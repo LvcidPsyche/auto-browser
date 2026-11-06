@@ -465,6 +465,58 @@ def test_w7_4_a_generated_token_file_whose_filesystem_kept_no_mode_is_warned_abo
     assert which in warned[0] and str(path) in warned[0] and "666" in warned[0]
     assert settings.api_bearer_token
     assert settings.takeover_token
+    # W9-8: the generation line said "mode 0600" right after that warning.
+    generated = [record.getMessage() for record in caplog.records if "enerated a" in record.getMessage()]
+    assert len(generated) == 1, caplog.text
+    assert "mode 0600" not in generated[0] and "mode 666" in generated[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w9_8_a_mode_check_that_cannot_stat_the_generated_file_warns_and_the_token_is_used(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The check returned silently when its stat failed, and the generation line still said "mode 0600".
+    import errno
+
+    from app.api_token import ensure_takeover_token
+
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    path = api_path if which == "API_TOKEN_FILE" else takeover_path
+    other, value = (takeover_path, "w9-8-marker-" + "m" * 32) if which == "API_TOKEN_FILE" else (api_path, STRONG_TOKEN)
+    other.write_text(value + "\n", encoding="utf-8")
+    other.chmod(0o600)
+    real_write, real_stat = api_token.atomic_write_text, os.stat
+    state = {"written": False, "failed": False}
+
+    def write(target, text, **kwargs):
+        real_write(target, text, **kwargs)
+        state["written"] = True
+
+    def stat(target, *args, **kwargs):
+        if state["written"] and not state["failed"] and os.fspath(target) == os.fspath(path):
+            state["failed"] = True
+            raise OSError(errno.EIO, "Input/output error", os.fspath(target))
+        return real_stat(target, *args, **kwargs)
+
+    with (
+        patch.object(api_token, "atomic_write_text", write),
+        patch.object(api_token.os, "stat", stat),
+        caplog.at_level(logging.INFO, logger=LOGGER),
+    ):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    assert state["failed"]
+    warned = [record.getMessage() for record in caplog.records if "could not check the mode" in record.getMessage()]
+    assert len(warned) == 1, caplog.text
+    assert which in warned[0] and str(path) in warned[0] and "after writing it" in warned[0]
+    generated = [record.getMessage() for record in caplog.records if "enerated a" in record.getMessage()]
+    assert len(generated) == 1 and "mode 0600" not in generated[0], caplog.text
+    assert settings.api_bearer_token
+    assert settings.takeover_token
+    assert path.read_text(encoding="utf-8").strip() in (settings.api_bearer_token, settings.takeover_token)
 
 
 def _posix_stand_in(**functions) -> SimpleNamespace:

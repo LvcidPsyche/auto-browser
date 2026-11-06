@@ -82,7 +82,7 @@ def ensure_api_credential(settings: Any) -> None:
         return
 
     token = _generate_token_file(path)
-    _warn_if_the_mode_was_not_kept(path, "API_TOKEN_FILE")
+    mode_note = _check_the_mode_was_kept(path, "API_TOKEN_FILE")
     settings.api_bearer_token = token
     logger.warning(
         "No API credential was configured, so the controller generated a bearer token and saved it to %s "
@@ -91,7 +91,7 @@ def ensure_api_credential(settings: Any) -> None:
         "(auto-browser-mcp --token-file / AUTO_BROWSER_TOKEN_FILE), set API_BEARER_TOKEN, or set "
         "API_ALLOW_TOKENLESS_LOOPBACK=true to serve loopback without one.",
         path,
-        _permissions_note(),
+        mode_note,
         _fingerprint(token),
     )
 
@@ -152,7 +152,7 @@ def ensure_takeover_token(settings: Any) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(path, token + "\n", mode=PRIVATE_FILE_MODE)
             _match_parent_owner(path)
-            _warn_if_the_mode_was_not_kept(path, "TAKEOVER_TOKEN_FILE")
+            mode_note = _check_the_mode_was_kept(path, "TAKEOVER_TOKEN_FILE")
             logger.warning(
                 "Generated a takeover token and saved it to %s (%s; with the shipped compose it is "
                 "./data/takeover-token on the host; sha256 fingerprint %s). GET /sessions/{session_id}/takeover-link "
@@ -160,7 +160,7 @@ def ensure_takeover_token(settings: Any) -> None:
                 "session's noVNC in a tab and again after a refusal, and scripts/takeover_link.sh reads it. Never give "
                 "it to an agent.",
                 path,
-                _permissions_note(),
+                mode_note,
                 _fingerprint(token),
             )
         else:
@@ -393,16 +393,25 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
     logger.warning("%s %s was readable beyond its owner (mode %o); changed it to 0600", name, path, mode)
 
 
-def _warn_if_the_mode_was_not_kept(path: Path, name: str) -> None:
+def _check_the_mode_was_kept(path: Path, name: str) -> str:
     """After generating a token file 0600, warn when its filesystem did not keep that mode (W7-4), as
     _restrict_mode does for an existing file (W5-4): a Windows drive under Docker Desktop reports every file
-    readable beyond its owner. The token is still used. POSIX only; never raises."""
+    readable beyond its owner. Returns what the generation line says of the file's permissions: "mode 0600" only
+    when that held (W9-8), else the mode found, or that it could not be checked. The token is still used. POSIX
+    only; never raises."""
     if os.name == "nt":
-        return
+        return _permissions_note()
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
-        return
+    except OSError as exc:
+        logger.warning(
+            "%s: could not check the mode of %s after writing it (%s). The token is used; make sure only the "
+            "controller's user can read it.",
+            name,
+            path,
+            exc.strerror or exc,
+        )
+        return "its mode could not be checked"
     if mode & _GROUP_OR_OTHER_BITS:
         logger.warning(
             "%s %s was written with mode 0600 but its filesystem did not keep 0600 (mode %o), so it stays readable "
@@ -411,6 +420,8 @@ def _warn_if_the_mode_was_not_kept(path: Path, name: str) -> None:
             path,
             mode,
         )
+        return f"mode {mode:o}, not 0600"
+    return "mode 0600"
 
 
 def _warn_about_an_open_link_target(path: Path, name: str) -> None:
