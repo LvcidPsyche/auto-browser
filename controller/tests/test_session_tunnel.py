@@ -635,9 +635,13 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
         rollback or a close for ever, and release() finishes its teardown under a cancel by design."""
 
         class StuckProcess(FakeProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self.exit = asyncio.Event()
+
             async def wait(self) -> int:
-                await asyncio.Event().wait()
-                return 0  # pragma: no cover - never reached
+                await self.exit.wait()
+                return 0
 
             def terminate(self) -> None:
                 self.terminated = True
@@ -648,14 +652,21 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))
             tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
-            tunnel.process = StuckProcess()
+            process = StuckProcess()
+            tunnel.process = process
             tunnel.stderr_handle = tunnel.log_path.open("ab")
             broker._tunnels["session-1"] = tunnel
             broker._allocated_ports.add(16181)
 
+            # W11-4: a task waited on with asyncio.wait, not wait_for: release() shields its teardown and keeps
+            # awaiting it under a cancel, so with the bound reverted wait_for's cancel hung instead of failing.
             with patch("app.session_tunnel._PROCESS_EXIT_WAIT_SECONDS", 0.05):
                 with self.assertLogs("app.session_tunnel", "WARNING") as logs:
-                    await asyncio.wait_for(broker.release(tunnel), timeout=10)
+                    release = asyncio.create_task(broker.release(tunnel))
+                    done, _ = await asyncio.wait({release}, timeout=10)
+                    process.exit.set()  # whatever happened, nothing is left waiting on the fake
+                    self.assertIn(release, done, "release() did not end while autossh never exited after the kill")
+                    await release
 
             self.assertTrue(tunnel.process.killed)
             self.assertTrue(
