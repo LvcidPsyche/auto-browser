@@ -71,6 +71,8 @@ All notable changes to auto-browser are documented here.
   `create_session` would have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and
   `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.
   A source created with a raw request proxy (`proxy_server`) stored no proxy to carry, so its fork gets the default.
+  The User-Agent carried is the one the source's context was built with, so under `STEALTH_ENABLED=true` a source
+  created without one gives its fork the same pool entry it drew instead of a second random draw.
 - `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not
   stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a dropped
   client, shutdown used to leave the audit event, the witness receipt and the stored record unwritten), and says

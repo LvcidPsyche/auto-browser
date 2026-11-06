@@ -145,7 +145,8 @@ class BrowserSession:
     refused_failures: deque[str] = field(default_factory=lambda: deque(maxlen=REFUSED_FAILURES_KEPT))
     last_action: str | None = None
     proxy_persona: str | None = None
-    # The User-Agent the create request named (None: the default), kept so a fork can carry it.
+    # The User-Agent the context was built with: the create request's, or the one STEALTH_ENABLED drew from the pool
+    # (None: Chromium's own). Kept so a fork carries the same one instead of drawing again.
     user_agent: str | None = None
     last_auth_state_path: Path | None = None
     # The last screenshot a checked read returned (see capture_session_screenshot).
