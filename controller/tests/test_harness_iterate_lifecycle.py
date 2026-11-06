@@ -331,6 +331,59 @@ class RetentionTests(_Base):
         self.assertTrue(service.store.run_dir(record.id).exists())
         self.assertTrue(candidate.exists())
 
+    async def test_a_candidate_left_aside_by_a_kill_mid_restage_is_put_back_at_startup(self) -> None:
+        # R-18: re-staging renames the old candidate to .tmp-<hex>.old, then the new build into place; a kill between
+        # the two left the candidate only in the hidden aside, and nothing recovered it.
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        skill_id = record.candidate.skill_id
+        staging = service.store.staging_root
+        os.replace(staging / skill_id, staging / ".tmp-0123456789ab.old")
+        (staging / ".tmp-ba9876543210").mkdir()  # the new build, never placed
+
+        restarted = HarnessService(self.root)
+        restarted.store.recover_interrupted_staging()
+
+        self.assertEqual(restarted.get_candidate(skill_id)["skill_id"], skill_id)
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), [skill_id])
+
+    async def test_an_aside_whose_candidate_is_still_in_place_is_removed(self) -> None:
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        staging = service.store.staging_root
+        shutil.copytree(staging / record.candidate.skill_id, staging / ".tmp-0123456789ab.old")
+
+        HarnessService(self.root).store.recover_interrupted_staging()
+
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), [record.candidate.skill_id])
+
+    async def test_an_aside_with_a_skill_id_that_is_not_a_plain_name_is_left_with_a_warning(self) -> None:
+        service = HarnessService(self.root)
+        aside = service.store.staging_root / ".tmp-0123456789ab.old"
+        for skill_id in ("../escape", ".hidden", "a/b", 7):
+            with self.subTest(skill_id=skill_id):
+                aside.mkdir(exist_ok=True)
+                (aside / "candidate.json").write_text(json.dumps({"skill_id": skill_id}), encoding="utf-8")
+
+                with self.assertLogs("app.harness.iterate", "WARNING"):
+                    HarnessService(self.root).store.recover_interrupted_staging()
+
+                self.assertTrue(aside.exists())
+                self.assertFalse((self.root / "escape").exists())
+
+    async def test_a_converged_run_left_without_its_candidate_is_marked_failed(self) -> None:
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        record.candidate = None
+        service.store.save(record)
+
+        restarted = HarnessService(self.root)
+        restarted.store.recover_interrupted_staging()
+
+        stored = restarted.store.get(record.id)
+        self.assertEqual(stored.status, "failed")
+        self.assertTrue(any("staging was interrupted" in note for note in stored.notes), stored.notes)
+
     async def test_prune_leaves_a_run_this_process_is_driving(self) -> None:
         service = HarnessService(self.root)
         record = await self._run(service)

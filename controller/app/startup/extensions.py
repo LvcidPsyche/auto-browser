@@ -143,6 +143,10 @@ def _init_harness(app) -> None:
         swept = service.store.mark_stale_running()
         if swept:
             logger.warning("startup.harness: marked %d run(s) left running by the last process interrupted", swept)
+        # Before the prune: a candidate a kill left in a staging aside is put back first, never pruned as a leftover.
+        recovered = service.store.recover_interrupted_staging()
+        if recovered:
+            logger.warning("startup.harness: settled %d entries an interrupted skill staging left behind", recovered)
         pruned = service.store.prune(float(getattr(settings, "harness_retention_days", 0) or 0))
         if pruned:
             logger.info("startup.harness: removed %d run/candidate directories past HARNESS_RETENTION_DAYS", pruned)

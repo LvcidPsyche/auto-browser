@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -147,6 +148,84 @@ class HarnessRunStore:
                 continue
             flipped += 1
         return flipped
+
+    def recover_interrupted_staging(self) -> int:
+        """Undo what a kill during staging left behind; returns how many entries it restored, removed or marked.
+
+        Run once at startup, before the prune and before requests are served. Re-staging renames the old candidate
+        aside (`.tmp-<hex>.old`), then the new build into place: a kill between the two left the candidate only in
+        the aside. An aside whose candidate.json names a plain skill id is renamed back when that id is missing and
+        removed when it is there; one that names no such id is left, with a warning. Every other `.tmp-*` entry is a
+        build that was never placed, and is removed. A `converged` run with no candidate (the process died while
+        staging it) is marked `failed`. Nothing here raises: what cannot be done is logged.
+        """
+        changed = 0
+        try:
+            entries = [entry for entry in self.staging_root.iterdir() if entry.name.startswith(".tmp-")]
+        except OSError as exc:
+            logger.warning("harness staging recovery could not list %s: %s", self.staging_root, exc)
+            entries = []
+        for aside in [entry for entry in entries if entry.name.endswith(".old") and entry.is_dir()]:
+            skill_id = self._aside_skill_id(aside)
+            if skill_id is None:
+                logger.warning("harness staging recovery left %s: its candidate.json names no plain skill id", aside)
+                continue
+            target = self.staging_root / skill_id
+            try:
+                if target.exists():
+                    shutil.rmtree(aside)
+                else:
+                    os.replace(aside, target)
+                    logger.warning("harness staging recovery restored candidate %s from %s", skill_id, aside.name)
+                changed += 1
+            except OSError as exc:
+                logger.warning("harness staging recovery could not settle %s: %s", aside, exc)
+        for build in [entry for entry in entries if not entry.name.endswith(".old")]:
+            try:
+                shutil.rmtree(build) if build.is_dir() else build.unlink()
+                changed += 1
+            except OSError as exc:
+                logger.warning("harness staging recovery could not remove %s: %s", build, exc)
+        for path in self.runs_root.glob("*/run.json"):
+            try:
+                record = _read_record(path)
+            except Exception as exc:
+                logger.debug("skipping unreadable harness run record %s: %s", path, exc)
+                continue
+            if record.status != "converged" or record.candidate is not None or record.id in self._active:
+                continue
+            record.status = "failed"
+            record.decision = ConvergenceDecision(
+                status="failed",
+                converged=False,
+                should_continue=False,
+                reason="staging the skill candidate was interrupted",
+                successful_attempts=record.decision.successful_attempts if record.decision else 0,
+                total_attempts=len(record.attempts),
+            )
+            record.notes.append("Skill candidate staging was interrupted by a controller restart.")
+            try:
+                self.save(record)
+            except (OSError, ValueError) as exc:
+                logger.warning("could not mark harness run %s failed after interrupted staging: %s", record.id, exc)
+                continue
+            changed += 1
+        return changed
+
+    def _aside_skill_id(self, aside: Path) -> str | None:
+        """The skill id an aside's candidate.json names, when it is one plain name that stays inside the root."""
+        try:
+            skill_id = json.loads((aside / "candidate.json").read_text(encoding="utf-8")).get("skill_id")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(skill_id, str) or not skill_id or skill_id.startswith(".") or skill_id in {".", ".."}:
+            return None
+        if "/" in skill_id or "\\" in skill_id or "\x00" in skill_id:
+            return None
+        root = self.staging_root.resolve()
+        if (root / skill_id).resolve().parent != root:
+            return None
+        return skill_id
 
     def _owned_runs(self, owner: str | None) -> set[str]:
         """The IDs of the stored runs that belong to `owner` (None: the runs nobody owns)."""
