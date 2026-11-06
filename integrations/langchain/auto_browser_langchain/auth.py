@@ -67,7 +67,17 @@ def loopback_transport(base_url: str, *, asynchronous: bool) -> httpx.BaseTransp
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host.removesuffix(".") == "localhost":
+    """Whether a request to this host stays on this machine, by the bridges' rule.
+
+    The name compared is the one the socket layer resolves (W12-1, W13-4): the host encoded with the ``idna``
+    codec, as getaddrinfo encodes it, and lowercased, so local<U+00AD>host and LOCALHOST are localhost; a host the
+    codec refuses is compared as given.
+    """
+    try:
+        name = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        name = host
+    if name.removesuffix(".") == "localhost":
         return True
     try:
         address = ipaddress.ip_address(host)

@@ -142,6 +142,14 @@ def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_prox
     assert proxy.seen == []
 
 
+@pytest.mark.parametrize("host", ["local­host", "LOCALHOST"])
+def test_w13_4_a_name_is_compared_as_the_socket_layer_resolves_it(host: str) -> None:
+    # The bridges' rule (W12-1): the idna codec drops the soft hyphen and lowercases, as getaddrinfo does.
+    from auto_browser_langchain.auth import _is_loopback_host
+
+    assert _is_loopback_host(host)
+
+
 def test_a_remote_controller_still_goes_through_the_proxy(servers) -> None:
     proxy, controller = servers
     _calls("http://controller.invalid:8000")
