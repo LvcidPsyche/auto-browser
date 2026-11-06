@@ -282,6 +282,11 @@ def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment
         "http://user@::1/mcp",
         "http://user:pass@::1/mcp",
         "http://user@%3a%3a1/mcp",
+        # W14-4: with a port as well, until the host http.client reads after the last @ was a reading.
+        "http://user@::1:8000/mcp",
+        "http://user:pass@::1:8000/mcp",
+        "http://user@%3a%3a1:8000/mcp",
+        "http://user@::ffff:127.0.0.1:8000/mcp",
         # W11-1: local to urllib's decoded host or the URL as written, but connected to as 127.0.0.2#.bad,
         # user:pass@127.0.0.1 and x/@127.0.0.1.
         "http://127.0.0.2%23.bad:{port}/mcp",

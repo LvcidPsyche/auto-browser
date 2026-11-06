@@ -146,14 +146,16 @@ def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
 def _goes_direct(request: Request) -> bool:
     """Whether the request goes past any environment proxy: the host http.client connects to is local (W13-2).
 
-    One fail-closed rule over four readings of the host. Direct only when (1) the host http.client connects to,
+    One fail-closed rule over five readings of the host. Direct only when (1) the host http.client connects to,
     which reads an unbracketed ::1:8000 as ::1, is local: going direct sends the request to that host and no other.
     When it is not, but another reading is, the request is refused with InvalidControllerURL: (2) the host of
     urllib's percent-decoded ``request.host`` read as a URL authority (W9-5: %31%32%37.0.0.2 is 127.0.0.2), which
     drops a userinfo http.client keeps in its host; (3) the host of the URL as written, which a proxy reads, so a
     percent-encoded / ? or # in a userinfo (x%2f@127.0.0.1) cannot hide a loopback host; (4) urllib's decoded
     ``request.host`` as a whole after its last @ (W12-2), so an unbracketed ::1 or :: without a port, which
-    http.client reads as host ":" and urlsplit as no host, is found local, also behind a userinfo (user@::1). Such a
+    http.client reads as host ":" and urlsplit as no host, is found local, also behind a userinfo (user@::1); (5) the
+    host http.client reads from that decoded host after its last @ (W14-4), so a userinfo before an unbracketed IPv6
+    loopback with a port (user@::1:8000, whose connect host is user@::1) cannot hide it. Such a
     host would be connected to as another name (127.0.0.2#.bad, x/@127.0.0.1, ":") that the resolver is asked for,
     and a proxy would get the token, so it goes nowhere. A host no reading finds local uses the proxy.
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), and a
@@ -181,8 +183,9 @@ def _goes_direct(request: Request) -> bool:
             urlsplit("//" + request.host).hostname,
             urlsplit(request.full_url).hostname,
             request.host.rpartition("@")[2],
+            HTTPConnection(request.host.rpartition("@")[2]).host,
         )
-    except ValueError as exc:
+    except (InvalidURL, ValueError) as exc:
         raise InvalidControllerURL("a reading cannot parse its host (an unbalanced or misplaced bracket)") from exc
     if _is_loopback_host(connected):
         return True

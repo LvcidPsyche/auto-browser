@@ -203,6 +203,11 @@ class AgentEvalProxyTests(unittest.TestCase):
             "http://user@::1",
             "http://user:pass@::1",
             "http://user@%3a%3a1",
+            # W14-4: with a port as well, until the host http.client reads after the last @ was a reading.
+            "http://user@::1:8000",
+            "http://user:pass@::1:8000",
+            "http://user@%3a%3a1:8000",
+            "http://user@::ffff:127.0.0.1:8000",
             f"http://127.0.0.2%23.bad:{port}",
             f"http://user:pass@127.0.0.1:{port}",
             f"http://x%2f@127.0.0.1:{port}",

@@ -362,7 +362,8 @@ class ControllerEvalClient:
         # urllib's default handler copied the Authorization header onto a redirect to any origin. The bridges'
         # _goes_direct decides (W13-2): direct when the host http.client connects to is local (an unbracketed
         # ::1:8000 is ::1). When it is not but another reading is (urllib's percent-decoded host, W10-4; the URL as
-        # written, which a proxy reads; that decoded host as a whole after its last @, W12-2), it raises
+        # written, which a proxy reads; that decoded host as a whole after its last @, W12-2; the host http.client
+        # reads from what follows that @, W14-4, so user@::1:8000 is refused), it raises
         # InvalidControllerURL (an http.client InvalidURL, W13-1), as it does for a non-numeric port or a host a
         # reading cannot parse (W12-3); that propagates before any opener is chosen. A host-less request (None)
         # falls through to urllib's own error.
