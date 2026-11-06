@@ -239,8 +239,9 @@ api_token() {
   fi
 }
 
-# The controller's bearer header as a curl config line, for `curl --config -` on
-# stdin (pipe it in: curl_auth_config | curl --config - ...). A command line is
+# The controller's bearer header as a curl config line, for `curl -q --config -` on
+# stdin (pipe it in: curl_auth_config | curl -q --config - ...; the -q keeps a
+# .curlrc out of a request carrying the token). A command line is
 # readable by every local user (ps, /proc/<pid>/cmdline), so the token never goes
 # in argv, and a config on stdin is never written to disk. It takes no argument
 # and turns xtrace off for itself (it runs in the pipeline's subshell, so the
