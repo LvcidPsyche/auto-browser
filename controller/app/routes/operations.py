@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserUnreachableError
 from ..approvals import ServerStateRefusal
+from ..auth_state import AuthStateDecryptError
+from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
@@ -190,6 +192,11 @@ def create_operations_router(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
             raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
+        except SessionLimitError as exc:  # the run's session, as POST /sessions answers it (CB1-8)
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except AuthStateDecryptError as exc:
+            # A fixed text that says what to check; it names no path.
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         except (ValidationError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

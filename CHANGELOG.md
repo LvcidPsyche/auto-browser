@@ -56,6 +56,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- `POST /crons/{job_id}/trigger` answers a run whose session meets the session cap with 409 and an unreadable
+  encrypted auth state with 422, with the same details as `POST /sessions`; both were a bare 500 there.
 - The scripts' `.env` loader no longer re-parses a whole multi-line quoted value for every added line: only a line
   that holds the opening quote character can close it, so a PEM-sized value is no longer quadratic.
 - The scripts' `.env` loader no longer overwrites a variable the calling script declared without a value (`local x`,

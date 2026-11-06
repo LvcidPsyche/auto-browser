@@ -26,6 +26,8 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.action_errors import BrowserActionError, BrowserUnreachableError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError
+from app.auth_state import AuthStateDecryptError
+from app.browser.services.session_creation import SessionLimitError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
@@ -325,6 +327,23 @@ def test_a_cron_trigger_that_meets_an_unreachable_browser_is_503_with_a_fixed_de
         response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
     assert response.status_code == 503, response.text
     assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_a_cron_trigger_at_the_session_cap_is_409_as_post_sessions_is(client: TestClient) -> None:
+    # CB1-8: SessionLimitError (a RuntimeError) from the run's create_session was a bare 500 here.
+    error = SessionLimitError("MAX_SESSIONS=1 live sessions already exist; close one first")
+    with patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=error)):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": str(error)}
+
+
+def test_a_cron_trigger_whose_auth_state_cannot_be_decrypted_is_422_as_post_sessions_is(client: TestClient) -> None:
+    error = AuthStateDecryptError("the saved auth state could not be decrypted: check AUTH_STATE_ENCRYPTION_KEY")
+    with patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=error)):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+    assert response.status_code == 422, response.text
+    assert response.json() == {"detail": str(error)}
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
