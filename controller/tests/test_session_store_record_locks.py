@@ -95,6 +95,53 @@ class RecordLockTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.store._write_locks, {})
 
+    async def test_w2_13_a_write_started_while_a_waiter_is_queued_waits_behind_it(self) -> None:
+        # The entry is kept while a write holds it or waits for it. A table that dropped it at every release let a
+        # third write of the id take a fresh lock and run beside the queued waiter.
+        gates = {name: threading.Event() for name in ("holder", "waiter")}
+        entered = {name: threading.Event() for name in gates}
+        for gate in gates.values():
+            self.addCleanup(gate.set)
+        landed: list[str] = []
+        file_store = self.store.file_store
+        real = type(file_store)._upsert_sync.__get__(file_store)  # the class's own, not asyncSetUp's gate
+
+        def gated(record: SessionRecord) -> None:
+            if record.name in gates:
+                entered[record.name].set()
+                gates[record.name].wait(10)
+            real(record)
+            landed.append(record.name)
+
+        self.store.file_store._upsert_sync = gated  # type: ignore[method-assign]
+
+        def named(name: str) -> SessionRecord:
+            return _record("same-id", "active").model_copy(update={"name": name})
+
+        async def entered_write(name: str) -> None:
+            await asyncio.wait_for(asyncio.to_thread(entered[name].wait, 10), timeout=11)
+
+        holder = asyncio.create_task(self.store.upsert(named("holder")))
+        await entered_write("holder")
+        waiter = asyncio.create_task(self.store.upsert(named("waiter")))
+        await asyncio.sleep(0.05)  # queued on the id's lock
+        entry = self.store._write_locks["same-id"]
+        self.assertEqual(entry.users, 2)
+
+        gates["holder"].set()
+        await holder
+        await entered_write("waiter")
+        self.assertIs(self.store._write_locks.get("same-id"), entry)
+
+        third = asyncio.create_task(self.store.upsert(named("third")))
+        await asyncio.sleep(0.1)
+        self.assertEqual(landed, ["holder"], "a third write of the id ran beside the queued waiter")
+
+        gates["waiter"].set()
+        await asyncio.gather(waiter, third)
+        self.assertEqual(landed, ["holder", "waiter", "third"])
+        self.assertEqual(self.store._write_locks, {})
+
     async def test_a_closed_record_is_still_not_reopened(self) -> None:
         self.release.set()
         await self.store.upsert(_record("s1", "closed"))
