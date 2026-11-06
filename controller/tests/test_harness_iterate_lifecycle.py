@@ -406,6 +406,23 @@ class RetentionTests(_Base):
 
         self.assertEqual([record.id for record in listed], [kept.id])
 
+    async def test_w4_22_the_run_cap_check_runs_in_a_worker_thread(self) -> None:
+        # begin_run reads every stored run.json under the store's lock: on the event loop each start stalled it.
+        from app.harness import iterate
+
+        service = HarnessService(self.root)
+        real_to_thread = asyncio.to_thread
+        offloaded: list = []
+
+        async def to_thread(function, /, *args, **kwargs):
+            offloaded.append(getattr(function, "__func__", function))
+            return await real_to_thread(function, *args, **kwargs)
+
+        with patch.object(iterate.asyncio, "to_thread", to_thread):
+            await self._run(service)
+
+        self.assertIn(iterate.HarnessRunStore.begin_run, offloaded)
+
     async def test_zero_days_keeps_everything(self) -> None:
         service = HarnessService(self.root)
         record = await self._run(service)

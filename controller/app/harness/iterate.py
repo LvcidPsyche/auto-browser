@@ -468,7 +468,8 @@ class HarnessService:
     ) -> HarnessRunRecord:
         owner = verified_operator()
         run_id = uuid.uuid4().hex[:12]
-        if not self.store.begin_run(run_id, owner, max_owned=self.max_runs_per_operator):
+        # In a worker thread: with a cap set, the check reads every stored run.json (under the store's own lock).
+        if not await asyncio.to_thread(self.store.begin_run, run_id, owner, max_owned=self.max_runs_per_operator):
             raise ValueError(
                 f"harness run limit reached: {self.max_runs_per_operator} stored runs for this operator "
                 "(HARNESS_MAX_RUNS_PER_OPERATOR); HARNESS_RETENTION_DAYS, when set, removes old runs"
