@@ -119,24 +119,27 @@ timestamp, then forgotten (a clock stepped back does not free it early). The cac
 at once, and nothing it remembers is dropped before it expires: when it is full of nonces still inside their
 window, a new envelope is refused with `503` ("mesh replay cache is full; retry later") and not recorded, and a
 retry passes once older nonces expire. The limit: a nonce is recorded once the envelope's signature checks out,
-before the request is decoded or granted, so one registered peer that sends 10,000 signed envelopes inside a
-window fills the cache, and every peer is refused (`503`) until they expire. The timestamp window is checked
-against that same latest time, never the raw clock, so a clock stepped back cannot put an envelope whose nonce is
-already forgotten inside the window again. A peer's reply to a delegation this node sent is checked against the
-same clock and nonce cache, and refused unless it names the request's id. The cost: after a large backward step of
-the clock, fresh envelopes are refused (`403`) until the clock catches up, for about the step minus the window.
-Nonces are kept in memory only, so a restart empties them; to close that gap the controller also refuses any
-envelope stamped before the moment it started or within one window after it (`403`). The last process accepted
-envelopes stamped up to one window ahead of its clock, so this covers everything it could have run. The cost is
-about one window (`MESH_TIMESTAMP_WINDOW`, 30 seconds by default) of refusals after each start, which a sender's
-retry with a new envelope passes once that window is over. Replay protection therefore holds across a restart as
-long as the clock did not step back across it: the high-water mark is kept in memory only, so a controller
-restarted with its clock set back by more than a window can accept again, once its clock nears their stamps, the
-envelopes the last process ran stamped later than the step minus one window before the restart (all of them once
-the step reaches how long it ran), and one set back by less, the envelopes it accepted stamped ahead of its clock.
-The check also assumes the last process ran with no larger `MESH_TIMESTAMP_WINDOW`: after lowering it, a restart
-is safe once the old window has passed since the last envelope was accepted (or restart first with the old value,
-and lower it after that long).
+before the request is decoded or granted, so registered peers that get 10,000 signed envelopes through inside a
+window fill the cache, and every peer is refused (`503`) until they expire (`/mesh/receive` takes no bearer token,
+so the request rate limit, on by default at 120 requests a minute, counts it per client address, and one address
+alone cannot fill it unless that limit is raised or off). The timestamp window is checked against that same latest
+time, never the raw clock, so a clock stepped back cannot put an envelope whose nonce is already forgotten inside
+the window again. A peer's reply to a delegation this node sent is checked against the same clock and nonce cache,
+and refused unless it names the request's id. The cost: after a large backward step of the clock, fresh envelopes
+are refused (`403`) until the clock catches up, for about the step minus the window. Nonces are kept in memory
+only, so a restart empties them; to close that gap the controller also refuses any envelope stamped before the
+moment it started or within one window after it (`403`). The last process accepted envelopes stamped up to one
+window ahead of its clock, so this covers everything it could have run. The cost is about one window
+(`MESH_TIMESTAMP_WINDOW`, 30 seconds by default) of refusals after each start, which a sender's retry with a new
+envelope passes once that window is over. Replay protection therefore holds across a restart as long as the clock
+did not step back across it: the high-water mark is kept in memory only, so a controller restarted with its clock
+set back by more than a window can accept again, once its clock nears their stamps, the envelopes the last process
+ran stamped later than the step minus one window before the restart (all of them once the step reaches how long it
+ran, or, after an upgrade from 1.15.0, which refused nothing at startup, how long it ran plus two windows), and
+one set back by less, the envelopes it accepted stamped more than the window minus the step after the restart. The
+check also assumes the last process ran with no larger `MESH_TIMESTAMP_WINDOW`: after lowering it, a restart is
+safe once the old window has passed since the last envelope was accepted (or restart first with the old value, and
+lower it after that long).
 
 ## Upgrading from a release that had `POST /mesh/peers`
 
