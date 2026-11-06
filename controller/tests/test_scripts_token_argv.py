@@ -466,6 +466,18 @@ class OtherIpv4SpellingTests(unittest.TestCase):
                     self.assertIn(URL_FORM_MESSAGE, stderr)
                     self.assertFalse(ran, "curl ran")
 
+    def test_w9_1_an_at_after_the_query_or_fragment_is_not_read_as_userinfo(self) -> None:
+        # curl ends the authority at the first ?, # or /, so it connects to 127.0.0.2 for both; a guard that cut only
+        # at / read the host as cafe.bad, 127.0.0.2 missed the --noproxy list, and the tokens went to the proxy.
+        # Both are plain, so neither is refused; nothing listens on 127.0.0.2, and the proxy must see nothing.
+        for function in ("bearer_curl", "takeover_curl"):
+            for url in ("http://127.0.0.2:{port}#@cafe.bad/", "http://127.0.0.2:{port}?@cafe.bad/"):
+                with self.subTest(function=function, url=url):
+                    _code, stderr, ran = self._run(function, url)
+                    self.assertNotIn(PLAIN_HOST_MESSAGE, stderr)
+                    self.assertNotIn(URL_FORM_MESSAGE, stderr)
+                    self.assertTrue(ran, "curl did not run")
+
     def test_w9_4_a_scheme_less_base_url_is_not_refused(self) -> None:
         for url in ("localhost:{port}", "127.0.0.2:{port}/x"):
             with self.subTest(url=url):
