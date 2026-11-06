@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import sys
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "agent_eval.py"
 
@@ -49,6 +51,25 @@ class ResolveBearerTokenTests(unittest.TestCase):
         with redirect_stderr(stderr):
             script.resolve_bearer_token("", {"AUTO_BROWSER_TOKEN": "t"})
         self.assertEqual(stderr.getvalue(), "")
+
+
+@unittest.skipIf(script is None, "scripts/ is not shipped in the controller image")
+class MainTokenTests(unittest.TestCase):
+    def test_main_builds_the_client_with_the_token_from_the_environment(self) -> None:
+        # R-22: the tests above call resolve_bearer_token directly, so reverting main()'s call site passed them all.
+        client = Mock()
+        with (
+            patch.object(script, "ControllerEvalClient", client),
+            patch.object(script, "load_cases", return_value=[]),
+            patch.object(script, "build_matrix", return_value=[]),
+            patch.object(sys, "argv", ["agent_eval.py", "--execute"]),
+            patch.dict(os.environ, {"AUTO_BROWSER_TOKEN": "from-env"}, clear=True),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(script.main(), 0)
+
+        client.assert_called_once()
+        self.assertEqual(client.call_args.kwargs["bearer_token"], "from-env")
 
 
 if __name__ == "__main__":
