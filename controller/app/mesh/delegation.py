@@ -73,9 +73,9 @@ class _NonceCache:
     back, so a wall clock stepped back cannot free a nonce whose envelope is inside the window again (a monotonic
     age could).
 
-    The size cap bounds how many envelopes are accepted per window. With a TTL (the manager's cache always has one),
-    a nonce still inside its window is never dropped to make room: at the cap every expired entry goes (a full scan,
-    since entries are in insertion order, not stamp order), and if none had expired the new nonce is refused with
+    The size cap bounds how many nonces are remembered at once. With a TTL (the manager's cache always has one),
+    nothing remembered is dropped before it expires: at the cap every expired entry goes (a full scan, since entries
+    are in insertion order, not stamp order), and if none had expired the new nonce is refused with
     MeshReplayCacheFull and not recorded. A cache without a TTL, which the manager never builds, still evicts its
     oldest entry at the cap.
     """

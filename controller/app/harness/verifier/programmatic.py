@@ -163,8 +163,8 @@ async def _regex_search_many(patterns: list[str], text: str, *, timeout: float) 
 
     Cost, measured 2026-11-05 with Python 3.12 on two Windows 11 laptops (100 calls with one pattern each): the
     price is the interpreter spawn, about the same for one pattern as for 100, so it is one start per verification
-    unless a pattern times out; each stuck pattern adds one (at most one verification per attempt, 20 attempts at
-    most), not one per check. With `-I` alone a call took 176 ms on one laptop and 88-93 ms on the other; with
+    unless a pattern times out; each stuck pattern with patterns left after it adds one (at most one verification
+    per attempt, 20 attempts at most), not one per check. With `-I` alone a call took 176 ms on one laptop and 88-93 ms on the other; with
     `-I -S` (the worker needs no site module) 124 ms and 69 ms. A long-lived worker is not worth its complexity for
     that; revisit if a verification ever needs more than one spawn per attempt. Linux was not measured.
     """

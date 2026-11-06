@@ -283,8 +283,8 @@ All notable changes to auto-browser are documented here.
   catches up (for about the step minus the window). The 10,000-nonce cap no longer evicts a nonce still inside its
   window (an envelope accepted, then 10,000 others inside its window, and it ran again): at the cap every expired
   nonce goes, and if none has, the new envelope is refused with `503` ("mesh replay cache is full; retry later") and
-  not recorded, so the cap bounds how many envelopes are accepted per window; a reply that finds the cache full fails
-  the delegation.
+  not recorded, so the cap bounds how many nonces are remembered at once, and nothing remembered is dropped before it
+  expires; a reply that finds the cache full fails the delegation.
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to
   hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
@@ -326,12 +326,15 @@ All notable changes to auto-browser are documented here.
   a child still runs as the controller's uid and can read its files (`data/api-token`, `data/takeover-token`, the mesh
   and witness keys); the `cli` providers and the bridge's Codex are such children, and page content can prompt-inject
   them. The driver and the browsers it launches, like the provider CLIs, are ordinary processes of the controller's
-  user: their environment holds no secret, but their memory holds page content and what is typed into pages, which a
-  command one of them runs could read where the host lets a process ptrace another of the same user
-  (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another CLI
-  runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). On macOS and Windows the
-  controller and the bridge do not change this, and whether a process of the same user can read their environment
-  depends on the system.
+  user: their environment holds none of the controller's own tokens or keys (a proxy setting that carries credentials
+  excepted), but their memory holds page content and what is typed into pages, which a command one of them runs could
+  read where the host lets a process ptrace another of the same user (`kernel.yama.ptrace_scope` 0). A provider CLI's
+  key is readable by the commands it runs and by those another CLI runs at the same time (`/proc/PID/environ` of a
+  dumpable process of the same user). On macOS and Windows the controller and the bridge do not change this, and
+  whether a process of the same user can read their environment depends on the system. A Docker credential helper
+  configured for the controller's user (`credsStore` or `credHelpers` in its Docker config) is run by the Docker SDK
+  with the controller's whole environment when the controller pulls a session image the daemon does not have: build or
+  pull that image ahead (compose builds it) and configure no credential helper for that user.
 - **Upgrade note:** a `HARNESS_UV_COMMAND` that needs a variable outside those base names (its own key or setting)
   names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
 - The scripts' `.env` loader runs with xtrace off and restores the caller's setting, so

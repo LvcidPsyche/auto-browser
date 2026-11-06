@@ -463,7 +463,9 @@ def _reap_killed(process: subprocess.Popen) -> None:
 
     An unbounded communicate() waited for EOF on stdout, which a descendant that moved to its own session (setsid),
     out of the group the kill reached, could hold open for as long as it lived. This never blocks longer than twice
-    the bound; a run still not reaped by then is left to the shutdown sweep and the OS.
+    the bound; a run still not reaped by then is not waited for again: its group was already killed, and a
+    descendant that left the group is the OS's (_run_codex drops the run from _in_flight either way, so the shutdown
+    sweep never sees it).
     """
     try:
         process.communicate(timeout=CODEX_DRAIN_TIMEOUT_SECONDS)

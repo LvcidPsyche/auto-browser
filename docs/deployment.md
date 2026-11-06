@@ -482,12 +482,16 @@ through `/proc/PID/environ`.
 
 Known limit: a child running as the controller's uid can still read the controller's files: `data/api-token`,
 `data/takeover-token`, the mesh and witness keys. The CLI providers (`OPENAI_AUTH_MODE=cli` and the others) and the
-Codex host bridge's Codex are such children, and page content they are shown can prompt-inject them. Use `api`
-mode where that matters. The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
-processes of the controller's user: their environment holds no secret, but their memory holds page content and what
-is typed into pages, which a command one of them runs could read where the host lets a process ptrace another of the
-same user (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those
-another CLI runs at the same time (`/proc/PID/environ` of a dumpable process of the same user).
+Codex host bridge's Codex are such children, and page content they are shown can prompt-inject them. Use `api` mode
+where that matters. The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
+processes of the controller's user: their environment holds none of the controller's own tokens or keys (a proxy
+setting that carries credentials excepted), but their memory holds page content and what is typed into pages, which
+a command one of them runs could read where the host lets a process ptrace another of the same user
+(`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another CLI
+runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). A Docker credential helper
+configured for the controller's user (`credsStore` or `credHelpers` in its Docker config) is run by the Docker SDK
+with the controller's whole environment when the controller pulls a session image the daemon does not have: build or
+pull that image ahead (compose builds it) and configure no credential helper for that user.
 
 `INSTALL_AGENT_CLIS=true` builds the three CLIs (and Node.js, about 750 MB) into
 the controller image, which leaves them out by default. Rebuild after setting it:
