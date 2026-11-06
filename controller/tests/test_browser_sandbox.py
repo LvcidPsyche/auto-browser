@@ -472,6 +472,21 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
                 container = next(iter(self.client.containers.browser_containers.values()))
                 self.assertTrue(container.removed)
 
+    async def test_cb1_7_the_refusal_claims_no_removal_the_rollback_may_not_make(self) -> None:
+        # "Its container was removed." was written before the rollback ran: wrong when its removal failed, and under
+        # ISOLATED_BROWSER_KEEP_CONTAINERS, which only stops the container.
+        off = {"sandbox": "off", "cause": "userns_refused"}
+        for keep in ("false", "true"):
+            with self.subTest(keep=keep):
+                with self.assertRaisesRegex(RuntimeError, "the session was refused") as raised:
+                    await self._provision(
+                        sandbox_state=off, BROWSER_SANDBOX="on", ISOLATED_BROWSER_KEEP_CONTAINERS=keep
+                    )
+                self.assertNotIn("removed", str(raised.exception))
+                container = next(iter(self.client.containers.browser_containers.values()))
+                self.assertEqual(container.removed, keep == "false")
+                self.assertTrue(container.stopped)
+
     async def test_auto_keeps_a_fallen_back_container(self) -> None:
         runtime = await self._provision(sandbox_state={"sandbox": "off", "cause": "userns_refused"})
         self.assertEqual(runtime.sandbox["sandbox"], "off")

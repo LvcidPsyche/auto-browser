@@ -378,11 +378,10 @@ class DockerBrowserNodeProvisioner:
             if sandbox is not None and sandbox.get("endpoint") != ws_endpoint:
                 sandbox = {"sandbox": "unknown", "detail": "browser-sandbox.json describes another run"}
             if self.settings.browser_sandbox == "on" and not verified_on(sandbox):
-                # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX.
-                raise RuntimeError(
-                    refusal(f"isolated browser container {pending.container_name}", sandbox)
-                    + " Its container was removed."
-                )
+                # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX. The text
+                # claims nothing about the container: the rollback below runs after it is written, may fail to
+                # remove it, and only stops it under ISOLATED_BROWSER_KEEP_CONTAINERS (CB1-7).
+                raise RuntimeError(refusal(f"isolated browser container {pending.container_name}", sandbox))
             await asyncio.to_thread(pending.container.reload)
             ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
             novnc_port = self._extract_host_port(ports, "6080/tcp")

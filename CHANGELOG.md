@@ -135,6 +135,9 @@ All notable changes to auto-browser are documented here.
   its rollback cannot remove the container (or cannot look it up), the directories stay, with that warning, instead of
   being emptied after a removal failure logged only at DEBUG. A rollback that releases after a failed
   provision or connect logs a failed release and raises the original error.
+- The `BROWSER_SANDBOX=on` refusal of an isolated session no longer ends "Its container was removed.": it was written
+  before the rollback ran, so it was wrong when that removal failed and under `ISOLATED_BROWSER_KEEP_CONTAINERS`,
+  which only stops the container.
 - Two isolated sessions created at once now read the Docker daemon's API version once and log the "GwPriority is not
   honoured" warning once; both were unsynchronised across the provisioning threads.
 - When the active tab closes (`browser.close_tab`, or the page closing itself), the session no longer moves to a tab
