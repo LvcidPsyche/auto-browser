@@ -210,6 +210,12 @@ def _hold_socket_lock(socket_path: Path) -> None:
         raise SocketPathError(
             f"another bridge is running on {socket_path}; stop it or pass another --socket-path"
         ) from None
+    except OSError as exc:
+        # ENOLCK, or EOPNOTSUPP on a filesystem without locks (W9-9): as an unopenable lock file, not a traceback.
+        os.close(fd)
+        raise SocketPathError(
+            f"cannot lock {lock_path} ({exc.strerror or exc}); remove it or pass another --socket-path"
+        ) from None
     except BaseException:
         os.close(fd)
         raise

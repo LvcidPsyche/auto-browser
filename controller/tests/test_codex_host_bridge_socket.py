@@ -201,6 +201,33 @@ class BridgeSocketLockTests(unittest.TestCase):
         self.assertIn(str(lock_path), str(caught.exception))
         self.assertIn("Permission denied", str(caught.exception))
 
+    def test_w9_9_a_lock_the_filesystem_cannot_take_stops_startup_naming_it(self) -> None:
+        # Only contention became a SocketPathError: ENOLCK, or EOPNOTSUPP on a filesystem without locks, escaped as a
+        # traceback.
+        import errno
+        import fcntl
+
+        target = self.root / "codex.sock"
+        lock_path = Path(str(target.resolve()) + ".lock")
+        closed: list[int] = []
+        real_close = os.close
+
+        def flock(fd, operation):
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        def close(fd):
+            closed.append(fd)
+            real_close(fd)
+
+        with patch.object(fcntl, "flock", flock), patch.object(bridge.os, "close", close):
+            with self.assertRaises(bridge.SocketPathError) as caught:
+                bridge.prepare_socket_path(str(target))
+        self.assertIn(f"cannot lock {lock_path}", str(caught.exception))
+        self.assertIn("No locks available", str(caught.exception))
+        self.assertIn("pass another --socket-path", str(caught.exception))
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(bridge._SOCKET_LOCKS, {})
+
     def test_the_lock_is_taken_beside_the_socket_at_0600_and_kept(self) -> None:
         target = self.root / "codex.sock"
         path = bridge.prepare_socket_path(str(target))
