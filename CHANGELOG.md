@@ -318,8 +318,9 @@ All notable changes to auto-browser are documented here.
   `.env`) or generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A `TAKEOVER_TOKEN`
   shorter than 32 characters, outside printable ASCII (a space included: a header could not carry it) or equal to an
   API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` inside `ARTIFACT_ROOT` or `UPLOAD_ROOT`; spaces and
-  tabs around the presented header are not part of the token. A token file that cannot be read or written, or holds an
-  unusable token, logs a warning and the endpoint answers 503. The takeover token stops only agents without file
+  tabs around the presented header are not part of the token. A token file that cannot be read or written, holds an
+  unusable token, or stays readable beyond its owner because its mode cannot be tightened (a root-owned 0444 mount)
+  logs a warning naming that cause and the endpoint answers 503. The takeover token stops only agents without file
   access to the controller's host: one running as the host user that owns `./data` (a local MCP setup) can read
   `data/takeover-token`, and so can the controller's own `cli` providers, which run as its uid (or anything that reads
   the session container's own copy of the password). Open the dashboard and the link in a browser no agent drives:

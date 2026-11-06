@@ -158,7 +158,19 @@ def ensure_takeover_token(settings: Any) -> None:
                 _fingerprint(token),
             )
         else:
-            _restrict_mode(path, name="TAKEOVER_TOKEN_FILE")
+            try:
+                _restrict_mode(path, name="TAKEOVER_TOKEN_FILE")
+            except OSError as exc:
+                # It reads fine but stays readable beyond its owner (a root-owned 0444 secret mount): fail closed,
+                # naming that cause rather than the read-or-write one below (W2-23).
+                logger.warning(
+                    "No takeover token: TAKEOVER_TOKEN_FILE %s is readable beyond its owner and its mode could not "
+                    "be tightened (%s). Make it owned by the controller's user with mode 0600 (or 0400), or set "
+                    "TAKEOVER_TOKEN; GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
+                    path,
+                    exc,
+                )
+                return
             logger.info("Using the takeover token in %s (sha256 fingerprint %s)", path, _fingerprint(token))
     except (OSError, ValueError) as exc:
         logger.warning(

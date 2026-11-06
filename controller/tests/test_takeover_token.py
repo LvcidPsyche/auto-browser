@@ -127,6 +127,31 @@ def test_an_unusable_file_warns_and_is_not_overwritten(tmp_path: Path, caplog: p
     assert "too-short" not in caplog.text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+def test_w2_23_a_file_whose_mode_cannot_be_tightened_fails_closed_and_says_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A root-owned 0444 secret mount reads fine, but its mode cannot be changed: the warning said the file must
+    # "hold a usable token (or can be written)", which it did.
+    from unittest.mock import patch
+
+    from app import api_token
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o644)
+    settings = make_settings(tmp_path)
+    with (
+        patch.object(api_token.os, "fchmod", side_effect=PermissionError(1, "Operation not permitted")),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+    ):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert "mode could not be tightened" in caplog.text
+    assert "can be written" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+
 def test_a_file_token_equal_to_an_api_credential_is_not_used(tmp_path: Path) -> None:
     (tmp_path / "takeover-token").write_text(SENTINEL + "\n", encoding="utf-8")
     settings = make_settings(tmp_path, API_BEARER_TOKEN=SENTINEL)
