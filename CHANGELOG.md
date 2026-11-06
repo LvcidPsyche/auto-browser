@@ -21,9 +21,11 @@ All notable changes to auto-browser are documented here.
 - **Upgrade note:** the Codex host bridge now gives Codex only an allowlisted environment: a Codex setup that needs
   another variable from the bridge's shell passes it with `--pass-env NAME` (repeatable), which hands that value to
   Codex and to every command Codex runs.
-- **Upgrade note:** an empty `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`, which under
-  `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public` bound the tunnel on every interface of the bastion, now stops startup:
-  set `0.0.0.0` for that instead.
+- **Upgrade note:** for a controller that reads `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS` itself (outside compose:
+  `docker-compose.isolation.yml` passes `${ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS:-127.0.0.1}`, so there an empty value
+  reached the controller as `127.0.0.1`), an empty value, which under `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public`
+  bound the tunnel on every interface of the bastion, now stops startup. Set `*` for every interface (IPv4 and IPv6)
+  or `0.0.0.0` for IPv4 only; both need `unsafe-public`, and the bastion's `GatewayPorts` still decides.
 - **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN address)
   was reachable by name before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as a Tailscale
   node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to allow it.
