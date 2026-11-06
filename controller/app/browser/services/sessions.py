@@ -624,19 +624,11 @@ class BrowserSessionService(SessionCreation):
             if shadow_session is not None:
                 # As create's rollback: a session the window-birth watcher registered is forgotten with it.
                 manager.window_births.forget_session(shadow_session)
-            # As create's rollback: the context first, then the browser, and its gate only once that has closed.
-            if context is not None:
-                # Bounded as each teardown step is: a stalled close must not keep the original error from
-                # returning, nor the browser from being closed.
-                try:
-                    await asyncio.wait_for(context.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
-                except Exception as exc:
-                    logger.warning(
-                        "failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}"
-                    )
-            await self._close_owned_browser(headed_browser, shadow_session_id)
-            # The directories, and the record a persist may already have written, closed as create_failed.
-            await self._forget_failed_session_state(shadow_session, shadow_session_id)
+            # One protected unit, as cleanup_failed's (W9-11): a cancel at any step left the browser, the directories
+            # or a record the persist already wrote reading active; the cancel is raised once the rollback is done.
+            await self._run_to_completion(
+                self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
+            )
             raise
 
         await manager.audit.append(
@@ -653,6 +645,22 @@ class BrowserSessionService(SessionCreation):
             "headless": False,
             "note": "Headed Chrome launched. Close the original session when done debugging.",
         }
+
+    async def _roll_back_shadow(
+        self, context: Any, headed_browser: Any, shadow_session: "BrowserSession | None", shadow_session_id: str
+    ) -> None:
+        """enable_shadow_browse's rollback, run to completion by its caller."""
+        # As create's rollback: the context first, then the browser, and its gate only once that has closed.
+        if context is not None:
+            # Bounded as each teardown step is: a stalled close must not keep the original error from
+            # returning, nor the browser from being closed.
+            try:
+                await asyncio.wait_for(context.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
+            except Exception as exc:
+                logger.warning("failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}")
+        await self._close_owned_browser(headed_browser, shadow_session_id)
+        # The directories, and the record a persist may already have written, closed as create_failed.
+        await self._forget_failed_session_state(shadow_session, shadow_session_id)
 
     async def _goto_or_blocked(self, browser: Any, page: Any, url: str, *, action: str) -> None:
         """The controller's own navigation outside the action pipeline, then the page's settle, a stop by the gate

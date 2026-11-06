@@ -431,8 +431,9 @@ class SessionCreation:
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
         """Remove the directories a failed create made, and close the record it persisted, if it got that far.
 
-        Part of cleanup_failed's protected unit (W5-6, W7-2): each await below was a point where a cancel stopped
-        the rollback before the record read closed.
+        Part of a protected unit in both its callers, cleanup_failed's (W5-6, W7-2) and enable_shadow_browse's
+        rollback (W9-11): each await below was a point where a cancel stopped the rollback before the record read
+        closed.
         """
         # In a worker thread: rmtree of a large profile or artifact tree would stall every request on the loop.
         await asyncio.to_thread(self.remove_session_dirs, session_id)
