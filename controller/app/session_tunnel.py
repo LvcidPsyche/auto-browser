@@ -152,11 +152,11 @@ class IsolatedSessionTunnelBroker:
                     local_host=local_host or self.settings.isolated_tunnel_local_host,
                     local_port=local_port,
                 )
-                # Before the log handle is opened: a metadata write that raises
-                # used to leave that handle open.
-                self._write_metadata(tunnel, status="starting")
-                tunnel.stderr_handle = tunnel.log_path.open("ab", buffering=0)
                 try:
+                    # Inside the cleanup (B3-3): a metadata write or a log open that raises (PermissionError, a
+                    # full disk) used to leave <session>.json, which names the bastion and its user, behind.
+                    self._write_metadata(tunnel, status="starting")
+                    tunnel.stderr_handle = tunnel.log_path.open("ab", buffering=0)
                     tunnel.process = await asyncio.create_subprocess_exec(
                         "autossh",
                         *self._autossh_args(tunnel),
@@ -167,9 +167,7 @@ class IsolatedSessionTunnelBroker:
                     # BaseException: a create cancelled while autossh is starting
                     # must not leave the log handle open or the metadata "starting".
                     tunnel.error = "autossh_start_failed"
-                    self._write_metadata(tunnel, status="error")
-                    tunnel.stderr_handle.close()
-                    self._remove_files(session_id, tunnel.info_path, tunnel.log_path)  # given up: B-fix-3
+                    self._give_up_files(tunnel)  # given up: B-fix-3
                     raise
                 # Reserved and visible while it starts, so a concurrent provision
                 # picks another port and release()/shutdown() can still find it.
@@ -240,10 +238,23 @@ class IsolatedSessionTunnelBroker:
             process.kill()
             await asyncio.shield(process.wait())
         tunnel.error = reason
-        self._write_metadata(tunnel, status="error")
-        self._close_stderr(tunnel)
         # Given up on: the files (bastion, user, key path; autossh's stderr) go, as on release.
-        self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
+        self._give_up_files(tunnel)
+
+    def _give_up_files(self, tunnel: IsolatedSessionTunnel) -> None:
+        """Record the error status, then close the log handle and remove both files, whatever that write does.
+
+        The status write is diagnostic only: when it fails (a full disk), the handle is still closed, the files
+        still removed, and the caller's own error, not this one, is what it raises (B3-3)."""
+        try:
+            self._write_metadata(tunnel, status="error")
+        except Exception as exc:
+            logger.warning("could not record the error status of session %s's tunnel: %s", tunnel.session_id, exc)
+        finally:
+            try:
+                self._close_stderr(tunnel)
+            finally:
+                self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
 
     def _forget_starting(self, tunnel: IsolatedSessionTunnel) -> None:
         self._allocated_ports.discard(tunnel.remote_port)

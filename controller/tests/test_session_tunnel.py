@@ -236,6 +236,70 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             # B-fix-3 (NAV-22): once provision gives up, neither file is left under ISOLATED_TUNNEL_INFO_ROOT.
             self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])
 
+    async def test_b3_3_a_log_that_cannot_be_opened_leaves_no_metadata(self) -> None:
+        real_open = Path.open
+
+        def refusing_open(path, *args, **kwargs):
+            if path.suffix == ".log":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with patch.object(Path, "open", refusing_open):
+                with self.assertRaises(PermissionError):
+                    await broker.provision("session-1", local_port=6080)
+            self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])
+            self.assertEqual(broker._tunnels, {})
+
+    async def test_b3_3_a_failed_error_metadata_write_still_cleans_up_and_keeps_the_original_error(self) -> None:
+        opened: list = []
+
+        async def failing_exec(*args, **kwargs):
+            opened.append(kwargs["stderr"])
+            raise FileNotFoundError(2, "No such file or directory", "autossh")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            real_write = broker._write_metadata
+
+            def write(tunnel, *, status):
+                if status == "error":
+                    raise OSError(28, "No space left on device")
+                return real_write(tunnel, status=status)
+
+            broker._write_metadata = write  # type: ignore[method-assign]
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=failing_exec):
+                with self.assertRaises(FileNotFoundError):
+                    await broker.provision("session-1", local_port=6080)
+            self.assertTrue(opened and opened[0].closed)
+            self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])
+
+    async def test_b3_3_a_failed_error_metadata_write_in_the_abort_still_cleans_up(self) -> None:
+        processes: list[FakeProcess] = []
+
+        async def fake_exec(*args, **kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            real_write = broker._write_metadata
+
+            def write(tunnel, *, status):
+                if status in {"active", "error"}:
+                    raise OSError(28, "No space left on device")
+                return real_write(tunnel, status=status)
+
+            broker._write_metadata = write  # type: ignore[method-assign]
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec):
+                with self.assertRaisesRegex(OSError, "No space left"):
+                    await broker.provision("session-1", local_port=6080)
+            self.assertTrue(processes[0].killed)
+            self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])
+            self.assertEqual(broker._tunnels, {})
+            self.assertEqual(broker._allocated_ports, set())
+
     async def test_b_fix_11_the_remote_bind_address_must_be_a_bare_host_or_ip(self) -> None:
         # NAV-29: the lenient loopback check accepted these, and the -R spec built from them was malformed.
         for bind, mode in (
@@ -375,8 +439,10 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provision_cancelled_while_autossh_is_starting_closes_the_log_and_marks_error(self) -> None:
         started = asyncio.Event()
+        handles: list = []
 
         async def hanging_exec(*args, **kwargs):
+            handles.append(kwargs["stderr"])
             started.set()
             await asyncio.Event().wait()
 
@@ -398,7 +464,8 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                     await provision
 
             tunnel = built[0]
-            self.assertTrue(tunnel.stderr_handle.closed)
+            self.assertTrue(handles[0].closed)
+            self.assertIsNone(tunnel.stderr_handle)
             # B-fix-3: given up, so the error metadata and the log are deleted (an open handle blocks that on Windows).
             self.assertEqual(tunnel.error, "autossh_start_failed")
             self.assertFalse(tunnel.info_path.exists())
