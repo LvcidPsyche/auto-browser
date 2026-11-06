@@ -112,7 +112,8 @@ def ensure_takeover_token(settings: Any) -> None:
     A configured TAKEOVER_TOKEN that is short, or equal to an API credential (a token an agent already holds
     protects nothing), refuses startup. A file that cannot be read or written, holds an unusable token or an API
     credential, or stays readable beyond its owner because its mode cannot be tightened (a root-owned 0444 mount),
-    only warns, naming that cause: the controller starts and that endpoint answers 503. Never logs the token; a sha256 fingerprint at most.
+    only warns, naming that cause: the controller starts and that endpoint answers 503. Never logs the token; a
+    sha256 fingerprint at most.
     Called after ensure_api_credential, so a token it loaded from API_TOKEN_FILE counts as an API credential.
     """
     api_tokens = {credential.token for credential in credentials_for(settings)}

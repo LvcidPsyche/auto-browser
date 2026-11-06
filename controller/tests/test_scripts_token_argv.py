@@ -317,8 +317,9 @@ class LoopbackNoProxyTests(unittest.TestCase):
         proxy = _serve(proxied)
         self.addCleanup(proxy.shutdown)
         environ = {**_proxy_environment(f"http://127.0.0.1:{proxy.server_address[1]}"), "NO_PROXY": "*"}
-        # Direct, 10.0.0.5 is unreachable here: the request fails fast instead of reaching the proxy.
-        self._run("bearer_curl --connect-timeout 2 --max-time 3", "http://10.0.0.5:8000/sessions", environ)
+        # Direct, the request fails fast instead of reaching the proxy. 192.0.2.1 is TEST-NET-1 (RFC 5737), never
+        # routed, so the sentinel cannot reach a host the way a private address on a CI or office network could.
+        self._run("bearer_curl --connect-timeout 1 --max-time 2", "http://192.0.2.1:8000/sessions", environ)
         self.assertEqual(proxied, [], "a request carrying the tokens went through the proxy")
 
 
