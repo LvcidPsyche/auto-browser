@@ -85,6 +85,8 @@ class HarnessRunRecord(BaseModel):
     owner: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
+    # The HarnessRunStore.generation of the process that created the run; None for a run saved before it existed.
+    generation: str | None = None
     attempts: list[HarnessAttempt] = Field(default_factory=list)
     decision: ConvergenceDecision | None = None
     candidate: SkillCandidate | None = None
@@ -100,10 +102,12 @@ class HarnessRunStore:
         self.staging_root = self.root / "skills" / "staging"
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
-        # Runs this process is driving (ID to owner), and when it began: the restart sweep touches neither.
+        # Runs this process is driving (ID to owner), and this process's generation, written on the runs it creates:
+        # the restart sweep touches neither. A generation, not a start time: a clock stepped back across a restart
+        # made an earlier process's run look created by this one.
         self._active: dict[str, str | None] = {}
         self._active_lock = threading.Lock()
-        self._started_at = time.time()
+        self.generation = uuid.uuid4().hex
         # Shared with the SkillInducer: prune holds it from a candidate's age check through its removal, staging
         # around its rename into place, so a candidate re-staged in between is never removed as old.
         self.staging_lock = threading.Lock()
@@ -129,9 +133,10 @@ class HarnessRunStore:
     def mark_stale_running(self) -> int:
         """Flip every run an earlier process left `running` to `interrupted`; returns how many.
 
-        Run once at startup, before requests are served. A run this process is driving, or created since it
-        started, is left alone. A record that cannot be rewritten is logged and left `running`: one bad record must
-        not stop the harness from starting.
+        Run once at startup, before requests are served. A run this process is driving, or one it created (its
+        generation is this process's), is left alone; every other `running` record is flipped, one saved without a
+        generation included. A record that cannot be rewritten is logged and left `running`: one bad record must not
+        stop the harness from starting.
         """
         flipped = 0
         for path in self.runs_root.glob("*/run.json"):
@@ -140,7 +145,7 @@ class HarnessRunStore:
             except Exception as exc:
                 logger.debug("skipping unreadable harness run record %s: %s", path, exc)
                 continue
-            if record.status != "running" or record.id in self._active or record.created_at >= self._started_at:
+            if record.status != "running" or record.id in self._active or record.generation == self.generation:
                 continue
             record.status = "interrupted"
             record.notes.append("Harness run interrupted by a controller restart.")
@@ -480,6 +485,7 @@ class HarnessService:
                 contract_hash=contract.hash(),
                 status="running",
                 owner=owner,
+                generation=self.store.generation,
                 strategy_path=str(strategy_path),
                 model_tiers=self.model_tiers,
             )

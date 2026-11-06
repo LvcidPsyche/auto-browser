@@ -179,11 +179,12 @@ All notable changes to auto-browser are documented here.
   with "attempt failed: TimeoutError", instead of claiming the wall-clock budget was spent.
 - A harness attempt driven by a real orchestrator session no longer records its `model_decision` event as
   `simulated: true`; only the mock attempt does.
-- A convergence run that is cancelled (or crashes) is no longer left `running` forever: it is saved as `cancelled`
-  (or `failed`) with a note. At startup, before requests are served, every run an earlier process left `running` is
-  marked `interrupted`; a run the current process is driving is never touched, and a record that cannot be rewritten
-  is logged and left as it is rather than stopping the harness from starting. `harness.list_runs` accepts both states
-  as its `status` filter.
+- A convergence run that is cancelled (or crashes) is no longer left `running` forever: it is saved as `cancelled` (or
+  `failed`) with a note. At startup, before requests are served, every run an earlier process left `running` is marked
+  `interrupted`, told apart by a generation id each process writes on the runs it creates (not by a start time, which
+  a clock stepped back across the restart defeated); a run the current process is driving is never touched, and a
+  record that cannot be rewritten is logged and left as it is rather than stopping the harness from starting.
+  `harness.list_runs` accepts both states as its `status` filter.
 - Staging a harness skill candidate now builds and signs it in a `.tmp-*` directory beside the final one and renames
   it into place, so a signer failure no longer leaves unsigned `SKILL.md`, `helper.py` and `test_skill.py` files
   behind, and the run is saved as `failed` with the reason instead of staying `converged` with no candidate.
@@ -212,10 +213,10 @@ All notable changes to auto-browser are documented here.
   holds a candidate's only copy); 30 suits a shared or long-running controller. `HARNESS_MAX_RUNS_PER_OPERATOR`
   (default `0`, no cap; set it when several operators share one controller) refuses a new run once the verified
   operator has that many stored or starting; runs with no verified operator share one count.
-- **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved with an
-  attempt in it (each attempt now records a `trace_hash`, which 1.15.0 rejects), including an older run this version's
-  startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`, and `harness.get_status` fails on
-  them.
+- **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved (each run now
+  records the `generation` of the process that created it, and each attempt a `trace_hash`, fields 1.15.0 rejects),
+  including an older run this version's startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`,
+  and `harness.get_status` fails on them.
 - The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
   segment, in any case, of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth`, `authorize`,
   `wp-login` (WordPress), `ServiceLogin` (Google), `login-actions` (Keycloak) or `signin-oidc` (ASP.NET Core) (path

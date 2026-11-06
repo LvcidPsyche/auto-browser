@@ -173,6 +173,46 @@ class CancelAndRestartTests(_Base):
         self.assertIn("restart", restarted.store.get("stale000001").notes[-1])
         self.assertEqual(restarted.store.get("done0000001").status, "converged")
 
+    async def test_w4_12_a_previous_generations_run_stamped_after_this_start_is_interrupted(self) -> None:
+        # A run counted as this process's when created at or after its start: a clock stepped back across the restart
+        # left the earlier process's run "running" forever.
+        earlier = HarnessService(self.root)
+        restarted = HarnessService(self.root)
+        ahead = HarnessRunRecord(
+            id="ahead000001",
+            contract_id="c",
+            contract_hash="h",
+            status="running",
+            generation=earlier.store.generation,
+            created_at=time.time() + 3600,
+        )
+        legacy = HarnessRunRecord(
+            id="legacy00001", contract_id="c", contract_hash="h", status="running", created_at=time.time() + 3600
+        )
+        ours = HarnessRunRecord(
+            id="ours0000001",
+            contract_id="c",
+            contract_hash="h",
+            status="running",
+            generation=restarted.store.generation,
+            created_at=time.time() - 3600,
+        )
+        for record in (ahead, legacy, ours):
+            earlier.store.save(record)
+
+        self.assertNotEqual(earlier.store.generation, restarted.store.generation)
+        self.assertEqual(restarted.store.mark_stale_running(), 2)
+
+        self.assertEqual(restarted.store.get("ahead000001").status, "interrupted")
+        self.assertEqual(restarted.store.get("legacy00001").status, "interrupted")
+        self.assertEqual(restarted.store.get("ours0000001").status, "running")
+
+    async def test_w4_12_a_run_records_the_generation_of_the_process_that_started_it(self) -> None:
+        service = HarnessService(self.root)
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+
+        self.assertEqual(service.store.get(record.id).generation, service.store.generation)
+
     async def test_a_stale_run_that_cannot_be_saved_is_logged_and_the_sweep_goes_on(self) -> None:
         # One record the sweep could not rewrite raised out of startup and left the controller without a harness.
         earlier = HarnessService(self.root)
