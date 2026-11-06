@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -407,10 +408,11 @@ class RetentionTests(_Base):
         self.assertEqual([record.id for record in listed], [kept.id])
 
     async def test_w4_22_the_run_cap_check_runs_in_a_worker_thread(self) -> None:
-        # begin_run reads every stored run.json under the store's lock: on the event loop each start stalled it.
+        # Reading every stored run.json on the event loop stalled it at each start; it runs in a worker thread now,
+        # holding no lock (W5-5).
         from app.harness import iterate
 
-        service = HarnessService(self.root)
+        service = HarnessService(self.root, max_runs_per_operator=5)
         real_to_thread = asyncio.to_thread
         offloaded: list = []
 
@@ -421,7 +423,74 @@ class RetentionTests(_Base):
         with patch.object(iterate.asyncio, "to_thread", to_thread):
             await self._run(service)
 
-        self.assertIn(iterate.HarnessRunStore.begin_run, offloaded)
+        self.assertIn(iterate.HarnessRunStore._owned_runs, offloaded)
+        self.assertNotIn(iterate.HarnessRunStore.begin_run, offloaded)
+
+    def _gate_scan(self, service) -> tuple[threading.Event, threading.Event]:
+        """Hold the stored-run scan in its worker thread until the test sets the second event."""
+        started, go_on = threading.Event(), threading.Event()
+        real = service.store._owned_runs
+
+        def gated(owner):
+            started.set()
+            go_on.wait(10)
+            return real(owner)
+
+        patch.object(service.store, "_owned_runs", side_effect=gated).start()
+        self.addCleanup(patch.stopall)
+        self.addCleanup(go_on.set)
+        return started, go_on
+
+    async def _until(self, event: threading.Event) -> None:
+        self.assertTrue(await asyncio.to_thread(event.wait, 10), "the scan never started")
+
+    async def test_w5_5_a_cancel_during_the_cap_scan_reserves_nothing(self) -> None:
+        # The reservation came before the try that gives it back, so a cancel during the scan kept the place: with
+        # a cap of 1 that operator could start no run until a restart.
+        service = HarnessService(self.root, max_runs_per_operator=1)
+        started, go_on = self._gate_scan(service)
+        task = asyncio.create_task(self._run(service))
+        await self._until(started)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        go_on.set()
+        await asyncio.sleep(0.2)  # the worker thread finishes its scan
+
+        self.assertEqual(service.store._active, {})
+        patch.stopall()
+        await self._run(service)
+        self.assertEqual(len(service.store.list()), 1)
+
+    async def test_w5_5_release_does_not_wait_for_a_cap_scan(self) -> None:
+        # The scan held the store's threading lock, so release (on the event loop when a run ends) blocked the loop
+        # until every run.json had been read.
+        service = HarnessService(self.root, max_runs_per_operator=3)
+        self.assertTrue(service.store.begin_run("0123456789ab", None))
+        started, go_on = self._gate_scan(service)
+        task = asyncio.create_task(self._run(service))
+        await self._until(started)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(service.store.release, "0123456789ab"), 2)
+        finally:
+            go_on.set()
+            await task
+        self.assertNotIn("0123456789ab", service.store._active)
+
+    async def test_w5_5_two_admissions_at_once_under_a_cap_of_one_admit_one(self) -> None:
+        service = HarnessService(self.root, max_runs_per_operator=1)
+        started, go_on = self._gate_scan(service)
+        first = asyncio.create_task(self._run(service))
+        second = asyncio.create_task(self._run(service))
+        await self._until(started)
+        go_on.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+
+        self.assertEqual(sum(isinstance(result, HarnessRunRecord) for result in results), 1)
+        refused = [result for result in results if isinstance(result, ValueError)]
+        self.assertEqual(len(refused), 1)
+        self.assertIn("HARNESS_MAX_RUNS_PER_OPERATOR", str(refused[0]))
+        self.assertEqual(len(service.store.list()), 1)
 
     async def test_zero_days_keeps_everything(self) -> None:
         service = HarnessService(self.root)

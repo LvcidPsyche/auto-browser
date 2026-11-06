@@ -115,13 +115,27 @@ class HarnessRunStore:
     def begin_run(self, run_id: str, owner: str | None, *, max_owned: int = 0) -> bool:
         """Mark a new run active, unless `owner` already has `max_owned` runs stored or starting (0: no cap).
 
-        The count and the mark are one step under the store's lock, and a run counts from here, before its
-        run.json is written, so two starts at once cannot both pass a cap that only one of them fits under.
+        The stored runs are read holding no lock, so the step is not atomic between callers: HarnessService
+        serialises its admissions (and reads the stored runs in a worker thread) instead of calling this.
+        """
+        counted = self.starting_runs(owner) | (self._owned_runs(owner) if max_owned > 0 else set())
+        return self.reserve(run_id, owner, counted, max_owned=max_owned)
+
+    def starting_runs(self, owner: str | None) -> set[str]:
+        """The IDs of the runs this process is driving or starting for `owner`."""
+        with self._active_lock:
+            return {run for run, who in self._active.items() if who == owner}
+
+    def reserve(self, run_id: str, owner: str | None, counted: set[str], *, max_owned: int = 0) -> bool:
+        """Mark a new run active unless `counted` (with `owner`'s runs starting now) reaches `max_owned` (0: no cap).
+
+        A run counts from here, before its run.json is written, so a start that holds its place is counted by the
+        next one.
         """
         with self._active_lock:
             if max_owned > 0:
                 starting = {run for run, who in self._active.items() if who == owner}
-                if len(self._owned_runs(owner) | starting) >= max_owned:
+                if len(counted | starting) >= max_owned:
                     return False
             self._active[run_id] = owner
             return True
@@ -448,6 +462,7 @@ class HarnessService:
     ):
         self.store = HarnessRunStore(root)
         self.max_runs_per_operator = max_runs_per_operator
+        self._admission = asyncio.Lock()
         self.verifier = verifier or ProgrammaticVerifier()
         self.model_tiers = {key: value for key, value in (model_tiers or {}).items() if value}
         self.inducer = SkillInducer(self.store.staging_root, signer=signer, lock=self.store.staging_lock)
@@ -468,8 +483,16 @@ class HarnessService:
     ) -> HarnessRunRecord:
         owner = verified_operator()
         run_id = uuid.uuid4().hex[:12]
-        # In a worker thread: with a cap set, the check reads every stored run.json (under the store's own lock).
-        if not await asyncio.to_thread(self.store.begin_run, run_id, owner, max_owned=self.max_runs_per_operator):
+        # Admissions run one at a time (W5-5). With a cap set, the stored runs are read in a worker thread holding no
+        # lock, so release (on the event loop) never waits for the scan, and the place is reserved on the loop with
+        # no await before the try that gives it back: a cancel during the scan reserves nothing.
+        async with self._admission:
+            counted: set[str] = set()
+            if self.max_runs_per_operator > 0:
+                counted = self.store.starting_runs(owner)
+                counted |= await asyncio.to_thread(self.store._owned_runs, owner)
+            admitted = self.store.reserve(run_id, owner, counted, max_owned=self.max_runs_per_operator)
+        if not admitted:
             raise ValueError(
                 f"harness run limit reached: {self.max_runs_per_operator} stored runs for this operator "
                 "(HARNESS_MAX_RUNS_PER_OPERATOR); HARNESS_RETENTION_DAYS, when set, removes old runs"
