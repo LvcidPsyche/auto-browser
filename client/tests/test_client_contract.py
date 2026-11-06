@@ -272,7 +272,7 @@ class StreamEventsTests(unittest.TestCase):
             return FakeStream()
 
         client = AutoBrowserClient("http://auto-browser.test", token="sekret")
-        with patch("auto_browser_client.client.httpx.stream", side_effect=fake_stream):
+        with patch("auto_browser_client.client.httpx.Client.stream", side_effect=fake_stream):
             events = list(client.stream_events("s-1"))
 
         self.assertEqual(events, [{"a": 1}, {"b": 2}])
@@ -319,7 +319,7 @@ class StreamEventsTests(unittest.TestCase):
                 return iter(())
 
         client = AutoBrowserClient("http://auto-browser.test", token="bad")
-        with patch("auto_browser_client.client.httpx.stream", return_value=FakeErrorStream()):
+        with patch("auto_browser_client.client.httpx.Client.stream", return_value=FakeErrorStream()):
             with self.assertRaises(AutoBrowserError) as ctx:
                 list(client.stream_events("s-1"))
 

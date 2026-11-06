@@ -491,7 +491,14 @@ class AutoBrowserClient:
         # connect. `timeout=None` disabled both, so an unreachable controller
         # hung this generator forever instead of raising.
         timeout = httpx.Timeout(None, connect=self._timeout)
-        with httpx.stream("GET", url, headers=self._headers, timeout=timeout) as r:
+        # A client of its own, built by the rule _new_sync_client follows (W8-8): module-level httpx.stream used no
+        # transport, so a loopback controller's Authorization header went to an environment proxy. Both the client
+        # and the stream close when the generator ends or is closed early.
+        transport = httpx.HTTPTransport() if self._direct() else None
+        with (
+            httpx.Client(transport=transport) as http,
+            http.stream("GET", url, headers=self._headers, timeout=timeout) as r,
+        ):
             if r.status_code >= 400:
                 r.read()
             self._raise(r)

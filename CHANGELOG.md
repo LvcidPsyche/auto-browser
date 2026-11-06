@@ -512,7 +512,7 @@ All notable changes to auto-browser are documented here.
   body is read. A malformed envelope is `422` as before.
 - The Python senders of the bearer token no longer send it to an environment proxy when the controller is local: the
   MCP stdio bridges (the `auto-browser-mcp` console script of the `auto-browser-client` package and the controller's
-  `app.mcp_stdio`), `AutoBrowserClient`'s sync and async HTTP clients (its `stream_events` is not yet covered), the
+  `app.mcp_stdio`), `AutoBrowserClient`'s sync and async HTTP clients and its event stream (`stream_events`), the
   LangChain package's `AutoBrowserTool` (calls and `list_tools`) and `AutoBrowserNode`, and
   `scripts/agent_eval.py --execute`. urllib skips a proxy for `localhost` only when `no_proxy` names it, and httpx
   follows `HTTP_PROXY`, `http_proxy` and `ALL_PROXY` to a loopback host the same way, so with a proxy set and no

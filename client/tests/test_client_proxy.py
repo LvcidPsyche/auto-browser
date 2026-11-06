@@ -102,3 +102,19 @@ def test_a_remote_controller_still_goes_through_the_proxy(servers) -> None:
     assert asyncio.run(call()) == []
     assert [path for path, _ in proxy.seen] == ["http://controller.invalid:8000/sessions"] * 2
     assert controller.seen == []
+
+
+def test_the_event_stream_reaches_a_loopback_controller_directly(servers) -> None:
+    proxy, controller = servers
+    with AutoBrowserClient(_loopback(controller), token=MARKER) as client:
+        assert list(client.stream_events("s-1")) == []
+    assert proxy.seen == []
+    assert controller.seen == [("/sessions/s-1/events", f"Bearer {MARKER}")]
+
+
+def test_the_event_stream_of_a_remote_controller_still_goes_through_the_proxy(servers) -> None:
+    proxy, controller = servers
+    with AutoBrowserClient("http://controller.invalid:8000", token=MARKER) as client:
+        assert list(client.stream_events("s-1")) == []
+    assert [path for path, _ in proxy.seen] == ["http://controller.invalid:8000/sessions/s-1/events"]
+    assert controller.seen == []

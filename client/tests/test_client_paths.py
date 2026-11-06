@@ -92,7 +92,7 @@ class ClientPathTests(unittest.TestCase):
             captured["url"] = url
             raise RuntimeError("stop before any network use")
 
-        with patch("auto_browser_client.client.httpx.stream", side_effect=fake_stream):
+        with patch("auto_browser_client.client.httpx.Client.stream", side_effect=fake_stream):
             with self.assertRaises(RuntimeError):
                 list(self.client.stream_events("a/b"))
 
