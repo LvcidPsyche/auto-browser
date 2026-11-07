@@ -511,7 +511,9 @@ class RejectDuringClaimTests(SpendBase):
             and item["action"] == "reject"
             and item["approval"]["approval_id"] == approval_id
         ]
-        self.assertEqual(rejections, [("rejected", "rejected", "not this one", "operator")])
+        # A payment click's approval receipts are restricted, as its own are, and withhold the operator's comment (A2,
+        # A4); the audit log keeps it.
+        self.assertEqual(rejections, [("rejected", "rejected", "[REDACTED]", "operator")])
         given_back = await self.manager.list_audit_events(limit=50, event_type="approval_given_back")
         self.assertEqual(
             [
