@@ -4,430 +4,78 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
-### Changed
+## [1.16.0] — 2026-11-06
 
-- **Upgrade note:** an agent that handed a person the takeover link of an isolated (`docker_ephemeral`) session now
-  hands over a link without the noVNC password. The person opens the full link from the dashboard ("Open noVNC") or
-  prints it with `scripts/takeover_link.sh <session_id>`; a link opened without the password makes noVNC ask for it.
-  Both need the new takeover token (`TAKEOVER_TOKEN`, else the token the controller generates in
-  `TAKEOVER_TOKEN_FILE`, `./data/takeover-token` with the shipped compose): the dashboard asks for it on the first
-  "Open noVNC" of an isolated session in a tab, before it opens the window (Chrome and Edge show no prompt in a tab
-  that is not in front), and again on the click after a refusal, and `scripts/takeover_link.sh` reads it from
-  `TAKEOVER_TOKEN` (the shell or `.env`) or `data/takeover-token`. A script or integration that took the password from
-  `POST /sessions`, `GET /sessions/{id}`, `GET /remote-access` or the takeover result now calls
+A security and correctness release over 1.15.0 (GHSA-gmvj-rj2h-7528), from the open findings of the review behind
+1.15.0 and from reviews of this release's own changes. The model no longer receives an isolated session's noVNC
+password: the full takeover link now comes from a route that also demands a takeover token, which agents are not
+given. Codex behind the host bridge no longer gets the whole environment of the bridge's shell; Playwright's driver,
+Tesseract and the controller's other helper processes get an allowlisted environment too (a Docker credential helper,
+when one is configured, is a known limit); and on Linux the controller and the bridge make themselves non-dumpable, so
+a process of the same user cannot read their environment through `/proc`. The Python client, the LangChain tools, the
+MCP bridges and the repo's scripts no longer send their tokens through an environment proxy to a controller on the
+same machine. Read the upgrade notes first: a person opens an isolated session's takeover link from the dashboard or
+`scripts/takeover_link.sh` with the takeover token, an approval webhook on a private name or address needs
+`APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`, a Codex setup behind the bridge that needs another variable passes it
+with `--pass-env`, and a controller rolled back to 1.15.0 cannot read the harness runs this version saved. The
+controller image and the client and LangChain packages change, and the MCP bridge package now requires this client;
+the browser-node image changes only in version.
+
+### Upgrade notes
+
+- **An isolated session's full takeover link now needs the new takeover token.** An agent that handed a person the
+  takeover link of an isolated (`docker_ephemeral`) session now hands over a link without the noVNC password. The
+  person opens the full link from the dashboard ("Open noVNC") or prints it with
+  `scripts/takeover_link.sh <session_id>`; a link opened without the password makes noVNC ask for it. Both need the
+  new takeover token (`TAKEOVER_TOKEN`, else the token the controller generates in `TAKEOVER_TOKEN_FILE`,
+  `./data/takeover-token` with the shipped compose): the dashboard asks for it on the first "Open noVNC" of an
+  isolated session in a tab, before it opens the window (Chrome and Edge show no prompt in a tab that is not in
+  front), and again on the click after a refusal, and `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` (the
+  shell or `.env`) or `data/takeover-token`. A script or integration that took the password from `POST /sessions`,
+  `GET /sessions/{id}`, `GET /remote-access` or the takeover result now calls
   `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
-- **Upgrade note:** a `provider_model` outside the model-name pattern (below) is refused with a 422, and an agent
-  job saved before the upgrade with such a model fails when it runs and cannot be resumed.
-- **Upgrade note:** the Codex host bridge now gives Codex only an allowlisted environment: a Codex setup that needs
-  another variable from the bridge's shell passes it with `--pass-env NAME` (repeatable), which hands that value to
-  Codex and to every command Codex runs. `docs/deployment.md` lists every name that already passes. Two setups that
-  need it: a sign-in kept in the desktop keyring (`DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`, where the bus is
-  not at its default path) and a node version manager with a non-default home (`VOLTA_HOME`, `ASDF_DATA_DIR`,
-  `MISE_DATA_DIR`).
-- **Upgrade note:** for a controller that reads `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS` itself (outside compose:
-  `docker-compose.isolation.yml` passes `${ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS:-127.0.0.1}`, so there an empty value
-  reached the controller as `127.0.0.1`), an empty value, which under `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public`
-  asked the bastion to bind the tunnel on every interface, now stops startup. Set `*` for every interface (IPv4 and
-  IPv6) or `0.0.0.0` for IPv4 only; both need `unsafe-public`, and the bastion's `GatewayPorts` still decides.
-- **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN host)
-  was reachable by name before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as a Tailscale
-  node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to allow it.
-  The flag lifts the name and address checks, so loopback (`localhost`, `127.0.0.1`) and every private range are
-  allowed too; cloud metadata stays refused whatever it says: `169.254.0.0/16`, `100.100.100.200`, `fe80::/10`,
-  `fd00:ec2::254`, `fd20:ce::254` (GCP), `fd00:c1::a9fe:a9fe` (OCI) and the names `metadata` and
-  `metadata.google.internal`, and an IPv6 address that spells a metadata address: mapped, translated, compatible,
-  NAT64's well-known `64:ff9b::/96`, the local-use `64:ff9b:1::/48` read at every RFC 6052 position (`/32` to `/96`),
-  6to4, Teredo (the client's address) or an ISATAP interface id (`0:5efe` or `200:5efe`, then the IPv4 address) after
-  any prefix. Without the flag such an address is refused, too, when the IPv4 address it spells is not global. A
-  network-specific NAT64 prefix (one an operator chose elsewhere) cannot be recognised. Behind a proxy (`HTTPS_PROXY`
-  and the like) the controller must still be able to resolve the webhook host itself: it checks the addresses before
-  it posts by name through the proxy, and a name it cannot resolve is not posted to.
-- `MESH_ENABLED`, `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and
-  `CURATOR_MODEL` are now `Settings` fields, read from the controller's settings rather than from `os.environ` at
-  startup. The names and defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not
-  only `true`), and an unparseable `MESH_ENABLED` or `MESH_TIMESTAMP_WINDOW`, an empty one included (`MESH_ENABLED=`),
-  stops startup (before, any `MESH_ENABLED` other than `true`, in any letter case, meant off). The harness settings
-  lost their redundant environment fallbacks.
-- `TYPING_DELAY_MS` is removed from the settings, `.env.example` and `docker-compose.yml`: no release ever read it
-  (typing pacing is `HUMAN_TYPING_MIN_DELAY_MS` and `HUMAN_TYPING_MAX_DELAY_MS`). An old env file that still sets it
-  is ignored.
-- httpx's per-request `HTTP Request:` INFO lines are no longer logged, at any `LOG_LEVEL` and for every client (the
-  approval webhook, the providers, the curator): each named its URL whole, userinfo, path and query included. httpx's
-  warnings and errors still are.
-- The GwPriority warning, now starting "GwPriority is not honoured", is logged once at the first isolated provision on
-  a daemon without GwPriority support (not at startup), whatever the network names: its check compares names only,
-  and the gateway and the published port can move anyway. When the session network's name sorts before the
-  controller's, it also names that order problem. It also covers a client that speaks an API version below 1.48.
-- `harness.check_drift` and `harness.check_all_drifts` now say what they do: they re-verify a staged candidate's
-  stored contract and trace and cannot detect a site change. `docs/convergence-harness.md` says the same.
-- Known limit: the `takeover` step the agent loop guard appends to an agent run carries the previous step's
-  observation (the page as it was before that step's action), not a fresh one; the harness trace ignores it when it
-  picks the run's final observation.
-- The mesh identity's `node_meta.json` check no longer claims to detect tampering: the file sits beside the key, so
-  anyone who can replace the key can replace it. It stays as a consistency check, and a mismatch now says "stored
-  node_id does not match the key (corrupt or mixed identity directory)".
-- Mesh `require_approval` is deprecated: no approval handler is wired, so a grant that sets it always answered
-  `approval_required` and its capability could never run. Loading such a grant now logs a `mesh.peers:` warning saying
-  so, the field is still parsed (an existing peers file stays valid), and the docs example no longer shows it.
-- Controller dependencies: `pydantic` is pinned to 2.14.2 (which pins `pydantic-core` 2.50.2), `typing-inspection`
-  to 0.4.4 and `click`, which uvicorn needs, to 8.5.0. Their newer releases (pydantic 2.14.3, pydantic-core 2.50.4
-  and typing-inspection 0.4.5, which the 1.15.0 image carried, and click 8.5.1) were uploaded on November 4, 5 and 6,
-  under 72 hours before this release was built; pydantic 2.14.2 is outside the affected range of every pydantic
-  advisory, and OSV lists none for click 8.5.0.
-
-### Fixed
-
-- Two session creates that both passed the `MAX_SESSIONS` check while one was still reading its storage state or
-  memory profile no longer both start: the limit is checked again right before a create reserves its slot, with no
-  await in between.
-- `POST /crons/{job_id}/trigger` answers a run whose session meets the session cap with 409 and an unreadable
-  encrypted auth state with 422, as `POST /sessions` does; both were a bare 500 there (an auth state file that is not
-  JSON, or JSON with no ciphertext, was a 400 or a 404). The 422 carries the same detail; the 409's is a fixed text
-  that names no session, since the cap's own text (the one `POST /sessions` answers with) would name the job owner's
-  live session ids, and the trigger checks only the job's webhook key, which another operator may hold.
-- The scripts' `.env` loader no longer re-parses a whole multi-line quoted value for every added line: only a line
-  that holds the opening quote character can close it, so a PEM-sized value is no longer re-parsed on every line.
-- The scripts' `.env` loader no longer overwrites a variable the calling script declared without a value (`local x`,
-  `declare x`): it read such a name as unset and let `.env` set it.
-- `scripts/bootstrap_cli_auth.sh` now refuses a `CLI_HOME` with a `..` component (`/data/../etc` matched `/data/*`).
-- `scripts/agent_eval.py --execute` reads the controller token from `AUTO_BROWSER_TOKEN`; `--bearer-token` still works
-  but is deprecated, warns, and is documented as visible to every local user in the process list.
-- The Codex host bridge now removes only a stale socket at `--socket-path`: a regular file, directory or symlink there
-  stops it with a message instead of being deleted, as does a socket another bridge is listening on (it connects
-  first, and removes the socket only when the connection is refused; any other connect failure but a timeout or a full
-  backlog, such as another uid's 0600 socket, stops it with "cannot tell whether a bridge is listening on <path>"), a
-  path too long for a unix socket is refused with its length, and the socket is set to 0600 explicitly after binding.
-  On POSIX each bridge holds an exclusive lock on `<socket-path>.lock` (created 0600, left in place) for its whole
-  life, taken before that check, so a second bridge on the same path stops at startup with "another bridge is running
-  on <path>" instead of racing the first one's probe, a lock file it cannot open (a symlink, or another uid's) or
-  cannot lock (`ENOLCK`, or a filesystem without locks) stops it with a message naming that file, and at shutdown a
-  bridge checks, just before removing the socket, that the path still names the one it bound, which keeps it from
-  removing a socket a later bridge bound there, but not one a process that ignores the lock puts there between the
-  check and the removal.
-- An encrypted auth-state save now removes the plaintext state file it replaces (best-effort: one that cannot be
-  removed, a directory or a Windows lock, logs a warning naming it and the save still succeeds), and loading a
-  plaintext state while `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
-- `POST /sessions` with an auth profile or `storage_state_path` that cannot be decrypted (wrong or missing
-  `AUTH_STATE_ENCRYPTION_KEY`, or a corrupt file) now answers 422 "wrong or missing AUTH_STATE_ENCRYPTION_KEY, or the
-  file is corrupt" instead of a 409 Conflict (no key), a 500 (a wrong key, a damaged ciphertext, or JSON of another
-  shape), or a 400 or 404 (a file that is not JSON, or JSON with no ciphertext). `POST /sessions/{session_id}/fork`
-  answers the same 422 when the fork's own stored state cannot be read back, where 1.15.0 answered as `POST /sessions`
-  did (409 Conflict with no key, otherwise a 500, 400 or 404).
-- A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact outside a live
-  session's directories, however new, on the next cleanup) now stops startup with an error naming the setting. Zero
-  and negative retention still mean "keep forever".
-- Forking a session that sits on `about:blank` or a `data:` page no longer fails with a 403, nor one on Chrome's error
-  page (`chrome-error://chromewebdata/`) with a 400 asking for `start_url`: with no `start_url` named, the fork starts
-  on a blank page with the source's cookies, and the audit records no start URL. Such a page is still judged first
-  when no `start_url` is named: one the page checks refuse (a refused page, or one that could not be judged) answers
-  the 403, a refused about:blank page included.
-- A forked session now keeps the source's proxy persona, User-Agent, protection mode and TOTP secret and hosts, as
-  `create_session` would have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and
-  `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.
-  A source created with a raw request proxy (`proxy_server`) stored no proxy to carry, so its fork gets the default.
-  The User-Agent carried is the one the source's context was built with, so under `STEALTH_ENABLED=true` a source
-  created without one gives its fork the same pool entry it drew instead of a second random draw. A fork whose proxy
-  persona file cannot be read answers 503 with the fixed text, as `POST /sessions` does (it answered 409 Conflict).
-- `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not
-  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a shutdown,
-  or a cancel of the task that awaited the close, used to leave the audit event, the witness receipt and the stored
-  record unwritten), and says when a step failed: the answer's `closed` stays true (the session is unregistered either
-  way, so its `MAX_SESSIONS` slot is free), the new `teardown` is `partial` (`complete` when every step succeeded),
-  `failed_steps` names the steps that failed (trace stop, tunnel release, browser context, isolated browser, isolated
-  runtime), and the `session_closed` audit event and witness receipt carry status `partial` and those names instead of
-  `ok`.
-- A late background write of a session's record can no longer put a closed session back to active: the active write is
-  skipped when the session is no longer registered (checked before and after the summary is built), and the session
-  store refuses to overwrite a stored `closed` record with any other status (an `interrupted` write replaced it and
-  lost its `close_reason`), a guard that reads the file copy, which every write updates first; a stored record it
-  cannot parse (a corrupt file) is replaced by the next write, unless Redis is the primary store and holds a readable
-  `closed` copy (then the write is refused, and a Redis read that fails otherwise, such as a lost connection, skips
-  it), and one it cannot read (an I/O error, which could hide a closed record) skips that non-closed write for the
-  next one to retry, each logged with the session id; neither fails the action whose state the write mirrors, the
-  check never refuses a `closed` write, and a close (or a failed create's rollback) writes its `closed` record over
-  one it cannot parse. The store makes one write at a time per session, from that check through the file and Redis
-  copies, and a cancelled write finishes before the next one for that session starts, so the guard holds within one
-  controller process; two processes sharing a store are not covered. Writes for different sessions do not wait for
-  each other.
-- A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
-  record in the session store: the directories are made only after the checks that need no browser (the arguments, the
-  start URL, the session cap, the proxy persona, the auth profile or state and the memory profile), removed again by
-  the rollback (in a worker thread, so a large tree does not stall other requests, and each on its own: one whose
-  removal or check fails is logged with its error, the rest of its tree is still removed, and the rest of the rollback
-  goes on), and a record the create had already written is marked `closed` (reason `create_failed`). The whole
-  rollback (the tunnel and isolated runtime releases, the context and browser closes, the directories and the record)
-  runs to completion when the task awaiting it is cancelled during it, then the cancel is raised. The create-failed
-  hook, the tunnel release, the context close, the isolated browser's close and the runtime release are each bounded
-  as `close_session`'s teardown steps are (30 seconds, then logged and passed), so a context close or runtime release
-  that never returns no longer holds the rest of the rollback or its caller; the directory removal and the record
-  close are not bounded. When the controller itself stops, every task left is cancelled, the rollback's own included,
-  and the next start marks such a record `interrupted`.
-- Releasing an isolated session's tunnel (a close, or a failed create's rollback) now waits at most 5 seconds for
-  autossh to exit after `SIGKILL`, as it already did after the terminate, then logs a warning naming the session and
-  the process id and finishes the teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close
-  or the rollback for ever. An autossh already gone when it is terminated or killed (it exited while the first wait
-  timed out, so `kill()` raised `ProcessLookupError`) no longer stops the teardown before it frees the remote port,
-  forgets the tunnel, closes its log and removes its files, and a log close that fails (a flush on a full disk) is
-  logged with the session id while both files are still removed.
-- A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
-  shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
-  already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback
-  now also runs on a cancel, and runs to completion when the caller is cancelled during it, as `create_session`'s
-  does, and the directories are made only once the browser is up.
-- One helper (`is_local_only_host`, next to `is_loopback_host`) now decides whether a takeover URL names only this
-  machine, for both the per-session remote-access report and the production "TAKEOVER_URL is still local-only"
-  warning. Before, each kept its own literal list that missed `127.0.0.2`, `*.localhost` and `[::ffff:127.0.0.1]`, so
-  a session on such a URL was not offered an isolated tunnel and the startup warning was skipped. The isolated
-  tunnel's remote bind address (`ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`) has its own strict check: a bare host or IP
-  only, `localhost` or any address that reads as loopback (another loopback address such as `127.0.0.2` included);
-  `0.0.0.0` stays refused there without `unsafe-public`. A value with a port or surrounding spaces (`localhost:22`,
-  `[::1]:22`, ` 127.0.0.1 `) went into the `-R` spec as it was, which ssh then refused or read as another bind, and an
-  empty one binds every interface: each now stops startup with a clear error. An IPv6 literal, bare (`::1`) or in
-  ssh's brackets without a port (`[::1]`), is accepted and goes into the spec in brackets, as ssh needs
-  (`[::1]:16181:127.0.0.1:6080`; the bare `::1:16181:...` is a spec ssh refuses). Any other bare host in brackets
-  (`[127.0.0.1]`, `[localhost]`, `[203.0.113.5]`, which ssh parses too) is unbracketed and judged as its bare
-  spelling.
-- An isolated session tunnel whose autossh exits early for a reason other than a taken remote port (a refused key, an
-  unreachable bastion) now fails the provision at once with that message instead of retrying every port in
-  `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port
-  forwarding failed" and "address already in use" still move on to the next port.
-- With `ISOLATED_TUNNEL_ENABLED=true`, an isolated session's noVNC now also admits the tunnel's public host
-  (`ISOLATED_TUNNEL_PUBLIC_HOST`, else `ISOLATED_TUNNEL_HOST`) as a page host: its `NOVNC_ALLOWED_HOSTS` held only
-  `ISOLATED_TAKEOVER_HOST`, so the takeover URL a session hands out through its tunnel was refused by noVNC's own
-  Origin/Host guard.
-- Releasing an isolated session no longer takes an unreachable Docker daemon (or any Docker error other than "not
-  found") for a gone container, and no longer goes on as if released after a container removal that failed (any
-  error but "not found", which means gone): after a failed removal it still releases the session network
-  (force-disconnecting that container from it); either way it then fails: `close_session` reports it in `failed_steps`
-  (the audit event and receipt say partial), and the session's profile and downloads directories are kept instead of
-  being deleted under a container that may still be running (after a failed removal, with a warning naming the
-  directory that holds them). A provision that fails before it returns (the container did not start, the session
-  network could not be joined) does the same: when its rollback cannot remove the container, or cannot look it up (an
-  unreachable daemon: whether one was created is then unknown), the directories stay, with a warning that says which,
-  instead of being emptied; both failures are now warnings with the daemon's reason (1.15.0 logged a failed lookup not
-  at all, reading it as no container, and a failed removal only at DEBUG). A rollback that releases after a failed
-  provision or connect logs a failed release and raises the original error.
-- The `BROWSER_SANDBOX=on` refusal of an isolated session no longer ends "Its container was removed.": it was written
-  before the rollback ran, so it was wrong when that removal failed and under `ISOLATED_BROWSER_KEEP_CONTAINERS`,
-  which only stops the container.
-- Two isolated sessions created at once now read the Docker daemon's API version once and log the "GwPriority is not
-  honoured" warning once; both were unsynchronised across the provisioning threads.
-- When the active tab closes, the session no longer moves to a tab that `ALLOWED_HOSTS` refuses while an allowed one
-  is left: `browser.close_tab` takes the allowed tab nearest the closed one (the earlier of two equally near), a page
-  that closes itself leaves the session on the last allowed tab, and only when every remaining tab is refused does
-  the old choice stand.
-- A convergence run started with `max_attempts` below the contract's budget now needs that many consecutive passes at
-  most: the threshold followed the contract's budget, so `max_attempts=1` on a budget of 5 could never converge.
-- A convergence run is `over_budget` only when `max_wall_seconds` actually ran out: a `TimeoutError` raised inside an
-  attempt or the verifier (an orchestrator or verifier-command timeout) with budget left now ends the run as `failed`
-  (the note reads "Harness attempt failed: TimeoutError" and the decision reason "attempt <n> failed"), instead of
-  claiming the wall-clock budget was spent.
-- A harness attempt driven by a real orchestrator session no longer records its `model_decision` event as
-  `simulated: true`; only the mock attempt does.
-- A convergence run that is cancelled (or crashes) is no longer left `running` forever: it is saved as `cancelled` (or
-  `failed`) with a note. At startup, before requests are served, every run an earlier process left `running` is marked
-  `interrupted`, told apart by a generation id each process writes on the runs it creates (not by a start time, which
-  a clock stepped back across the restart defeated); a run the current process is driving is never touched, and a
-  record that cannot be rewritten is logged and left as it is rather than stopping the harness from starting.
-  `harness.list_runs` accepts both states as its `status` filter.
-- Staging a harness skill candidate now builds and signs it in a `.tmp-*` directory beside the final one and renames
-  it into place, so a signer failure no longer leaves unsigned `SKILL.md`, `helper.py` and `test_skill.py` files
-  behind, and the run is saved as `failed` with the reason instead of staying `converged` with no candidate.
-  Re-staging over an earlier candidate takes two renames (the old one aside, the new one in); a kill between them, or
-  during a build, is settled at the next start, before the prune: the earlier candidate is renamed back when nothing
-  replaced it, unplaced builds are removed, and a run left `converged` with no candidate gets the candidate staged for
-  its contract and last attempt's trace (a kill after the build was in place, before the run was saved), or is marked
-  `failed` when none matches. An aside a kill left half removed (its `candidate.json` gone), which cannot be restored,
-  is removed when its `envelope.json` (a signed one's payload included) or `provenance.json` names a candidate that is
-  in place, or when it holds nothing but a staged candidate's files (empty included), instead of being warned about at
-  every start; one holding anything else is still left, with a warning.
-- A staged skill's `SKILL.md` renders the contract's goal, precondition and postcondition values and the verifier
-  notes as single-line code spans (with a fence longer than any backtick run inside), so a goal holding a heading,
-  HTML, a link or a code fence can no longer change the document a reviewer reads before promotion.
-- A `url_matches` condition whose pattern is nested too deeply or repeats too many times (`RecursionError` or
-  `OverflowError` from `re.compile`) is now refused as an invalid regex like any other, instead of escaping the
-  contract validator as an unhandled error.
-- `harness.get_trace` now refuses a stored attempt trace whose observation, network entries or extracted data were
-  edited on disk (`TraceIntegrityError`): each attempt records the trace's hash when it is written, and the read
-  compares it. The hash chain alone covered only the events. A run recorded before this release has no hash and is
-  read as before.
-- The convergence harness can now be bounded: `HARNESS_RETENTION_DAYS` removes run directories and staged candidates
-  not touched for that long, at startup and in each maintenance sweep (never a run the process is driving, and never a
-  candidate re-staged between the age check and the removal: the two hold one lock against staging's rename, taken for
-  staged entries only, so removing a run directory does not hold up a stage; listing runs skips one removed while it
-  sorts, and one it cannot stat, with a warning naming it; the prune, too, warns about an entry it cannot read, its
-  type included, and goes on to the rest). The default, `0`, keeps everything, so an upgrade deletes nothing (staging
-  holds a candidate's only copy); 30 suits a shared or long-running controller. `HARNESS_MAX_RUNS_PER_OPERATOR`
-  (default `0`, no cap; set it when several operators share one controller) refuses a new run once the verified
-  operator has that many stored or starting (admissions run one at a time; the stored runs are read in a worker
-  thread holding no lock, so neither the event loop nor a run ending waits for the scan, and a start cancelled during
-  it holds no place); runs with no verified operator share one count.
-- **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved (each run now
-  records the `generation` of the process that created it, and each attempt a `trace_hash`, fields 1.15.0 rejects),
-  including an older run this version's startup rewrote: one an earlier process left `running` (now `interrupted`)
-  or `converged` with no candidate (now `failed`, or, for a run this version recorded, given the candidate it had
-  staged). Such runs drop out of `harness.list_runs`, and `harness.get_status` fails on them.
-- The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
-  segment, in any case, of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth`, `authorize`,
-  `wp-login` (WordPress), `ServiceLogin` (Google), `login-actions` (Keycloak) or `signin-oidc` (ASP.NET Core) (path
-  parameters such as `;jsessionid=...` aside, and an app's hash route such as `#/login` read as a path;
-  `payment_screen` reads paths the same way), a host whose first label is one of those or `sso`
-  (`login.microsoftonline.com`, `sso.example.com`), a 401 or 403 in an observation's `status_code`, `http_status` or
-  `status` (the controller's own observations carry none, so in a live run a 401 or 403 page counts only by its URL),
-  or the caller's value inside the URL. A marketing page that offers "sign in" or mentions "authenticate" no longer
-  fails a run. `payment_screen` and `captcha_screen` match their built-in words and phrases whole (`credit card`,
-  `card number`, `payment method`, ...; the bare word `payment` no longer counts, a `/payment` path does), so
-  "accredit cards" or "captchaless" are not hits; a `-` ends a word for both, and for `captcha_screen` a `_` or a
-  camelCase hump does too, so names in page code such as `captcha_image`, `captchaToken` or `reCaptcha` count, as do
-  the widgets' `grecaptcha` and `hcaptcha`. The caller's own `value` still matches as a case-insensitive substring, as
-  before, so a path such as `/billing` does. These are heuristics with known false hits: a page-code flag such as
-  `captcha_enabled`, and an API path such as `/payments/1/authorize` (read as a login page).
-- The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
-  command that writes more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even
-  when one read crosses that, so a failure's notes still carry the start of the command's own message. On POSIX the
-  command now runs in its own process group, and a kill (past the cap, at its timeout, or when the caller gives up)
-  reaches the processes it started, not only the command itself (on Windows only the command itself is killed); its
-  pipes are then drained, discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which
-  a descendant holding one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs
-  now say that during a run the command receives the full contract and the attempt's trace on stdin, its final
-  observation as the page gave it (only secret-named keys, and a `text` or `text_preview` beside a truthy `sensitive`
-  or `text_redacted` flag, redacted; not the PII and URL-token scrubbing of what is stored), and that a drift check
-  (`harness.check_drift`, `harness.check_all_drifts`) sends it the candidate's stored trace, which is scrubbed, with
-  the contract's expected text scrubbed to match.
-- A drift check whose expected-text scrubber fails keeps a `url_contains` expectation as written: a failing URL
-  scrubber hands back the value up to its first `?` or `#`, the empty string for a `url_contains` value that starts
-  with `?` or `#` and `/` for one that starts with `/?` or `/#`, and every URL contains the first, every `http://` or
-  `https://` URL the second. A scrubber that raises is reported `unverified` with the exception type instead of
-  failing the call. A URL inside a `text_contains` or `dom_contains` expectation whose query or fragment a failing
-  scrub dropped is kept as written too, instead of shrinking to its path; one inside a `network_response_shape` or
-  `extracted_data_schema` value still shrinks to its path.
-- The harness trace no longer blanks the `value`, `label` and `username` of a dict in page data (an observation or
-  extracted data) just because the site's own data carries a `sensitive` or `text_redacted` key: that hiding applies
-  to an action's own event payload only, and stops at the page data the action event carries (its `observation` and
-  the execution's `before` and `after`), so a row there keeps what the same row keeps in `final_observation`. A
-  sensitive `select_option`'s execution `target` still hides its `value` and `label`; its `index`, like the
-  decision's, is kept. A `text` or `text_preview` beside such a key is
-  still hidden everywhere.
-- A URL the harness trace scrubs out of quoted text now ends before the closing quote when `.`, `!` or `?` and then a
-  space or the end follow it (`see 'https://site/a?token=...'.` lost its quote and full stop); an apostrophe inside
-  a URL (`?q=o'neil`) is still part of it.
-- A mesh peer's most specific matching grant now applies, not the first one in `peers.json`: an exact capability beats
-  a wildcard, a longer wildcard prefix beats a shorter one, and ties go to the entry listed first. A broad `tool:*`
-  listed early no longer shadows a stricter grant for one tool listed later. `docs/mesh.md` also states that
-  `url_allowlist` covers the request's URL arguments only, not redirects or later navigation.
-- Mesh replay protection no longer depends on a size-evicted, memory-only nonce cache alone: a nonce now expires once
-  the highest wall time seen is more than `MESH_TIMESTAMP_WINDOW` past its envelope's timestamp (a clock stepped back
-  does not free it), and `/mesh/receive` refuses an envelope stamped before the controller started or within one
-  window after it, since the last process accepted envelopes stamped up to one window ahead (so one it could have run
-  cannot be replayed after a restart, unless the clock stepped back across it: by more than a window, those the
-  last process ran stamped later than the step minus one window before the restart (all of them once the step reaches
-  how long it ran, or, after an upgrade from 1.15.0, which refused nothing at startup, how long it ran plus two
-  windows); by less, those it accepted stamped more than the window minus the step after the restart; the high-water
-  mark below is kept in memory only). After lowering `MESH_TIMESTAMP_WINDOW`, a restart is safe once the old window
-  has passed since the last envelope was accepted (or restart first with the old value and lower it after that long):
-  the check assumes the last process ran with no larger window. The cost is about one window, 30 s by default, of
-  `403` refusals after each start, which a sender's retry with a new envelope passes once that window is over. The
-  timestamp window is checked against that same high-water mark, not the raw clock, so an envelope whose nonce has
-  expired cannot come back inside the window when the clock steps back; a peer's reply to this node's own delegation
-  request is checked the same way, and a reply whose request id is not the request's is refused. The cost: after a
-  large backward step of the clock, fresh envelopes are refused until it catches up (for about the step minus the
-  window). The 10,000-nonce cap no longer evicts a nonce still inside its window (an envelope accepted, then 10,000
-  others inside its window, and it ran again): at the cap every expired nonce goes, and if none has, the new envelope
-  is refused with `503` ("mesh replay cache is full; retry later") and not recorded, so the cap bounds how many nonces
-  are remembered at once, and nothing remembered is dropped before it expires; a reply that finds the cache full fails
-  the delegation. The limit: a nonce is recorded once the envelope's signature checks out, before the request is
-  decoded or granted, so registered peers that get 10,000 signed envelopes through inside a window fill the cache, and
-  every peer is refused (`503`) until they expire (`/mesh/receive` takes no bearer token, so the request rate limit,
-  on by default at 120 requests a minute, counts it per client address; since a nonce is kept for up to two windows,
-  one address can hold about four times as many nonces as the window has seconds (120 at the default 30-second
-  `MESH_TIMESTAMP_WINDOW`), so alone it cannot fill the cache unless that limit is raised or off or the window is
-  about 2,500 seconds or more; when the controller serves without a token (`API_ALLOW_TOKENLESS_LOOPBACK`), the limit
-  counts each `Authorization` or `X-Operator-Id` value apart, so a sender that varies one is not limited).
-- The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to
-  hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
-  (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
-  runs at most two Codex decisions at once (a third waits 2 s, then gets 503), serves at most 32 connections at once
-  (one more is answered 503 and closed at once; each held a thread, with no limit), and on a Codex timeout kills
-  Codex's whole process group, not only the direct child, then drains its pipes for at most 3 s and waits at most 3 s
-  more (a descendant that left the group with `setsid` and kept stdout open used to hold the request, and its decision
-  slot, for as long as it ran; the reply stays 504). Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex runs
-  still in flight the same way, skipping only a run the handler has already reaped (a Codex that exited while its
-  children hold its pipes is still signalled, so they are killed too). Codex now runs in its own session, so the
-  terminal's Ctrl+C no longer reaches it and the shutdown sweep kills it instead (in 1.15.0 a SIGTERM to the bridge
-  left it running, orphaned).
-- The Codex host bridge answers a request body that is not UTF-8 with 400 and a fixed message instead of a 500
-  carrying the exception text, answers any other unexpected error with a fixed `internal error` and logs the detail on
-  the bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the
-  controller never read that field). A Codex run that exits nonzero is answered 502 with the fixed message
-  `codex exited with <code>; see the bridge log` instead of up to 4,000 characters of Codex's stderr or stdout (host
-  paths, possibly a token); the bridge logs that output (stderr, or stdout when stderr is empty), or the exit code
-  when Codex printed nothing.
+- **An approval webhook on a private name or address now needs `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`.** An
+  approval webhook whose host is a private name (a service on the compose network, a LAN host) was reachable by name
+  before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as a Tailscale node): every address
+  that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to allow it. The flag lifts the
+  name and address checks, so loopback (`localhost`, `127.0.0.1`) and every private range are allowed too; cloud
+  metadata stays refused whatever it says: `169.254.0.0/16`, `100.100.100.200`, `fe80::/10`, `fd00:ec2::254`,
+  `fd20:ce::254` (GCP), `fd00:c1::a9fe:a9fe` (OCI) and the names `metadata` and `metadata.google.internal`, and an
+  IPv6 address that spells a metadata address: mapped, translated, compatible, NAT64's well-known `64:ff9b::/96`, the
+  local-use `64:ff9b:1::/48` read at every RFC 6052 position (`/32` to `/96`), 6to4, Teredo (the client's address) or
+  an ISATAP interface id (`0:5efe` or `200:5efe`, then the IPv4 address) after any prefix. Without the flag such an
+  address is refused, too, when the IPv4 address it spells is not global. A network-specific NAT64 prefix (one an
+  operator chose elsewhere) cannot be recognised. Behind a proxy (`HTTPS_PROXY` and the like) the controller must
+  still be able to resolve the webhook host itself: it checks the addresses before it posts by name through the proxy,
+  and a name it cannot resolve is not posted to.
+- **Codex behind the host bridge gets only allowlisted variables; pass any other it needs with `--pass-env`.** The
+  Codex host bridge now gives Codex only an allowlisted environment: a Codex setup that needs another variable from
+  the bridge's shell passes it with `--pass-env NAME` (repeatable), which hands that value to Codex and to every
+  command Codex runs. `docs/deployment.md` lists every name that already passes. Two setups that need it: a sign-in
+  kept in the desktop keyring (`DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`, where the bus is not at its default
+  path) and a node version manager with a non-default home (`VOLTA_HOME`, `ASDF_DATA_DIR`, `MISE_DATA_DIR`).
+- **The `HARNESS_UV_COMMAND` verifier now gets a fixed environment.** A `HARNESS_UV_COMMAND` that needs a variable
+  outside the provider CLIs' base names (`CLI_BASE_ENV_NAMES` and `LC_*`, listed in docs/deployment.md), such as its
+  own key or setting, names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
+- **An empty `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS` now stops startup.** For a controller that reads
+  `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS` itself (outside compose: `docker-compose.isolation.yml` passes
+  `${ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS:-127.0.0.1}`, so there an empty value reached the controller as `127.0.0.1`),
+  an empty value, which under `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public` asked the bastion to bind the tunnel on
+  every interface, now stops startup. Set `*` for every interface (IPv4 and IPv6) or `0.0.0.0` for IPv4 only; both
+  need `unsafe-public`, and the bastion's `GatewayPorts` still decides.
+- **Model names are now checked against a pattern.** A `provider_model` outside the model-name pattern (below) is
+  refused with a 422, and an agent job saved before the upgrade with such a model fails when it runs and cannot be
+  resumed.
+- **After a rollback to 1.15.0, the harness runs this version saved cannot be read.** A controller rolled back to
+  1.15.0 cannot read a harness run this version has saved (each run now records the `generation` of the process that
+  created it, and each attempt a `trace_hash`, fields 1.15.0 rejects), including an older run this version's startup
+  rewrote: one an earlier process left `running` (now `interrupted`) or `converged` with no candidate (now `failed`,
+  or, for a run this version recorded, given the candidate it had staged). Such runs drop out of `harness.list_runs`,
+  and `harness.get_status` fails on them.
 
 ### Security
 
-- On Linux the controller makes itself non-dumpable at startup (`prctl(PR_SET_DUMPABLE, 0)`, first in its lifespan),
-  and so does the Codex host bridge: a process of the same uid, such as an unsandboxed child, could read either's
-  whole environment through `/proc/PID/environ`, around the allowlisted one it was given. Where the call fails the
-  process logs one warning and goes on. The Universal Verifier command and autossh now get the provider CLIs' base
-  names (`CLI_BASE_ENV_NAMES` and `LC_*`) instead of the controller's whole environment (the Universal Verifier
-  command also gets the names in the new `HARNESS_UV_ENV_PASSTHROUGH`, and autossh keeps its own `AUTOSSH_*` tuning,
-  such as `AUTOSSH_POLL`), and the regex worker gets only `SYSTEMROOT`, on Windows (the base names are listed in
-  docs/deployment.md). Playwright's node driver, and every browser it launches (shadow browse's headed Chromium among
-  them), get those base names plus Playwright's own `PW_*` and `PLAYWRIGHT_*`, `DEBUG`, `DEBUG_FILE` and the display
-  and session-bus names (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`):
-  until now the driver got the controller's whole environment and stayed readable at `/proc/PID/environ` by any
-  process of its uid. The controller confines it before each Playwright start and fails to start if the installed
-  Playwright no longer has the function it confines. Tesseract, which screenshot redaction's OCR starts through
-  pytesseract, gets the same base names plus `TESSDATA_PREFIX` and `OMP_*`: until now it too got the controller's
-  whole environment (the provider keys among it, and the API token when it is set as `API_BEARER_TOKEN` or
-  `API_BEARER_TOKENS`), readable at `/proc/PID/environ` by any process of its uid while it ran. The controller
-  confines it at startup, before anything can run OCR, and fails to start if the installed pytesseract no longer has
-  the module-level `environ` it replaces. Known limit: such a child still runs as the controller's uid and can read
-  its files (`data/api-token`, `data/takeover-token`, the mesh and witness keys); the `cli` providers are such
-  children, the bridge's Codex runs as the host user who started the bridge (who can read those files where it owns
-  `./data`), and page content can prompt-inject them. The driver and the browsers it launches, like the provider CLIs,
-  are ordinary processes of the controller's user: their environment holds none of the controller's own tokens or keys
-  (a proxy setting that carries credentials excepted), but their memory holds page content and what is typed into
-  pages, which a command one of them runs could read where the host lets a process ptrace another of the same user
-  (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another CLI
-  runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). On macOS and Windows the
-  controller and the bridge do not change this, and whether a process of the same user can read their environment
-  depends on the system. A Docker credential helper configured for the controller's user (`credsStore` or
-  `credHelpers` in its Docker config) is run by the Docker SDK with the controller's whole environment when the
-  controller pulls a session image the daemon does not have: build or pull that image ahead (compose builds it) and
-  configure no credential helper for that user.
-- **Upgrade note:** a `HARNESS_UV_COMMAND` that needs a variable outside those base names (its own key or setting)
-  names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
-- The scripts' `.env` loader runs with xtrace off and restores the caller's setting, so
-  `bash -x` no longer prints every `.env` value as a script loads them, and `bash -x scripts/takeover_link.sh`
-  prints neither `TAKEOVER_TOKEN` nor `API_BEARER_TOKEN` (a value a script expands after loading still shows in its
-  trace); the isolated smokes pipe the takeover-link response to Python instead of
-  holding it in a variable `bash -x` would print. `bearer_curl`, `takeover_curl` and `doctor.sh`'s token-carrying API
-  calls pass curl `--noproxy` for `localhost`, `127.0.0.1`, `::1` and the scripts' base URL host when it is another
-  loopback address or `0.0.0.0` (`127.0.0.2`, say; `bearer_curl` and `takeover_curl` refuse, before any token is sent,
-  a base URL whose host is not a plain host name or address: an IPv4 address written another way than four dotted
-  decimals, such as `127.2`, `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`, a host holding anything but ASCII letters,
-  digits, `.` and `-` (such as `%31%32%37.0.0.2`) or ending in `.`, and a bracketed IPv6 host other than `[::1]` that
-  holds anything but hex digits and `:` (a zone id, or a dotted tail such as `[64:ff9b::127.0.0.2]`) or whose first
-  group is empty or all zeros, which covers every IPv4-mapped form such as `[::ffff:127.0.0.2]`; curl normalises a
-  host before it matches `--noproxy`, so a spelling of another loopback address missed the list, while a spelling of
-  `127.0.0.1` itself was normalised to it; the host is read as curl reads it, a scheme only at the start of the URL
-  and the authority ending at the first `/`, `?` or `#`, and they also refuse a set base URL that starts with a
-  scheme, a colon and a slash but not with that scheme, `//` and a host, such as `http:///127.0.0.2:8000/` or
-  `http:/127.0.0.2:8000/`, which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/` (an
-  empty bracketed host, as in `http://[]:8000/`, passes these checks and is left to curl); a scheme-less
-  `localhost:8000` is still accepted), then the environment's own `no_proxy`, else `NO_PROXY`, as curl reads them (one
-  that is `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's bastion curl passes it for
-  the bastion's own loopback names, and `scripts/smoke_download.py` sends its controller requests with no proxy, so a
-  request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`.
-  `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403 means.
-- The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
-  allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
-  command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
-  CLIs (`CLI_BASE_ENV_NAMES` and `LC_*`) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_API_KEY` and
-  `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`, which the controller's own `cli`-mode
-  Codex now gets too), and each name given with the new `--pass-env NAME` (a bad name exits 2 at startup).
-- The model no longer receives an isolated session's noVNC password. `create_session`, `get_session`,
+- **The model no longer receives an isolated session's noVNC password.** `create_session`, `get_session`,
   `get_remote_access` and `request_human_takeover` (REST and MCP) carried it in the takeover URL's fragment, which
   over MCP reached the calling model, and with a session tunnel up the URL was the public one. No MCP tool result, and
   no response of a route the agent-facing packages (the Python client, the MCP package, the LangChain integration)
@@ -476,27 +124,146 @@ All notable changes to auto-browser are documented here.
   Open the dashboard and the link in a browser no agent drives: such an agent can read the dashboard's sessionStorage.
   The `takeover_note` names no script. The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free
   link.
+- **The Codex host bridge no longer hands Codex the whole environment of the shell that started it.** The Codex host
+  bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an allowlisted
+  environment instead of the whole environment of the shell it was started from, which Codex, and every command a
+  prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider CLIs
+  (`CLI_BASE_ENV_NAMES` and `LC_*`) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_API_KEY` and
+  `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`, which the controller's own `cli`-mode
+  Codex now gets too), and each name given with the new `--pass-env NAME` (a bad name exits 2 at startup).
+- **The processes the controller starts get only the environment they need, and on Linux cannot read the
+  controller's.** On Linux the controller makes itself non-dumpable at startup (`prctl(PR_SET_DUMPABLE, 0)`, first in
+  its lifespan), and so does the Codex host bridge: a process of the same uid, such as an unsandboxed child, could
+  read either's whole environment through `/proc/PID/environ`, around the allowlisted one it was given. Where the call
+  fails the process logs one warning and goes on. The Universal Verifier command and autossh now get the provider
+  CLIs' base names (`CLI_BASE_ENV_NAMES` and `LC_*`) instead of the controller's whole environment (the Universal
+  Verifier command also gets the names in the new `HARNESS_UV_ENV_PASSTHROUGH`, and autossh keeps its own `AUTOSSH_*`
+  tuning, such as `AUTOSSH_POLL`), and the regex worker gets only `SYSTEMROOT`, on Windows (the base names are listed
+  in docs/deployment.md). Playwright's node driver, and every browser it launches (shadow browse's headed Chromium
+  among them), get those base names plus Playwright's own `PW_*` and `PLAYWRIGHT_*`, `DEBUG`, `DEBUG_FILE` and the
+  display and session-bus names (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`,
+  `DBUS_SESSION_BUS_ADDRESS`): until now the driver got the controller's whole environment and stayed readable at
+  `/proc/PID/environ` by any process of its uid. The controller confines it before each Playwright start and fails to
+  start if the installed Playwright no longer has the function it confines. Tesseract, which screenshot redaction's
+  OCR starts through pytesseract, gets the same base names plus `TESSDATA_PREFIX` and `OMP_*`: until now it too got
+  the controller's whole environment (the provider keys among it, and the API token when it is set as
+  `API_BEARER_TOKEN` or `API_BEARER_TOKENS`), readable at `/proc/PID/environ` by any process of its uid while it ran.
+  The controller confines it at startup, before anything can run OCR, and fails to start if the installed pytesseract
+  no longer has the module-level `environ` it replaces. Known limit: such a child still runs as the controller's uid
+  and can read its files (`data/api-token`, `data/takeover-token`, the mesh and witness keys); the `cli` providers are
+  such children, the bridge's Codex runs as the host user who started the bridge (who can read those files where it
+  owns `./data`), and page content can prompt-inject them. The driver and the browsers it launches, like the provider
+  CLIs, are ordinary processes of the controller's user: their environment holds none of the controller's own tokens
+  or keys (a proxy setting that carries credentials excepted), but their memory holds page content and what is typed
+  into pages, which a command one of them runs could read where the host lets a process ptrace another of the same
+  user (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another
+  CLI runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). On macOS and Windows the
+  controller and the bridge do not change this, and whether a process of the same user can read their environment
+  depends on the system. A Docker credential helper configured for the controller's user (`credsStore` or
+  `credHelpers` in its Docker config) is run by the Docker SDK with the controller's whole environment when the
+  controller pulls a session image the daemon does not have: build or pull that image ahead (compose builds it) and
+  configure no credential helper for that user.
+- **The repo's scripts keep their tokens out of `bash -x` output and away from proxies for a local controller.** The
+  scripts' `.env` loader runs with xtrace off and restores the caller's setting, so `bash -x` no longer prints every
+  `.env` value as a script loads them, and `bash -x scripts/takeover_link.sh` prints neither `TAKEOVER_TOKEN` nor
+  `API_BEARER_TOKEN` (a value a script expands after loading still shows in its trace); the isolated smokes pipe the
+  takeover-link response to Python instead of holding it in a variable `bash -x` would print. `bearer_curl`,
+  `takeover_curl` and `doctor.sh`'s token-carrying API calls pass curl `--noproxy` for `localhost`, `127.0.0.1`, `::1`
+  and the scripts' base URL host when it is another loopback address or `0.0.0.0` (`127.0.0.2`, say; `bearer_curl` and
+  `takeover_curl` refuse, before any token is sent, a base URL whose host is not a plain host name or address: an IPv4
+  address written another way than four dotted decimals, such as `127.2`, `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`,
+  a host holding anything but ASCII letters, digits, `.` and `-` (such as `%31%32%37.0.0.2`) or ending in `.`, and a
+  bracketed IPv6 host other than `[::1]` that holds anything but hex digits and `:` (a zone id, or a dotted tail such
+  as `[64:ff9b::127.0.0.2]`) or whose first group is empty or all zeros, which covers every IPv4-mapped form such as
+  `[::ffff:127.0.0.2]`; curl normalises a host before it matches `--noproxy`, so a spelling of another loopback
+  address missed the list, while a spelling of `127.0.0.1` itself was normalised to it; the host is read as curl reads
+  it, a scheme only at the start of the URL and the authority ending at the first `/`, `?` or `#`, and they also
+  refuse a set base URL that starts with a scheme, a colon and a slash but not with that scheme, `//` and a host, such
+  as `http:///127.0.0.2:8000/` or `http:/127.0.0.2:8000/`, which curl reads as `127.0.0.2`, and one whose host is
+  empty, such as `http://:8000/` (an empty bracketed host, as in `http://[]:8000/`, passes these checks and is left to
+  curl); a scheme-less `localhost:8000` is still accepted), then the environment's own `no_proxy`, else `NO_PROXY`, as
+  curl reads them (one that is `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's bastion
+  curl passes it for the bastion's own loopback names, and `scripts/smoke_download.py` sends its controller requests
+  with no proxy, so a request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`.
+  `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403 means.
+- **A `.curlrc` or a proxy set in `.env` can no longer redirect the scripts' token-bearing requests.** `bearer_curl`
+  and `takeover_curl` (scripts/load_env.sh), `doctor.sh`'s token-carrying API calls and the reverse-SSH smoke's
+  bastion curl now run `curl -q`, so a `.curlrc` cannot add a proxy or header to a request that carries the token (the
+  tokenless readiness waits still run plain `curl`), and the scripts' `.env` loader also refuses `CURL_HOME`,
+  `XDG_CONFIG_HOME`, `PERL5*`, `PERLLIB`, `LANG`, `LC_*` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY` and their lower-case forms). Before, only `LC_ALL`, `LC_CTYPE`, `PERL5OPT` and `PERL5LIB` of
+  these were refused. A proxy set in `.env` for the scripts must now be exported in your shell instead.
+- **The Python client, the LangChain tools, the MCP bridges and `agent_eval.py` reach a controller at `localhost`, a
+  loopback address or `0.0.0.0` directly, never through an environment proxy.** The Python senders of the bearer token
+  no longer send it to an environment proxy when the base URL's host is `localhost` (also as `localhost.`), a loopback
+  IP literal or `0.0.0.0` or `::`: the MCP stdio bridges (the `auto-browser-mcp` console script of the
+  `auto-browser-client` package and the controller's `app.mcp_stdio`), `AutoBrowserClient`'s sync and async HTTP
+  clients and its event stream (`stream_events`), the LangChain package's `AutoBrowserTool` (calls and `list_tools`)
+  and `AutoBrowserNode`, and `scripts/agent_eval.py --execute`. urllib skips a proxy for `localhost` only when
+  `no_proxy` names it, and httpx follows `HTTP_PROXY`, `http_proxy` and `ALL_PROXY` to a loopback host the same way,
+  so with a proxy set and no `NO_PROXY` the `Authorization` header went to the proxy. One rule now decides for all of
+  them: a host that, after one trailing dot is stripped from a name, is `localhost`, or an address that is loopback or
+  unspecified (`0.0.0.0` and `::`, which a server's startup line prints and which reach this host on Linux and macOS),
+  an IPv4-mapped IPv6 address such as `[::ffff:127.0.0.2]` counting as the IPv4 address it maps, is reached directly
+  (the httpx clients get a transport of their own, which still reads `SSL_CERT_FILE` and `SSL_CERT_DIR`). The address
+  is the IP literal, or what the platform's numeric parser (`getaddrinfo` with `AI_NUMERICHOST`, which never queries
+  DNS) reads the host as, so `127.2`, `2130706434` and `0x7f000002` count as `127.0.0.2`, as they do for the socket
+  layer, and a name is compared as the socket layer resolves it, after the `idna` encoding `getaddrinfo` applies and
+  lowercased (`local%C2%ADhost`, with a soft hyphen, is `localhost` to the bridges); the bridges and
+  `scripts/agent_eval.py` go direct when the host http.client connects to is local (an unbracketed `::1:8000` is
+  `::1`, and urllib percent-decodes `%31%32%37.0.0.2` to `127.0.0.2`). They refuse the base URL as an invalid
+  controller URL, before any opener is chosen and with the request sent nowhere, when another reading finds a local
+  host http.client would not connect to (urllib's decoded host read as an authority, which finds `127.0.0.2` in
+  `127.0.0.2%23.bad`; the host of the URL as written, which urllib sends a proxy for an `http://` URL, `127.0.0.1` in
+  `x%2f@127.0.0.1`; urllib's decoded host after its last `@`, `::1` in an unbracketed `::1` without a port, which
+  http.client reads as host `:`, and in `user@::1`; or the host http.client reads from that part, `::1` in
+  `user@::1:8000`, whose connect host is `user@::1`), when a reading cannot parse the host (`x%5b@127.0.0.1`), or when
+  the port http.client reads is not a number from 0 to 65535 (it reads `:99999` as 99999, which the socket layer can
+  wrap to another port). Any other host, a `*.localhost` name included, still goes through the proxy the environment
+  names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy. The bridges refuse a
+  URL urllib cannot read or that is not an `http://` or `https://` URL with a host (1.15.0 answered a `data:` or
+  `file:` URL from the URL or the file, as if a controller had answered), and they and `scripts/agent_eval.py` one
+  whose path or query holds a space or a control character, as an invalid controller URL with the request sent
+  nowhere; that answer gives the reason in the bridges' own words and does not name the URL. Their answer that no
+  controller is reachable names it without its userinfo, query or fragment; the error text their answers show has the
+  URL's userinfo, password, query and fragment, each whole, as written or percent-decoded, replaced with `[redacted]`
+  and any other `user:password@` removed (a server's error detail that quotes one another way, such as a query value
+  alone, is shown as it came); a 429's `Retry-After` is shown only as a number of seconds; and the bridges no longer
+  send a token holding a line break, which http.client's header error quoted whole. 1.15.0's answers echoed them all.
+  `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also refuse
+  redirects, as the bridges do, direct or proxied: urllib's default handler copied the `Authorization` header onto a
+  redirect to any origin, and a 3xx is now reported as the HTTP error each script already reports.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it
   and the controller, another uid, reads it. docs/deployment.md has the details.
-- `bearer_curl` and `takeover_curl` (scripts/load_env.sh), `doctor.sh`'s token-carrying API calls and the reverse-SSH
-  smoke's bastion curl now run `curl -q`, so a `.curlrc` cannot add a proxy or header to a request that carries the
-  token (the tokenless readiness waits still run plain `curl`), and the scripts' `.env`
-  loader also refuses `CURL_HOME`, `XDG_CONFIG_HOME`, `PERL5*`, `PERLLIB`, `LANG`, `LC_*` and the proxy variables
-  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lower-case forms). Before, only `LC_ALL`,
-  `LC_CTYPE`, `PERL5OPT` and `PERL5LIB` of these were refused. A proxy set in `.env` for the scripts must now be
-  exported in your shell instead.
-- The Codex path-compatibility shim (which links a `.codex` home named in the CLI home's `config.toml` to the real
-  one) now creates a link only under the CLI home or at `/home/<user>/.codex`, never makes parent directories anywhere
-  else, logs each path it refuses, leaves a path that already exists (a dangling link included) as it is, and reads
-  the config and makes its links once per adapter, on the first CLI call that finds a `config.toml` it can parse,
-  instead of on every CLI call. It checks where a path is
-  before it looks at it, so a refused one such as `/root/.codex` is never read (for a non-root controller on Python
-  3.11 and 3.12 that read raised and ended the call), and a path it cannot check or link (a parent it may not
-  create, a NUL byte) is logged and skipped.
-- `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP
-  URL's userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself
+- **The approval webhook can no longer be pointed at an internal address through DNS.** The approval webhook target is
+  now checked after DNS: a host a browser would read as another one is refused whatever address it spells, even with
+  `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on (an IPv4 address other than four plain dotted decimals, such as
+  `2130706433`, `0x7f.1`, `127.1`, `0177.0.0.1` or `0x08080808`; a percent-encoded name, or a non-ASCII one a browser
+  (UTS 46) maps beyond case folding and composition, refuses, or reads differently from urllib; a backslash or a
+  control character, U+0000 to U+001F); the host is then resolved (an IP literal is checked as written) and, unless
+  `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` is on, refused when any answer is not a global address (loopback, private,
+  link-local, unspecified, multicast, reserved and the shared `100.64.0.0/10` space among them) or is an IPv6 address
+  that spells one; the request is then sent to the addresses that were checked, in the resolver's order and moving to
+  the next only when one cannot be connected to, with the name kept as the `Host` header and the TLS server name, so a
+  second lookup cannot return a different one. A non-ASCII host (`bücher.example`) is looked up, sent as `Host` and
+  named for TLS in its IDNA form (`xn--bcher-kva.example`), as 1.15.0 did when it posted by name; a lookup that cannot
+  encode the name counts as one that did not resolve. When a proxy from the environment applies to the URL
+  (`HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the answers are still checked, but the request goes
+  by name through the proxy, which then owns resolution: the proxy resolves the name, so its own rules decide which
+  addresses the request can reach. Logs carry only `scheme://host`, never the path, query or credentials: httpx's own
+  INFO line for each request, which named the whole URL, is no longer logged (the controller sets the `httpx` logger
+  to WARNING, or to `LOG_LEVEL` if higher). A name that does not resolve is not posted to. A cloud metadata address
+  stays refused, even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on, when an IPv6 answer spells it: mapped,
+  translated, compatible, NAT64's well-known `64:ff9b::/96` (its last 32 bits), the local-use `64:ff9b:1::/48` read at
+  every RFC 6052 position (`/32` to `/96`), 6to4, Teredo (the client address), or an ISATAP interface id (`0:5efe` or
+  `200:5efe`, then the IPv4 address) after any prefix. That check fails closed: a local-use NAT64 target whose address
+  another RFC 6052 layout than the operator's reads as `169.254.x.x` is refused even with the opt-in (behind a prefix
+  such as `64:ff9b:1:a9fe::/64`, every address).
+- **A CDP URL's credentials no longer reach the logs, the audit or the caller, and an unreachable browser answers
+  503.** `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A
+  CDP URL's userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself
   still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way. Why a connect failed (the
   first line of Playwright's error) is in the controller's log and the startup error, with the Chrome shown as
   `scheme://host:port` and any URL in that line cut the same way, never the full URL, which Playwright's error repeats
@@ -511,130 +278,431 @@ All notable changes to auto-browser are documented here.
   `CDP_CONNECT_URL` (any surrounding whitespace, Unicode spaces too, such as a trailing CR or LF from a quoted `.env`
   value or the process environment) is stripped first, so it does not stop startup, and a value of only whitespace now
   counts as unset, as an empty one does.
-- `.gitignore` now ignores everything under `data/` except the `.gitkeep` in each directory directly under it (it
-  listed directories one by one and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the
-  proxy and cron stores), and ignores `.env.*` except `.env.example`.
-- The approval webhook target is now checked after DNS: a host a browser would read as another one is refused whatever
-  address it spells, even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on (an IPv4 address other than four plain
-  dotted decimals, such as `2130706433`, `0x7f.1`, `127.1`, `0177.0.0.1` or `0x08080808`; a percent-encoded name, or a
-  non-ASCII one a browser (UTS 46) maps beyond case folding and composition, refuses, or reads differently from
-  urllib; a backslash or a control character, U+0000 to U+001F); the host is then resolved (an IP literal is checked
-  as written) and, unless `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` is on, refused when any answer is not a global
-  address (loopback, private, link-local, unspecified, multicast, reserved and the shared `100.64.0.0/10` space among
-  them) or is an IPv6 address that spells one; the request is then sent to the addresses that were checked, in the
-  resolver's order and moving to the next only when one cannot be connected to, with the name kept as the `Host`
-  header and the TLS server name, so a second lookup cannot return a different one. A non-ASCII host
-  (`bücher.example`) is looked up, sent as `Host` and named for TLS in its IDNA form (`xn--bcher-kva.example`), as
-  1.15.0 did when it posted by name; a lookup that cannot encode the name counts as one that did not resolve. When a
-  proxy from the environment applies to the URL (`HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the
-  answers are still checked, but the request goes by name through the proxy, which then owns resolution: the proxy
-  resolves the name, so its own rules decide which addresses the request can reach. Logs carry only `scheme://host`,
-  never the path, query or credentials: httpx's own INFO line for each request, which named the whole URL, is no
-  longer logged (the controller sets the `httpx` logger to WARNING, or to `LOG_LEVEL` if higher). A name that does not
-  resolve is not posted to. A cloud metadata address stays refused, even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS`
-  on, when an IPv6 answer spells it: mapped, translated, compatible, NAT64's well-known `64:ff9b::/96` (its last 32
-  bits), the local-use `64:ff9b:1::/48` read at every RFC 6052 position (`/32` to `/96`), 6to4, Teredo (the client
-  address), or an ISATAP interface id (`0:5efe` or `200:5efe`, then the IPv4 address) after any prefix. That check
-  fails closed: a local-use NAT64 target whose address another RFC 6052 layout than the operator's reads as
-  `169.254.x.x` is refused even with the opt-in (behind a prefix such as `64:ff9b:1:a9fe::/64`, every address).
-- A harness `run_id` must now look like the ids the harness generates (1 to 120 letters, digits, `.`, `_` or `-`,
-  starting with a letter or digit), at the tool boundary and again in the run store, so an id cannot name a directory
-  outside the harness runs root.
-- `provider_model` on the agent step and run requests, and the model the Codex host bridge passes to `codex --model`,
-  must now match one pattern (letters, digits, `.`, `_`, `:`, `/`, `@`, `-`; 1 to 128 characters; starting with a
-  letter or digit; no `..`), which a Vertex-style id such as `claude-3-5-sonnet@20240620` passes. The bridge answers
-  400 otherwise, so a model can no longer be read as a CLI flag. The Gemini adapter, and the curator for
-  `CURATOR_MODEL`, also URL-quote the model they put in the request path.
-- The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no write-then-chmod
-  window) in an identity directory created at 0700, and on POSIX a key that is readable by group or others is changed
-  to 0600 on load, through the descriptor it was opened with and with a warning, as the token files are (one that
-  cannot be tightened is still loaded, with a warning that it stays readable). An identity directory an earlier
-  release left open to group or others is tightened to 0700 on load when the controller owns it and it holds only the
-  identity files, with one warning, and reported with a warning when it holds anything else (a `MESH_IDENTITY_DIR`
-  pointed at `/data/mesh` or `/data`, whose other readers a chmod would lock out), belongs to another user or keeps
-  its mode after the chmod (a mount that does not keep modes). The witness signer's key directory goes through the
-  same check.
-- Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
-  approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
-  `Settings` object no longer carries it. So are the URL fields that can carry a credential in their userinfo, path
-  or query: `APPROVAL_WEBHOOK_URL`, `REDIS_URL`, `CDP_CONNECT_URL`, `BROWSER_WS_ENDPOINT`, `DEFAULT_PROXY_SERVER`,
-  `TAKEOVER_URL`, `WITNESS_REMOTE_URL` and every provider's `*_BASE_URL`.
-- `browser.enable_shadow_browse` is now refused under `SESSION_ISOLATION_MODE=docker_ephemeral`: its headed Chromium
-  runs in the controller's own process tree, outside the per-session container isolation. It is still started without
-  the `MAX_SESSIONS` check, but an open shadow session counts toward the limit, so it takes a slot from later creates
-  and forks.
-- A session tunnel's metadata (`<session>.json`) and autossh log (`<session>.log`) under `ISOLATED_TUNNEL_INFO_ROOT`
-  are now deleted when it is released, and when its provision gives up (autossh did not start, exited early, was
-  cancelled, or no port was left; also when a metadata write (the first, or the one that marks the tunnel active) or
-  the log open fails, or the error-status write does, which is then logged while the original error is raised: on an
-  early exit autossh's own message, or its exit code when it printed nothing); the metadata named the bastion and its
-  user, and the log (whose tail the metadata's `error` also carried) holds autossh's and ssh's own messages, which can
-  name the key path. The tunnel block in `remote_access.session_tunnel` (a session's `remote_access` in its summary)
-  no longer carries `ssh_host`, `ssh_port`, `ssh_user`, `info_path` or `log_path` (a session the controller no longer
-  holds is answered from its stored record, so one recorded before the upgrade still shows them), and its `error` is a
-  short code (`autossh_exited`, `autossh_start_failed`, `provision_cancelled`, `provision_failed`) instead of
-  autossh's stderr, which is logged by the controller.
-- `browser.request_human_takeover` no longer writes the takeover URL and the remote-access block to the session's
-  `actions.jsonl` (served under `/artifacts` to the session's users): the line keeps the reason and the
-  session, without `takeover_url` or `remote_access`. The tool's own result still carries them, as before.
-- The `tunnel` block of the remote-access report (`GET /remote-access`, a session's `remote_access.tunnel`, or
-  `remote_access.shared_tunnel` for an isolated session) now carries only `status`, `updated_at`,
-  `public_takeover_url`, `public_api_url` and `stale_after_seconds` from the reverse-ssh sidecar file, not the whole
-  file (the bastion, its port and user, the access mode, the bind address and the remote ports); a session the
-  controller no longer holds is answered from its stored record, so one recorded before the upgrade still shows the
-  whole file's fields. A file that is not a JSON object is reported as unreadable, a `stale_after_seconds` that does
-  not read as a positive finite number (a numeric string such as `"90"` reads as one, a boolean does not; one too
-  large for a float included) falls back to `REMOTE_ACCESS_STALE_AFTER_SECONDS` (1.15.0 raised on a non-numeric
-  string, a list or object, or an integer too large for a float, took `true` as one second, and used NaN, an infinity
-  or a negative number as read), an `updated_at` that cannot be read or converted to UTC (`0001-01-01T00:00:00+01:00`)
-  falls back to the file's modification time, and a public URL that is not a string is ignored. The `tunnel` block
-  passes the file's fields only as validated: the `stale_after_seconds` in use, `updated_at` only when it reads as a
-  timestamp (then in UTC), and `status` and a public URL only when they are a non-empty string, so a `status` or
-  `updated_at` that is NaN, a list or an object is now left out of the block (before, `GET /remote-access` and
-  `browser.get_remote_access` passed a list or object on as it was and wrote a NaN as `null`; neither answered a 500).
-- `POST /mesh/receive`, which takes no bearer token, now reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a
-  body with no `Content-Length` (however small: a peer must send one, and the `413` says so), a larger one, or one
-  that streams past the cap gets `413` before anything is parsed, and an uninitialised mesh answers `503` before the
-  body is read. A malformed envelope is `422` as before.
-- The Python senders of the bearer token no longer send it to an environment proxy when the base URL's host is
-  `localhost` (also as `localhost.`), a loopback IP literal or `0.0.0.0` or `::`: the MCP stdio bridges (the
-  `auto-browser-mcp` console script of the `auto-browser-client` package and the controller's `app.mcp_stdio`),
-  `AutoBrowserClient`'s sync and async HTTP clients and its event stream (`stream_events`), the LangChain package's
-  `AutoBrowserTool` (calls and `list_tools`) and `AutoBrowserNode`, and `scripts/agent_eval.py --execute`. urllib
-  skips a proxy for `localhost` only when `no_proxy` names it, and httpx follows `HTTP_PROXY`, `http_proxy` and
-  `ALL_PROXY` to a loopback host the same way, so with a proxy set and no `NO_PROXY` the `Authorization` header went
-  to the proxy. One rule now decides for all of them: a host that, after one trailing dot is stripped from a name, is
-  `localhost`, or an address that is loopback or unspecified (`0.0.0.0` and `::`, which a server's startup line
-  prints and which reach this host on Linux and macOS), an IPv4-mapped IPv6 address such as `[::ffff:127.0.0.2]`
-  counting as the IPv4 address it maps, is reached directly (the httpx clients get a transport of their own, which
-  still reads `SSL_CERT_FILE` and `SSL_CERT_DIR`). The address is the IP literal, or what the platform's numeric
-  parser (`getaddrinfo` with `AI_NUMERICHOST`, which never queries DNS) reads the host as, so `127.2`, `2130706434`
-  and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer, and a name is compared as the socket layer
-  resolves it, after the `idna` encoding `getaddrinfo` applies and lowercased (`local%C2%ADhost`, with a soft hyphen,
-  is `localhost` to the bridges); the bridges and `scripts/agent_eval.py` go direct when the host http.client connects
-  to is local (an unbracketed `::1:8000` is `::1`, and urllib percent-decodes `%31%32%37.0.0.2` to `127.0.0.2`). They
-  refuse the base URL as an invalid controller URL, before any opener is chosen and with the request sent nowhere,
-  when another reading finds a local host http.client would not connect to (urllib's decoded host read as an
-  authority, which finds `127.0.0.2` in `127.0.0.2%23.bad`; the host of the URL as written, which urllib sends a proxy
-  for an `http://` URL, `127.0.0.1` in `x%2f@127.0.0.1`; urllib's decoded host after its last `@`, `::1` in an
-  unbracketed `::1` without a port, which http.client reads as host `:`, and in `user@::1`; or the host http.client
-  reads from that part, `::1` in `user@::1:8000`, whose connect host is `user@::1`), when a reading cannot parse the
-  host (`x%5b@127.0.0.1`), or when the port http.client reads is not a number from 0 to 65535 (it reads `:99999` as
-  99999, which the socket layer can wrap to another port). Any other host, a `*.localhost` name included, still goes
-  through the proxy the environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never
-  uses a proxy. The bridges refuse a URL urllib cannot read or that is not an `http://` or `https://` URL with a host
-  (1.15.0 answered a `data:` or `file:` URL from the URL or the file, as if a controller had answered), and they and
-  `scripts/agent_eval.py` one whose path or query holds a space or a control character, as an invalid controller URL
-  with the request sent nowhere; that answer gives the reason in the bridges' own words and does not name the URL.
-  Their answer that no controller is reachable names it without its userinfo, query or fragment; the error text their
-  answers show has the URL's userinfo, password, query and fragment, each whole, as written or percent-decoded,
-  replaced with `[redacted]` and any other `user:password@` removed (a server's error detail that quotes one another
-  way, such as a query value alone, is shown as it came); a 429's `Retry-After` is shown only as a number of seconds;
-  and the bridges no longer send a token holding a line break, which http.client's header error quoted whole. 1.15.0's
-  answers echoed them all. `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and
-  `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct or proxied: urllib's default
-  handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is now reported as the HTTP error
-  each script already reports.
+- **A model name can no longer be read as a CLI flag.** `provider_model` on the agent step and run requests, and the
+  model the Codex host bridge passes to `codex --model`, must now match one pattern (letters, digits, `.`, `_`, `:`,
+  `/`, `@`, `-`; 1 to 128 characters; starting with a letter or digit; no `..`), which a Vertex-style id such as
+  `claude-3-5-sonnet@20240620` passes. The bridge answers 400 otherwise, so a model can no longer be read as a CLI
+  flag. The Gemini adapter, and the curator for `CURATOR_MODEL`, also URL-quote the model they put in the request
+  path.
+- **A harness run id can no longer name a directory outside the runs root.** A harness `run_id` must now look like the
+  ids the harness generates (1 to 120 letters, digits, `.`, `_` or `-`, starting with a letter or digit), at the tool
+  boundary and again in the run store, so an id cannot name a directory outside the harness runs root.
+- **The Codex path-compatibility shim now links only under the CLI home or `/home/<user>/.codex`.** The Codex
+  path-compatibility shim (which links a `.codex` home named in the CLI home's `config.toml` to the real one) now
+  creates a link only under the CLI home or at `/home/<user>/.codex`, never makes parent directories anywhere else,
+  logs each path it refuses, leaves a path that already exists (a dangling link included) as it is, and reads the
+  config and makes its links once per adapter, on the first CLI call that finds a `config.toml` it can parse, instead
+  of on every CLI call. It checks where a path is before it looks at it, so a refused one such as `/root/.codex` is
+  never read (for a non-root controller on Python 3.11 and 3.12 that read raised and ended the call), and a path it
+  cannot check or link (a parent it may not create, a NUL byte) is logged and skipped.
+- **`git add` no longer picks up secrets under `data/` or in `.env.*` files.** `.gitignore` now ignores everything
+  under `data/` except the `.gitkeep` in each directory directly under it (it listed directories one by one and missed
+  `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores), and ignores
+  `.env.*` except `.env.example`.
+- **The mesh and witness key and its directory are created private, and tightened when an earlier release left them
+  open.** The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no
+  write-then-chmod window) in an identity directory created at 0700, and on POSIX a key that is readable by group or
+  others is changed to 0600 on load, through the descriptor it was opened with and with a warning, as the token files
+  are (one that cannot be tightened is still loaded, with a warning that it stays readable). An identity directory an
+  earlier release left open to group or others is tightened to 0700 on load when the controller owns it and it holds
+  only the identity files, with one warning, and reported with a warning when it holds anything else (a
+  `MESH_IDENTITY_DIR` pointed at `/data/mesh` or `/data`, whose other readers a chmod would lock out), belongs to
+  another user or keeps its mode after the chmod (a mount that does not keep modes). The witness signer's key
+  directory goes through the same check.
+- **A logged `Settings` object no longer carries secrets.** Every secret `Settings` field (the auth-state encryption
+  key, the witness remote key, every provider API key, the approval webhook secret, the default proxy password, the
+  share-link secret) is now left out of `repr()`, so a logged `Settings` object no longer carries it. So are the URL
+  fields that can carry a credential in their userinfo, path or query: `APPROVAL_WEBHOOK_URL`, `REDIS_URL`,
+  `CDP_CONNECT_URL`, `BROWSER_WS_ENDPOINT`, `DEFAULT_PROXY_SERVER`, `TAKEOVER_URL`, `WITNESS_REMOTE_URL` and every
+  provider's `*_BASE_URL`.
+- **Shadow browse is refused when sessions are isolated.** `browser.enable_shadow_browse` is now refused under
+  `SESSION_ISOLATION_MODE=docker_ephemeral`: its headed Chromium runs in the controller's own process tree, outside
+  the per-session container isolation. It is still started without the `MAX_SESSIONS` check, but an open shadow
+  session counts toward the limit, so it takes a slot from later creates and forks.
+- **A session tunnel no longer leaves the bastion's details on disk or in session summaries.** A session tunnel's
+  metadata (`<session>.json`) and autossh log (`<session>.log`) under `ISOLATED_TUNNEL_INFO_ROOT` are now deleted when
+  it is released, and when its provision gives up (autossh did not start, exited early, was cancelled, or no port was
+  left; also when a metadata write (the first, or the one that marks the tunnel active) or the log open fails, or the
+  error-status write does, which is then logged while the original error is raised: on an early exit autossh's own
+  message, or its exit code when it printed nothing); the metadata named the bastion and its user, and the log (whose
+  tail the metadata's `error` also carried) holds autossh's and ssh's own messages, which can name the key path. The
+  tunnel block in `remote_access.session_tunnel` (a session's `remote_access` in its summary) no longer carries
+  `ssh_host`, `ssh_port`, `ssh_user`, `info_path` or `log_path` (a session the controller no longer holds is answered
+  from its stored record, so one recorded before the upgrade still shows them), and its `error` is a short code
+  (`autossh_exited`, `autossh_start_failed`, `provision_cancelled`, `provision_failed`) instead of autossh's stderr,
+  which is logged by the controller.
+- **The takeover URL no longer goes into a session's action log.** `browser.request_human_takeover` no longer writes
+  the takeover URL and the remote-access block to the session's `actions.jsonl` (served under `/artifacts` to the
+  session's users): the line keeps the reason and the session, without `takeover_url` or `remote_access`. The tool's
+  own result still carries them, as before.
+- **The remote-access report passes on only the tunnel fields it validated.** The `tunnel` block of the remote-access
+  report (`GET /remote-access`, a session's `remote_access.tunnel`, or `remote_access.shared_tunnel` for an isolated
+  session) now carries only `status`, `updated_at`, `public_takeover_url`, `public_api_url` and `stale_after_seconds`
+  from the reverse-ssh sidecar file, not the whole file (the bastion, its port and user, the access mode, the bind
+  address and the remote ports); a session the controller no longer holds is answered from its stored record, so one
+  recorded before the upgrade still shows the whole file's fields. A file that is not a JSON object is reported as
+  unreadable, a `stale_after_seconds` that does not read as a positive finite number (a numeric string such as `"90"`
+  reads as one, a boolean does not; one too large for a float included) falls back to
+  `REMOTE_ACCESS_STALE_AFTER_SECONDS` (1.15.0 raised on a non-numeric string, a list or object, or an integer too
+  large for a float, took `true` as one second, and used NaN, an infinity or a negative number as read), an
+  `updated_at` that cannot be read or converted to UTC (`0001-01-01T00:00:00+01:00`) falls back to the file's
+  modification time, and a public URL that is not a string is ignored. The `tunnel` block passes the file's fields
+  only as validated: the `stale_after_seconds` in use, `updated_at` only when it reads as a timestamp (then in UTC),
+  and `status` and a public URL only when they are a non-empty string, so a `status` or `updated_at` that is NaN, a
+  list or an object is now left out of the block (before, `GET /remote-access` and `browser.get_remote_access` passed
+  a list or object on as it was and wrote a NaN as `null`; neither answered a 500).
+- **The unauthenticated mesh endpoint caps the body it reads.** `POST /mesh/receive`, which takes no bearer token, now
+  reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a body with no `Content-Length` (however small: a peer
+  must send one, and the `413` says so), a larger one, or one that streams past the cap gets `413` before anything is
+  parsed, and an uninitialised mesh answers `503` before the body is read. A malformed envelope is `422` as before.
+
+### Fixed
+
+- **Closing a session finishes its teardown even when the caller goes away, and says which steps failed.**
+  `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not
+  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a shutdown,
+  or a cancel of the task that awaited the close, used to leave the audit event, the witness receipt and the stored
+  record unwritten), and says when a step failed: the answer's `closed` stays true (the session is unregistered either
+  way, so its `MAX_SESSIONS` slot is free), the new `teardown` is `partial` (`complete` when every step succeeded),
+  `failed_steps` names the steps that failed (trace stop, tunnel release, browser context, isolated browser, isolated
+  runtime), and the `session_closed` audit event and witness receipt carry status `partial` and those names instead of
+  `ok`.
+- **A closed session can no longer be recorded as active again.** A late background write of a session's record can no
+  longer put a closed session back to active: the active write is skipped when the session is no longer registered
+  (checked before and after the summary is built), and the session store refuses to overwrite a stored `closed` record
+  with any other status (an `interrupted` write replaced it and lost its `close_reason`), a guard that reads the file
+  copy, which every write updates first; a stored record it cannot parse (a corrupt file) is replaced by the next
+  write, unless Redis is the primary store and holds a readable `closed` copy (then the write is refused, and a Redis
+  read that fails otherwise, such as a lost connection, skips it), and one it cannot read (an I/O error, which could
+  hide a closed record) skips that non-closed write for the next one to retry, each logged with the session id;
+  neither fails the action whose state the write mirrors, the check never refuses a `closed` write, and a close (or a
+  failed create's rollback) writes its `closed` record over one it cannot parse. The store makes one write at a time
+  per session, from that check through the file and Redis copies, and a cancelled write finishes before the next one
+  for that session starts, so the guard holds within one controller process; two processes sharing a store are not
+  covered. Writes for different sessions do not wait for each other.
+- **A failed session create cleans up after itself.** A `create_session` that fails no longer leaves its artifact,
+  auth and upload directories behind or an `active` record in the session store: the directories are made only after
+  the checks that need no browser (the arguments, the start URL, the session cap, the proxy persona, the auth profile
+  or state and the memory profile), removed again by the rollback (in a worker thread, so a large tree does not stall
+  other requests, and each on its own: one whose removal or check fails is logged with its error, the rest of its tree
+  is still removed, and the rest of the rollback goes on), and a record the create had already written is marked
+  `closed` (reason `create_failed`). The whole rollback (the tunnel and isolated runtime releases, the context and
+  browser closes, the directories and the record) runs to completion when the task awaiting it is cancelled during it,
+  then the cancel is raised. The create-failed hook, the tunnel release, the context close, the isolated browser's
+  close and the runtime release are each bounded as `close_session`'s teardown steps are (30 seconds, then logged and
+  passed), so a context close or runtime release that never returns no longer holds the rest of the rollback or its
+  caller; the directory removal and the record close are not bounded. When the controller itself stops, every task
+  left is cancelled, the rollback's own included, and the next start marks such a record `interrupted`.
+- **A session tunnel's release no longer hangs on an autossh that never exits.** Releasing an isolated session's
+  tunnel (a close, or a failed create's rollback) now waits at most 5 seconds for autossh to exit after `SIGKILL`, as
+  it already did after the terminate, then logs a warning naming the session and the process id and finishes the
+  teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close or the rollback for ever. An
+  autossh already gone when it is terminated or killed (it exited while the first wait timed out, so `kill()` raised
+  `ProcessLookupError`) no longer stops the teardown before it frees the remote port, forgets the tunnel, closes its
+  log and removes its files, and a log close that fails (a flush on a full disk) is logged with the session id while
+  both files are still removed.
+- **A failed or cancelled shadow browse cleans up after itself.** A shadow browse that fails or is cancelled after its
+  Chromium started no longer leaves that browser running, the shadow's artifact, auth and upload directories on disk,
+  or an `active` record in the session store (a record already written is marked `closed` with reason `create_failed`,
+  as a failed `create_session`'s is): the rollback now also runs on a cancel, and runs to completion when the caller
+  is cancelled during it, as `create_session`'s does, and the directories are made only once the browser is up.
+- **`MAX_SESSIONS` now holds when two creates race.** Two session creates that both passed the `MAX_SESSIONS` check
+  while one was still reading its storage state or memory profile no longer both start: the limit is checked again
+  right before a create reserves its slot, with no await in between.
+- **A session on a blank, `data:` or browser error page can be forked.** Forking a session that sits on `about:blank`
+  or a `data:` page no longer fails with a 403, nor one on Chrome's error page (`chrome-error://chromewebdata/`) with
+  a 400 asking for `start_url`: with no `start_url` named, the fork starts on a blank page with the source's cookies,
+  and the audit records no start URL. Such a page is still judged first when no `start_url` is named: one the page
+  checks refuse (a refused page, or one that could not be judged) answers the 403, a refused about:blank page
+  included.
+- **A fork keeps its source's proxy persona, User-Agent, protection mode and TOTP settings.** A forked session now
+  keeps the source's proxy persona, User-Agent, protection mode and TOTP secret and hosts, as `create_session` would
+  have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and `browser.fork_session`
+  take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins. A source created with a
+  raw request proxy (`proxy_server`) stored no proxy to carry, so its fork gets the default. The User-Agent carried is
+  the one the source's context was built with, so under `STEALTH_ENABLED=true` a source created without one gives its
+  fork the same pool entry it drew instead of a second random draw. A fork whose proxy persona file cannot be read
+  answers 503 with the fixed text, as `POST /sessions` does (it answered 409 Conflict).
+- **An auth state that cannot be decrypted answers 422 with a fixed text.** `POST /sessions` with an auth profile or
+  `storage_state_path` that cannot be decrypted (wrong or missing `AUTH_STATE_ENCRYPTION_KEY`, or a corrupt file) now
+  answers 422 "wrong or missing AUTH_STATE_ENCRYPTION_KEY, or the file is corrupt" instead of a 409 Conflict (no key),
+  a 500 (a wrong key, a damaged ciphertext, or JSON of another shape), or a 400 or 404 (a file that is not JSON, or
+  JSON with no ciphertext). `POST /sessions/{session_id}/fork` answers the same 422 when the fork's own stored state
+  cannot be read back, where 1.15.0 answered as `POST /sessions` did (409 Conflict with no key, otherwise a 500, 400
+  or 404).
+- **The cron trigger answers the session cap with 409 and an unreadable auth state with 422, not 500.**
+  `POST /crons/{job_id}/trigger` answers a run whose session meets the session cap with 409 and an unreadable
+  encrypted auth state with 422, as `POST /sessions` does; both were a bare 500 there (an auth state file that is not
+  JSON, or JSON with no ciphertext, was a 400 or a 404). The 422 carries the same detail; the 409's is a fixed text
+  that names no session, since the cap's own text (the one `POST /sessions` answers with) would name the job owner's
+  live session ids, and the trigger checks only the job's webhook key, which another operator may hold.
+- **Encrypting auth state no longer leaves the plaintext copy behind.** An encrypted auth-state save now removes the
+  plaintext state file it replaces (best-effort: one that cannot be removed, a directory or a Windows lock, logs a
+  warning naming it and the save still succeeds), and loading a plaintext state while `AUTH_STATE_ENCRYPTION_KEY` is
+  set logs a warning.
+- **Closing the active tab no longer moves the session to a refused tab.** When the active tab closes, the session no
+  longer moves to a tab that `ALLOWED_HOSTS` refuses while an allowed one is left: `browser.close_tab` takes the
+  allowed tab nearest the closed one (the earlier of two equally near), a page that closes itself leaves the session
+  on the last allowed tab, and only when every remaining tab is refused does the old choice stand.
+- **A `nan` or infinite float setting now stops startup.** A `nan` or infinite value in any float setting
+  (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact outside a live session's directories, however new, on the next
+  cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
+- **An isolated session's files are kept when its container may still be running.** Releasing an isolated session no
+  longer takes an unreachable Docker daemon (or any Docker error other than "not found") for a gone container, and no
+  longer goes on as if released after a container removal that failed (any error but "not found", which means gone):
+  after a failed removal it still releases the session network (force-disconnecting that container from it); either
+  way it then fails: `close_session` reports it in `failed_steps` (the audit event and receipt say partial), and the
+  session's profile and downloads directories are kept instead of being deleted under a container that may still be
+  running (after a failed removal, with a warning naming the directory that holds them). A provision that fails before
+  it returns (the container did not start, the session network could not be joined) does the same: when its rollback
+  cannot remove the container, or cannot look it up (an unreachable daemon: whether one was created is then unknown),
+  the directories stay, with a warning that says which, instead of being emptied; both failures are now warnings with
+  the daemon's reason (1.15.0 logged a failed lookup not at all, reading it as no container, and a failed removal only
+  at DEBUG). A rollback that releases after a failed provision or connect logs a failed release and raises the
+  original error.
+- **The sandbox refusal no longer claims the container was removed.** The `BROWSER_SANDBOX=on` refusal of an isolated
+  session no longer ends "Its container was removed.": it was written before the rollback ran, so it was wrong when
+  that removal failed and under `ISOLATED_BROWSER_KEEP_CONTAINERS`, which only stops the container.
+- **Isolated sessions created at once check the Docker API version once.** Two isolated sessions created at once now
+  read the Docker daemon's API version once and log the "GwPriority is not honoured" warning once; both were
+  unsynchronised across the provisioning threads.
+- **Local-only takeover URLs are recognised everywhere, and the tunnel's bind address is checked strictly.** One
+  helper (`is_local_only_host`, next to `is_loopback_host`) now decides whether a takeover URL names only this
+  machine, for both the per-session remote-access report and the production "TAKEOVER_URL is still local-only"
+  warning. Before, each kept its own literal list that missed `127.0.0.2`, `*.localhost` and `[::ffff:127.0.0.1]`, so
+  a session on such a URL was not offered an isolated tunnel and the startup warning was skipped. The isolated
+  tunnel's remote bind address (`ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`) has its own strict check: a bare host or IP
+  only, `localhost` or any address that reads as loopback (another loopback address such as `127.0.0.2` included);
+  `0.0.0.0` stays refused there without `unsafe-public`. A value with a port or surrounding spaces (`localhost:22`,
+  `[::1]:22`, ` 127.0.0.1 `) went into the `-R` spec as it was, which ssh then refused or read as another bind, and an
+  empty one binds every interface: each now stops startup with a clear error. An IPv6 literal, bare (`::1`) or in
+  ssh's brackets without a port (`[::1]`), is accepted and goes into the spec in brackets, as ssh needs
+  (`[::1]:16181:127.0.0.1:6080`; the bare `::1:16181:...` is a spec ssh refuses). Any other bare host in brackets
+  (`[127.0.0.1]`, `[localhost]`, `[203.0.113.5]`, which ssh parses too) is unbracketed and judged as its bare
+  spelling.
+- **A session tunnel that cannot start now fails at once instead of trying every port.** An isolated session tunnel
+  whose autossh exits early for a reason other than a taken remote port (a refused key, an unreachable bastion) now
+  fails the provision at once with that message instead of retrying every port in
+  `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port
+  forwarding failed" and "address already in use" still move on to the next port.
+- **noVNC now accepts the takeover URL an isolated session hands out through its tunnel.** With
+  `ISOLATED_TUNNEL_ENABLED=true`, an isolated session's noVNC now also admits the tunnel's public host
+  (`ISOLATED_TUNNEL_PUBLIC_HOST`, else `ISOLATED_TUNNEL_HOST`) as a page host: its `NOVNC_ALLOWED_HOSTS` held only
+  `ISOLATED_TAKEOVER_HOST`, so the takeover URL a session hands out through its tunnel was refused by noVNC's own
+  Origin/Host guard.
+- **A run with `max_attempts` below the contract's budget can now converge.** A convergence run started with
+  `max_attempts` below the contract's budget now needs that many consecutive passes at most: the threshold followed
+  the contract's budget, so `max_attempts=1` on a budget of 5 could never converge.
+- **A timeout inside an attempt no longer reads as a spent wall-clock budget.** A convergence run is `over_budget`
+  only when `max_wall_seconds` actually ran out: a `TimeoutError` raised inside an attempt or the verifier (an
+  orchestrator or verifier-command timeout) with budget left now ends the run as `failed` (the note reads "Harness
+  attempt failed: TimeoutError" and the decision reason "attempt <n> failed"), instead of claiming the wall-clock
+  budget was spent.
+- **Real harness attempts are no longer marked simulated.** A harness attempt driven by a real orchestrator session no
+  longer records its `model_decision` event as `simulated: true`; only the mock attempt does.
+- **Cancelled, crashed and interrupted harness runs no longer stay `running`.** A convergence run that is cancelled
+  (or crashes) is no longer left `running` forever: it is saved as `cancelled` (or `failed`) with a note. At startup,
+  before requests are served, every run an earlier process left `running` is marked `interrupted`, told apart by a
+  generation id each process writes on the runs it creates (not by a start time, which a clock stepped back across the
+  restart defeated); a run the current process is driving is never touched, and a record that cannot be rewritten is
+  logged and left as it is rather than stopping the harness from starting. `harness.list_runs` accepts both states as
+  its `status` filter.
+- **Staging a skill candidate is atomic, and a kill mid-stage is settled at the next start.** Staging a harness skill
+  candidate now builds and signs it in a `.tmp-*` directory beside the final one and renames it into place, so a
+  signer failure no longer leaves unsigned `SKILL.md`, `helper.py` and `test_skill.py` files behind, and the run is
+  saved as `failed` with the reason instead of staying `converged` with no candidate. Re-staging over an earlier
+  candidate takes two renames (the old one aside, the new one in); a kill between them, or during a build, is settled
+  at the next start, before the prune: the earlier candidate is renamed back when nothing replaced it, unplaced builds
+  are removed, and a run left `converged` with no candidate gets the candidate staged for its contract and last
+  attempt's trace (a kill after the build was in place, before the run was saved), or is marked `failed` when none
+  matches. An aside a kill left half removed (its `candidate.json` gone), which cannot be restored, is removed when
+  its `envelope.json` (a signed one's payload included) or `provenance.json` names a candidate that is in place, or
+  when it holds nothing but a staged candidate's files (empty included), instead of being warned about at every start;
+  one holding anything else is still left, with a warning.
+- **A contract can no longer change the `SKILL.md` a reviewer reads.** A staged skill's `SKILL.md` renders the
+  contract's goal, precondition and postcondition values and the verifier notes as single-line code spans (with a
+  fence longer than any backtick run inside), so a goal holding a heading, HTML, a link or a code fence can no longer
+  change the document a reviewer reads before promotion.
+- **A pathological `url_matches` pattern is refused as invalid.** A `url_matches` condition whose pattern is nested
+  too deeply or repeats too many times (`RecursionError` or `OverflowError` from `re.compile`) is now refused as an
+  invalid regex like any other, instead of escaping the contract validator as an unhandled error.
+- **An attempt trace edited on disk is refused.** `harness.get_trace` now refuses a stored attempt trace whose
+  observation, network entries or extracted data were edited on disk (`TraceIntegrityError`): each attempt records the
+  trace's hash when it is written, and the read compares it. The hash chain alone covered only the events. A run
+  recorded before this release has no hash and is read as before.
+- **The harness's disk use can now be bounded.** The convergence harness can now be bounded: `HARNESS_RETENTION_DAYS`
+  removes run directories and staged candidates not touched for that long, at startup and in each maintenance sweep
+  (never a run the process is driving, and never a candidate re-staged between the age check and the removal: the two
+  hold one lock against staging's rename, taken for staged entries only, so removing a run directory does not hold up
+  a stage; listing runs skips one removed while it sorts, and one it cannot stat, with a warning naming it; the prune,
+  too, warns about an entry it cannot read, its type included, and goes on to the rest). The default, `0`, keeps
+  everything, so an upgrade deletes nothing (staging holds a candidate's only copy); 30 suits a shared or long-running
+  controller. `HARNESS_MAX_RUNS_PER_OPERATOR` (default `0`, no cap; set it when several operators share one
+  controller) refuses a new run once the verified operator has that many stored or starting (admissions run one at a
+  time; the stored runs are read in a worker thread holding no lock, so neither the event loop nor a run ending waits
+  for the scan, and a start cancelled during it holds no place); runs with no verified operator share one count.
+- **The harness's forbidden-state checks look at where the browser is and match whole words.** The harness's
+  `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path segment, in
+  any case, of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth`, `authorize`, `wp-login`
+  (WordPress), `ServiceLogin` (Google), `login-actions` (Keycloak) or `signin-oidc` (ASP.NET Core) (path parameters
+  such as `;jsessionid=...` aside, and an app's hash route such as `#/login` read as a path; `payment_screen` reads
+  paths the same way), a host whose first label is one of those or `sso` (`login.microsoftonline.com`,
+  `sso.example.com`), a 401 or 403 in an observation's `status_code`, `http_status` or `status` (the controller's own
+  observations carry none, so in a live run a 401 or 403 page counts only by its URL), or the caller's value inside
+  the URL. A marketing page that offers "sign in" or mentions "authenticate" no longer fails a run. `payment_screen`
+  and `captcha_screen` match their built-in words and phrases whole (`credit card`, `card number`, `payment method`,
+  ...; the bare word `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not
+  hits; a `-` ends a word for both, and for `captcha_screen` a `_` or a camelCase hump does too, so names in page code
+  such as `captcha_image`, `captchaToken` or `reCaptcha` count, as do the widgets' `grecaptcha` and `hcaptcha`. The
+  caller's own `value` still matches as a case-insensitive substring, as before, so a path such as `/billing` does.
+  These are heuristics with known false hits: a page-code flag such as `captcha_enabled`, and an API path such as
+  `/payments/1/authorize` (read as a login page).
+- **The uv verifier's output is capped, and a kill reaches the processes it started.** The harness's
+  `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a command that writes
+  more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even when one read crosses
+  that, so a failure's notes still carry the start of the command's own message. On POSIX the command now runs in its
+  own process group, and a kill (past the cap, at its timeout, or when the caller gives up) reaches the processes it
+  started, not only the command itself (on Windows only the command itself is killed); its pipes are then drained,
+  discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which a descendant holding
+  one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs now say that during a
+  run the command receives the full contract and the attempt's trace on stdin, its final observation as the page gave
+  it (only secret-named keys, and a `text` or `text_preview` beside a truthy `sensitive` or `text_redacted` flag,
+  redacted; not the PII and URL-token scrubbing of what is stored), and that a drift check (`harness.check_drift`,
+  `harness.check_all_drifts`) sends it the candidate's stored trace, which is scrubbed, with the contract's expected
+  text scrubbed to match.
+- **A failing scrubber can no longer make a drift check pass.** A drift check whose expected-text scrubber fails keeps
+  a `url_contains` expectation as written: a failing URL scrubber hands back the value up to its first `?` or `#`, the
+  empty string for a `url_contains` value that starts with `?` or `#` and `/` for one that starts with `/?` or `/#`,
+  and every URL contains the first, every `http://` or `https://` URL the second. A scrubber that raises is reported
+  `unverified` with the exception type instead of failing the call. A URL inside a `text_contains` or `dom_contains`
+  expectation whose query or fragment a failing scrub dropped is kept as written too, instead of shrinking to its
+  path; one inside a `network_response_shape` or `extracted_data_schema` value still shrinks to its path.
+- **The harness trace no longer hides a site's own data.** The harness trace no longer blanks the `value`, `label` and
+  `username` of a dict in page data (an observation or extracted data) just because the site's own data carries a
+  `sensitive` or `text_redacted` key: that hiding applies to an action's own event payload only, and stops at the page
+  data the action event carries (its `observation` and the execution's `before` and `after`), so a row there keeps
+  what the same row keeps in `final_observation`. A sensitive `select_option`'s execution `target` still hides its
+  `value` and `label`; its `index`, like the decision's, is kept. A `text` or `text_preview` beside such a key is
+  still hidden everywhere.
+- **Scrubbing a quoted URL keeps the closing quote.** A URL the harness trace scrubs out of quoted text now ends
+  before the closing quote when `.`, `!` or `?` and then a space or the end follow it
+  (`see 'https://site/a?token=...'.` lost its quote and full stop); an apostrophe inside a URL (`?q=o'neil`) is still
+  part of it.
+- **The most specific mesh grant wins.** A mesh peer's most specific matching grant now applies, not the first one in
+  `peers.json`: an exact capability beats a wildcard, a longer wildcard prefix beats a shorter one, and ties go to the
+  entry listed first. A broad `tool:*` listed early no longer shadows a stricter grant for one tool listed later.
+  `docs/mesh.md` also states that `url_allowlist` covers the request's URL arguments only, not redirects or later
+  navigation.
+- **Mesh replay protection no longer forgets a nonce early, after a restart or when its cache is full.** Mesh replay
+  protection no longer depends on a size-evicted, memory-only nonce cache alone: a nonce now expires once the highest
+  wall time seen is more than `MESH_TIMESTAMP_WINDOW` past its envelope's timestamp (a clock stepped back does not
+  free it), and `/mesh/receive` refuses an envelope stamped before the controller started or within one window after
+  it, since the last process accepted envelopes stamped up to one window ahead (so one it could have run cannot be
+  replayed after a restart, unless the clock stepped back across it: by more than a window, those the last process ran
+  stamped later than the step minus one window before the restart (all of them once the step reaches how long it ran,
+  or, after an upgrade from 1.15.0, which refused nothing at startup, how long it ran plus two windows); by less,
+  those it accepted stamped more than the window minus the step after the restart; the high-water mark below is kept
+  in memory only). After lowering `MESH_TIMESTAMP_WINDOW`, a restart is safe once the old window has passed since the
+  last envelope was accepted (or restart first with the old value and lower it after that long): the check assumes the
+  last process ran with no larger window. The cost is about one window, 30 s by default, of `403` refusals after each
+  start, which a sender's retry with a new envelope passes once that window is over. The timestamp window is checked
+  against that same high-water mark, not the raw clock, so an envelope whose nonce has expired cannot come back inside
+  the window when the clock steps back; a peer's reply to this node's own delegation request is checked the same way,
+  and a reply whose request id is not the request's is refused. The cost: after a large backward step of the clock,
+  fresh envelopes are refused until it catches up (for about the step minus the window). The 10,000-nonce cap no
+  longer evicts a nonce still inside its window (an envelope accepted, then 10,000 others inside its window, and it
+  ran again): at the cap every expired nonce goes, and if none has, the new envelope is refused with `503` ("mesh
+  replay cache is full; retry later") and not recorded, so the cap bounds how many nonces are remembered at once, and
+  nothing remembered is dropped before it expires; a reply that finds the cache full fails the delegation. The limit:
+  a nonce is recorded once the envelope's signature checks out, before the request is decoded or granted, so
+  registered peers that get 10,000 signed envelopes through inside a window fill the cache, and every peer is refused
+  (`503`) until they expire (`/mesh/receive` takes no bearer token, so the request rate limit, on by default at 120
+  requests a minute, counts it per client address; since a nonce is kept for up to two windows, one address can hold
+  about four times as many nonces as the window has seconds (120 at the default 30-second `MESH_TIMESTAMP_WINDOW`), so
+  alone it cannot fill the cache unless that limit is raised or off or the window is about 2,500 seconds or more; when
+  the controller serves without a token (`API_ALLOW_TOKENLESS_LOOPBACK`), the limit counts each `Authorization` or
+  `X-Operator-Id` value apart, so a sender that varies one is not limited).
+- **The Codex host bridge can no longer be tied up by slow clients or runaway Codex runs.** The Codex host bridge
+  reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to hold a handler thread
+  indefinitely; it now gets 408) and the request line and headers within 30 seconds in total (past that it closes the
+  connection; a request line cut off that way no longer ends in a broken-pipe traceback), runs at most two Codex
+  decisions at once (a third waits 2 s, then gets 503), serves at most 32 connections at once (one more is answered
+  503 and closed at once; each held a thread, with no limit), and on a Codex timeout kills Codex's whole process
+  group, not only the direct child, then drains its pipes for at most 3 s and waits at most 3 s more (a descendant
+  that left the group with `setsid` and kept stdout open used to hold the request, and its decision slot, for as long
+  as it ran; the reply stays 504). Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex runs still in flight the
+  same way, skipping only a run the handler has already reaped (a Codex that exited while its children hold its pipes
+  is still signalled, so they are killed too). Codex now runs in its own session, so the terminal's Ctrl+C no longer
+  reaches it and the shutdown sweep kills it instead (in 1.15.0 a SIGTERM to the bridge left it running, orphaned).
+- **The Codex host bridge answers errors with fixed texts and logs the detail itself.** The Codex host bridge answers
+  a request body that is not UTF-8 with 400 and a fixed message instead of a 500 carrying the exception text, answers
+  any other unexpected error with a fixed `internal error` and logs the detail on the bridge side, and no longer
+  returns Codex's stderr to the controller on success (it logs it instead; the controller never read that field). A
+  Codex run that exits nonzero is answered 502 with the fixed message `codex exited with <code>; see the bridge log`
+  instead of up to 4,000 characters of Codex's stderr or stdout (host paths, possibly a token); the bridge logs that
+  output (stderr, or stdout when stderr is empty), or the exit code when Codex printed nothing.
+- **The Codex host bridge no longer deletes what it finds at its socket path.** The Codex host bridge now removes only
+  a stale socket at `--socket-path`: a regular file, directory or symlink there stops it with a message instead of
+  being deleted, as does a socket another bridge is listening on (it connects first, and removes the socket only when
+  the connection is refused; any other connect failure but a timeout or a full backlog, such as another uid's 0600
+  socket, stops it with "cannot tell whether a bridge is listening on <path>"), a path too long for a unix socket is
+  refused with its length, and the socket is set to 0600 explicitly after binding. On POSIX each bridge holds an
+  exclusive lock on `<socket-path>.lock` (created 0600, left in place) for its whole life, taken before that check, so
+  a second bridge on the same path stops at startup with "another bridge is running on <path>" instead of racing the
+  first one's probe, a lock file it cannot open (a symlink, or another uid's) or cannot lock (`ENOLCK`, or a
+  filesystem without locks) stops it with a message naming that file, and at shutdown a bridge checks, just before
+  removing the socket, that the path still names the one it bound, which keeps it from removing a socket a later
+  bridge bound there, but not one a process that ignores the lock puts there between the check and the removal.
+- **Loading a large multi-line `.env` value is no longer quadratic.** The scripts' `.env` loader no longer re-parses a
+  whole multi-line quoted value for every added line: only a line that holds the opening quote character can close it,
+  so a PEM-sized value is no longer re-parsed on every line.
+- **`.env` no longer overrides a variable a script declared.** The scripts' `.env` loader no longer overwrites a
+  variable the calling script declared without a value (`local x`, `declare x`): it read such a name as unset and let
+  `.env` set it.
+- **`bootstrap_cli_auth.sh` refuses a `CLI_HOME` that climbs out with `..`.** `scripts/bootstrap_cli_auth.sh` now
+  refuses a `CLI_HOME` with a `..` component (`/data/../etc` matched `/data/*`).
+- **`agent_eval.py` takes its token from the environment, not the command line.** `scripts/agent_eval.py --execute`
+  reads the controller token from `AUTO_BROWSER_TOKEN`; `--bearer-token` still works but is deprecated, warns, and is
+  documented as visible to every local user in the process list.
+
+### Changed
+
+- **Mesh and curator settings are read like every other setting, and a bad value stops startup.** `MESH_ENABLED`,
+  `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and `CURATOR_MODEL` are now
+  `Settings` fields, read from the controller's settings rather than from `os.environ` at startup. The names and
+  defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not only `true`), and an
+  unparseable `MESH_ENABLED` or `MESH_TIMESTAMP_WINDOW`, an empty one included (`MESH_ENABLED=`), stops startup
+  (before, any `MESH_ENABLED` other than `true`, in any letter case, meant off). The harness settings lost their
+  redundant environment fallbacks.
+- **Logs no longer carry the full URL of every outgoing request.** httpx's per-request `HTTP Request:` INFO lines are
+  no longer logged, at any `LOG_LEVEL` and for every client (the approval webhook, the providers, the curator): each
+  named its URL whole, userinfo, path and query included. httpx's warnings and errors still are.
+- **The GwPriority warning comes once, at the first isolated provision, and says what goes wrong.** The GwPriority
+  warning, now starting "GwPriority is not honoured", is logged once at the first isolated provision on a daemon
+  without GwPriority support (not at startup), whatever the network names: its check compares names only, and the
+  gateway and the published port can move anyway. When the session network's name sorts before the controller's, it
+  also names that order problem. It also covers a client that speaks an API version below 1.48.
+- **The drift tools say what they check.** `harness.check_drift` and `harness.check_all_drifts` now say what they do:
+  they re-verify a staged candidate's stored contract and trace and cannot detect a site change.
+  `docs/convergence-harness.md` says the same.
+- **`node_meta.json` is a consistency check, not a tamper check.** The mesh identity's `node_meta.json` check no
+  longer claims to detect tampering: the file sits beside the key, so anyone who can replace the key can replace it.
+  It stays as a consistency check, and a mismatch now says "stored node_id does not match the key (corrupt or mixed
+  identity directory)".
+- **Mesh `require_approval` is deprecated.** No approval handler is wired, so a grant that sets it always answered
+  `approval_required` and its capability could never run. Loading such a grant now logs a `mesh.peers:` warning saying
+  so, the field is still parsed (an existing peers file stays valid), and the docs example no longer shows it.
+- **`TYPING_DELAY_MS` is gone; nothing read it.** `TYPING_DELAY_MS` is removed from the settings, `.env.example` and
+  `docker-compose.yml`: no release ever read it (typing pacing is `HUMAN_TYPING_MIN_DELAY_MS` and
+  `HUMAN_TYPING_MAX_DELAY_MS`). An old env file that still sets it is ignored.
+- **Known limit: a `takeover` step the agent loop guard adds shows the page before the last action.** The `takeover`
+  step the agent loop guard appends to an agent run carries the previous step's observation (the page as it was before
+  that step's action), not a fresh one; the harness trace ignores it when it picks the run's final observation.
+- **The controller pins pydantic 2.14.2 and typing-inspection 0.4.4.** `pydantic` is pinned to 2.14.2 (which pins
+  `pydantic-core` 2.50.2), `typing-inspection` to 0.4.4 and `click`, which uvicorn needs, to 8.5.0. Their newer
+  releases (pydantic 2.14.3, pydantic-core 2.50.4 and typing-inspection 0.4.5, which the 1.15.0 image carried, and
+  click 8.5.1) were uploaded on November 4, 5 and 6, under 72 hours before this release was built; pydantic 2.14.2 is
+  outside the affected range of every pydantic advisory, and OSV lists none for click 8.5.0.
 
 ## [1.15.0] — 2026-11-05
 
