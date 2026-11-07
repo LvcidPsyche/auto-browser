@@ -130,25 +130,15 @@ async def test_a_tainted_page_is_forked_onto_a_start_url_the_caller_names(tmp_pa
     assert "REFUSED-CONTENT" not in str(manager.audit.append.await_args_list)
 
 
-def page_refusal_type(manager) -> type[PermissionError]:
-    """The type of the refusal the page checks raise for a page ALLOWED_HOSTS refuses."""
-    try:
-        manager._assert_page_object_allowed(SimpleNamespace(url=REFUSED))
-    except PermissionError as exc:
-        return type(exc)
-    raise AssertionError("a page on a refused host was not refused")
-
-
-async def test_a_fork_of_a_page_on_about_blank_is_not_refused_as_a_refused_page(tmp_path: Path) -> None:
-    """Round 4d (R4C-L1-5, T7): a fresh session still on about:blank is refused by create_session's URL check
-    (no about: start URL), and REST answered that the page was on, or came from, a refused host, because every
-    PermissionError of a fork without start_url was taken for the page's."""
+async def test_a_fork_of_a_page_on_about_blank_opens_no_start_url(tmp_path: Path) -> None:
+    """Round 4d (R4C-L1-5, T7) had this refused by create_session's URL check (no about: start URL). AUTH-09
+    (round 5): a fresh session still on about:blank forks onto a blank page instead, and is refused by nothing."""
     manager, session_id = await fork_source(tmp_path, "about:blank")
 
-    with pytest.raises(PermissionError, match="scheme") as refused:
-        await manager.fork_session(session_id)
+    forked = await manager.fork_session(session_id)
 
-    assert not isinstance(refused.value, page_refusal_type(manager))
+    assert manager.sessions[forked["id"]].page.url == "about:blank"
+    assert manager.audit.append.await_args.kwargs["details"]["start_url"] is None
 
 
 async def test_control_a_start_url_off_the_list_is_still_refused(tmp_path: Path) -> None:

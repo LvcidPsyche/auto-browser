@@ -18,14 +18,18 @@
 # Locals use a __lre_ prefix so a .env key cannot overwrite the parser's own state.
 
 # Whether a .env key is on the fixed denylist: shell startup, expansion and behaviour hooks, the dynamic
-# loader, the interpreters' startup hooks (PYTHON*, PERL5*, NODE_OPTIONS, BROWSER, which webbrowser.open() runs),
-# HOME (which login shells read profiles from), and the smoke scripts' own names. SMOKE_* is not refused as a
+# loader, the interpreters' startup hooks (PYTHON*, PERL5*, PERLLIB, NODE_OPTIONS, BROWSER, which webbrowser.open()
+# runs), HOME and XDG_CONFIG_HOME (which login shells and curl read profiles and a .curlrc from), CURL_HOME, the
+# locale (LANG, LC_*), the proxy variables curl reads (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and their
+# lower-case forms), and the smoke scripts' own names. SMOKE_* is not refused as a
 # whole: doctor.sh reads SMOKE_URL, SMOKE_PROVIDER and SMOKE_GOAL from .env.
 __lre_denied_name() {
   case "$1" in
     BASH_ENV | ENV | BASH_FUNC_* | SHELLOPTS | BASHOPTS | IFS | PATH | PS4 | PROMPT_COMMAND | CDPATH | GLOBIGNORE) return 0 ;;
-    POSIXLY_CORRECT | BASH_COMPAT | EXECIGNORE | FUNCNEST | TMOUT | LC_ALL | LC_CTYPE | HOME) return 0 ;;
-    PYTHON* | BROWSER | PERL5OPT | PERL5LIB | NODE_OPTIONS) return 0 ;;
+    POSIXLY_CORRECT | BASH_COMPAT | EXECIGNORE | FUNCNEST | TMOUT | LANG | LC_* | HOME) return 0 ;;
+    PYTHON* | BROWSER | PERL5* | PERLLIB | NODE_OPTIONS) return 0 ;;
+    CURL_HOME | XDG_CONFIG_HOME | HTTP_PROXY | HTTPS_PROXY | ALL_PROXY | NO_PROXY) return 0 ;;
+    http_proxy | https_proxy | all_proxy | no_proxy) return 0 ;;
     LD_* | DYLD_* | COMSPEC | PATHEXT) return 0 ;;
     SMOKE_PROJECT | SMOKE_COMPOSE_* | SMOKE_SESSION_* | SMOKE_*_LABEL | ROOT_DIR | COMPOSE | __lre_*) return 0 ;;
   esac
@@ -50,8 +54,9 @@ __lre_refused() {
       fi
       ;;
   esac
-  # `${!1+set}` (not `[[ -v ]]`, which needs bash 4.2) is empty for a name that is not set.
-  [[ -n "${!1+set}" ]] || return 1
+  # `declare -p` (not `[[ -v ]]`, which needs bash 4.2, nor `${!1+set}`, which reads a `local x` with no value as
+  # unset) succeeds for any declared name.
+  declare -p "$1" >/dev/null 2>&1 || return 1
   local __lre_decl
   __lre_decl="$(declare -p "$1" 2>/dev/null)" || return 1
   case "$__lre_decl" in
@@ -125,6 +130,11 @@ load_repo_env() {
     return 0
   fi
 
+  # xtrace off while the values are read and exported (the .env holds the tokens), restored after: `bash -x` would
+  # otherwise print every value.
+  local __lre_xtrace=0
+  if [[ $- == *x* ]]; then __lre_xtrace=1; fi
+  { set +x; } 2>/dev/null
   local __lre_pair_re='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$'
   local __lre_line __lre_key __lre_raw __lre_value __lre_out __lre_number=0 __lre_start __lre_rc __lre_next=""
   local __lre_bad_escape=0
@@ -154,6 +164,13 @@ load_repo_env() {
       while ((__lre_rc == 2)) && IFS= read -r __lre_next || [[ -n "$__lre_next" ]]; do
         ((__lre_number++)) || true
         __lre_value+=$'\n'"${__lre_next%$'\r'}"
+        # A line without the opening quote character cannot close the value (an escape only protects a quote), so
+        # the whole accumulated value is parsed again only when one arrives: re-parsing it for every added line made
+        # a PEM-sized value quadratic.
+        if [[ "$__lre_next" != *"${__lre_value:0:1}"* ]]; then
+          __lre_next=""
+          continue
+        fi
         __lre_next=""
         __lre_rc=0
         __lre_parse_quoted "$__lre_value" || __lre_rc=$?
@@ -183,6 +200,13 @@ load_repo_env() {
     fi
     export "$__lre_key=$__lre_value"
   done < "$__lre_file"
+  if ((__lre_xtrace)); then set -x; fi
+}
+
+# True when a container path lies under /data/ with no ".." component: /data/../etc matches /data/* and
+# leaves /data (bootstrap_cli_auth.sh refuses any other CLI_HOME).
+container_path_under_data() {
+  [[ "$1" == /data/* && "/$1/" != */../* ]]
 }
 
 resolve_repo_host_path() {
@@ -221,8 +245,9 @@ api_token() {
   fi
 }
 
-# The controller's bearer header as a curl config line, for `curl --config -` on
-# stdin (pipe it in: curl_auth_config | curl --config - ...). A command line is
+# The controller's bearer header as a curl config line, for `curl -q --config -` on
+# stdin (pipe it in: curl_auth_config | curl -q --config - ...; the -q keeps a
+# .curlrc out of a request carrying the token). A command line is
 # readable by every local user (ps, /proc/<pid>/cmdline), so the token never goes
 # in argv, and a config on stdin is never written to disk. It takes no argument
 # and turns xtrace off for itself (it runs in the pipeline's subshell, so the
@@ -243,8 +268,184 @@ curl_auth_config() {
   fi
 }
 
+# The hosts curl reaches directly whatever HTTP_PROXY, HTTPS_PROXY or ALL_PROXY says: a request to a loopback
+# controller carries the tokens, and through a proxy it would hand them to the proxy. curl's --noproxy takes a
+# comma-separated list (an IPv6 address unbracketed) and replaces NO_PROXY for that curl, so the environment's own
+# list (no_proxy, which curl reads first, else NO_PROXY) follows them. The scripts' base URL host (API_BASE_URL, else
+# AUTO_BROWSER_BASE_URL) is listed too when it is another loopback address (127.0.0.2, say) or 0.0.0.0: named
+# exactly, since older curls take no CIDR. curl reads `*` as every host only when it is the whole list, so an
+# inherited `*` is printed alone.
+loopback_noproxy() {
+  local inherited="${no_proxy:-${NO_PROXY:-}}"
+  local trimmed="${inherited//[[:space:]]/}"
+  if [[ "$trimmed" == "*" ]]; then
+    printf '%s' "*"
+    return 0
+  fi
+  local hosts="localhost,127.0.0.1,::1"
+  local host
+  host="$(base_url_loopback_host "${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}")"
+  if [[ -n "$host" && ",${hosts}," != *",${host},"* ]]; then
+    hosts="${hosts},${host}"
+  fi
+  printf '%s' "${hosts}${inherited:+,${inherited}}"
+}
+
+# The host of a base URL as curl reads its authority: a scheme stripped only when the URL starts with one (curl
+# guesses http:// for 127.0.0.2:8000/?next=http://cafe.bad/ and connects to 127.0.0.2), the authority cut at the
+# first /, ? or #, the userinfo dropped up to the last @, then a bracketed host up to ] (printed with its brackets),
+# else the host up to the port's colon. Nothing is decoded: refuse_other_ipv4_spelling refuses a host curl would
+# decode or normalise.
+base_url_host() {
+  local rest="$1"
+  if [[ "$rest" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    rest="${rest#*://}"
+  fi
+  rest="${rest%%[/?#]*}"
+  rest="${rest##*@}"
+  if [[ "$rest" == \[* ]]; then
+    rest="${rest#\[}"
+    printf '[%s]' "${rest%%\]*}"
+  else
+    printf '%s' "${rest%%:*}"
+  fi
+}
+
+# The host of a base URL when it is a loopback address (localhost, anything in 127.0.0.0/8, ::1) or 0.0.0.0, which a
+# server's startup line prints and which reaches this host on Linux and macOS, IPv6 unbracketed as --noproxy takes
+# it; nothing otherwise.
+base_url_loopback_host() {
+  local host
+  host="$(base_url_host "$1")"
+  host="${host#\[}"
+  host="${host%\]}"
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$host" == "localhost" || "$host" == "::1" || "$host" == "0.0.0.0" \
+    || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    printf '%s' "$host"
+  fi
+}
+
+# Fails, with a message, when the scripts' base URL host (API_BASE_URL, else AUTO_BROWSER_BASE_URL) is not a plain
+# host name or address. curl normalises a host before it matches --noproxy, so a spelling of another loopback
+# address (127.2 is 127.0.0.2) missed the scripts' list and that controller was reached through an environment proxy
+# with the tokens, while a spelling of 127.0.0.1 itself was normalised to it. Refused:
+# - an unbracketed host holding anything but ASCII letters, digits, . and - (curl decodes %31 to 1), or ending in .;
+# - an IPv4 address written another way than four dotted decimals: one to four dot-separated parts, each all decimal
+#   digits or 0x and at least one hex digit, that are not four decimal numbers from 0 to 255 without leading zeros
+#   (127.2, 0x7f.0.0.2, 2130706434, 0177.0.0.1); a name (cafe.bad, 0x) is not refused;
+# - a bracketed host holding anything but hex digits and :, or whose first group is empty or all zeros, other than
+#   exactly ::1: every IPv4-mapped and IPv4-compatible form ([::ffff:127.0.0.2]) is in ::/96, while a global IPv6
+#   literal ([2001:db8::5]) passes.
+# Refused before that, as a form curl reads another host from than base_url_host does (W9-4): a set base URL that
+# starts with a scheme and a colon but not with that scheme, // and a character other than / (curl connects to
+# 127.0.0.2 for http:///127.0.0.2:9/ and http:/127.0.0.2:9/), or whose host reads empty (http://:9/). Only an unset or
+# empty variable passes without a host; a scheme-less localhost:8000 is read as curl reads it.
+refuse_other_ipv4_spelling() {
+  local url="${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}"
+  [[ -n "$url" ]] || return 0
+  local host
+  host="$(base_url_host "$url")"
+  if [[ -z "$host" ]] || [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*:/ && ! "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/] ]]; then
+    echo "The controller address is not written in a form the scripts can keep away from a proxy:" \
+      "write AUTO_BROWSER_BASE_URL (or API_BASE_URL) as http://host:port, such as http://127.0.0.2:8000" >&2
+    return 1
+  fi
+  local plain=1
+  if [[ "$host" == \[* ]]; then
+    local inner="${host#\[}"
+    inner="${inner%\]}"
+    if [[ "$inner" != "::1" ]]; then
+      if [[ "$inner" =~ [^0123456789abcdefABCDEF:] || "$inner" == ::* || "$inner" =~ ^0+: ]]; then
+        plain=0
+      fi
+    fi
+  elif [[ "$host" =~ [^0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-] || "$host" == *. ]]; then
+    plain=0
+  else
+    local -a parts
+    IFS=. read -r -a parts <<< "$host"
+    if (( ${#parts[@]} >= 1 && ${#parts[@]} <= 4 )); then
+      local part decimal=1 address=1
+      for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^[0-9]+$ ]]; then
+          if [[ ! "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( 10#$part > 255 )); then
+            decimal=0
+          fi
+        elif [[ "$part" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+          decimal=0
+        else
+          address=0
+          break
+        fi
+      done
+      if (( address == 1 && ! (decimal == 1 && ${#parts[@]} == 4) )); then
+        plain=0
+      fi
+    fi
+  fi
+  (( plain == 1 )) && return 0
+  echo "The controller address ${host} is not a plain host name or address, which the scripts cannot keep away" \
+    "from a proxy: write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as a plain host name" \
+    "or address, such as 127.0.0.2" >&2
+  return 1
+}
+
 # curl that sends the controller's bearer token. Without it every API call is a
 # 401 and the smoke scripts could only pass against an open controller.
 bearer_curl() {
-  curl_auth_config | curl --config - "$@"
+  refuse_other_ipv4_spelling || return 1
+  # -q first: curl would otherwise read a .curlrc (through CURL_HOME, XDG_CONFIG_HOME or HOME) that can add a proxy
+  # or another header to a request carrying the token.
+  curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"
 }
+
+# The takeover token, the person's second secret that GET /sessions/{session_id}/takeover-link demands:
+# TAKEOVER_TOKEN when set, else the token the compose controller saved in /data/takeover-token
+# (<repo>/data/takeover-token on the host). Not TAKEOVER_TOKEN_FILE: docker-compose.yml pins the controller's to
+# /data/takeover-token (and passes TAKEOVER_TOKEN from the shell or .env), so a different TAKEOVER_TOKEN_FILE in
+# .env or the shell names some other controller's file. Prints nothing when there is none.
+takeover_token() {
+  if [[ -n "${TAKEOVER_TOKEN:-}" ]]; then
+    printf '%s' "${TAKEOVER_TOKEN}"
+    return 0
+  fi
+  local token_file
+  token_file="$(resolve_repo_host_path "${ROOT_DIR}" /data/takeover-token)"
+  if [[ -r "$token_file" ]]; then
+    tr -d '[:space:]' < "$token_file"
+  elif [[ -e "$token_file" ]]; then
+    echo "Cannot read the takeover token in $token_file; rerun with sudo, or read it with:" >&2
+    echo "  docker compose exec -T controller cat /data/takeover-token" >&2
+  fi
+}
+
+# A filter for the config curl_auth_config prints: it passes that config through and adds the X-Takeover-Token
+# header, so both headers reach curl in one config on stdin and neither token goes in argv. xtrace is off for it,
+# as for curl_auth_config.
+with_takeover_header() {
+  { set +x; } 2>/dev/null
+  cat
+  local token
+  token="$(takeover_token)"
+  if [[ "$token" == *$'\n'* || "$token" == *$'\r'* ]]; then
+    echo "The takeover token contains a line break; fix TAKEOVER_TOKEN (or data/takeover-token)." >&2
+    return 1
+  fi
+  if [[ -n "$token" ]]; then
+    token="${token//\\/\\\\}"
+    printf 'header = "X-Takeover-Token: %s"\n' "${token//\"/\\\"}"
+  fi
+}
+
+# curl that sends the bearer token and the takeover token, for GET /sessions/{session_id}/takeover-link only.
+takeover_curl() {
+  refuse_other_ipv4_spelling || return 1
+  curl_auth_config | with_takeover_header | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"
+}
+
+# True when takeover_token finds a token. In a subshell with xtrace off, so a trace never shows it.
+have_takeover_token() (
+  { set +x; } 2>/dev/null
+  [[ -n "$(takeover_token)" ]]
+)

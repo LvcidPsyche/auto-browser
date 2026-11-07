@@ -55,29 +55,76 @@ class DelegationReplayError(DelegationError):
     pass
 
 
+class MeshReplayCacheFull(DelegationError):
+    """The nonce cache holds its cap of nonces still inside their window: the envelope is refused, not recorded."""
+
+
 # ---------------------------------------------------------------------------
 # Nonce cache
 # ---------------------------------------------------------------------------
 
 
 class _NonceCache:
-    """Thread-safe LRU nonce cache for replay defense."""
+    """Thread-safe nonce cache for replay defense: bounded by age (when `ttl_seconds` is set) and by size.
 
-    def __init__(self, max_size: int = _NONCE_CACHE_MAX) -> None:
+    A nonce only needs remembering while its envelope could still pass the timestamp check: the manager records
+    each nonce with its envelope's timestamp and sets the age to the timestamp window, so a nonce goes once the
+    highest wall time seen so far is more than a window past that timestamp. That high-water mark never moves
+    back, so a wall clock stepped back cannot free a nonce whose envelope is inside the window again (a monotonic
+    age could).
+
+    The size cap bounds how many nonces are remembered at once. With a TTL (the manager's cache always has one),
+    nothing remembered is dropped before it expires: at the cap every expired entry goes (a full scan, since entries
+    are in insertion order, not stamp order), and if none had expired the new nonce is refused with
+    MeshReplayCacheFull and not recorded. A cache without a TTL, which the manager never builds, still evicts its
+    oldest entry at the cap.
+    """
+
+    def __init__(
+        self,
+        max_size: int = _NONCE_CACHE_MAX,
+        ttl_seconds: Optional[float] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self._max = max_size
+        self._ttl = ttl_seconds
+        self._clock = clock
         self._seen: OrderedDict[str, float] = OrderedDict()
+        self._high_water = float("-inf")
         self._lock = Lock()
 
-    def check_and_record(self, nonce: str) -> bool:
+    @property
+    def high_water(self) -> float:
+        """The highest wall time a check has seen (-inf before the first): the clock the nonces expire by."""
+        with self._lock:
+            return self._high_water
+
+    def check_and_record(self, nonce: str, *, stamped_at: Optional[float] = None, now: Optional[float] = None) -> bool:
         """
-        Returns True (first time seen → OK) or False (replay detected → reject).
+        Returns True (first time seen → OK) or False (replay detected → reject); raises MeshReplayCacheFull when a
+        cache with a TTL is full of unexpired nonces.
+
+        `stamped_at` is the envelope's timestamp (the time of the check when absent); `now` the wall time the
+        caller checked it against (the cache's clock when absent).
         """
         with self._lock:
+            current = self._clock() if now is None else now
+            self._high_water = max(self._high_water, current)
+            if self._ttl is not None:
+                # Roughly oldest first (insertion order); a later entry with an older stamp only stays longer.
+                while self._seen and self._high_water - next(iter(self._seen.values())) > self._ttl:
+                    self._seen.popitem(last=False)
             if nonce in self._seen:
                 return False
-            self._seen[nonce] = time.time()
-            if len(self._seen) > self._max:
-                self._seen.popitem(last=False)
+            if len(self._seen) >= self._max:
+                if self._ttl is None:
+                    self._seen.popitem(last=False)
+                else:
+                    for expired in [seen for seen, stamp in self._seen.items() if self._high_water - stamp > self._ttl]:
+                        del self._seen[expired]
+                    if len(self._seen) >= self._max:
+                        raise MeshReplayCacheFull("mesh replay cache is full; retry later")
+            self._seen[nonce] = current if stamped_at is None else stamped_at
             return True
 
 
@@ -121,7 +168,13 @@ class DelegationManager:
         self._peers = peers
         self._timestamp_window = timestamp_window
         self._policy = PolicyEvaluator()
-        self._nonce_cache = _NonceCache()
+        # A nonce is kept until the wall clock's high-water mark is a window past its envelope's timestamp, after
+        # which that envelope can no longer pass the timestamp check.
+        self._nonce_cache = _NonceCache(ttl_seconds=timestamp_window)
+        # Nonces are not persisted, so an envelope the last process could have accepted is refused by its timestamp
+        # instead: that process accepted envelopes stamped up to one window ahead of its clock, so up to one window
+        # past this start. The cost is about one window of refusals after each start, which a sender's retry passes.
+        self._started_at = time.time()
         self._tool_gateway = tool_gateway
         self._approval_fn = approval_fn
 
@@ -165,8 +218,11 @@ class DelegationManager:
             raise DelegationError(f"reply envelope verification failed: {exc}") from exc
 
         # Reply timestamp window — symmetric with inbound, closes a MITM replay vector
-        # where a captured reply could be re-served long after the original.
-        reply_age = time.time() - reply_envelope.timestamp
+        # where a captured reply could be re-served long after the original. Against the clock the nonces expire by,
+        # as the inbound check is (W2-2): read raw, a clock stepped back put a reply whose nonce had expired inside
+        # the window again, and it was accepted twice.
+        reply_now = max(time.time(), self._nonce_cache.high_water)
+        reply_age = reply_now - reply_envelope.timestamp
         # "not <=", not ">": a NaN timestamp compares false both ways and would pass ">".
         if not abs(reply_age) <= self._timestamp_window:
             raise DelegationError(
@@ -174,10 +230,16 @@ class DelegationManager:
                 f"limit={self._timestamp_window}s peer={peer_node_id}"
             )
 
-        if not self._nonce_cache.check_and_record(reply_envelope.nonce):
+        if not self._nonce_cache.check_and_record(
+            reply_envelope.nonce, stamped_at=reply_envelope.timestamp, now=reply_now
+        ):
             raise DelegationReplayError(f"reply nonce replay from peer={peer_node_id}")
 
-        return DelegationResponse.model_validate(reply_payload)
+        response = DelegationResponse.model_validate(reply_payload)
+        # A reply to another request (a stale one replayed, W2-4) is not this request's answer.
+        if response.request_id != request.request_id:
+            raise DelegationRejected(f"reply request id does not match the request's from peer={peer_node_id}")
+        return response
 
     # ------------------------------------------------------------------
     # Inbound
@@ -202,12 +264,22 @@ class DelegationManager:
         if peer is None:
             raise DelegationRejected(f"Unknown sender node_id={sender_id!r}")
 
-        # Timestamp window — check before signature verification (cheap, fails fast)
-        age = time.time() - envelope.timestamp
+        # Timestamp window — check before signature verification (cheap, fails fast). Against the clock the nonces
+        # expire by, which never moves back (CB3-1): read raw, a clock stepped back put an envelope whose nonce had
+        # already expired inside the window again, and it ran twice. The cost: after a large backward step, fresh
+        # envelopes are refused until the wall clock catches up (about the step minus the window).
+        now = max(time.time(), self._nonce_cache.high_water)
+        age = now - envelope.timestamp
         # "not <=", not ">": a NaN timestamp compares false both ways and would pass ">".
         if not abs(age) <= self._timestamp_window:
             raise DelegationRejected(
                 f"envelope timestamp out of window: age={age:.1f}s limit={self._timestamp_window}s"
+            )
+
+        if envelope.timestamp <= self._started_at + self._timestamp_window:
+            raise DelegationRejected(
+                "envelope was stamped before this node started, or within one timestamp window after it; the nonce "
+                "cache does not survive a restart, so retry"
             )
 
         # Signature verification BEFORE nonce cache write.
@@ -225,7 +297,15 @@ class DelegationManager:
             raise DelegationRejected(f"envelope verification failed: {exc}") from exc
 
         # Nonce freshness — now safe to record; sender is authenticated.
-        if not self._nonce_cache.check_and_record(envelope.nonce):
+        try:
+            fresh = self._nonce_cache.check_and_record(envelope.nonce, stamped_at=envelope.timestamp, now=now)
+        except MeshReplayCacheFull:
+            logger.warning(
+                "mesh.delegation.replay_cache_full sender=%s: the replay cache is full, so the envelope was refused",
+                sender_id,
+            )
+            raise
+        if not fresh:
             raise DelegationReplayError(f"nonce replay from sender={sender_id!r}")
 
         # Decode request

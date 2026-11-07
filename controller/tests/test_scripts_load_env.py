@@ -193,6 +193,24 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["D"], "x\\\\")
         self.assertEqual(stderr, "")
 
+    def test_a_long_multi_line_value_is_parsed_only_where_a_quote_could_close_it(self) -> None:
+        # Re-parsing the whole accumulated value for every added line made a PEM-sized value quadratic. A line with
+        # no quote character in it cannot close the value, so only the opening line and the closing one are parsed.
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        log = Path(tempdir.name, "parses.log")
+        counting = (
+            'eval "__lre_orig$(declare -f __lre_parse_quoted)"; '
+            f'__lre_parse_quoted() {{ echo call >> "{_bash_path(log)}"; __lre_orig__lre_parse_quoted "$@"; }}; '
+        )
+        body = "".join("A" * 64 + "\n" for _ in range(60))
+        exported, _, stderr = self.load(f'PEM="-----BEGIN\n{body}-----END"\nFINE=1\n', prelude=counting)
+
+        self.assertEqual(exported["FINE"], "1")
+        self.assertNotIn("PEM", exported)
+        self.assertIn("a quoted value over several lines (to line 62), ignored", stderr)
+        self.assertLessEqual(len(log.read_text().splitlines()), 3)
+
     def test_the_lines_of_an_unterminated_quote_are_skipped_until_it_closes(self) -> None:
         # A PEM's base64 padding is KEY=VALUE-shaped: it must not be exported as a key.
         pem = 'PEM="-----BEGIN KEY-----\nMIIBabc\nAbCdEfGh12==\n-----END KEY-----"\nAFTER=1\n'
@@ -261,6 +279,25 @@ class LoadRepoEnvTests(unittest.TestCase):
 
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "done"))
 
+    def test_w2_24_an_xtrace_run_never_prints_a_value_and_keeps_the_callers_trace(self) -> None:
+        # The loop exported each value with xtrace on, so `bash -x scripts/takeover_link.sh` printed TAKEOVER_TOKEN
+        # and API_BEARER_TOKEN.
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        env_file = Path(tempdir.name) / "scratch.env"
+        marker = "sentinel-xtrace-value-0123456789"
+        env_file.write_text(f"TAKEOVER_TOKEN={marker}\nAPI_BEARER_TOKEN='{marker}-2'\n", encoding="utf-8")
+        script = (
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; set -x; load_repo_env "{_bash_path(env_file)}"; '
+            'case "$-" in *x*) echo still-tracing;; *) echo not-tracing;; esac; set +x'
+        )
+        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60, env=_minimal_env())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+ load_repo_env", result.stderr)  # the trace was on
+        self.assertNotIn(marker, result.stderr)
+        self.assertEqual(result.stdout.strip(), "still-tracing")
+
     def test_bash_env_cannot_run_a_command_in_a_child_shell(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -327,6 +364,22 @@ class LoadRepoEnvTests(unittest.TestCase):
                 self.assertIn(f": {key} is not loaded from .env (", stderr)
                 self.assertNotIn("poisoned", stderr)
 
+    def test_keys_that_redirect_curl_perl_or_the_locale_are_refused(self) -> None:
+        # curl reads CURL_HOME/XDG_CONFIG_HOME for a .curlrc and the *_PROXY variables for where it connects; perl
+        # reads PERL5* and PERLLIB; LANG and LC_* decide which locale files a child loads.
+        denied = [
+            "CURL_HOME", "XDG_CONFIG_HOME", "PERLLIB", "PERL5DB", "PERL5LIB", "PERL5OPT", "LANG", "LC_MESSAGES",
+            "LC_NUMERIC", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "no_proxy",
+        ]  # fmt: skip
+        for key in denied:
+            with self.subTest(key=key):
+                exported, _, stderr = self.load(f"{key}=poisoned\nFINE=1\n")
+
+                self.assertNotEqual(exported.get(key), "poisoned")
+                self.assertEqual(exported["FINE"], "1")
+                self.assertIn(f": {key} is not loaded from .env (", stderr)
+
     def test_on_windows_shells_the_denylist_ignores_the_case_of_a_key(self) -> None:
         # Windows treats environment names case-insensitively, so `Path=` would reach a child as PATH.
         denied = ["Path", "ComSpec", "Ld_Preload", "Bash_Env", "Pythonpath"]
@@ -343,13 +396,14 @@ class LoadRepoEnvTests(unittest.TestCase):
     def test_a_key_that_is_not_set_costs_no_subprocess(self) -> None:
         # Each fork costs about 130 ms on Git Bash, so a copied .env.example (176 keys) took 20 s. The wrappers
         # shadow the builtin and `tr` and log to a file (declare's own stderr is redirected away by the caller);
-        # `declare -p` is only for a name that is set, and the case fold on Windows shells needs no `tr`.
+        # `declare` is logged only when it runs in a subshell (a `$(declare -p x)`), which is the fork: the plain
+        # `declare -p x >/dev/null` existence test is a builtin, and the case fold on Windows shells needs no `tr`.
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         log = _bash_path(Path(tempdir.name) / "forks.log")
         wrappers = (
             f'tr() {{ echo "tr" >> "{log}"; command tr "$@"; }}; '
-            f'declare() {{ echo "declare $*" >> "{log}"; builtin declare "$@"; }}; '
+            f'declare() {{ [[ "$BASHPID" == "$$" ]] || echo "declare $*" >> "{log}"; builtin declare "$@"; }}; '
         )
         for ostype in ("cygwin", "linux-gnu"):
             with self.subTest(ostype=ostype):
@@ -412,6 +466,18 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertNotIn("MY_INTERNAL", exported)  # set but not exported, and .env does not export it
         self.assertEqual(exported["EXPORTED_ONE"], "from-env")  # an exported variable stays overridable
         self.assertIn("MY_INTERNAL", stderr)
+
+    def test_a_variable_the_script_declared_without_a_value_is_not_overwritten(self) -> None:
+        # `local x` / `declare x` makes x the script's own, with no value yet: ${x+set} reads it as unset.
+        exported, _, stderr = self.load(
+            "MY_DECLARED=from-env\nFINE=1\n",
+            prelude="declare MY_DECLARED; ",
+            watch=("MY_DECLARED",),
+        )
+
+        self.assertNotIn("MY_DECLARED", exported)
+        self.assertEqual(exported["FINE"], "1")
+        self.assertIn("MY_DECLARED", stderr)
 
     def test_the_parsers_own_names_are_ordinary_keys(self) -> None:
         exported, _, stderr = self.load("pair_re=.*\nline=L\nkey=K\nvalue=V\nenv_file=E\nOTHER=1\n")
@@ -489,6 +555,50 @@ class ScriptsStayBash32CompatibleTests(unittest.TestCase):
             ]
             with self.subTest(script=script.name):
                 self.assertEqual(found, [], f"{script.name} uses syntax that bash 3.2 rejects")
+
+
+@unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
+class ContainerPathUnderDataTests(unittest.TestCase):
+    """HARN-39: bootstrap_cli_auth.sh takes CLI_HOME only under /data/, and a '..' component (/data/../etc matches
+    /data/*) is refused. The check is container_path_under_data in load_env.sh, run here through bash."""
+
+    REFUSED = ("/data/../etc", "/data/cli-home/..", "/data//../x", "/data/x/../y", "/data/..", "/etc/cli-home")
+    ALLOWED = ("/data/a..b", "/data/./x", "/data/cli-home")
+
+    def test_a_dot_dot_component_or_a_path_outside_data_is_refused(self) -> None:
+        paths = self.REFUSED + self.ALLOWED
+        script = (
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
+            'for p in "$@"; do if container_path_under_data "$p"; then echo "allowed $p"; else echo "refused $p"; fi; done'
+        )
+        result = subprocess.run(
+            [BASH, "-c", script, "_", *paths], capture_output=True, text=True, timeout=60, env=_minimal_env()
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        verdicts = dict(reversed(line.split(" ", 1)) for line in result.stdout.splitlines())
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(verdicts.get(path), "allowed" if path in self.ALLOWED else "refused")
+
+    def test_bootstrap_checks_cli_home_before_it_uses_it(self) -> None:
+        # The function passing proves nothing if bootstrap stops calling it, or calls it after resolving and creating
+        # the host directory: the guard's own call site must be what a revert turns red.
+        lines = (SCRIPTS / "bootstrap_cli_auth.sh").read_text(encoding="utf-8").splitlines()
+        assigned = next(i for i, line in enumerate(lines) if line.startswith("container_cli_home="))
+        guard = lines.index('if ! container_path_under_data "$container_cli_home"; then')
+        guard_end = lines.index("fi", guard)
+
+        self.assertLess(assigned, guard)
+        self.assertIn("exit 1", [line.strip() for line in lines[guard:guard_end]])
+        uses = [
+            i
+            for i, line in enumerate(lines)
+            if "container_cli_home" in line and i != assigned and not guard <= i <= guard_end
+        ]
+        self.assertTrue(uses)
+        self.assertTrue(all(i > guard_end for i in uses), [lines[i] for i in uses if i < guard])
 
 
 if __name__ == "__main__":

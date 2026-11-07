@@ -85,6 +85,8 @@ curl -s "${AUTH[@]}" http://127.0.0.1:8000/sessions/<session-id>/takeover \
   -d '{"reason":"Manual checkpoint"}' | jq
 ```
 
+An isolated session's full link, with its noVNC password, comes from `scripts/takeover_link.sh <session_id>`.
+
 ## 9. List MCP tools
 
 ```bash

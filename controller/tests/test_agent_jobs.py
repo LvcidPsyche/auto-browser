@@ -184,6 +184,16 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Resuming background agent job", resumed_record["request"]["context_hints"])
         self.assertIn("https://example.com/3", resumed_record["request"]["context_hints"])
 
+        # W7-9: the resumed job runs on. Its store writes run in worker threads that the teardown's cancel does not
+        # stop, so one could land while the temporary directory was removed ("Directory not empty").
+        final = {"completed", "failed", "interrupted", "cancelled"}
+        for _ in range(200):
+            if (await self.queue.get_job(resumed["id"]))["status"] in final:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            self.fail("the resumed job did not finish")
+
     async def test_resume_context_stays_within_the_request_limit(self) -> None:
         # Long checkpoint URLs, operator hints and repeated resumes each pushed
         # context_hints past its limit, and the resumed job then failed with a

@@ -50,6 +50,23 @@ CLI_BASE_ENV_NAMES = frozenset(
     }
 )  # fmt: skip
 CLI_BASE_ENV_PREFIXES = ("LC_",)
+
+
+def allowlisted_environment(extra_names=(), extra_prefixes=()) -> dict[str, str]:
+    """This process's environment cut to CLI_BASE_ENV_NAMES, the LC_ prefix, `extra_names` and `extra_prefixes`
+    (compared upper-cased).
+
+    What every child the controller starts gets instead of its whole environment, the controller's tokens and keys.
+    """
+    allowed = CLI_BASE_ENV_NAMES | {name.upper() for name in extra_names}
+    prefixes = (*CLI_BASE_ENV_PREFIXES, *(prefix.upper() for prefix in extra_prefixes))
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in allowed or name.upper().startswith(prefixes)
+    }
+
+
 # Each CLI_HOME that could not be created, warned about once.
 _UNUSABLE_CLI_HOMES: set[str] = set()
 
@@ -478,13 +495,7 @@ class BaseProviderAdapter(ABC):
         )
 
     def cli_environment(self) -> dict[str, str]:
-        allowed = CLI_BASE_ENV_NAMES | {name.upper() for name in self.cli_env_names}
-        allowed |= {name.upper() for name in self.settings.cli_provider_env_passthrough_names}
-        env = {
-            name: value
-            for name, value in os.environ.items()
-            if name.upper() in allowed or name.upper().startswith(CLI_BASE_ENV_PREFIXES)
-        }
+        env = allowlisted_environment([*self.cli_env_names, *self.settings.cli_provider_env_passthrough_names])
         if (self.settings.cli_home or "").strip():
             env["HOME"] = self.effective_cli_home()
         env.setdefault("CI", "1")

@@ -45,9 +45,12 @@ Useful env knobs:
 | `HARNESS_ROOT` | Runtime directory for runs, traces, and staged candidates |
 | `HARNESS_VERIFIER` | `programmatic`, `uv`, or `ensemble` |
 | `HARNESS_UV_COMMAND` | Pinned command used by `UniversalVerifierAdapter` |
+| `HARNESS_UV_ENV_PASSTHROUGH` | Variable names (comma-separated) the command gets on top of the provider CLIs' base names (`CLI_BASE_ENV_NAMES`, listed in [deployment.md](deployment.md#option-b--subscription-backed-clis)); it gets nothing else of the controller's environment |
 | `HARNESS_EXPLORER_MODEL` | Model recorded for induction/exploration cost provenance |
 | `HARNESS_VERIFIER_MODEL` | Model recorded for verifier cost provenance |
 | `HARNESS_EXECUTOR_MODEL` | Minimum executor tier recorded on staged skills |
+| `HARNESS_RETENTION_DAYS` | Default `0`, which keeps everything: staging holds a candidate's only copy until it is promoted by hand. Set `30` for a shared or long-running controller. Run directories and staged candidates not touched for this many days are then removed at startup and in each maintenance sweep (`CLEANUP_INTERVAL_SECONDS`). Age is the file time of `run.json` or `candidate.json`; a run this process is driving is never removed |
+| `HARNESS_MAX_RUNS_PER_OPERATOR` | Default `0`, no cap. Set it when several operators share one controller, so none of them can fill it: a new run is then refused once the verified operator already has this many runs stored or starting (runs with no verified operator share one count) |
 
 ## MCP Tools
 
@@ -62,6 +65,8 @@ The full MCP profile exposes the harness itself:
 - `harness.graduate`
 
 `harness.graduate` returns the staged candidate metadata only. It does not promote or register the skill into production automatically.
+
+`harness.check_drift` and `harness.check_all_drifts` re-verify a staged candidate's stored contract and stored trace (and the hashes recorded for them) with the verifier and write `drift.json`. They run no browser and make no request to the site, so they cannot see that a site has changed since the candidate was staged; they catch a stored candidate that no longer verifies (an edited file, a changed verifier). To find out whether the skill still works on the live site, run a new convergence run.
 
 For live browser sessions, call `harness.start_convergence` with `workflow_profile=governed` and a valid approval. Mock-only harness runs can be used for local deterministic smoke tests without attaching to a live session.
 
@@ -101,6 +106,8 @@ Review staged candidates through MCP before shelling into the harness root:
 
 Stage 0 ships with a deterministic `ProgrammaticVerifier` and a dependency-gated `UniversalVerifierAdapter`. The UV adapter returns `unverified` until a pinned Stagehand/Universal Verifier command is configured through `HARNESS_UV_COMMAND`.
 
+During a run, `HARNESS_UV_COMMAND` receives the full task contract and the attempt's trace on stdin, including the final observation as the page gave it (only secret-named keys, and a `text` or `text_preview` beside a truthy `sensitive` or `text_redacted` flag, are redacted; the PII and URL-token scrubbing applied to what is stored is not), so configure only a command you trust with that page content; a drift check (`harness.check_drift`, `harness.check_all_drifts`) sends it the candidate's stored trace, which is scrubbed, with the contract's expected text scrubbed to match. Its stdout is read up to 1 MiB; a command that writes more is killed and the verification is `unverified`. The command runs in its own process group on POSIX, so a kill (past the cap, at `timeout_seconds`, or when the caller gives up) reaches what it started too, and its pipes are then drained for at most 5 seconds; a descendant that calls `setsid` leaves the group and is not killed. On Windows only the command itself is killed.
+
 Stage 1 is expected to add the CUAVerifierBench regression suite and verifier ensemble voting on top of this adapter boundary.
 
 ## Mesh Boundary
@@ -111,7 +118,9 @@ On a controller with a mesh identity, where candidates are signed, the registry 
 
 This gives future mesh replication a provenance format without widening the trust boundary in Stage 0.
 
-Signed candidates are verified immediately after signing. If the mesh envelope cannot be created or verified, staging fails closed instead of writing an ambiguous artifact.
+A candidate is built in a temporary directory beside its final one (`.tmp-*` under the staging directory) and renamed into place only after the files are written and signed. If the mesh envelope cannot be created, staging fails closed: the temporary directory is removed, nothing appears under the candidate's name, and the run is saved as `failed` with the reason instead of `converged`. Re-staging the same contract and owner replaces the earlier candidate directory whole.
+
+A run is saved as `cancelled` when its request is cancelled and `failed` if the harness itself crashes mid-run. At startup, before requests are served, every run a previous process left `running` is marked `interrupted`.
 
 ## Stage 0 Limits
 

@@ -74,6 +74,7 @@ for _name, _relative in {
     "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
     "ISOLATED_TUNNEL_INFO_ROOT": "tunnels/sessions",
     "API_TOKEN_FILE": "api-token",
+    "TAKEOVER_TOKEN_FILE": "takeover-token",
     "CLI_HOME": "cli-home",
 }.items():
     os.environ[_name] = os.path.join(_DATA_ROOT, _relative)
@@ -98,3 +99,16 @@ os.environ.setdefault("API_ALLOW_TOKENLESS_LOOPBACK", "true")
 # the suite declares it the way docker-compose.yml does. Tests of the guard
 # itself build their own Settings.
 os.environ.setdefault("CONTROLLER_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver")
+
+# The lifespan makes the controller process non-dumpable (app/process_hardening.py), and several tests run the real
+# lifespan in this process: the flag would then stay off for the rest of the run. The suite keeps itself dumpable;
+# test_process_hardening.py runs the real call in a child process.
+from app import process_hardening as _process_hardening  # noqa: E402
+
+
+def _keep_the_test_runner_dumpable() -> bool:
+    return False
+
+
+REAL_MAKE_NON_DUMPABLE = _process_hardening.make_non_dumpable
+_process_hardening.make_non_dumpable = _keep_the_test_runner_dumpable

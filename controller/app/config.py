@@ -1,9 +1,10 @@
+import math
 import random
 import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .browser_sandbox import SECCOMP_PROFILE_PATH
@@ -34,6 +35,12 @@ class Settings(BaseSettings):
     # which is ./data/api-token on the host, where clients read it from.
     # See app/api_token.py.
     api_token_file: str = Field("/data/api-token", alias="API_TOKEN_FILE")
+    # The person's second secret: GET /sessions/{session_id}/takeover-link, which returns an isolated session's
+    # noVNC password, also demands it in X-Takeover-Token. Agents hold the bearer token, never this one. Set, it is
+    # used and the file is ignored; unset, the controller reads it from TAKEOVER_TOKEN_FILE or generates one there
+    # on first start, in every scope. See app/api_token.py (ensure_takeover_token).
+    takeover_token: str | None = Field(None, alias="TAKEOVER_TOKEN", repr=False, exclude=True)
+    takeover_token_file: str = Field("/data/takeover-token", alias="TAKEOVER_TOKEN_FILE")
     # The old default: a loopback controller with no token serves every
     # route unauthenticated. "Loopback" is the host publish mapping, not who can
     # reach port 8000, so any container on the compose network can drive the API;
@@ -49,6 +56,7 @@ class Settings(BaseSettings):
     browser_ws_endpoint: str | None = Field(
         None,
         validation_alias=AliasChoices("BROWSER_WS_ENDPOINT", "BROWSER_CDP_ENDPOINT"),
+        repr=False,
     )
     browser_ws_endpoint_file: str = Field(
         "/data/browser-profile/browser-ws-endpoint.txt",
@@ -57,6 +65,7 @@ class Settings(BaseSettings):
     takeover_url: str = Field(
         "http://localhost:6080/vnc.html?autoconnect=true&resize=scale",
         alias="TAKEOVER_URL",
+        repr=False,
     )
     remote_access_info_path: str = Field(
         "/data/tunnels/reverse-ssh.json",
@@ -81,21 +90,35 @@ class Settings(BaseSettings):
         "/data/compliance-manifest.json",
         alias="COMPLIANCE_MANIFEST_PATH",
     )
-    redis_url: str | None = Field(None, alias="REDIS_URL")
+    redis_url: str | None = Field(None, alias="REDIS_URL", repr=False)
     session_store_redis_prefix: str = Field(
         "auto_browser:sessions",
         alias="SESSION_STORE_REDIS_PREFIX",
     )
     agent_job_worker_count: int = Field(1, alias="AGENT_JOB_WORKER_COUNT")
-    auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY")
+    auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY", repr=False)
     require_auth_state_encryption: bool = Field(False, alias="REQUIRE_AUTH_STATE_ENCRYPTION")
     auth_state_max_age_hours: float = Field(72.0, alias="AUTH_STATE_MAX_AGE_HOURS")
     harness_root: str = Field("/data/harness", alias="HARNESS_ROOT")
     harness_verifier: str = Field("programmatic", alias="HARNESS_VERIFIER")
     harness_uv_command: str = Field("", alias="HARNESS_UV_COMMAND")
+    # Extra environment variable names (comma-separated) the HARNESS_UV_COMMAND child gets on top of the base ones.
+    harness_uv_env_passthrough: str = Field("", alias="HARNESS_UV_ENV_PASSTHROUGH")
     harness_explorer_model: str = Field("", alias="HARNESS_EXPLORER_MODEL")
     harness_verifier_model: str = Field("", alias="HARNESS_VERIFIER_MODEL")
     harness_executor_model: str = Field("", alias="HARNESS_EXECUTOR_MODEL")
+    # Runs and staged candidates older than this many days are removed (0 or less, the default, keeps them: staging
+    # holds a candidate's only copy, and an upgrade must delete nothing); at most this many runs are kept per
+    # operator before a new one is refused (0 or less means no cap).
+    harness_retention_days: float = Field(0.0, alias="HARNESS_RETENTION_DAYS")
+    harness_max_runs_per_operator: int = Field(0, alias="HARNESS_MAX_RUNS_PER_OPERATOR")
+    # Mesh: signed delegation between auto-browser nodes (docs/mesh.md). Off by default.
+    mesh_enabled: bool = Field(False, alias="MESH_ENABLED")
+    mesh_identity_dir: str = Field("/data/mesh/identity", alias="MESH_IDENTITY_DIR")
+    mesh_peers_path: str = Field("/data/mesh/peers.json", alias="MESH_PEERS_PATH")
+    mesh_timestamp_window: float = Field(30.0, alias="MESH_TIMESTAMP_WINDOW")
+    # /mesh/receive skips the bearer token, so its body is capped before anything is parsed.
+    mesh_max_body_bytes: int = Field(1024 * 1024, alias="MESH_MAX_BODY_BYTES")
     memory_root: str = Field("/data/memory", alias="MEMORY_ROOT")
     memory_enabled: bool = Field(True, alias="MEMORY_ENABLED")
     ocr_enabled: bool = Field(True, alias="OCR_ENABLED")
@@ -248,8 +271,8 @@ class Settings(BaseSettings):
         "normal",
         alias="WITNESS_PROTECTION_MODE_DEFAULT",
     )
-    witness_remote_url: str | None = Field(None, alias="WITNESS_REMOTE_URL")
-    witness_remote_api_key: str | None = Field(None, alias="WITNESS_REMOTE_API_KEY")
+    witness_remote_url: str | None = Field(None, alias="WITNESS_REMOTE_URL", repr=False)
+    witness_remote_api_key: str | None = Field(None, alias="WITNESS_REMOTE_API_KEY", repr=False)
     witness_remote_tenant_id: str | None = Field(None, alias="WITNESS_REMOTE_TENANT_ID")
     witness_remote_timeout_seconds: float = Field(0.75, alias="WITNESS_REMOTE_TIMEOUT_SECONDS")
     witness_remote_verify_tls: bool = Field(True, alias="WITNESS_REMOTE_VERIFY_TLS")
@@ -258,7 +281,6 @@ class Settings(BaseSettings):
         alias="WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL",
     )
     enable_tracing: bool = Field(False, alias="ENABLE_TRACING")
-    typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")
     request_rate_limit_enabled: bool = Field(True, alias="REQUEST_RATE_LIMIT_ENABLED")
     request_rate_limit_requests: int = Field(120, alias="REQUEST_RATE_LIMIT_REQUESTS")
@@ -278,8 +300,8 @@ class Settings(BaseSettings):
     upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
 
-    openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
-    openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY", repr=False)
+    openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL", repr=False)
     openai_model: str = Field("gpt-6.1-sol", alias="OPENAI_MODEL")
     openai_auth_mode: str = Field("api", alias="OPENAI_AUTH_MODE")
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
@@ -294,8 +316,8 @@ class Settings(BaseSettings):
     codex_sandbox_mode: str = Field("read-only", alias="CODEX_SANDBOX_MODE")
     codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 
-    anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
-    anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL")
+    anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY", repr=False)
+    anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL", repr=False)
     anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     vision_model: str = Field("claude-haiku-4-5-20251001", alias="VISION_MODEL")
@@ -303,10 +325,11 @@ class Settings(BaseSettings):
     claude_cli_path: str = Field("claude", alias="CLAUDE_CLI_PATH")
     claude_cli_model: str | None = Field(None, alias="CLAUDE_CLI_MODEL")
 
-    gemini_api_key: str | None = Field(None, alias="GEMINI_API_KEY")
+    gemini_api_key: str | None = Field(None, alias="GEMINI_API_KEY", repr=False)
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta",
         alias="GEMINI_BASE_URL",
+        repr=False,
     )
     gemini_model: str = Field("gemini-3.5-flash", alias="GEMINI_MODEL")
     gemini_auth_mode: str = Field("api", alias="GEMINI_AUTH_MODE")
@@ -319,24 +342,24 @@ class Settings(BaseSettings):
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
     # are stable; model defaults are current-but-overridable.
-    openrouter_api_key: str | None = Field(None, alias="OPENROUTER_API_KEY")
-    openrouter_base_url: str = Field("https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    openrouter_api_key: str | None = Field(None, alias="OPENROUTER_API_KEY", repr=False)
+    openrouter_base_url: str = Field("https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL", repr=False)
     openrouter_model: str = Field("", alias="OPENROUTER_MODEL")
 
-    xai_api_key: str | None = Field(None, alias="XAI_API_KEY")
-    xai_base_url: str = Field("https://api.x.ai/v1", alias="XAI_BASE_URL")
+    xai_api_key: str | None = Field(None, alias="XAI_API_KEY", repr=False)
+    xai_base_url: str = Field("https://api.x.ai/v1", alias="XAI_BASE_URL", repr=False)
     xai_model: str = Field("grok-4", alias="XAI_MODEL")
 
-    deepseek_api_key: str | None = Field(None, alias="DEEPSEEK_API_KEY")
-    deepseek_base_url: str = Field("https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
+    deepseek_api_key: str | None = Field(None, alias="DEEPSEEK_API_KEY", repr=False)
+    deepseek_base_url: str = Field("https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL", repr=False)
     deepseek_model: str = Field("deepseek-chat", alias="DEEPSEEK_MODEL")
 
-    minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY")
-    minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
+    minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY", repr=False)
+    minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL", repr=False)
     minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
 
-    openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY")
-    openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL")
+    openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY", repr=False)
+    openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL", repr=False)
     openai_compatible_model: str = Field("", alias="OPENAI_COMPATIBLE_MODEL")
 
     model_request_timeout_seconds: float = Field(60.0, alias="MODEL_REQUEST_TIMEOUT_SECONDS")
@@ -358,8 +381,12 @@ class Settings(BaseSettings):
     )
 
     # Approval webhooks — notified when approvals are created or decided
-    approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL")
-    approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET")
+    approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL", repr=False)
+    approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET", repr=False)
+    # Off: a webhook host that is, or resolves to, any address that is not global is refused (app/webhooks.py). On,
+    # for a receiver on the compose network, the LAN or a tailnet: loopback and the private ranges are allowed too.
+    # Cloud metadata is always refused.
+    approval_webhook_allow_private_targets: bool = Field(False, alias="APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS")
 
     # Perception presets — default mode for /observe
     # text: no screenshot, no OCR — accessibility tree + text extraction only
@@ -378,9 +405,9 @@ class Settings(BaseSettings):
     sse_keepalive_seconds: float = Field(15.0, alias="SSE_KEEPALIVE_SECONDS")
 
     # Proxy (session-level override supported in CreateSessionRequest)
-    default_proxy_server: str | None = Field(None, alias="DEFAULT_PROXY_SERVER")
+    default_proxy_server: str | None = Field(None, alias="DEFAULT_PROXY_SERVER", repr=False)
     default_proxy_username: str | None = Field(None, alias="DEFAULT_PROXY_USERNAME")
-    default_proxy_password: str | None = Field(None, alias="DEFAULT_PROXY_PASSWORD")
+    default_proxy_password: str | None = Field(None, alias="DEFAULT_PROXY_PASSWORD", repr=False)
 
     # Proxy personas — path to JSON file mapping name → {server, username, password}
     proxy_persona_file: str | None = Field(None, alias="PROXY_PERSONA_FILE")
@@ -408,7 +435,7 @@ class Settings(BaseSettings):
     network_inspector_body_max_bytes: int = Field(16384, alias="NETWORK_INSPECTOR_BODY_MAX_BYTES")
 
     # CDP attach mode — connect to an already-running Chrome instance
-    cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL")
+    cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL", repr=False)
     # The operator's declaration that the Chrome reached over CDP (CDP_CONNECT_URL, browser.cdp_attach) was
     # started with --disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect
     # (request_gate.REDIRECT_ORIGIN_SWITCH). Without the first, older Chrome fails a cross-origin POST redirect the
@@ -425,13 +452,15 @@ class Settings(BaseSettings):
     # Post-session skill review by an LLM. Off unless asked for: it calls a paid
     # model on every session close.
     curator_enabled: bool = Field(False, alias="CURATOR_ENABLED")
+    curator_provider: str = Field("claude", alias="CURATOR_PROVIDER")
+    curator_model: str | None = Field(None, alias="CURATOR_MODEL")
 
     # Cron / webhook triggers
     cron_store_path: str = Field("/data/crons/crons.json", alias="CRON_STORE_PATH")
     cron_max_jobs: int = Field(50, alias="CRON_MAX_JOBS")
 
     # Shared session links
-    share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET")
+    share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET", repr=False)
     share_token_ttl_minutes: int = Field(60, alias="SHARE_TOKEN_TTL_MINUTES")
 
     model_config = SettingsConfigDict(
@@ -443,6 +472,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "api_bearer_token",
+        "takeover_token",
         "witness_remote_api_key",
         "openai_api_key",
         "anthropic_api_key",
@@ -460,6 +490,24 @@ class Settings(BaseSettings):
         # answered 401 (OpenRouter: "Missing Authentication header").
         # A whitespace-only API_BEARER_TOKEN was a credential that "Bearer" plus the same
         # whitespace satisfied (40 spaces even cleared the 32-character floor); it is unset now.
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("*")
+    @classmethod
+    def _floats_are_finite(cls, value: object, info: ValidationInfo) -> object:
+        # nan compares false with everything, so a nan retention swept every artifact and a nan timeout never fired.
+        # Zero and negative stay valid: ARTIFACT_RETENTION_HOURS <= 0 means "keep forever".
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
+        return value
+
+    @field_validator("cdp_connect_url", mode="before")
+    @classmethod
+    def _cdp_connect_url_stripped(cls, value: object) -> object:
+        # A quoted .env value or a process variable can carry a trailing CR or LF, which the control-character
+        # refusal (runtime_policy) turned into a startup failure. Only the ends are trimmed: one inside is refused.
         if isinstance(value, str):
             return value.strip() or None
         return value
@@ -488,6 +536,10 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return str(SECCOMP_PROFILE_PATH)
         return value
+
+    @property
+    def harness_uv_env_passthrough_names(self) -> list[str]:
+        return [item.strip() for item in self.harness_uv_env_passthrough.split(",") if item.strip()]
 
     @property
     def cli_provider_env_passthrough_names(self) -> list[str]:

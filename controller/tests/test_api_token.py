@@ -179,6 +179,30 @@ def test_the_generation_warning_only_promises_0600_where_it_holds(
         assert "API_TOKEN_FILE under your user profile" in caplog.text
 
 
+def test_w10_10_the_takeover_tokens_windows_note_names_its_own_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    # The note said "set API_TOKEN_FILE under your user profile" for a generated TAKEOVER_TOKEN_FILE too.
+    from app.api_token import ensure_takeover_token
+
+    real_os = api_token.os
+    monkeypatch.setattr(api_token, "os", SimpleNamespace(**{**vars(real_os), "name": "nt"}))
+    monkeypatch.setattr(api_token, "_match_parent_owner", lambda _path: None)
+    settings = make_settings(
+        tmp_path / "api-token", API_BEARER_TOKEN=STRONG_TOKEN, TAKEOVER_TOKEN_FILE=str(tmp_path / "takeover-token")
+    )
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+
+    generated = [
+        record.getMessage() for record in caplog.records if "Generated a takeover token" in record.getMessage()
+    ]
+    assert len(generated) == 1, caplog.text
+    assert "set TAKEOVER_TOKEN_FILE under your user profile" in generated[0]
+    assert "API_TOKEN_FILE" not in generated[0]
+
+
 def test_a_second_start_reuses_the_saved_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
     path = tmp_path / "api-token"
     first = make_settings(path)
@@ -385,7 +409,7 @@ def test_group_or_other_bits_are_removed_with_a_warning(
     closed: list[int] = []
     fake_os = _posix_stand_in(
         open=lambda target, flags: 7,
-        fstat=lambda fd: SimpleNamespace(st_mode=mode),
+        fstat=lambda fd: SimpleNamespace(st_mode=0o100600 if fchmods else mode),
         fchmod=lambda fd, bits: fchmods.append((fd, bits)),
         close=closed.append,
     )
@@ -397,7 +421,163 @@ def test_group_or_other_bits_are_removed_with_a_warning(
     # Changed through the descriptor it opened without following a symlink, never by path.
     assert fchmods == ([(7, 0o600)] if tightened else [])
     assert closed == [7]
-    assert ("0600" in caplog.text) is tightened
+    assert ("changed it to 0600" in caplog.text) is tightened
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w5_4_a_filesystem_that_ignores_chmod_is_warned_about_and_the_token_still_used(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # A repo on a Windows drive under Docker Desktop, or some FUSE and SMB mounts, accept a chmod and keep the mode:
+    # the log said "changed it to 0600" while the file stayed readable beyond its owner.
+    from app.api_token import ensure_takeover_token
+
+    marker = "w5-4-marker-" + "m" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    path = api_path if which == "API_TOKEN_FILE" else takeover_path
+    for each, value in ((api_path, STRONG_TOKEN), (takeover_path, marker)):
+        each.write_text(value + "\n", encoding="utf-8")
+        each.chmod(0o600)
+    path.chmod(0o644)
+
+    with patch.object(api_token.os, "fchmod", lambda fd, bits: None), caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    assert "changed it" not in caplog.text
+    warned = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert which in warned[0] and str(path) in warned[0] and "did not keep" in warned[0]
+    assert "644" in warned[0]
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert settings.takeover_token == marker
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w7_4_a_generated_token_file_whose_filesystem_kept_no_mode_is_warned_about(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The generation paths wrote 0600 and logged "mode 0600" without checking it held: on a Windows drive under
+    # Docker Desktop the first start claimed 0600 and warned nothing; only the second start warned.
+    from app.api_token import ensure_takeover_token
+
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    path = api_path if which == "API_TOKEN_FILE" else takeover_path
+    # The other file is already there (0600), so only `which` is generated.
+    other, value = (takeover_path, "w7-4-marker-" + "m" * 32) if which == "API_TOKEN_FILE" else (api_path, STRONG_TOKEN)
+    other.write_text(value + "\n", encoding="utf-8")
+    other.chmod(0o600)
+    real_write = api_token.atomic_write_text
+
+    def write_on_a_filesystem_that_keeps_no_mode(target, text, **kwargs):
+        real_write(target, text, **kwargs)
+        os.chmod(target, 0o666)  # noqa: S103 - what such a filesystem reports for every file
+
+    with (
+        patch.object(api_token, "atomic_write_text", write_on_a_filesystem_that_keeps_no_mode),
+        caplog.at_level(logging.INFO, logger=LOGGER),
+    ):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    warned = [record.getMessage() for record in caplog.records if "did not keep" in record.getMessage()]
+    assert len(warned) == 1, caplog.text
+    assert which in warned[0] and str(path) in warned[0] and "666" in warned[0]
+    assert settings.api_bearer_token
+    assert settings.takeover_token
+    # W9-8: the generation line said "mode 0600" right after that warning.
+    generated = [record.getMessage() for record in caplog.records if "enerated a" in record.getMessage()]
+    assert len(generated) == 1, caplog.text
+    assert "mode 0600" not in generated[0] and "mode 666" in generated[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w10_8_a_generated_token_file_with_another_owner_only_mode_is_named_as_found(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The generation line said "mode 0600" for any mode without group or other bits (0400, 0700, 0000).
+    from app.api_token import ensure_takeover_token
+
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    other, value = (
+        (takeover_path, "w10-8-marker-" + "m" * 32) if which == "API_TOKEN_FILE" else (api_path, STRONG_TOKEN)
+    )
+    other.write_text(value + "\n", encoding="utf-8")
+    other.chmod(0o600)
+    real_write = api_token.atomic_write_text
+
+    def write_owner_read_only(target, text, **kwargs):
+        real_write(target, text, **kwargs)
+        os.chmod(target, 0o400)
+
+    with (
+        patch.object(api_token, "atomic_write_text", write_owner_read_only),
+        caplog.at_level(logging.INFO, logger=LOGGER),
+    ):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    generated = [record.getMessage() for record in caplog.records if "enerated a" in record.getMessage()]
+    assert len(generated) == 1, caplog.text
+    assert "mode 0600" not in generated[0] and "mode 400" in generated[0]
+    # Nothing beyond the owner can read it, so nothing is warned about.
+    assert "did not keep" not in caplog.text
+    assert settings.api_bearer_token
+    assert settings.takeover_token
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w9_8_a_mode_check_that_cannot_stat_the_generated_file_warns_and_the_token_is_used(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The check returned silently when its stat failed, and the generation line still said "mode 0600".
+    import errno
+
+    from app.api_token import ensure_takeover_token
+
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    path = api_path if which == "API_TOKEN_FILE" else takeover_path
+    other, value = (takeover_path, "w9-8-marker-" + "m" * 32) if which == "API_TOKEN_FILE" else (api_path, STRONG_TOKEN)
+    other.write_text(value + "\n", encoding="utf-8")
+    other.chmod(0o600)
+    real_write, real_stat = api_token.atomic_write_text, os.stat
+    state = {"written": False, "failed": False}
+
+    def write(target, text, **kwargs):
+        real_write(target, text, **kwargs)
+        state["written"] = True
+
+    def stat(target, *args, **kwargs):
+        if state["written"] and not state["failed"] and os.fspath(target) == os.fspath(path):
+            state["failed"] = True
+            raise OSError(errno.EIO, "Input/output error", os.fspath(target))
+        return real_stat(target, *args, **kwargs)
+
+    with (
+        patch.object(api_token, "atomic_write_text", write),
+        patch.object(api_token.os, "stat", stat),
+        caplog.at_level(logging.INFO, logger=LOGGER),
+    ):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    assert state["failed"]
+    warned = [record.getMessage() for record in caplog.records if "could not check the mode" in record.getMessage()]
+    assert len(warned) == 1, caplog.text
+    assert which in warned[0] and str(path) in warned[0] and "after writing it" in warned[0]
+    generated = [record.getMessage() for record in caplog.records if "enerated a" in record.getMessage()]
+    assert len(generated) == 1 and "mode 0600" not in generated[0], caplog.text
+    assert settings.api_bearer_token
+    assert settings.takeover_token
+    assert path.read_text(encoding="utf-8").strip() in (settings.api_bearer_token, settings.takeover_token)
 
 
 def _posix_stand_in(**functions) -> SimpleNamespace:
@@ -409,21 +589,100 @@ def test_a_symlinked_token_file_is_left_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     # Kubernetes secret mounts are symlinks, and chmod would change the target (a file we may not own).
-    # O_NOFOLLOW makes opening a symlink fail with ELOOP.
+    # O_NOFOLLOW makes opening a symlink fail with ELOOP; the target is then opened only to read its mode.
     opened: list[int] = []
 
     def refuse_symlink(target, flags):
         opened.append(flags)
-        raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+        if flags & fake_os.O_NOFOLLOW:
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+        return 9
 
-    fake_os = _posix_stand_in(open=refuse_symlink, fstat=None, fchmod=None, close=None)
+    fchmods: list[int] = []
+    fake_os = _posix_stand_in(
+        open=refuse_symlink,
+        fstat=lambda fd: SimpleNamespace(st_mode=0o100600),
+        fchmod=lambda fd, bits: fchmods.append(fd),
+        close=lambda fd: None,
+    )
     monkeypatch.setattr(api_token, "os", fake_os)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         api_token._restrict_mode(tmp_path / "api-token")
 
     assert opened and opened[0] & fake_os.O_NOFOLLOW
+    assert fchmods == []
     assert caplog.text == ""
+
+
+requires_posix_symlinks = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX modes, and creating a symlink on Windows needs a privilege CI's runner lacks"
+)
+
+
+@requires_posix_symlinks
+@pytest.mark.parametrize(("mode", "warned"), [(0o644, True), (0o600, False)])
+def test_w4_4_a_symlinked_token_file_is_used_and_warns_when_its_target_is_readable_beyond_its_owner(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: int, warned: bool
+):
+    target = tmp_path / "secret-mount" / "..data" / "api-token"
+    target.parent.mkdir(parents=True)
+    target.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
+    target.chmod(mode)
+    link = tmp_path / "api-token"
+    link.symlink_to(target)
+    settings = make_settings(link)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert stat.S_IMODE(target.stat().st_mode) == mode  # the target is not ours to change
+    assert ("readable beyond its owner" in caplog.text) is warned
+    if warned:
+        assert str(link) in caplog.text and "644" in caplog.text
+    assert STRONG_TOKEN not in caplog.text
+
+
+@requires_posix_symlinks
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w6_4_a_link_target_that_cannot_be_opened_for_its_mode_is_warned_about_and_the_token_used(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The target vanished or turned unreadable between the read and the mode check: the open raised, which stopped
+    # startup for API_TOKEN_FILE and was reported as "could not be tightened" for TAKEOVER_TOKEN_FILE.
+    from app.api_token import ensure_takeover_token
+
+    marker = "w6-4-marker-" + "m" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    link = api_path if which == "API_TOKEN_FILE" else takeover_path
+    for each, value in ((api_path, STRONG_TOKEN), (takeover_path, marker)):
+        target = tmp_path / "mount" / each.name
+        target.parent.mkdir(exist_ok=True)
+        target.write_text(value + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        if each == link:
+            each.symlink_to(target)
+        else:
+            target.replace(each)
+    real_open = os.open
+
+    def follow_fails(path, flags, *args, **kwargs):
+        if Path(path) == link and not flags & os.O_NOFOLLOW:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch.object(api_token.os, "open", follow_fails), caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    warned = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert which in warned[0] and str(link) in warned[0] and "could not be checked" in warned[0]
+    assert "Permission denied" in warned[0]
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert settings.takeover_token == marker
 
 
 def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -432,8 +691,17 @@ def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(api_token, "os", _posix_stand_in(open=refuse))
 
-    with pytest.raises(PermissionError):
+    # W10-1: API_TOKEN_FILE's failure is the original exception, as before W8-6.
+    with pytest.raises(PermissionError) as raised:
         api_token._restrict_mode(tmp_path / "api-token")
+    assert type(raised.value) is PermissionError
+    assert raised.value.__cause__ is None
+
+    # W8-6: for a takeover token file it is an OSError of _restrict_mode's own, which keeps the errno, so the
+    # caller can name the cause.
+    with pytest.raises(api_token._ModeCheckOpenError) as raised:
+        api_token._restrict_mode(tmp_path / "takeover-token", name="TAKEOVER_TOKEN_FILE")
+    assert raised.value.errno == errno.EACCES
 
 
 @pytest.mark.parametrize(

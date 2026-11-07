@@ -12,7 +12,8 @@ def register(registry, gateway):
                 "Fork a session: snapshot its cookies, storage state, and current URL, "
                 "then create a new independent session with that state. "
                 "Useful for branching workflows or running parallel variants. "
-                "Refused without start_url while the page is Chrome's error page for a stopped navigation. "
+                "Without start_url, a page that is no URL to open (blank, data:, Chrome's error page) forks onto "
+                "a blank page. "
                 "Counts as a new session: needs MAX_SESSIONS of at least 2."
             ),
             input_model=ForkSessionInput,

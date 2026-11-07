@@ -305,6 +305,14 @@ class ShippedComposeDeclarationTests(unittest.TestCase):
         self.assertIn("API_TOKEN_FILE: /data/api-token\n", text)
         self.assertIn("API_ALLOW_TOKENLESS_LOOPBACK: ${API_ALLOW_TOKENLESS_LOOPBACK:-false}", text)
 
+    def test_base_compose_pins_the_takeover_token_file_and_passes_the_shell_token(self) -> None:
+        # W2-1/W2-20: scripts/load_env.sh's takeover_token reads /data/takeover-token, so compose must pin it there
+        # (a TAKEOVER_TOKEN_FILE in .env made the controller use another file and the scripts got a 403), and a
+        # TAKEOVER_TOKEN exported in the shell must reach the controller as API_BEARER_TOKEN does.
+        text = self._compose("docker-compose.yml")
+        self.assertIn("      TAKEOVER_TOKEN_FILE: /data/takeover-token\n", text)
+        self.assertIn("      TAKEOVER_TOKEN: ${TAKEOVER_TOKEN:-}\n", text)
+
     def test_codespaces_overlay_declares_exposed_because_it_publishes_widely(self) -> None:
         text = self._compose("docker-compose.codespaces.yml")
         self.assertIn('"0.0.0.0:${API_PORT:-8000}:8000"', text)

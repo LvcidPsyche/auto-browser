@@ -114,6 +114,15 @@ class PeerRegistryFile:
         except (TypeError, ValueError) as exc:
             self._fail_closed(f"the peers file has an invalid entry ({exc})", signature)
             return
+        for peer in peers.values():
+            for grant in peer.grants:
+                if grant.require_approval:
+                    logger.warning(
+                        "mesh.peers: peer %s grant %s sets require_approval, which is deprecated: nothing can "
+                        "approve a mesh request, so this capability will always answer approval_required",
+                        peer.node_id,
+                        grant.capability,
+                    )
         self._peers = peers
         self._signature = signature
         self._last_seen = {key: seen for key, seen in self._last_seen.items() if key in peers}

@@ -12,6 +12,7 @@ import traceback
 import unittest
 from types import SimpleNamespace
 
+from app.action_errors import BrowserUnreachableError
 from app.browser.services.runtime import BrowserRuntimeService
 from app.browser_sandbox import browser_sandbox_check, redact_endpoints
 
@@ -92,7 +93,7 @@ class ControllerOutputRedactionTests(unittest.IsolatedAsyncioTestCase):
         manager.settings.cdp_connect_url = None
         manager.playwright.chromium = FailingChromium()
 
-        with self.assertRaises(RuntimeError) as raised:
+        with self.assertRaises(BrowserUnreachableError) as raised:
             await BrowserRuntimeService(manager).ensure_browser()
 
         self.assertNotIn(SECRET, str(raised.exception))
@@ -106,7 +107,7 @@ class ControllerOutputRedactionTests(unittest.IsolatedAsyncioTestCase):
             return ENDPOINT
 
         with self.assertLogs("app.browser.services.runtime", level=logging.WARNING) as logs:
-            with self.assertRaises(RuntimeError) as raised:
+            with self.assertRaises(BrowserUnreachableError) as raised:
                 await BrowserRuntimeService(manager).connect_browser(
                     factory, failure_context="browser node unreachable"
                 )

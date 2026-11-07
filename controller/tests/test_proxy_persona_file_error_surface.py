@@ -46,7 +46,11 @@ def client(corrupt_path: Path) -> TestClient:
     async def create_session(**kwargs):
         store.resolve_proxy(kwargs["proxy_persona"])
 
-    manager = SimpleNamespace(create_session=create_session)
+    async def fork_session(session_id, **kwargs):
+        # The fork's create_session reads the source's (or the named) persona the same way.
+        store.resolve_proxy(kwargs["proxy_persona"] or "a")
+
+    manager = SimpleNamespace(create_session=create_session, fork_session=fork_session)
     app = FastAPI()
     app.include_router(create_operations_router(manager=manager, proxy_store=store, cron_service=Mock()))
     app.include_router(create_sessions_router(manager=manager))
@@ -85,6 +89,8 @@ def test_the_message_names_the_setting_not_the_path(corrupt_path: Path):
         ("post", "/proxy-personas", {"name": "z", "server": "http://z:1"}),
         ("delete", "/proxy-personas/a", None),
         ("post", "/sessions", {"proxy_persona": "a"}),
+        # B-fix-6 (NAV-04): the fork route answered this 409 Conflict (ProxyPersonaFileError is a RuntimeError).
+        ("post", "/sessions/s1/fork?proxy_persona=a", None),
     ],
 )
 def test_rest_answers_503_with_the_fixed_text(client: TestClient, corrupt_path: Path, verb, path, body):

@@ -5,8 +5,68 @@ import json
 from shutil import which
 from typing import Any
 
+from ...process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
+from ...providers.base import allowlisted_environment
 from ..contracts import TaskContract
 from .base import VerificationResult
+
+# The command's answer is a small JSON object; anything past this is a runaway or hostile command.
+_STDOUT_LIMIT_BYTES = 1024 * 1024
+# Only the start of stderr is kept (it feeds a 1 KiB failure detail); the rest is drained so the child never blocks.
+_STDERR_KEEP_BYTES = 4096
+_READ_CHUNK_BYTES = 65536
+
+
+class _OutputTooLarge(Exception):
+    pass
+
+
+async def _read_capped(stream: asyncio.StreamReader, limit: int, *, strict: bool) -> bytes:
+    """Read the stream to its end, keeping at most `limit` bytes; past it, `strict` raises and otherwise discards.
+
+    Not strict, the part of the chunk that crosses the limit that still fits is kept, so the start always is.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await stream.read(_READ_CHUNK_BYTES):
+        room = limit - total
+        total += len(chunk)
+        if total > limit:
+            if strict:
+                raise _OutputTooLarge
+            if room > 0:
+                chunks.append(chunk[:room])
+            continue
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:
+    try:
+        process.stdin.write(data)
+        await process.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # the command answered without reading all of its input
+    finally:
+        process.stdin.close()
+
+
+async def _exchange(process: asyncio.subprocess.Process, data: bytes) -> tuple[bytes, bytes]:
+    """Send `data`, then return (stdout, stderr), raising _OutputTooLarge when stdout passes its cap."""
+    tasks = [
+        asyncio.ensure_future(_feed(process, data)),
+        asyncio.ensure_future(_read_capped(process.stdout, _STDOUT_LIMIT_BYTES, strict=True)),
+        asyncio.ensure_future(_read_capped(process.stderr, _STDERR_KEEP_BYTES, strict=False)),
+    ]
+    try:
+        _, stdout, stderr = await asyncio.gather(*tasks)
+        await process.wait()
+        return stdout, stderr
+    finally:
+        # No reader may outlive the call: the reaping that follows reads the pipes itself.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class UniversalVerifierAdapter:
@@ -14,9 +74,16 @@ class UniversalVerifierAdapter:
 
     backend = "uv"
 
-    def __init__(self, command: list[str] | None = None, timeout_seconds: float = 60.0):
+    def __init__(
+        self,
+        command: list[str] | None = None,
+        timeout_seconds: float = 60.0,
+        env_passthrough: list[str] | tuple[str, ...] = (),
+    ):
         self.command = command
         self.timeout_seconds = timeout_seconds
+        # HARNESS_UV_ENV_PASSTHROUGH: names the command gets on top of the base ones (W2-27).
+        self.env_passthrough = tuple(env_passthrough)
 
     @property
     def available(self) -> bool:
@@ -38,15 +105,21 @@ class UniversalVerifierAdapter:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # The base names and HARNESS_UV_ENV_PASSTHROUGH, not the controller's tokens and keys (W2-27).
+            env=allowlisted_environment(self.env_passthrough),
+            **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(json.dumps(payload).encode("utf-8")),
+                _exchange(process, json.dumps(payload).encode("utf-8")),
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:
             await self._kill_and_reap(process)
             return self._unavailable("Universal Verifier command timed out.")
+        except _OutputTooLarge:
+            await self._kill_and_reap(process)
+            return self._unavailable(f"Universal Verifier output exceeded {_STDOUT_LIMIT_BYTES} bytes.")
         except BaseException:
             # The caller gave up (HarnessService wraps verify() in a wall-clock
             # wait_for) or the app is shutting down: CancelledError is not a
@@ -88,11 +161,9 @@ class UniversalVerifierAdapter:
 
     @staticmethod
     async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass  # exited between the timeout and the kill
-        await process.communicate()
+        # The whole process group on POSIX (a descendant holding a pipe kept it open), then a drain that discards
+        # and gives up after DRAIN_TIMEOUT_SECONDS: an uncapped communicate() hung on such a pipe and buffered it.
+        await kill_and_drain(process, label="Universal Verifier command")
 
     def _unavailable(self, note: str) -> VerificationResult:
         return VerificationResult(

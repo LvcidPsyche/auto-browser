@@ -17,9 +17,13 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import docker
 from pydantic import ValidationError
 
+from app.browser.services.runtime import BrowserRuntimeService
 from app.config import Settings
 from app.session_isolation import DockerBrowserNodeProvisioner, _host_path
 from tests.test_session_isolation import FakeDockerClient, FakeDockerContainer
@@ -267,12 +271,21 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.api.connect_bodies[-1]["EndpointConfig"], {"GwPriority": -1})
 
-    async def test_an_old_daemon_does_not_warn_when_the_session_network_sorts_after_the_controllers(self) -> None:
+    async def test_an_old_daemon_warns_once_even_when_the_session_network_sorts_after_the_controllers(self) -> None:
+        # B-fix-10 (D8-4): the name check is not the whole of Docker's choice (the published port can move anyway),
+        # so an old daemon gets the warning once at the first isolated provision, without the order problem.
         provisioner, client = self.provisioner()
         client.api_version = "1.47"
 
-        with self.assertNoLogs("app.session_isolation", level=logging.WARNING):
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
             await provisioner.provision("s1")
+            await provisioner.provision("s2")
+
+        warnings = [line for line in logs.output if "GwPriority" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GwPriority is not honoured", warnings[0])
+        self.assertNotIn("sorts before", warnings[0])
+        self.assertIn("Docker Engine 28", warnings[0])
 
     async def test_a_current_daemon_does_not_warn_whatever_the_names(self) -> None:
         provisioner, client = self.provisioner(ISOLATED_BROWSER_CONTAINER_PREFIX="aaa-session")
@@ -362,7 +375,8 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         client.events.clear()
 
         with self.assertLogs("app.session_isolation", level=logging.WARNING):
-            await provisioner.release(runtime)
+            with self.assertRaises(RuntimeError):  # R-12: the release is partial, and says so
+                await provisioner.release(runtime)
 
         self.assertNotIn(runtime.network_name, client.networks.by_name)
         self.assertEqual(
@@ -398,10 +412,88 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         client.networks.by_name[runtime.network_name].attrs["Labels"]["auto-browser.session_id"] = "someone-else"
 
         with self.assertLogs("app.session_isolation", level=logging.WARNING):
-            await provisioner.release(runtime)
+            with self.assertRaises(RuntimeError):
+                await provisioner.release(runtime)
 
         network = client.networks.by_name[runtime.network_name]
         self.assertIn(container.id, network.attrs["Containers"])
+
+    async def test_a_container_that_cannot_be_removed_keeps_its_profile_and_the_release_raises(self) -> None:
+        # R-12: the failed removal was logged, then the mounted profile emptied and the release reported success.
+        provisioner, client = self.provisioner()
+        runtime = await provisioner.provision("s1")
+        container = client.containers.browser_containers[runtime.container_name]
+
+        def refuse_stop(timeout: int = 0) -> None:
+            raise docker.errors.APIError("stop refused")
+
+        def refuse_remove(force: bool = False) -> None:
+            raise docker.errors.APIError("remove refused")
+
+        container.stop = refuse_stop  # type: ignore[method-assign]
+        container.remove = refuse_remove  # type: ignore[method-assign]
+        client.events.clear()
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
+            with self.assertRaises(RuntimeError) as raised:
+                await provisioner.release(runtime)
+
+        self.assertIn(runtime.container_name, str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, docker.errors.APIError)
+        self.assertTrue(provisioner._local_runtime_root("s1").exists())
+        self.assertNotIn("cleanup.run", [event[0] for event in client.events])
+        self.assertTrue(any(str(provisioner._local_runtime_root("s1")) in line for line in logs.output))
+
+    async def test_a_failed_release_in_the_provision_rollback_does_not_replace_the_original_error(self) -> None:
+        provisioner, client = self.provisioner()
+        original_provision = provisioner._provision_container_sync
+
+        def provision_then_refuse_removal(session_id: str):
+            pending = original_provision(session_id)
+
+            def refuse(force: bool = False) -> None:
+                raise docker.errors.APIError("remove refused")
+
+            pending.container.remove = refuse  # type: ignore[method-assign]
+            return pending
+
+        provisioner._provision_container_sync = provision_then_refuse_removal  # type: ignore[method-assign]
+        provisioner._wait_for_ws_endpoint = AsyncMock(side_effect=TimeoutError("endpoint never appeared"))
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING):
+            with self.assertRaisesRegex(TimeoutError, "endpoint never appeared"):
+                await provisioner.provision("s1")
+
+    async def test_a_failed_release_in_the_connect_rollback_does_not_replace_the_connect_error(self) -> None:
+        runtime = SimpleNamespace(ws_endpoint="ws://browser-session-s1:9223/x", ws_endpoint_file="/endpoint")
+        manager = SimpleNamespace(
+            settings=SimpleNamespace(session_isolation_mode="docker_ephemeral"),
+            runtime_provisioner=SimpleNamespace(
+                provision=AsyncMock(return_value=runtime),
+                release=AsyncMock(side_effect=RuntimeError("browser container could not be removed")),
+            ),
+        )
+        service = BrowserRuntimeService(manager)
+        service.connect_browser = AsyncMock(side_effect=RuntimeError("connect failed"))  # type: ignore[method-assign]
+
+        with self.assertLogs("app.browser.services.runtime", level=logging.WARNING):
+            with self.assertRaisesRegex(RuntimeError, "connect failed"):
+                await service.acquire_session_browser("s1")
+        manager.runtime_provisioner.release.assert_awaited_once_with(runtime)
+
+    async def test_a_container_already_gone_at_removal_still_releases_and_deletes_the_profile(self) -> None:
+        provisioner, client = self.provisioner()
+        runtime = await provisioner.provision("s1")
+        container = client.containers.browser_containers[runtime.container_name]
+
+        def gone(force: bool = False) -> None:
+            raise docker.errors.NotFound("no such container")
+
+        container.remove = gone  # type: ignore[method-assign]
+
+        await provisioner.release(runtime)
+
+        self.assertFalse(provisioner._local_runtime_root("s1").exists())
 
     async def test_release_carries_on_when_the_network_is_already_gone(self) -> None:
         provisioner, client = self.provisioner()
@@ -524,7 +616,7 @@ if __name__ == "__main__":
 
 
 class HostDataRootTests(unittest.IsolatedAsyncioTestCase):
-    """Docker Desktop on Windows reports the controller's /data source as
+    r"""Docker Desktop on Windows reports the controller's /data source as
     C:\...\data. Resolved inside the Linux controller it became
     /app/C:\...\data and every session create failed ("too many colons")."""
 

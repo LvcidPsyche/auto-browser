@@ -149,7 +149,11 @@ class BusyPageTests(unittest.IsolatedAsyncioTestCase):
         _session(self.manager, "busy", page=SilentPage(), context=context)
         with patch.object(sessions_module, "TEARDOWN_STEP_TIMEOUT_SECONDS", 0.05):
             result = await asyncio.wait_for(self.manager.close_session("busy"), timeout=5)
+        # Answered, and gone (closed), but the step that timed out is named and the teardown partial (B-fix-9).
         self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "partial")
+        self.assertEqual(result["failed_steps"], ["close browser context"])
+        self.assertNotIn("busy", self.manager.sessions)
 
 
 @requires_chromium

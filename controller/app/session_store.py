@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -16,6 +19,21 @@ try:  # pragma: no cover - import path depends on optional dependency
 except Exception:  # pragma: no cover - graceful fallback when redis isn't installed
     Redis = None  # type: ignore[assignment]
     redis_from_url = None
+
+
+async def _run_to_completion(work) -> None:
+    """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised once the
+    work has finished (the pattern of BrowserSessionService._run_to_completion)."""
+    task = asyncio.create_task(work)
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    task.result()
+    if cancelled is not None:
+        raise cancelled
 
 
 class SessionStoreBackend(Protocol):
@@ -151,6 +169,14 @@ class RedisSessionStore(_MarkInterruptedMixin):
         return f"{self.prefix}:index"
 
 
+@dataclass
+class _RecordLock:
+    """One record id's write lock, and how many writes hold it or wait for it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
 class DurableSessionStore:
     def __init__(
         self,
@@ -162,6 +188,10 @@ class DurableSessionStore:
         self.file_store = FileSessionStore(file_root)
         self.redis_store = RedisSessionStore(redis_url, redis_prefix) if redis_url else None
         self._primary: SessionStoreBackend = self.file_store
+        # Serializes upsert() per record id within this process (CB3-2: one lock for the store queued every
+        # session's persist behind one slow write); another controller process on the same store is not covered.
+        # An entry goes once no write holds or waits for it, so the table does not grow with every session.
+        self._write_locks: dict[str, _RecordLock] = {}
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -210,9 +240,93 @@ class DurableSessionStore:
         return await self.file_store.get(session_id)
 
     async def upsert(self, record: SessionRecord) -> None:
-        await self.file_store.upsert(record)
-        if self.redis_store is not None and self._primary is self.redis_store:
-            await self.redis_store.upsert(record)
+        # One write at a time per record id, from the closed check through both backends, so a check cannot go stale
+        # before its write lands, and the Redis copy lands in the same order as the file. Run to completion when the
+        # caller is cancelled: a to_thread write keeps going after a cancel, so letting the lock go early reopens the
+        # race.
+        await _run_to_completion(self._upsert_locked(record))
+
+    @asynccontextmanager
+    async def _record_lock(self, record_id: str) -> AsyncIterator[None]:
+        entry = self._write_locks.get(record_id)
+        if entry is None:
+            entry = self._write_locks[record_id] = _RecordLock()
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0 and self._write_locks.get(record_id) is entry:
+                del self._write_locks[record_id]
+
+    async def _upsert_locked(self, record: SessionRecord) -> None:
+        async with self._record_lock(record.id):
+            if record.status != "closed":
+                closed = await self._is_closed(record.id)
+                if closed is None:
+                    # The stored record could not be read and could be a closed one: skip this write and go on (the
+                    # record is a mirror), so the next write tries again.
+                    return
+                if closed:
+                    # A late write of a session that has been closed: a session never reopens, and an interrupted
+                    # write must not replace the close (and its close_reason) either.
+                    logger.info("not writing a %s record over the closed session %s", record.status, record.id)
+                    return
+            await self.file_store.upsert(record)
+            if self.redis_store is not None and self._primary is self.redis_store:
+                await self.redis_store.upsert(record)
+
+    async def _is_closed(self, session_id: str) -> bool | None:
+        """Whether the durable (file) record says the session is closed, or None when that cannot be told.
+
+        Never raises: the write it guards mirrors a change that has already taken effect. No record is not closed, and
+        neither is one that cannot be parsed (no readable closed record), so the write replaces it. Any other read
+        failure is None, so a non-closed write is skipped: an I/O error could be hiding a closed record.
+
+        With Redis as the primary store, a file record that cannot be parsed defers to the Redis copy (W8-1), which
+        get() reads first: a readable closed one refuses the write, a missing, unparseable or not closed one lets it
+        replace both, and any other Redis read failure, such as a lost connection, is None.
+        """
+        try:
+            return (await self.file_store.get(session_id)).status == "closed"
+        except KeyError:
+            return False
+        except ValueError as exc:
+            if self.redis_store is not None and self._primary is self.redis_store:
+                return await self._redis_is_closed(session_id, exc)
+            logger.warning(
+                "the stored record of session %s cannot be parsed, so this write replaces it: %s", session_id, exc
+            )
+            return False
+        except Exception as exc:
+            self._warn_unreadable(session_id, exc)
+            return None
+
+    async def _redis_is_closed(self, session_id: str, file_error: ValueError) -> bool | None:
+        try:
+            closed = (await self.redis_store.get(session_id)).status == "closed"  # type: ignore[union-attr]
+        except (KeyError, ValueError):
+            closed = False
+        except Exception as exc:
+            self._warn_unreadable(session_id, exc)
+            return None
+        if not closed:
+            logger.warning(
+                "the stored record of session %s cannot be parsed and redis holds no closed one, so this write "
+                "replaces it: %s",
+                session_id,
+                file_error,
+            )
+        return closed
+
+    @staticmethod
+    def _warn_unreadable(session_id: str, exc: BaseException) -> None:
+        logger.warning(
+            "could not read the record of session %s before writing it, so it is not written this time: %s",
+            session_id,
+            exc,
+        )
 
     async def mark_all_active_interrupted(self) -> None:
         await self.file_store.mark_all_active_interrupted()

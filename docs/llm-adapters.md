@@ -56,7 +56,15 @@ The controller now includes:
 Each of the three first-party providers has an `api` mode (a key in the environment)
 and a `cli` mode (the vendor's CLI, signed in under `CLI_HOME`: `codex`, `claude`,
 `gemini`). OpenAI also has a `host_bridge` mode that reaches a host-side Codex over a
-Unix socket. `GET /agent/providers` reports the mode each provider is in.
+Unix socket (`scripts/codex_host_bridge.py`, which gives Codex an allowlisted environment plus each
+`--pass-env NAME`; see docs/deployment.md). `GET /agent/providers` reports the mode each provider is in.
+
+A `cli` provider's CLI gets an allowlisted environment, and on Linux the controller (and the bridge) is
+non-dumpable, so the CLI cannot read the controller's environment through `/proc`. Known limit: the CLI runs as the
+controller's uid (the bridge's Codex as the bridge's), so it can still read the controller's files: `data/api-token`,
+`data/takeover-token`, the mesh and witness keys. Page content shown to the model can prompt-inject the CLI into
+doing so. On macOS and Windows the controller and the bridge do not change this, and whether a process of the same
+user can read their environment depends on the system.
 
 ### OpenAI
 Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:

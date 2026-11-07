@@ -373,8 +373,8 @@ jobs:
 
       - name: Without the profile, BROWSER_SANDBOX=on refuses to start
         # The negative leg: under Docker's own profile a sandboxed launch cannot start, so on must leave browser-node
-        # refused, with its state saying so and no endpoint: the session is refused by the gate, or by a failed
-        # connect to a browser-node that refused to start (the next step is the one only the gate can refuse).
+        # refused, with its state saying so and no endpoint. The session then fails with 503: the controller cannot
+        # connect to a browser-node that refused to start (the next step is the one only the gate can refuse, 409).
         run: |
           BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up -d --force-recreate --no-deps browser-node || true
           python3 - <<'PY'
@@ -402,10 +402,10 @@ jobs:
           PY
           docker compose logs --tail 20 browser-node
           api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
-          python3 scripts/check_sandbox_gate.py --expect 409 --api-port "$api_port"
+          python3 scripts/check_sandbox_gate.py --expect 503 --api-port "$api_port"
 
       - name: The controller's gate refuses an unverified browser-node (BROWSER_SANDBOX=on)
-        # The leg above's 409 comes from a browser-node with no endpoint at all. Here browser-node runs under auto with
+        # The leg above's 503 comes from a browser-node with no endpoint at all. Here browser-node runs under auto with
         # Docker's own profile: it starts unsandboxed (state off) and publishes an endpoint, so the controller (still
         # under on) connects, and only its gate can refuse the session; its WARNING must say why.
         run: |

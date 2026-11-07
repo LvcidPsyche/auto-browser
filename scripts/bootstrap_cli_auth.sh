@@ -91,8 +91,8 @@ if [[ "${INSTALL_AGENT_CLIS:-false}" != "true" ]]; then
 fi
 
 container_cli_home="${CLI_HOME:-/data/cli-home}"
-if [[ "$container_cli_home" != /data/* ]]; then
-  echo >&2 "bootstrap_cli_auth.sh only supports CLI_HOME paths under /data/."
+if ! container_path_under_data "$container_cli_home"; then
+  echo >&2 "bootstrap_cli_auth.sh only supports CLI_HOME paths under /data/, without '..'."
   echo >&2 "Current CLI_HOME=${container_cli_home}"
   echo >&2 "Use CLI_HOME=/data/cli-home for in-container bootstrap, or sign in on the host and use docker-compose.host-subscriptions.yml."
   exit 1

@@ -7,7 +7,7 @@ from logging import Logger
 
 from fastapi import HTTPException, Request
 
-from ..action_errors import BrowserActionError
+from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserActionError, BrowserUnreachableError
 from ..approvals import CONTROLLER_SCOPE
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE, UNJUDGED_TAB_MESSAGE
@@ -29,6 +29,9 @@ def require_safe_segment(value: str, *, field: str) -> str:
     return value
 
 
+TAKEOVER_LINK_ROUTE = "/sessions/{session_id}/takeover-link"
+
+
 async def require_session_access(request: Request) -> None:
     """Refuse another operator's session on every route that names one.
 
@@ -42,6 +45,10 @@ async def require_session_access(request: Request) -> None:
     # Controller-wide approvals are listed by their owner: their scope names no session.
     route = getattr(request.scope.get("route"), "path", None)
     listing_controller = route == "/approvals" and session_id == CONTROLLER_SCOPE
+    # The takeover link checks its takeover token first and looks the session up itself (W2-19): a 404 from here
+    # came before that check, so a caller without the token could tell which ids exist, unaudited.
+    if route == TAKEOVER_LINK_ROUTE:
+        return
     if session_id and manager is not None and not listing_controller:
         await manager.ensure_session_accessible(session_id)
 
@@ -98,8 +105,8 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
     - ``HTTPException`` (``ApprovalRequiredError`` included), ``BrowserActionError``
       and ``KeyError`` (``SessionNotFoundError`` included) pass through to the
       app handlers, which keep their status, ``code`` and payload.
-    - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404.
-      The texts are fixed: the exceptions' own messages can carry hosts and paths.
+    - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404,
+      ``BrowserUnreachableError`` -> 503. The texts are fixed: the exceptions' own messages can carry hosts and paths.
     - Anything else is logged with *message* and answers 500 "Internal error".
 
     A route that maps an error differently on purpose (a 409 for a refused
@@ -116,5 +123,7 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
         raise HTTPException(status_code=400, detail="Invalid request") from None
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Not found") from None
+    except BrowserUnreachableError:
+        raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
     except Exception:
         raise internal_error(logger, message, *args) from None

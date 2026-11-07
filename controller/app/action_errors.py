@@ -12,6 +12,20 @@ BROWSER_ACTION_BLOCKED = "browser_action_blocked"
 PRE_REQUEST_GATE_UNAVAILABLE = "pre_request_gate_unavailable"
 # No window-birth watcher on the browser (app/browser/window_births.py): the same 503, retryable the same way.
 WINDOW_BIRTH_WATCHER_UNAVAILABLE = "window_birth_watcher_unavailable"
+# A browser connect that failed (CDP_CONNECT_URL, browser.cdp_attach, the shared browser-node, an isolated session's
+# browser): 503 with this fixed text, retryable.
+BROWSER_UNREACHABLE = "browser_unreachable"
+BROWSER_UNREACHABLE_DETAIL = "the browser could not be reached"
+
+
+class BrowserUnreachableError(Exception):
+    """The browser could not be reached: over CDP, or the shared browser-node's or an isolated session's Playwright
+    server.
+
+    Not a RuntimeError, so a route's "Conflict" for one does not answer it: the routes and the MCP gateway answer
+    503 with BROWSER_UNREACHABLE_DETAIL. str() is the reason, any URL in it reduced to scheme://host:port, for the
+    log, /readyz and deep health.
+    """
 
 
 class RefusedPageError(PermissionError):
@@ -23,14 +37,10 @@ class RefusedPageError(PermissionError):
 
 
 class ErrorPageSourceError(ValueError):
-    """Fork or shadow browse from Chrome's error page with no start_url: that page is no page to open. A
-    ValueError (a 400) whose fixed text the routes return as it is: it names no host or path."""
+    """Shadow browse from Chrome's error page: that page is no page to open. A ValueError (a 400) whose fixed text
+    the routes return as it is: it names no host or path."""
 
 
-ERROR_PAGE_SOURCE_FORK = (
-    "The session's page is Chrome's error page, for a navigation that was stopped or failed, so there is no page "
-    "to fork onto. Pass start_url."
-)
 ERROR_PAGE_SOURCE_SHADOW = (
     "The session's page is Chrome's error page, for a navigation that was stopped or failed, so there is no page "
     "to open in the shadow browser. Navigate the session to a page first."

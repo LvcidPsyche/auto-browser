@@ -10,6 +10,7 @@ from .delegation import (
     DelegationManager,
     DelegationRejected,
     DelegationReplayError,
+    MeshReplayCacheFull,
     ToolGatewayFn,
 )
 from .identity import NodeIdentity
@@ -44,6 +45,7 @@ __all__ = [
     "DelegationManager",
     "DelegationRejected",
     "DelegationReplayError",
+    "MeshReplayCacheFull",
     "ToolGatewayFn",
     "ApprovalFn",
     # identity

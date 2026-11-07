@@ -20,8 +20,6 @@ from app.tool_inputs import EmptyInput
 class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.manager = SimpleNamespace(
-            # The handoff view (#password= for isolated sessions): these sessions have none.
-            remote_access=SimpleNamespace(with_takeover_password=lambda payload: payload),
             ensure_session_accessible=AsyncMock(),
             create_session=AsyncMock(return_value={"id": "session-1"}),
             list_sessions=AsyncMock(return_value=[{"id": "session-1"}]),
@@ -514,6 +512,20 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.harness_service.check_all_drifts.assert_awaited_once_with()
         contract = self.harness_service.start_convergence.await_args.args[0]
         self.assertEqual(contract.id, "task-1")
+
+    async def test_harness_list_runs_filters_on_cancelled_and_interrupted_runs(self) -> None:
+        # HARN-11: a run can end `cancelled` or `interrupted`; a client must be able to ask for those too.
+        listed = {tool["name"]: tool for tool in self.full_gateway.list_tools()}["harness.list_runs"]
+        for status in ("cancelled", "interrupted"):
+            with self.subTest(status=status):
+                response = await self.full_gateway.call_tool(
+                    McpToolCallRequest(name="harness.list_runs", arguments={"status": status})
+                )
+
+                self.assertFalse(response.isError, response.structuredContent)
+                self.assertEqual(response.structuredContent[0]["status"], status)
+                self.assertIn(status, listed["description"])
+                self.assertIn(status, listed["inputSchema"]["properties"]["status"]["anyOf"][0]["enum"])
 
     async def test_harness_tools_return_clear_error_when_service_unavailable(self) -> None:
         gateway = McpToolGateway(

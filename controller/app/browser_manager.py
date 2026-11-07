@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urlsplit
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from . import process_hardening
 from .action_errors import RefusedPageError, SessionNotFoundError
 from .action_records import drain_unfinished_records
 from .actions import BrowserActionPipeline
@@ -145,6 +146,9 @@ class BrowserSession:
     refused_failures: deque[str] = field(default_factory=lambda: deque(maxlen=REFUSED_FAILURES_KEPT))
     last_action: str | None = None
     proxy_persona: str | None = None
+    # The User-Agent the context was built with: the create request's, or the one STEALTH_ENABLED drew from the pool
+    # (None: Chromium's own). Kept so a fork carries the same one instead of drawing again.
+    user_agent: str | None = None
     last_auth_state_path: Path | None = None
     # The last screenshot a checked read returned (see capture_session_screenshot).
     last_screenshot: dict[str, str] | None = None
@@ -322,6 +326,7 @@ class BrowserManager:
         await self.session_store.mark_all_active_interrupted()
         if self.memory is not None:
             await self.memory.startup()
+        process_hardening.confine_playwright_driver_environment()
         self.playwright = await async_playwright().start()
         await self.tunnel_broker.startup()
         await self.runtime_provisioner.startup()
@@ -444,9 +449,19 @@ class BrowserManager:
         *,
         name: str | None = None,
         start_url: str | None = None,
+        proxy_persona: str | None = None,
+        user_agent: str | None = None,
+        protection_mode: str | None = None,
     ) -> dict[str, Any]:
         """Fork a session: clone cookies + localStorage state into a new session."""
-        return await self.session_lifecycle.fork(session_id, name=name, start_url=start_url)
+        return await self.session_lifecycle.fork(
+            session_id,
+            name=name,
+            start_url=start_url,
+            proxy_persona=proxy_persona,
+            user_agent=user_agent,
+            protection_mode=protection_mode,
+        )
 
     async def enable_shadow_browse(self, session_id: str) -> dict[str, Any]:
         """Launch a headed clone of a session for visual debugging."""

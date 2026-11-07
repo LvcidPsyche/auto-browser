@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .harness.contracts import TaskContract
+from .harness.contracts import RUN_ID_PATTERN, TaskContract
 from .models import (
     AGENT_RUN_MAX_STEPS,
     CDP_URL_SCHEMES,
@@ -25,6 +25,7 @@ from .models import (
     BrowserActionDecision,
     CreateSessionRequest,
     PerceptionPreset,
+    ProtectionMode,
     ProviderName,
     StrictInputModel,
     WorkflowProfile,
@@ -130,6 +131,7 @@ class HarnessGetStatusInput(StrictInputModel):
     run_id: str = Field(
         min_length=1,
         max_length=120,
+        pattern=RUN_ID_PATTERN,
         description=(
             "ID of the convergence run, as returned by harness.start_convergence or listed by harness.list_runs."
         ),
@@ -141,7 +143,10 @@ class HarnessGetTraceInput(HarnessGetStatusInput):
 
 
 class HarnessListRunsInput(StrictInputModel):
-    status: Literal["created", "running", "converged", "unconverged", "failed", "over_budget"] | None = Field(
+    status: (
+        Literal["created", "running", "converged", "unconverged", "failed", "over_budget", "cancelled", "interrupted"]
+        | None
+    ) = Field(
         default=None,
         description="Only return runs in this state. Omit to list runs in every state.",
     )
@@ -384,9 +389,18 @@ class ForkSessionInput(SessionIdInput):
         default=None,
         max_length=2000,
         description=(
-            "Omitted: the source session's current URL; refused while that is Chrome's error page for a stopped "
-            "or failed navigation."
+            "Omitted: the source session's current URL, or a blank page when that is no URL to open (blank, "
+            "data:, Chrome's error page for a stopped or failed navigation)."
         ),
+    )
+    proxy_persona: str | None = Field(
+        default=None, min_length=1, max_length=200, description="Omitted: the source session's proxy persona."
+    )
+    user_agent: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="Omitted: the source session's User-Agent."
+    )
+    protection_mode: ProtectionMode | None = Field(
+        default=None, description="Omitted: the source session's witness protection mode."
     )
 
     @field_validator("start_url")

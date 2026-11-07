@@ -18,10 +18,11 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
-from .config import get_settings
+from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,11 @@ class CuratorLLMAdapter:
         Build an adapter from env config. Returns None when no API key is
         available for the requested provider (graceful degraded mode).
         """
-        provider = os.environ.get("CURATOR_PROVIDER", "claude").lower().strip()
-        model = os.environ.get("CURATOR_MODEL") or None
+        # With no settings handed in, read a fresh one (not the cached get_settings(): it would not see the
+        # environment as it is now).
+        configured = settings if settings is not None else Settings(_env_file=None)
+        provider = configured.curator_provider.lower().strip()
+        model = configured.curator_model or None
         try:
             adapter = cls(provider, model=model, settings=settings)
         except ValueError as exc:
@@ -181,7 +185,9 @@ class CuratorLLMAdapter:
     def _build_gemini(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         # The key goes in a header: httpx puts the request URL in its error
         # messages, and a ?key= query string put the key in the logs with them.
-        url = f"{self._settings_in_use().gemini_base_url.rstrip('/')}/models/{self.model}:generateContent"
+        # Quoted as the Gemini provider adapter quotes provider_model: CURATOR_MODEL is not checked against its pattern.
+        model = quote(self.model, safe="/:")
+        url = f"{self._settings_in_use().gemini_base_url.rstrip('/')}/models/{model}:generateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": self._api_key()}
         parts: list[dict[str, str]] = []
         if system:

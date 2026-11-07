@@ -71,6 +71,11 @@ token, from either source.
 - A controller run outside compose defaults to `/data/api-token` too. On Windows
   that is `C:\data\api-token`, which inherits permissions that let every local user
   read and replace it, so set `API_TOKEN_FILE` to a path under your user profile.
+- On POSIX a token file (this one or `TAKEOVER_TOKEN_FILE`) that group or others can read
+  is changed to 0600 at startup. A symlinked one (a Kubernetes secret mount, 0644 by
+  default) is used as it is, its target's mode untouched, with one warning naming the
+  path and mode when that target is readable beyond its owner: set the mount's mode
+  (`defaultMode: 0400`) instead.
 - To rotate the generated token, delete the file and restart the controller. Once
   `API_BEARER_TOKEN` is set the file is ignored (the startup log says so), and
   clients still pointed at it get a 401.
@@ -259,6 +264,15 @@ only uid that can read them there (root's chown cannot work on such a mount), an
 user is treated like a root-owned one and handed to uid 10002. To keep the files yours, chown `./data` to another uid,
 or start the controller as `user: "10002:10002"` and give yourself access through a group.
 
+**A host shared with other users:** browser-node's endpoint file, `./data/browser-profile/browser-ws-endpoint.txt`,
+is readable by any host user who can enter `./data`, and its `ws://` URL is what connecting to the shared browser
+takes. It cannot be private to one uid: browser-node (uid 10001) writes it and the controller, another uid, reads it.
+On such a host, keep `./data` closed to other users: owned by the user the controller runs as (above), with mode
+0700, or 0750 with a group only the operators are in. The host scripts that create files there
+(`scripts/bootstrap_cli_auth.sh`, `scripts/smoke_reverse_ssh.sh`) need write access as well: run them as the owner,
+or make it 0770 for that group. browser-node, the per-session browser containers and the reverse-ssh sidecar are
+unaffected: they mount the subdirectories they use directly.
+
 `CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
 `controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
 
@@ -275,17 +289,21 @@ the exception (below).
 
 The controller joins each session network at gateway priority -1, so its own compose network keeps its default
 gateway and its published API port. That needs Docker Engine 28 or later (API 1.48). On an older engine Docker picks
-the gateway by network name, lowest first, so a session network whose name sorts before the compose network takes it
-and the request creating the session can be cut: the controller logs a warning when that would happen. Upgrade the
-engine, or set `ISOLATED_BROWSER_CONTAINER_PREFIX` to a prefix that sorts after the compose network's name (the
-default `browser-session` sorts after `auto-browser_default`).
+the gateway by network name, lowest first, and weighs a network's other properties too, so a session network can
+take it (and the published port with it) and the request creating the session can be cut. On such an engine the
+controller logs one warning, starting "GwPriority is not honoured", at the first isolated provision, whatever the
+names; when the session network's name sorts before the compose network's, it also names that order problem. Upgrade
+the engine; setting `ISOLATED_BROWSER_CONTAINER_PREFIX` to a prefix that sorts after the compose network's name (the
+default `browser-session` sorts after `auto-browser_default`) avoids only the name-order case.
 
 - **Upgrading:** isolated browsers no longer reach compose-network services. A proxy
   sidecar named in `DEFAULT_PROXY_SERVER` or a proxy persona must be reachable some
   other way than by its compose service name, or keep `ISOLATED_BROWSER_NETWORK_MODE=shared`.
 - **`ISOLATED_BROWSER_NETWORK`** now applies only to `ISOLATED_BROWSER_NETWORK_MODE=shared`,
   which puts every browser on one network as before. In `per_session` mode it is ignored,
-  and the controller logs a warning at startup.
+  and the controller logs a warning at startup. `shared` has no session-network fence: a
+  session's browser can reach the controller's API, which the bearer token and the Host
+  allowlist still guard.
 - **The controller must be a container on the isolation daemon.** A controller run on the
   host, or an `ISOLATED_DOCKER_HOST` that is a different daemon, cannot join session
   networks, so `per_session` refuses to start a session there and names
@@ -321,17 +339,37 @@ What per-session networks do not change:
   isolated session's noVNC has **its own random VNC password**, generated when the
   container starts; the operator's `VNC_PASSWORD` is no longer handed to isolated
   containers, where any of them could read it.
-- **The takeover URL is a secret.** The `takeover_url` in the handoff responses (the
-  session from `create_session` and `get_session`, `get_remote_access`, and
-  `request_human_takeover`, over REST and MCP) carries the session's password in its
-  fragment, `#password=…`, so noVNC connects without asking. A browser never sends the
-  fragment to a server, so it stays out of access logs, but treat the URL like the API
-  token. Over MCP those results reach the calling model, which is how an agent hands you
-  the link, and an MCP client may keep them in its transcript. Observations, action
-  results, `list_sessions`, the stored session records, the
-  tunnel metadata file and the audit trail carry the URL without it; opened from there,
-  noVNC asks for the password. noVNC remembers a password it was given in that origin's
-  browser storage, which is harmless: each session has its own random port and password.
+- **No agent-facing result carries the password.** No MCP tool result carries it, and no response
+  of a route the agent-facing packages (the Python client, the MCP package, the LangChain
+  integration) call: `create_session`, `get_session`, `get_remote_access`,
+  `request_human_takeover`, observations, action results and `list_sessions` give the
+  `takeover_url` without it, and an isolated session's `remote_access` block and takeover
+  result add a `takeover_note` saying the operator opens the full link from the dashboard. The person taking over opens
+  it from the dashboard ("Open noVNC") or prints it with `scripts/takeover_link.sh
+  <session_id>`; both read `GET /sessions/{session_id}/takeover-link` (`Cache-Control:
+  no-store`, audited as `takeover_link_viewed` without the URL), which no MCP tool and no
+  agent-facing package calls. Besides the bearer token, which agents hold, that endpoint
+  demands the takeover token in the `X-Takeover-Token` header, in every scope (tokenless
+  loopback included), and agents are not given it: `TAKEOVER_TOKEN`, or the token the
+  controller generates in `TAKEOVER_TOKEN_FILE` (`./data/takeover-token` with the shipped
+  compose) on first start. Without it the answer is 403 (audited as
+  `takeover_link_refused`), before any 404, and 503 when the controller could not load or
+  write one (its startup log says why). The dashboard asks for it on the first "Open
+  noVNC" of an isolated session in a tab, before it opens the noVNC window, and again
+  on the click after a 403 (a shared browser-node session's link needs no token);
+  `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` or `data/takeover-token`. The
+  takeover token stops agents without file access to the controller's host, and only those:
+  under compose `./data` belongs to the host user, so an agent running as that user on the
+  host (a local MCP setup) can read `data/takeover-token`, and so can the controller's own
+  `cli` providers, which run as the controller's uid (see the known limit under the CLI
+  providers); so can anything that reads the session container's own copy of the password.
+  Open the dashboard and the takeover link in a browser no agent drives: such an agent can
+  read the dashboard's sessionStorage, where the tokens are kept. That link carries
+  the password in its fragment, `#password=…`, so noVNC connects without asking; a
+  browser never sends the fragment to a server, so it stays out of access logs, but
+  treat the link like the API token. Opened without it, noVNC asks for the password.
+  noVNC remembers a password it was given in that origin's browser storage, which is
+  harmless: each session has its own random port and password.
 - **The shared browser-node's noVNC is reachable from session containers too,** the same
   way. Only the operator's `VNC_PASSWORD` guards it, so set it with `docker_ephemeral`;
   the readiness check warns while it is unset.
@@ -426,10 +464,34 @@ CLI_HOME=/data/cli-home
 INSTALL_AGENT_CLIS=true
 ```
 
-A CLI child gets only the operating-system basics (`PATH`, `HOME`, proxy and certificate variables) and its own
-provider's variables (such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), never the controller's
-tokens or other keys. If a CLI needs another variable, name it in `CLI_PROVIDER_ENV_PASSTHROUGH`
-(comma-separated).
+A CLI child gets only the base names below, its own provider's variables (such as `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`) and the names in `CLI_PROVIDER_ENV_PASSTHROUGH` (comma-separated), never the
+controller's tokens or other keys. The base names (`CLI_BASE_ENV_NAMES` in `controller/app/providers/base.py`), each
+passed only when set, are `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, every `LC_*`, `TZ`,
+`TERM`, `NO_COLOR`, `CI`, `TEMP`, `TMP`, `TMPDIR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+`NO_PROXY`), the CA variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) and the
+Windows names (`USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `SYSTEMDRIVE`,
+`WINDIR`, `COMSPEC`, `PATHEXT`). The other children the controller starts get the same base names: the Universal
+Verifier command (plus the names in `HARNESS_UV_ENV_PASSTHROUGH`), autossh (plus its own `AUTOSSH_*` tuning),
+Playwright's node driver and every browser it launches (plus Playwright's own `PW_*` and `PLAYWRIGHT_*`, `DEBUG`,
+`DEBUG_FILE`, and `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` for
+shadow browse's headed browser), and Tesseract, which screenshot redaction's OCR starts through pytesseract (plus
+`TESSDATA_PREFIX` and every `OMP_*`); the regex worker gets only `SYSTEMROOT`, on Windows. On Linux the controller
+also makes itself non-dumpable at startup, so a process of its uid cannot read the controller's own environment
+through `/proc/PID/environ`.
+
+Known limit: a child running as the controller's uid can still read the controller's files: `data/api-token`,
+`data/takeover-token`, the mesh and witness keys. The CLI providers (`OPENAI_AUTH_MODE=cli` and the others) and the
+Codex host bridge's Codex are such children, and page content they are shown can prompt-inject them. Use `api` mode
+where that matters. The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
+processes of the controller's user: their environment holds none of the controller's own tokens or keys (a proxy
+setting that carries credentials excepted), but their memory holds page content and what is typed into pages, which
+a command one of them runs could read where the host lets a process ptrace another of the same user
+(`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another CLI
+runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). A Docker credential helper
+configured for the controller's user (`credsStore` or `credHelpers` in its Docker config) is run by the Docker SDK
+with the controller's whole environment when the controller pulls a session image the daemon does not have: build or
+pull that image ahead (compose builds it) and configure no credential helper for that user.
 
 `INSTALL_AGENT_CLIS=true` builds the three CLIs (and Node.js, about 750 MB) into
 the controller image, which leaves them out by default. Rebuild after setting it:
@@ -497,6 +559,24 @@ OPENAI_HOST_BRIDGE_SOCKET=/data/host-bridge/codex.sock
 That keeps `codex` on the host, reuses the host login state directly, and lets the container call it over a shared Unix socket, so the controller image does not need the CLIs for OpenAI.
 The controller now health-checks that socket and the bridge kills stuck host `codex` jobs after 55 seconds by default.
 Treat the socket as a host-trust boundary: any local process that can connect to it can trigger host-side `codex exec`.
+The bridge starts Codex with an allowlisted environment, not the whole environment of the shell it was started
+from. Exactly these pass, matched case-insensitively (the bridge's copies of the controller's `CLI_BASE_ENV_NAMES`,
+`CLI_BASE_ENV_PREFIXES` and the OpenAI adapter's `cli_env_names`, which a test keeps equal):
+
+- `CODEX_BASE_ENV_NAMES`: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `TZ`, `TERM`,
+  `NO_COLOR`, `CI`, the temp directories `TMPDIR`, `TEMP` and `TMP`, the proxy settings `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, the CA settings `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `REQUESTS_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS`, and the Windows names `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`,
+  `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC` and `PATHEXT`;
+- `CODEX_BASE_ENV_PREFIXES`: any name starting `LC_`;
+- `CODEX_PROVIDER_ENV_NAMES`: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_API_KEY` and
+  `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`).
+
+A Codex setup that needs another variable passes it with `--pass-env NAME` (repeatable; a name must be letters,
+digits and underscores, not starting with a digit), for example `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`
+for a sign-in kept in the desktop keyring where the bus is not at its default path, or `VOLTA_HOME`,
+`ASDF_DATA_DIR` or `MISE_DATA_DIR` for a node version manager with a non-default home. That passes the
+variable's value to Codex and to every command Codex runs, so pass only what Codex needs.
 
 In `APP_ENV=production`, startup now fails fast if:
 - any `*_AUTH_MODE` value is not one of its supported modes (`api`, `cli`, and for OpenAI also `host_bridge`)
@@ -790,8 +870,9 @@ can choose that URL. Forking a session onto its page's URL (no `start_url`) refu
 refused, and over REST answers the same 403 as observe (any other refusal of a fork answers the generic
 403); a fork onto a `start_url` the caller names is judged by that URL, as a new session is. Shadow browse
 from a refused page answers that 403 too, and from a `data:` or `blob:` page the generic one. From Chrome's
-error page, a fork without `start_url` and a shadow browse answer 400 with a fixed text: the page is Chrome's
-error page for a navigation that was stopped or failed; fork's says to pass `start_url`.
+error page, a fork without `start_url` starts on a blank page with the source's cookies, as from
+`about:blank` (a refused error page still answers the 403), and a shadow browse answers 400 with a fixed text:
+the page is Chrome's error page for a navigation that was stopped or failed.
 
 ### Other tabs while one is refused
 

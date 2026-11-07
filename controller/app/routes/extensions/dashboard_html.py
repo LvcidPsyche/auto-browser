@@ -56,6 +56,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .timeline-item strong { color: var(--text); font-weight: 600; }
   .empty { padding: 32px; text-align: center; color: var(--muted); }
   .section-note { padding: 10px 20px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+  .takeover-note { padding: 10px 20px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+  .takeover-note:empty { display: none; }
   .wrap { white-space: pre-wrap; word-break: break-word; max-width: 360px; }
   .arguments-viewer pre { margin: 0; padding: 12px 20px; max-height: 50vh; overflow: auto;
                           white-space: pre-wrap; word-break: break-word; }
@@ -111,6 +113,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Sessions</h2>
       <button class="refresh-btn" id="refresh-sessions">↻ Refresh</button>
     </div>
+    <div id="takeover-note" class="takeover-note" role="status"></div>
     <table><thead><tr>
       <th>Session ID</th><th>Name</th><th>Status</th><th>Operator</th><th>URL</th><th>Actions</th>
     </tr></thead><tbody id="sessions-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
@@ -257,8 +260,10 @@ const errorText = (body, status) => {
 };
 // Resolves with the response to a successful request and rejects with an Error
 // carrying the server's own text otherwise, so no caller can mistake a failed
-// request for a done one. Callers show err.message.
-const apiResponse = async (path, options = {}) => {
+// request for a done one. Callers show err.message. With {alerts: false} a 401 or a
+// missing operator header still clears what it clears but shows no alert(): the
+// caller says so on the page (the takeover flow, whose window may be in front).
+const apiResponse = async (path, options = {}, {alerts = true} = {}) => {
   const headers = {..._authHeaders(), ...(options.headers || {})};
   let r;
   try {
@@ -268,17 +273,21 @@ const apiResponse = async (path, options = {}) => {
   }
   if (r.status === 401) {
     sessionStorage.removeItem('ab_token');
-    alert('Auth failed — token cleared. Reload and try again.');
-    throw new Error('unauthorized: token cleared, reload and try again');
+    if (alerts) alert('Auth failed — token cleared. Reload and try again.');
+    const err = new Error('unauthorized: token cleared, reload and try again');
+    err.status = 401;
+    throw err;
   }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     if (r.status === 400 && String((body && body.detail) || '').includes('operator header')) {
       sessionStorage.removeItem('ab_operator_id');
       sessionStorage.removeItem('ab_operator_name');
-      alert('Operator identity missing. Reload and provide an operator id.');
+      if (alerts) alert('Operator identity missing. Reload and provide an operator id.');
     }
-    throw new Error(errorText(body, r.status));
+    const err = new Error(errorText(body, r.status));
+    err.status = r.status;
+    throw err;
   }
   return r;
 };
@@ -420,7 +429,9 @@ async function loadSessions() {
       link.style.textDecoration = 'none';
       link.textContent = 'Open noVNC';
       const fullId = asText(s.session_id || s.id, '');
-      if (fullId) link.addEventListener('click', (event) => openTakeover(event, fullId, href));
+      const isolated = isIsolated(s);
+      const note = document.getElementById('takeover-note');
+      if (fullId) link.addEventListener('click', (event) => openTakeover(event, fullId, href, isolated, note));
       actionCell.appendChild(link);
     } else {
       actionCell.textContent = '—';
@@ -430,22 +441,76 @@ async function loadSessions() {
   });
 }
 
-// The session list leaves an isolated session's noVNC password out of its takeover
-// URL; the session's own record (GET /sessions/{id}) is a handoff response and
-// carries it in the fragment. The window opens on the click, which popup blockers
-// allow, and is pointed at the record's URL once it arrives. If the record cannot
-// be read, the list's URL still opens: noVNC then asks for the password.
-async function openTakeover(event, sessionId, fallback) {
+// The takeover token: a second secret, held by the person and never by agents, that
+// the takeover-link endpoint demands beside the API token. Asked for on the first
+// "Open noVNC" of an isolated session in a tab, and again after one is refused; kept
+// in sessionStorage under its own key; empty when the person cancels.
+const TAKEOVER_TOKEN_KEY = 'ab_takeover_token';
+function takeoverToken() {
+  const stored = (sessionStorage.getItem(TAKEOVER_TOKEN_KEY) || '').trim();
+  if (stored) return stored;
+  const entered = prompt('Enter the takeover token (TAKEOVER_TOKEN, or data/takeover-token in your auto-browser folder on a local install):', '');
+  const token = (entered || '').trim();
+  if (token) sessionStorage.setItem(TAKEOVER_TOKEN_KEY, token);
+  return token;
+}
+// Only an isolated (docker_ephemeral) session has a noVNC password: a shared
+// browser-node session's takeover link carries none, so its listed URL is the link.
+const isIsolated = (session) => Boolean(session && session.isolation && session.isolation.mode === 'docker_ephemeral');
+const showTakeoverNote = (note, text) => { if (note) note.textContent = text; };
+
+// No session record carries an isolated session's noVNC password (the model reads
+// those); GET /sessions/{id}/takeover-link, a human-only endpoint, returns the full
+// link with it in the fragment, given the takeover token in X-Takeover-Token. The
+// token is asked for first, while this tab is in front: Chrome and Edge show no
+// prompt() in a tab that is not, so asking after the window opened never asked. The
+// window then opens (a popup blocker may refuse it after a slow answer: the token is
+// kept and the note says to click again), loses its copy of this tab's
+// sessionStorage, and is pointed at the link once it arrives. A 403 means the stored
+// token is wrong: it is cleared, the window closes and the note says so; the next
+// click asks again. A 401, 404, 503 or 400 also closes the window, with the reason
+// in the note and no alert() (the window may be in front of this tab). Any other
+// failure still opens the list's URL, and the note says noVNC will ask for the
+// password.
+async function openTakeover(event, sessionId, fallback, isolated, note) {
   event.preventDefault();
+  showTakeoverNote(note, '');
+  const token = isolated ? takeoverToken() : '';
   const win = window.open('about:blank', '_blank');
-  if (!win) return;
+  if (!win) {
+    showTakeoverNote(note, 'The browser blocked the noVNC window. Click Open noVNC again.');
+    return;
+  }
+  try {
+    win.sessionStorage.clear();  // a window opened this way starts with a copy of this tab's
+  } catch (err) {
+    console.warn(`takeover window: could not clear its session storage: ${err.message}`);
+  }
   win.opener = null;
   let target = fallback;
-  try {
-    const record = await api(`/sessions/${encodeURIComponent(sessionId)}`);
-    target = safeHttpUrl(record.takeover_url) || fallback;
-  } catch (err) {
-    console.warn(`takeover link: could not read session ${sessionId}: ${err.message}`);
+  if (token) {
+    const path = `/sessions/${encodeURIComponent(sessionId)}/takeover-link`;
+    try {
+      const r = await apiResponse(path, {headers: {'X-Takeover-Token': token}}, {alerts: false});
+      const link = await r.json();
+      target = safeHttpUrl(link.takeover_url) || fallback;
+    } catch (err) {
+      if (err.status === 403) sessionStorage.removeItem(TAKEOVER_TOKEN_KEY);
+      const closing = {
+        403: 'The takeover token was refused; click Open noVNC again to enter it.',
+        401: 'The API token was refused and cleared; reload the page to enter it again.',
+        404: 'That session is closed or unknown.',
+        503: 'This controller has no takeover token; see TAKEOVER_TOKEN in docs/deployment.md.',
+        400: err.message,
+      }[err.status];
+      if (closing !== undefined) {
+        win.close();
+        showTakeoverNote(note, closing);
+        return;
+      }
+      console.warn(`takeover link: could not read session ${sessionId}: ${err.message}`);
+      showTakeoverNote(note, "Could not read the takeover link; noVNC will ask for the session's password.");
+    }
   }
   win.location.href = target;
 }
@@ -992,7 +1057,15 @@ async function wizardStart() {
     link.target = '_blank';
     link.rel = 'noopener';
     link.textContent = 'Open takeover window to log in';
+    // session.takeover_url carries no noVNC password: openTakeover reads the full link.
+    const wizardId = wizardSessionId;
+    const isolated = isIsolated(session);
+    const note = document.createElement('div');
+    note.className = 'takeover-note';
+    note.setAttribute('role', 'status');
+    if (wizardId) link.addEventListener('click', (event) => openTakeover(event, wizardId, url, isolated, note));
     takeover.appendChild(link);
+    takeover.appendChild(note);
   } else {
     const note = document.createElement('span');
     note.className = 'empty';

@@ -20,7 +20,13 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ValidationError
 
-from ..action_errors import BrowserActionError, SessionNotFoundError
+from ..action_errors import (
+    BROWSER_UNREACHABLE,
+    BROWSER_UNREACHABLE_DETAIL,
+    BrowserActionError,
+    BrowserUnreachableError,
+    SessionNotFoundError,
+)
 from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
@@ -449,6 +455,11 @@ class McpToolGateway:
             # The agent can enable the job, or stop triggering it; a code tells it which refusal this is.
             message = str(exc.args[0]) if exc.args else "job is disabled"
             return self._refusal_response(message, {"error": message, "code": "cron_job_disabled"}, exc)
+        except BrowserUnreachableError as exc:
+            # Its message names the endpoint and Playwright's reason: the log has them (runtime.py), the caller not.
+            return self._refusal_response(
+                BROWSER_UNREACHABLE_DETAIL, {"error": BROWSER_UNREACHABLE_DETAIL, "code": BROWSER_UNREACHABLE}, exc
+            )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
             # source_selector or source_x/source_y", "Memory profile not found").
@@ -765,8 +776,6 @@ class McpToolGateway:
         return decision, reason
 
     async def _create_session(self, payload: CreateSessionRequest) -> dict[str, Any]:
-        # Human-handoff results (create/get session, remote access, takeover):
-        # their takeover URL carries the session's noVNC password.
         created = await self.manager.create_session(
             name=payload.name,
             start_url=payload.start_url,
@@ -782,7 +791,7 @@ class McpToolGateway:
             totp_secret=payload.totp_secret,
             totp_hosts=payload.totp_hosts,
         )
-        return self.manager.remote_access.with_takeover_password(created)
+        return created
 
     async def _list_sessions(self, _: EmptyInput) -> list[dict[str, Any]]:
         return await self.manager.list_sessions()
@@ -821,9 +830,7 @@ class McpToolGateway:
         return {"name": payload.profile_name, "deleted": deleted}
 
     async def _get_session(self, payload: SessionIdInput) -> dict[str, Any]:
-        return self.manager.remote_access.with_takeover_password(
-            await self.manager.get_session_record(payload.session_id)
-        )
+        return await self.manager.get_session_record(payload.session_id)
 
     async def _observe(self, payload: ObserveInput) -> dict[str, Any]:
         return await self.manager.observe(payload.session_id, limit=payload.limit, preset=payload.preset)
@@ -884,9 +891,7 @@ class McpToolGateway:
         return await self.manager.save_auth_profile(payload.session_id, payload.profile_name)
 
     async def _takeover(self, payload: TakeoverInput) -> dict[str, Any]:
-        return self.manager.remote_access.with_takeover_password(
-            await self.manager.request_human_takeover(payload.session_id, payload.reason)
-        )
+        return await self.manager.request_human_takeover(payload.session_id, payload.reason)
 
     async def _close_session(self, payload: SessionIdInput) -> dict[str, Any]:
         return await self.manager.close_session(payload.session_id)
@@ -982,9 +987,7 @@ class McpToolGateway:
         if payload.session_id and payload.session_id not in self.manager.sessions:
             record = await self.manager.get_session_record(payload.session_id)
             return record["remote_access"]
-        return self.manager.remote_access.with_takeover_password(
-            self.manager.get_remote_access_info(payload.session_id)
-        )
+        return self.manager.get_remote_access_info(payload.session_id)
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
         # The same report as GET /readiness, the pre-request gate's and the window-birth watcher's states included.
@@ -1024,6 +1027,9 @@ class McpToolGateway:
             payload.session_id,
             name=payload.name,
             start_url=payload.start_url,
+            proxy_persona=payload.proxy_persona,
+            user_agent=payload.user_agent,
+            protection_mode=payload.protection_mode,
         )
 
     async def _eval_js(self, payload: EvalJsInput) -> dict[str, Any]:

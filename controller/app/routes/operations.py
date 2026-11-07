@@ -6,13 +6,23 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
+from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserUnreachableError
 from ..approvals import ServerStateRefusal
+from ..auth_state import AuthStateDecryptError
+from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
 from ._utils import cron_store_errors, persona_file_errors, typed_route_errors
 
 logger = logging.getLogger(__name__)
+
+
+# The cap's own text names the job owner's live session ids (check_limit runs as the owner), and the trigger checks
+# only the job's webhook key, which another operator may hold: the trigger names no session (W2-14).
+CRON_TRIGGER_SESSION_LIMIT_DETAIL = (
+    "Session limit reached: the job's run could not start a session. Close a session or raise MAX_SESSIONS."
+)
 
 
 def create_operations_router(
@@ -31,7 +41,7 @@ def create_operations_router(
                 return record["remote_access"]
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown session") from None
-        return manager.remote_access.with_takeover_password(manager.get_remote_access_info(session_id))
+        return manager.get_remote_access_info(session_id)
 
     @router.get("/audit/events")
     async def list_audit_events(
@@ -187,6 +197,13 @@ def create_operations_router(
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except CronJobDisabledError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
+            raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
+        except SessionLimitError:  # the run's session (CB1-8), with a detail that names none (W2-14)
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_SESSION_LIMIT_DETAIL) from None
+        except AuthStateDecryptError as exc:
+            # A fixed text that says what to check; it names no path.
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         except (ValidationError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

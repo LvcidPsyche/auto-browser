@@ -13,8 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+from app.action_errors import BrowserUnreachableError
 from app.browser_manager import BrowserManager
 from app.models import McpToolCallRequest, OperatorIdentity
 from app.session_ownership import acting_as
@@ -88,6 +89,80 @@ class CdpAttachTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.isError)
         self.assertEqual(result.structuredContent["code"], "not_permitted")
         self.assertIn("every operator", result.structuredContent["error"])
+        self.assertIs(self.manager.browser, self.original)
+
+    async def test_an_ambiguous_cdp_url_over_mcp_is_refused_without_echoing_or_auditing_it(self) -> None:
+        # A browser could read another host in these than urllib does. The input model refuses them before the attach,
+        # with the same message whatever their credentials; the host is quoted only for a form a browser maps.
+        self.manager.settings.api_bearer_tokens = ""
+        self.manager.settings.api_bearer_token = "only-token"
+        gateway = McpToolGateway(
+            manager=self.manager,
+            orchestrator=SimpleNamespace(),
+            job_queue=SimpleNamespace(),
+            tool_profile="full",
+        )
+        refused = {
+            "ws://user:pw-5c1e@evil.example\\@good.example:9222/devtools/browser/id-77d2": "backslash",
+            "ws://admin:pw-90ab@evil.example\\@good.example:9222/devtools/browser/id-41f0": "backslash",
+            "http://user:pw-5c1e@0x7f.1:9222/devtools/browser/id-77d2": "a browser reads as another host",
+        }
+        secrets = ("user:", "admin:", "pw-5c1e", "pw-90ab", "/devtools/", "id-77d2", "id-41f0")
+        texts: dict[str, str] = {}
+
+        with (
+            patch.object(self.manager.audit, "append", new=AsyncMock(wraps=self.manager.audit.append)) as audit,
+            acting_as(BOB),
+        ):
+            for cdp_url, reason in refused.items():
+                with self.subTest(cdp_url=cdp_url):
+                    result = await gateway.call_tool(
+                        McpToolCallRequest(name="browser.cdp_attach", arguments={"cdp_url": cdp_url})
+                    )
+                    self.assertTrue(result.isError)
+                    texts[cdp_url] = result.content[0].text
+                    self.assertIn(reason, texts[cdp_url])
+                    for part in secrets:
+                        self.assertNotIn(part, result.model_dump_json())
+
+        backslash_texts = {text for url, text in texts.items() if refused[url] == "backslash"}
+        self.assertEqual(len(backslash_texts), 1, backslash_texts)  # a fixed message
+        self.assertNotIn("evil.example", backslash_texts.pop())
+        self.connect.assert_not_awaited()
+        self.assertIs(self.manager.browser, self.original)
+        for part in secrets:
+            self.assertNotIn(part, repr(audit.call_args_list))
+
+    async def test_a_browser_that_cannot_be_reached_over_mcp_answers_a_fixed_text(self) -> None:
+        # A failed connect named the endpoint and Playwright's reason, and came back as a plain RuntimeError.
+        self.manager.settings.api_bearer_tokens = ""
+        self.manager.settings.api_bearer_token = "only-token"
+        secret_url = "ws://user:pw-5c1e@10.0.0.9:9222/devtools/browser/id-77d2"
+        self.connect.side_effect = Exception(
+            "BrowserType.connect_over_cdp: WebSocket error: connect ECONNREFUSED 10.0.0.9:9222\n"
+            f"Call log:\n  - <ws connecting> {secret_url}"
+        )
+        gateway = McpToolGateway(
+            manager=self.manager,
+            orchestrator=SimpleNamespace(),
+            job_queue=SimpleNamespace(),
+            tool_profile="full",
+        )
+        unreachable = BrowserUnreachableError("could not connect to Chrome over CDP at ws://10.0.0.9:9222: refused")
+
+        for name, arguments in (("browser.cdp_attach", {"cdp_url": secret_url}), ("browser.create_session", {})):
+            with (
+                self.subTest(tool=name),
+                patch.object(self.manager, "create_session", new=AsyncMock(side_effect=unreachable)),
+                acting_as(BOB),
+            ):
+                result = await gateway.call_tool(McpToolCallRequest(name=name, arguments=arguments))
+
+                self.assertTrue(result.isError)
+                self.assertEqual(result.content[0].text, "the browser could not be reached")
+                self.assertEqual(result.structuredContent["code"], "browser_unreachable")
+                for part in ("user:", "pw-5c1e", "id-77d2", "/devtools/", "10.0.0.9", "refused"):
+                    self.assertNotIn(part, result.model_dump_json())
         self.assertIs(self.manager.browser, self.original)
 
     async def test_single_operator_attach_closes_the_previous_browser(self) -> None:

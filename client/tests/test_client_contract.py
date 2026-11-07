@@ -272,7 +272,7 @@ class StreamEventsTests(unittest.TestCase):
             return FakeStream()
 
         client = AutoBrowserClient("http://auto-browser.test", token="sekret")
-        with patch("auto_browser_client.client.httpx.stream", side_effect=fake_stream):
+        with patch("auto_browser_client.client.httpx.Client.stream", side_effect=fake_stream):
             events = list(client.stream_events("s-1"))
 
         self.assertEqual(events, [{"a": 1}, {"b": 2}])
@@ -283,6 +283,41 @@ class StreamEventsTests(unittest.TestCase):
         # unreachable controller.
         self.assertIsNone(captured["timeout"].read)
         self.assertEqual(captured["timeout"].connect, 60.0)
+
+    def test_w10_3_stream_events_closes_the_client_it_opens(self) -> None:
+        # W8-8: the stream runs on a client of its own; one that was never closed passed every other test. The
+        # client is captured where it opens the stream, and is_closed covers both close() and the with-block exit.
+        class FakeStream:
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return None
+
+            def iter_text(self):
+                yield 'data: {"a": 1}\n\n'
+                yield 'data: {"b": 2}\n\n'
+
+        opened: list[httpx.Client] = []
+
+        def fake_stream(http, method, url, **kwargs):
+            opened.append(http)
+            return FakeStream()
+
+        client = AutoBrowserClient("http://auto-browser.test", token="sekret")
+        with patch.object(httpx.Client, "stream", autospec=True, side_effect=fake_stream):
+            self.assertEqual(list(client.stream_events("s-1")), [{"a": 1}, {"b": 2}])
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].is_closed, "the stream's client stayed open after the generator ended")
+
+            events = client.stream_events("s-1")
+            self.assertEqual(next(events), {"a": 1})
+            self.assertEqual(len(opened), 2)
+            self.assertFalse(opened[1].is_closed)
+            events.close()
+            self.assertTrue(opened[1].is_closed, "the stream's client stayed open after an early close()")
 
     def test_stream_events_error_raises_autobrowser_error_not_response_not_read(self) -> None:
         # Regression: a streaming response is unread until .read() is called, so
@@ -319,7 +354,7 @@ class StreamEventsTests(unittest.TestCase):
                 return iter(())
 
         client = AutoBrowserClient("http://auto-browser.test", token="bad")
-        with patch("auto_browser_client.client.httpx.stream", return_value=FakeErrorStream()):
+        with patch("auto_browser_client.client.httpx.Client.stream", return_value=FakeErrorStream()):
             with self.assertRaises(AutoBrowserError) as ctx:
                 list(client.stream_events("s-1"))
 

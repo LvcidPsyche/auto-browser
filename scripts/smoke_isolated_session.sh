@@ -56,10 +56,13 @@ assert payload["isolation"]["shared_takeover_surface"] is False, payload
 assert payload["remote_access"]["status"] == "local_only", payload
 runtime = payload["isolation"]["runtime"]
 expected_takeover = f"http://127.0.0.1:{runtime['novnc_port']}/vnc.html?autoconnect=true&resize=scale"
-# A handoff response: the URL carries this session's own noVNC password.
-import re
-assert re.fullmatch(re.escape(expected_takeover) + r"#password=[A-Za-z0-9]{8}", payload["takeover_url"]), payload
+# NAV-14: the create response reaches the model, so no password anywhere in it (checked first, so a failure never
+# prints one); the person gets the full link from GET /sessions/{id}/takeover-link, checked below.
+assert "#password=" not in json.dumps(payload), "the create response carries the noVNC password"
+assert payload["takeover_url"] == expected_takeover, payload
 assert payload["remote_access"]["takeover_url"] == payload["takeover_url"], payload
+# The note says where the person opens the full link.
+assert "from the dashboard" in str(payload["remote_access"].get("takeover_note", "")), payload
 # Its own network (per_session, the default), not the compose network.
 assert runtime["network"] == f"{runtime['container_name']}-net", payload
 print(payload["id"], runtime["container_name"], runtime["novnc_port"], runtime["network"])
@@ -116,9 +119,43 @@ payload = json.loads(sys.argv[1])
 novnc_port = int(sys.argv[2])
 assert payload["status"] == "local_only", payload
 expected = f"http://127.0.0.1:{novnc_port}/vnc.html?autoconnect=true&resize=scale"
-assert payload["takeover_url"].startswith(expected + "#password="), payload
-print("isolated remote-access endpoint ok (takeover URL carries the session password)")
+assert "#password=" not in json.dumps(payload), "remote-access carries the noVNC password"
+assert payload["takeover_url"] == expected, payload
+print("isolated remote-access endpoint ok (no password in it)")
 PY
+
+# The person's path (NAV-14): only this endpoint returns the full link, the session's noVNC password in its fragment,
+# with Cache-Control: no-store. The response goes to Python on stdin, never argv or a variable, and is not printed.
+# NAV-14b: without the takeover token (the bearer token alone, as an agent holds it) the endpoint answers 403.
+NO_TAKEOVER_TOKEN_STATUS="$(bearer_curl -sS -o /dev/null -w '%{http_code}' "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
+if [[ "${NO_TAKEOVER_TOKEN_STATUS}" != "403" ]]; then
+  echo >&2 "takeover-link without X-Takeover-Token answered ${NO_TAKEOVER_TOKEN_STATUS}, not 403"
+  exit 1
+fi
+# With it: takeover_curl reads the token the controller generated in data/takeover-token, as bearer_curl reads
+# data/api-token, and sends both on stdin. The response goes from curl to Python on stdin, never into a shell
+# variable (`bash -x` prints an assignment, and it carries the password); the check comes from -c.
+TAKEOVER_LINK_CHECK="$(cat <<'PY'
+import json
+import re
+import sys
+
+novnc_port, session_id = int(sys.argv[1]), sys.argv[2]
+head, _, body = sys.stdin.read().replace("\r\n", "\n").partition("\n\n")
+headers = {
+    name.strip().lower(): value.strip()
+    for name, _, value in (line.partition(":") for line in head.splitlines()[1:])
+}
+assert headers.get("cache-control") == "no-store", f"takeover-link Cache-Control: {headers.get('cache-control')!r}"
+link = json.loads(body)
+assert link.get("session_id") == session_id, "takeover-link names another session"
+expected = f"http://127.0.0.1:{novnc_port}/vnc.html?autoconnect=true&resize=scale"
+pattern = re.escape(expected) + r"#password=[A-Za-z0-9]{8}"
+assert re.fullmatch(pattern, str(link.get("takeover_url", ""))), "takeover-link is not this session's password link"
+print("isolated takeover-link endpoint ok (the full link, no-store; not printed)")
+PY
+)"
+takeover_curl -fsS -i "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link" | python3 -I -c "${TAKEOVER_LINK_CHECK}" "${NOVNC_PORT}" "${SESSION_ID}"
 
 # NOVNC_PORT is the session's published noVNC port, as the API reported it above.
 # Every isolated container has its own noVNC password, whatever VNC_PASSWORD is.
@@ -288,6 +325,8 @@ import json
 import sys
 payload = json.loads(sys.argv[1])
 assert payload["closed"] is True, payload
+# B-fix-9 made `closed` true even for a partial close: only `teardown` tells the two apart.
+assert payload["teardown"] == "complete", payload
 assert payload["session"]["status"] == "closed", payload
 print("isolated close ok")
 PY

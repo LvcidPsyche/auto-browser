@@ -133,6 +133,12 @@ services:
       # stdio bridge, the scripts and the dashboard's user read it. No other
       # service mounts the /data root.
       API_TOKEN_FILE: /data/api-token
+      # The takeover token (GET /sessions/{session_id}/takeover-link), passed
+      # like API_BEARER_TOKEN so a value exported in the shell reaches the
+      # controller too, and its file pinned like API_TOKEN_FILE: the dashboard's
+      # user, scripts/takeover_link.sh and the smokes read ./data/takeover-token.
+      TAKEOVER_TOKEN: ${TAKEOVER_TOKEN:-}
+      TAKEOVER_TOKEN_FILE: /data/takeover-token
       # true restores the old tokenless loopback API (see .env.example).
       API_ALLOW_TOKENLESS_LOOPBACK: ${API_ALLOW_TOKENLESS_LOOPBACK:-false}
       CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver}
@@ -193,7 +199,6 @@ services:
       ENABLE_TRACING: ${ENABLE_TRACING:-false}
       STEALTH_ENABLED: ${STEALTH_ENABLED:-false}
       STEALTH_PROFILE: ${STEALTH_PROFILE:-off}
-      TYPING_DELAY_MS: ${TYPING_DELAY_MS:-20}
       ACTION_TIMEOUT_MS: ${ACTION_TIMEOUT_MS:-15000}
       CONNECT_RETRIES: ${CONNECT_RETRIES:-60}
       CONNECT_RETRY_DELAY_SECONDS: ${CONNECT_RETRY_DELAY_SECONDS:-1}

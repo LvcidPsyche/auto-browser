@@ -472,6 +472,21 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
                 container = next(iter(self.client.containers.browser_containers.values()))
                 self.assertTrue(container.removed)
 
+    async def test_cb1_7_the_refusal_claims_no_removal_the_rollback_may_not_make(self) -> None:
+        # "Its container was removed." was written before the rollback ran: wrong when its removal failed, and under
+        # ISOLATED_BROWSER_KEEP_CONTAINERS, which only stops the container.
+        off = {"sandbox": "off", "cause": "userns_refused"}
+        for keep in ("false", "true"):
+            with self.subTest(keep=keep):
+                with self.assertRaisesRegex(RuntimeError, "the session was refused") as raised:
+                    await self._provision(
+                        sandbox_state=off, BROWSER_SANDBOX="on", ISOLATED_BROWSER_KEEP_CONTAINERS=keep
+                    )
+                self.assertNotIn("removed", str(raised.exception))
+                container = next(iter(self.client.containers.browser_containers.values()))
+                self.assertEqual(container.removed, keep == "false")
+                self.assertTrue(container.stopped)
+
     async def test_auto_keeps_a_fallen_back_container(self) -> None:
         runtime = await self._provision(sandbox_state={"sandbox": "off", "cause": "userns_refused"})
         self.assertEqual(runtime.sandbox["sandbox"], "off")
@@ -581,7 +596,8 @@ class Round2WiringTests(unittest.TestCase):
         self.assertIn("BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up", job)
         self.assertIn('if state and state.get("sandbox") == "refused":', job)
         self.assertIn('sys.exit("a refused browser-node left an endpoint file")', job)
-        # The controller under on in both legs: a session on the verified node, a 409 on the refused one (S3#5).
+        # The controller under on in both legs: a session on the verified node, and a 503 on the refused one, which
+        # publishes no endpoint to connect to (S3#5; an unreachable browser-node answers 503 since R-2).
         self.assertIn("BROWSER_SANDBOX=on docker compose up -d --force-recreate browser-node controller", job)
         # S4#1/D9: a leg only the gate can refuse (an unverified browser-node with an endpoint), and its WARNING.
         self.assertIn(
@@ -597,6 +613,10 @@ class Round2WiringTests(unittest.TestCase):
         self.assertIn("check_sandbox_gate.py --expect 200 --isolated", job)
         self.assertLess(
             job.index('check_sandbox_gate.py --expect 200 --api-port "$api_port"'),
+            job.index('check_sandbox_gate.py --expect 503 --api-port "$api_port"'),
+        )
+        self.assertLess(
+            job.index('check_sandbox_gate.py --expect 503 --api-port "$api_port"'),
             job.index('check_sandbox_gate.py --expect 409 --api-port "$api_port"'),
         )
         script = (REPO / "scripts" / "assert_browser_sandbox.py").read_text(encoding="utf-8")

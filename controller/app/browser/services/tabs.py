@@ -211,7 +211,18 @@ class BrowserTabService:
             await target_page.close()
             remaining = self.pages(session)
             if was_active and remaining:
-                session.page = remaining[max(0, min(index, len(remaining) - 1))]
+                # The tab that took the closed one's place, unless ALLOWED_HOSTS refuses it: then the nearest
+                # tab it allows (the first of two equally near), and only if none is allowed, the old choice.
+                preferred = max(0, min(index, len(remaining) - 1))
+                nearest_first = sorted(range(len(remaining)), key=lambda position: abs(position - preferred))
+                session.page = next(
+                    (
+                        remaining[position]
+                        for position in nearest_first
+                        if not self.manager._page_refused(remaining[position])
+                    ),
+                    remaining[preferred],
+                )
                 self.manager._attach_page_listeners(session.page, session)
                 if hasattr(session.page, "bring_to_front"):
                     await session.page.bring_to_front()

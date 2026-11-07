@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.induce import SkillInducer
@@ -107,6 +108,132 @@ class DriftOnUrlContainsTests(unittest.IsolatedAsyncioTestCase):
         # The bare value is scrubbed to the same replacement the stored query holds, so it is checked as "some
         # redaction is present".
         self.assertEqual(await self._drift(EMAIL, f"https://app.test/done?email={EMAIL}"), "healthy")
+
+
+class DriftScrubberFailureTests(unittest.IsolatedAsyncioTestCase):
+    def test_a_scrubber_that_returns_nothing_leaves_the_expectation_as_written(self) -> None:
+        from app.harness.drift import _scrub_url_contains
+
+        with patch("app.harness.drift._scrub_url", return_value=""):
+            self.assertEqual(_scrub_url_contains("email=alice"), "email=alice")
+
+    async def test_a_scrubber_that_raises_makes_the_check_unverified_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            contract = TaskContract(
+                id="drift-boom",
+                goal="Open the page.",
+                postconditions=[Postcondition(kind="url_contains", value="email=alice")],
+                budget=Budget(max_attempts=1, max_steps=2),
+            )
+            record = await service.start_convergence(
+                contract, mock_final_observation={"url": "https://app.test/?email=alice", "text": "done"}
+            )
+
+            with patch("app.harness.drift._scrub_url", side_effect=RuntimeError("scrubber bug")):
+                drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+            self.assertEqual(drift.status, "unverified")
+            self.assertIn("RuntimeError", " ".join(drift.notes))
+
+    async def test_a_url_scrubber_that_fails_on_a_query_or_fragment_value_never_matches_every_page(self) -> None:
+        # The PII scrubber's url() failing is caught inside scrub_url, which hands back the value's path: "" for a
+        # value that starts with `?` or `#`. An expectation of "" is in every URL, so the check must not say healthy.
+        from app.pii_scrub import PiiScrubber
+
+        for expected, final_url in (
+            (f"?email={EMAIL}", f"https://app.test/done?email={EMAIL}"),
+            (f"#email={EMAIL}", f"https://app.test/done#email={EMAIL}"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                service = HarnessService(tmp)
+                contract = TaskContract(
+                    id="drift-url-scrubber",
+                    goal="Open the page.",
+                    postconditions=[Postcondition(kind="url_contains", value=expected)],
+                    budget=Budget(max_attempts=1, max_steps=2),
+                )
+                record = await service.start_convergence(
+                    contract, mock_final_observation={"url": final_url, "text": "done"}
+                )
+                self.assertEqual(record.status, "converged")
+
+                with patch.object(PiiScrubber, "url", side_effect=RuntimeError("scrubber bug")):
+                    drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+                self.assertNotEqual(drift.status, "healthy", drift.notes)
+
+    async def test_a_url_inside_a_text_or_dom_expectation_is_kept_as_written_when_its_scrub_fails(self) -> None:
+        # text_contains and dom_contains scrub each URL in the value as a URL. A failing URL scrub hands back the
+        # URL's path, so "Done: https://app.test/done?email=..." became "Done: https://app.test/done", which the
+        # stored text contains whatever its query said.
+        from app.pii_scrub import PiiScrubber
+
+        value = f"Done: https://app.test/done?email={EMAIL}"
+        for kind, observation in (
+            ("text_contains", {"url": "https://app.test/done", "text": value}),
+            ("dom_contains", {"url": "https://app.test/done", "text": "done", "dom": value}),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                service = HarnessService(tmp)
+                contract = TaskContract(
+                    id="drift-url-span",
+                    goal="Open the page.",
+                    postconditions=[Postcondition(kind=kind, value=value)],
+                    budget=Budget(max_attempts=1, max_steps=2),
+                )
+                record = await service.start_convergence(contract, mock_final_observation=observation)
+                self.assertEqual(record.status, "converged")
+
+                with patch.object(PiiScrubber, "url", side_effect=RuntimeError("scrubber bug")):
+                    drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+                self.assertNotEqual(drift.status, "healthy", drift.notes)
+
+    async def test_a_url_inside_a_text_expectation_still_matches_when_its_scrub_works(self) -> None:
+        value = f"Done: https://app.test/done?email={EMAIL}"
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            contract = TaskContract(
+                id="drift-url-span-ok",
+                goal="Open the page.",
+                postconditions=[Postcondition(kind="text_contains", value=value)],
+                budget=Budget(max_attempts=1, max_steps=2),
+            )
+            record = await service.start_convergence(
+                contract, mock_final_observation={"url": "https://app.test/done", "text": value}
+            )
+
+            drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+            self.assertEqual(drift.status, "healthy", drift.notes)
+
+    async def test_a_url_scrubber_that_fails_on_a_path_with_a_query_or_fragment_never_matches_every_page(self) -> None:
+        # The same failure on `/?...` or `/#...` hands back "/", which every URL also contains: a scrub that lost the
+        # value's query or fragment is a failed one, and the value is kept as written.
+        from app.pii_scrub import PiiScrubber
+
+        for expected, final_url in (
+            (f"/?email={EMAIL}", f"https://app.test/?email={EMAIL}"),
+            (f"/#email={EMAIL}", f"https://app.test/#email={EMAIL}"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                service = HarnessService(tmp)
+                contract = TaskContract(
+                    id="drift-url-scrubber-path",
+                    goal="Open the page.",
+                    postconditions=[Postcondition(kind="url_contains", value=expected)],
+                    budget=Budget(max_attempts=1, max_steps=2),
+                )
+                record = await service.start_convergence(
+                    contract, mock_final_observation={"url": final_url, "text": "done"}
+                )
+                self.assertEqual(record.status, "converged")
+
+                with patch.object(PiiScrubber, "url", side_effect=RuntimeError("scrubber bug")):
+                    drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+                self.assertNotEqual(drift.status, "healthy", drift.notes)
 
 
 if __name__ == "__main__":

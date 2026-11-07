@@ -30,15 +30,21 @@ _SENSITIVE_KEY_FRAGMENTS = (
 _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
 # They are redacted when the action is marked sensitive.
-_TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "label", "username"})
+# Beside a sensitive flag, `text` and `text_preview` are hidden in any dict; `value`, `label` and `username` only in an
+# action's own payload, because a site's own row can carry a "sensitive" key and those are its data. That rule stops
+# at the page data an event carries (_PAGE_DATA_KEYS): a row there keeps what final_observation keeps.
+_TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
+_ACTION_TYPED_TEXT_KEYS = _TYPED_TEXT_KEYS | {"value", "label", "username"}
+_PAGE_DATA_KEYS = frozenset({"observation", "before", "after"})
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
 # A URL in text ends at whitespace, a double quote or an angle bracket, and a trailing run of `,;)]}` is punctuation
 # after it. An apostrophe is legal inside a URL (`?q=o'neil&token=...`), so it ends one only when it closes a quoted
-# string: when whitespace, `,;:)]}` or the end follows it.
+# string: when whitespace, `,;:)]}`, the end, or sentence punctuation (`.!?`) and then whitespace or the end follows it.
+# An apostrophe before a letter or a digit stays ambiguous and stays in the URL.
 _URL_PATTERN = re.compile(
-    r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|\Z))*[^\s"'<>,;)\]}]""",
+    r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|[.!?](?:\s|\Z)|\Z))*[^\s"'<>,;)\]}]""",
     re.IGNORECASE,
 )
 _URL_SCRUB_MAX_BYTES = 16384
@@ -215,7 +221,7 @@ class TraceEnvelope(BaseModel):
                     run_id=trace.run_id,
                     step_idx=index,
                     event_type=event_type,
-                    payload=_redact_sensitive(payload),
+                    payload=_redact_sensitive(payload, decision=True),
                     previous_hash=previous_hash,
                 ).with_hash()
                 previous_hash = event.entry_hash
@@ -249,7 +255,7 @@ class TraceRecorder:
             run_id=self.run_id,
             step_idx=step_idx,
             event_type=event_type,
-            payload=_redact_sensitive(payload),
+            payload=_redact_sensitive(payload, decision=True),
             previous_hash=self._previous_hash,
         ).with_hash()
         with self.jsonl_path.open("a", encoding="utf-8") as handle:
@@ -426,22 +432,34 @@ def _map_urls(value: str, on_url: Callable[[str], str], on_text: Callable[[str],
     return "".join(parts)
 
 
-def _redact_sensitive(value: Any, *, strings: Callable[[str], str] | None = _scrub_string) -> Any:
-    """Redact secret-named keys, typed text of sensitive actions, and (with `strings`) rewrite every string."""
+def _redact_sensitive(
+    value: Any, *, strings: Callable[[str], str] | None = _scrub_string, decision: bool = False
+) -> Any:
+    """Redact secret-named keys and (with `strings`) rewrite every string.
+
+    The typed text of a dict flagged sensitive is hidden too: its `text` and `text_preview` anywhere, and with
+    `decision` (an event payload: the agent's decision and its action) its `value`, `label` and `username` as well.
+    In page data (an observation, extracted data, and inside an event its `observation` and the execution's `before`
+    and `after`) those three stay: a "sensitive" key a site's own data carries must not blank its neighbours. A
+    sensitive select_option's own execution `target` is the action's, and keeps the action rule.
+    """
     if isinstance(value, dict):
-        hide_typed_text = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
+        flagged = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
+        typed_keys = _ACTION_TYPED_TEXT_KEYS if decision else _TYPED_TEXT_KEYS
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
             if any(fragment in key_text for fragment in _SENSITIVE_KEY_FRAGMENTS):
                 redacted[key] = _REDACTED
-            elif hide_typed_text and key_text in _TYPED_TEXT_KEYS:
+            elif flagged and key_text in typed_keys:
                 redacted[key] = _REDACTED
             else:
-                redacted[key] = _redact_sensitive(item, strings=strings)
+                # The action rule stops at page data inside an event: its observation and the execution's snapshots.
+                below = decision and key_text not in _PAGE_DATA_KEYS
+                redacted[key] = _redact_sensitive(item, strings=strings, decision=below)
         return redacted
     if isinstance(value, (list, tuple)):
-        return [_redact_sensitive(item, strings=strings) for item in value]
+        return [_redact_sensitive(item, strings=strings, decision=decision) for item in value]
     if strings is not None and isinstance(value, str):
         return strings(value)
     return value

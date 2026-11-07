@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .mcp_stdio import _goes_direct, _NoRedirects
+
 
 @dataclass(frozen=True)
 class AgentEvalCase:
@@ -353,8 +355,24 @@ class ControllerEvalClient:
             headers=self.headers,
             method="POST",
         )
+        # A loopback controller is reached past any environment proxy (W7-1): urllib skips a proxy for localhost
+        # only when no_proxy names it, so the Authorization header went to the proxy. Any other host still uses the
+        # proxy the environment names. The bridge's rule decides, not auth_policy.is_loopback_host, whose meaning
+        # feeds auth decisions (W8-3). Redirects are refused on both branches, as the bridge refuses them (W9-6):
+        # urllib's default handler copied the Authorization header onto a redirect to any origin. The bridges'
+        # _goes_direct decides (W13-2): direct when the host http.client connects to is local (an unbracketed
+        # ::1:8000 is ::1). When it is not but another reading is (urllib's percent-decoded host, W10-4; the URL as
+        # written, which a proxy reads; that decoded host as a whole after its last @, W12-2; the host http.client
+        # reads from what follows that @, W14-4, so user@::1:8000 is refused), it raises
+        # InvalidControllerURL (an http.client InvalidURL, W13-1), as it does for a non-numeric port or a host a
+        # reading cannot parse (W12-3); that propagates before any opener is chosen. A host-less request (None)
+        # falls through to urllib's own error.
+        if _goes_direct(request):
+            urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects).open
+        else:
+            urlopen = urllib.request.build_opener(_NoRedirects).open
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urlopen(request, timeout=120) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

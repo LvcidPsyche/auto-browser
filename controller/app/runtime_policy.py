@@ -6,9 +6,17 @@ from shutil import which
 from typing import Sequence
 from urllib.parse import urlparse
 
-from .auth_policy import BIND_SCOPE_EXPOSED, Credential, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
+from .auth_policy import (
+    BIND_SCOPE_EXPOSED,
+    Credential,
+    credentials_for,
+    is_local_only_host,
+    resolve_bind_scope,
+    tokenless_loopback_allowed,
+)
 from .config import Settings
 from .providers.base import BaseProviderAdapter
+from .url_safety import refuse_ambiguous_host
 
 
 @dataclass(slots=True)
@@ -20,8 +28,6 @@ class RuntimePolicyReport:
     def ok(self) -> bool:
         return not self.errors
 
-
-LOCAL_HOSTS = {"", "127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 # Production floor for API_BEARER_TOKEN. "Required" alone was satisfied by
 # API_BEARER_TOKEN=x, which is not meaningfully different from no token.
@@ -204,10 +210,22 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
         )
 
 
+def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -> None:
+    """Playwright parses CDP_CONNECT_URL as a browser does and the startup log as urllib does: where they could read
+    different hosts, the log would name one and the controller connect to the other."""
+    if not settings.cdp_connect_url:
+        return
+    try:
+        refuse_ambiguous_host(settings.cdp_connect_url, field_name="CDP_CONNECT_URL")
+    except ValueError as exc:
+        report.errors.append(str(exc))
+
+
 def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
     report = RuntimePolicyReport()
 
     _validate_api_authentication(settings, report)
+    _validate_cdp_connect_url(settings, report)
 
     if getattr(settings, "codex_allow_host_exec", False):
         report.warnings.append(
@@ -296,7 +314,7 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
             )
 
     takeover_host = (urlparse(settings.takeover_url).hostname or "").strip().lower()
-    if takeover_host in LOCAL_HOSTS and not settings.isolated_tunnel_enabled:
+    if is_local_only_host(takeover_host) and not settings.isolated_tunnel_enabled:
         report.warnings.append(
             "TAKEOVER_URL is still local-only and ISOLATED_TUNNEL_ENABLED=false; front it with Cloudflare Access, Tailscale, or a tunnel before remote use"
         )

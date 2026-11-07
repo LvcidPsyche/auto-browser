@@ -8,11 +8,13 @@ pages. The copy is the same logins, so it belongs to the same operator.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.action_errors import SessionNotFoundError
 from app.models import OperatorIdentity
@@ -83,6 +85,103 @@ class ShadowBrowseOwnershipTests(unittest.IsolatedAsyncioTestCase):
         _, shadow_id = await self._shadow_of(ALICE)
 
         self.assertIn(shadow_id, self.manager.sessions)
+
+    async def _source(self) -> str:
+        with acting_as(ALICE):
+            session_id = (await self.manager.create_session(name="source"))["id"]
+        self.manager.sessions[session_id].context = StateContext(self.manager.sessions[session_id].page)
+        return session_id
+
+    async def _shadow_records(self) -> list:
+        with acting_as(ALICE):
+            return [r for r in await self.manager.session_store.list() if r.name == "shadow-source"]
+
+    async def test_a_rollback_after_the_record_was_written_closes_the_record(self) -> None:
+        # R-15: the rollback never touched the session store, so the shadow's record stayed active.
+        session_id = await self._source()
+        real_persist = self.manager._persist_session
+
+        async def persist_then_fail(session, *, status):
+            await real_persist(session, status=status)
+            raise RuntimeError("persist failed after the write")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        with acting_as(ALICE), self.assertRaisesRegex(RuntimeError, "persist failed"):
+            await self.manager.enable_shadow_browse(session_id)
+
+        records = await self._shadow_records()
+        self.assertEqual([(r.status, r.close_reason) for r in records], [("closed", "create_failed")])
+
+    async def test_a_cancel_while_the_shadow_record_is_written_still_ends_closed(self) -> None:
+        session_id = await self._source()
+        store = self.manager.session_store.file_store
+        real_write = store._upsert_sync
+        writing, release = threading.Event(), threading.Event()
+
+        def gated_write(record) -> None:
+            if record.name == "shadow-source" and record.status == "active":
+                writing.set()
+                release.wait(5)
+            real_write(record)
+
+        store._upsert_sync = gated_write  # type: ignore[method-assign]
+        with acting_as(ALICE):
+            task = asyncio.create_task(self.manager.enable_shadow_browse(session_id))
+        await asyncio.to_thread(writing.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        records = await self._shadow_records()
+        self.assertEqual([r.status for r in records], ["closed"])
+        self.assertNotIn(records[0].id, self.manager.sessions)
+
+    async def test_w9_11_a_cancel_during_the_rollback_still_closes_the_shadow_record(self) -> None:
+        # W7-2 moved the run-to-completion up to cleanup_failed, so the shadow's rollback ran bare: a cancel while
+        # its directories were removed skipped the record close, and a record the persist wrote stayed active.
+        from app.browser.services.sessions import BrowserSessionService
+
+        session_id = await self._source()
+        real_persist = self.manager._persist_session
+
+        async def persist_then_fail(session, *, status):
+            await real_persist(session, status=status)
+            raise RuntimeError("persist failed after the write")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        started, go_on = threading.Event(), threading.Event()
+        self.addCleanup(go_on.set)
+        real_remove = BrowserSessionService.remove_session_dirs
+        removed: list[str] = []
+
+        def gated(service, shadow_id):
+            removed.append(shadow_id)
+            started.set()
+            go_on.wait(10)
+            real_remove(service, shadow_id)
+
+        with patch.object(BrowserSessionService, "remove_session_dirs", gated):
+            with acting_as(ALICE):
+                task = asyncio.create_task(self.manager.enable_shadow_browse(session_id))
+            self.assertTrue(await asyncio.to_thread(started.wait, 10), "the rollback never removed the directories")
+            self.assertEqual([r.status for r in await self._shadow_records()], ["active"])
+            task.cancel()
+            await asyncio.sleep(0.05)
+            go_on.set()
+            cancels = 0
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 10)
+            except asyncio.CancelledError:
+                cancels += 1
+
+        self.assertEqual(cancels, 1)
+        records = await self._shadow_records()
+        self.assertEqual([(r.status, r.close_reason) for r in records], [("closed", "create_failed")])
+        settings = self.manager.settings
+        dirs = [Path(root) / removed[0] for root in (settings.artifact_root, settings.auth_root, settings.upload_root)]
+        self.assertEqual([d for d in dirs if d.exists()], [])
 
 
 class ShadowBrowseAllowedHostsTests(unittest.IsolatedAsyncioTestCase):

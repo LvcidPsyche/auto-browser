@@ -8,8 +8,9 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from . import process_hardening
 from .action_errors import BrowserActionError, SessionNotFoundError
-from .api_token import ensure_api_credential
+from .api_token import ensure_api_credential, ensure_takeover_token
 from .app_factory import build_controller_services, create_controller_app
 from .auth_policy import has_named_credentials
 from .compliance import apply_compliance_template, write_compliance_manifest
@@ -29,6 +30,9 @@ from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(level=_log_level)
+# httpx logs every request's whole URL at INFO, userinfo, path and query included: an approval webhook's URL is often
+# its credential, and a provider's can carry one. Its warnings and errors still come through.
+logging.getLogger("httpx").setLevel(max(_log_level, logging.WARNING))
 logger = logging.getLogger(__name__)
 
 
@@ -61,9 +65,16 @@ mcp_transport = services.mcp_transport
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # Before anything starts a child (W2-27): a process of the controller's uid can read a dumpable controller's
+    # whole environment through /proc/PID/environ. Through the module, so the test suite can keep itself dumpable.
+    process_hardening.make_non_dumpable()
+    # Before anything can run OCR (W5-1): pytesseract starts Tesseract with the controller's whole environment.
+    process_hardening.confine_tesseract_environment()
     # First, so the runtime policy below sees a token loaded or generated from
     # API_TOKEN_FILE. Not at import: tests and dev harnesses import this module.
     ensure_api_credential(settings)
+    # After it, so a token loaded from API_TOKEN_FILE counts as an agent's credential the takeover token must differ from.
+    ensure_takeover_token(settings)
     if _compliance_template and _compliance_overrides is not None:
         write_compliance_manifest(
             template_name=_compliance_template,
@@ -85,6 +96,7 @@ async def lifespan(application: FastAPI):
         from .startup.extensions import register_extensions
 
         register_extensions(application)
+        maintenance.harness_service = getattr(application.state, "harness_service", None)
     except Exception as exc:
         logger.error("v1.0 extensions init failed (non-fatal): %s", exc)
     try:

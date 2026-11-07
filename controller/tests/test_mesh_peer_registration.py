@@ -51,6 +51,8 @@ def mesh(tmp_path: Path):
     app.state.mesh_identity = server
     app.state.peer_registry = peers
     app.state.delegation_manager = DelegationManager(identity=server, peers=peers, tool_gateway=tool_gateway)
+    # A node up for longer than one window: right after a start it refuses every envelope for that long.
+    app.state.delegation_manager._started_at -= app.state.delegation_manager._timestamp_window + 1
     register_all_routers(app)
     with TestClient(app) as client:
         yield SimpleNamespace(

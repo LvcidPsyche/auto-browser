@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Check the controller's BROWSER_SANDBOX=on gate against a real browser-node (CI's compose-smoke).
 
-usage: check_sandbox_gate.py --expect 200|409 [--isolated] [--log-must-say TEXT] [--api-port N] [--data DIR]
+usage: check_sandbox_gate.py --expect 200|409|503 [--isolated] [--log-must-say TEXT] [--api-port N] [--data DIR]
 
 --expect 200: a session is created, then closed. Shared mode: the shared browser-node's state names exactly the
               endpoint file's content (the run the controller connected to). --isolated (docker_ephemeral): the
               session container's own state is a verified on with /proc evidence (assert_browser_sandbox.py's rules).
---expect 409: session creation is refused by the gate (a browser-node that is not a verified "on"), or by a failed
-              connect to a browser-node that refused to start. --log-must-say: and the controller's log (docker
-              compose logs controller) says so.
+--expect 409: session creation is refused by the gate (a browser-node that is not a verified "on").
+--expect 503: session creation fails because the controller cannot reach the browser-node (one that refused to
+              start publishes no endpoint).
+--log-must-say (with 409 or 503): and the controller's log (docker compose logs controller) says so.
 
 The token is read from DIR/api-token and never printed.
 """
@@ -27,6 +28,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect, as the MCP bridge does (W9-6): urllib's default handler copied the Authorization
+    header onto a redirect to any origin. The 3xx is reported as the HTTP error it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Every request goes to the loopback controller, so none goes through an environment proxy: urllib skips one for
+# 127.0.0.1 only when no_proxy names it, and the API token would go to the proxy.
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects)
+
+
 def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(url, data=data, method=method)  # noqa: S310 - a loopback http URL
@@ -34,7 +48,7 @@ def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[i
     if data is not None:
         request.add_header("content-type", "application/json")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - a loopback URL
+        with _DIRECT.open(request, timeout=120) as response:  # noqa: S310 - a loopback URL
             return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as exc:
         try:
@@ -45,7 +59,7 @@ def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[i
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expect", type=int, choices=(200, 409), required=True)
+    parser.add_argument("--expect", type=int, choices=(200, 409, 503), required=True)
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--data", default="data")
     parser.add_argument("--isolated", action="store_true")
@@ -59,7 +73,7 @@ def main(argv: list[str]) -> int:
     base = f"http://127.0.0.1:{args.api_port}"
     for _ in range(90):
         try:
-            with urllib.request.urlopen(f"{base}/healthz", timeout=5):  # noqa: S310
+            with _DIRECT.open(f"{base}/healthz", timeout=5):  # noqa: S310
                 break
         except OSError:
             time.sleep(2)

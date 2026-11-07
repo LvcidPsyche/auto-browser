@@ -23,8 +23,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.action_errors import BrowserActionError, SessionNotFoundError
+from app.action_errors import BrowserActionError, BrowserUnreachableError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError
+from app.auth_state import AuthStateDecryptError
+from app.browser.services.session_creation import SessionLimitError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
@@ -239,6 +241,144 @@ def test_value_error_is_400_without_its_message(client: TestClient, route: Route
         response = _call(client, route)
     assert response.status_code == 400, response.text
     assert response.json() == {"detail": "Invalid request"}
+
+
+# The routes whose manager call can reach a browser connect: Chrome over CDP_CONNECT_URL, the shared browser-node, or
+# an isolated session's own browser (connect_browser, under acquire_session_browser). A failed connect raises
+# BrowserUnreachableError, which is not a RuntimeError, so their "Conflict" for one does not answer it.
+BROWSER_ROUTES = [route for route in ALL_ROUTES if route.method in ("create_session", "fork_session")]
+
+
+@pytest.mark.parametrize("route", BROWSER_ROUTES, ids=lambda r: r.id)
+def test_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient, route: Route) -> None:
+    reason = "could not connect to Chrome over CDP at ws://10.0.0.9:9222: WebSocket error: connect ECONNREFUSED"
+    with _raising(route, BrowserUnreachableError(reason)):
+        response = _call(client, route)
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
+class _UnreachableChromium:
+    async def connect(self, ws_target: str):
+        raise ConnectionRefusedError(f"connect ECONNREFUSED {ws_target}")
+
+
+def _shared_node_unreachable() -> ExitStack:
+    """The real path from create_session to connect_browser, with a shared browser-node that never answers."""
+    stack = ExitStack()
+    manager = main_module.manager
+    stack.enter_context(patch.object(manager, "playwright", SimpleNamespace(chromium=_UnreachableChromium())))
+    stack.enter_context(patch.object(manager, "browser", None))
+    stack.enter_context(patch.object(manager.settings, "connect_retries", 1))
+    stack.enter_context(patch.object(manager.settings, "connect_retry_delay_seconds", 0))
+    stack.enter_context(patch.object(manager.settings, "cdp_connect_url", None))
+    stack.enter_context(patch.object(manager.settings, "session_isolation_mode", "shared_browser_node"))
+    stack.enter_context(patch.object(manager.settings, "browser_ws_endpoint", "ws://browser-node:9223/sentinel-path"))
+    return stack
+
+
+def test_an_unreachable_shared_browser_node_is_503_on_create(client: TestClient) -> None:
+    # R-2: connect_browser raised a RuntimeError, which POST /sessions answers as a 409 Conflict.
+    with _shared_node_unreachable():
+        response = client.post("/sessions", json={})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_an_unreachable_shared_browser_node_is_503_on_fork(client: TestClient) -> None:
+    # CB2-2: the real fork path, from the route through fork_session and create_session to connect_browser. The
+    # source session is made on a fake browser; the fork's own create then connects and meets the unreachable node.
+    from tests.test_auth_state_ownership import StateContext
+    from tests.test_browser_manager_create_session import FakeBrowser, FakePage
+
+    manager = main_module.manager
+    source = FakeBrowser(StateContext(FakePage()))
+    with (
+        patch.object(manager, "_acquire_session_browser", new=AsyncMock(return_value=(source, None))),
+        patch.object(manager, "_settle", new=AsyncMock()),
+        patch.object(manager, "_maybe_provision_session_tunnel", new=AsyncMock()),
+    ):
+        source_id = client.post("/sessions", json={"name": "fork-source"}).json()["id"]
+    try:
+        connect = AsyncMock(side_effect=ConnectionRefusedError("connect ECONNREFUSED"))
+        with (
+            _shared_node_unreachable(),
+            patch.object(manager.playwright.chromium, "connect", new=connect),
+            patch.object(manager.settings, "max_sessions", 2),  # a fork counts as a session
+        ):
+            response = client.post(f"/sessions/{source_id}/fork")
+        connect.assert_awaited()  # the fork's own session reached the connect
+    finally:
+        manager.sessions.pop(source_id, None)
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_an_unreachable_isolated_browser_is_503_and_its_container_is_released(client: TestClient) -> None:
+    # CB2-2: the docker_ephemeral branch of acquire_session_browser: the session's own browser does not answer.
+    manager = main_module.manager
+    runtime = SimpleNamespace(
+        ws_endpoint="ws://browser-session-x:9223/sentinel-path", ws_endpoint_file="/data/browser-sessions/x/profile"
+    )
+    provisioner = SimpleNamespace(provision=AsyncMock(return_value=runtime), release=AsyncMock())
+    with (
+        _shared_node_unreachable(),
+        patch.object(manager.settings, "session_isolation_mode", "docker_ephemeral"),
+        patch.object(manager, "runtime_provisioner", provisioner),
+    ):
+        response = client.post("/sessions", json={})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+    provisioner.release.assert_awaited_once_with(runtime)
+
+
+def test_a_sandbox_refusal_of_the_shared_browser_node_stays_409(client: TestClient) -> None:
+    manager = main_module.manager
+    with (
+        patch.object(manager.runtime, "ensure_browser", new=AsyncMock(return_value=SimpleNamespace())),
+        patch.object(manager.runtime, "shared_sandbox", None),
+        patch.object(manager.settings, "browser_sandbox", "on"),
+        patch.object(manager.settings, "cdp_connect_url", None),
+        patch.object(manager.settings, "session_isolation_mode", "shared_browser_node"),
+    ):
+        response = client.post("/sessions", json={})
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "Conflict"}
+
+
+def test_a_cron_trigger_that_meets_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient) -> None:
+    # R-1: the trigger creates the run's session (create_session, then ensure_browser) and mapped no such error.
+    reason = "could not connect to Chrome over CDP at ws://10.0.0.9:9222: WebSocket error: connect ECONNREFUSED"
+    with patch.object(
+        main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=BrowserUnreachableError(reason))
+    ):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_a_cron_trigger_at_the_session_cap_is_409_with_a_fixed_detail_naming_no_session(client: TestClient) -> None:
+    # CB1-8: SessionLimitError (a RuntimeError) from the run's create_session was a bare 500 here. W2-14: its text
+    # names the job owner's live session ids (check_limit runs as the owner), and the trigger checks only the
+    # webhook key, so another operator holding the key read them: the trigger answers a fixed detail instead.
+    from app.routes.operations import CRON_TRIGGER_SESSION_LIMIT_DETAIL
+
+    error = SessionLimitError(
+        "Session limit reached: max_sessions=1. Active live session(s): sentinel-owner-session-id."
+    )
+    with patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=error)):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": CRON_TRIGGER_SESSION_LIMIT_DETAIL}
+    assert "sentinel-owner-session-id" not in response.text
+
+
+def test_a_cron_trigger_whose_auth_state_cannot_be_decrypted_is_422_as_post_sessions_is(client: TestClient) -> None:
+    error = AuthStateDecryptError("the saved auth state could not be decrypted: check AUTH_STATE_ENCRYPTION_KEY")
+    with patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=error)):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+    assert response.status_code == 422, response.text
+    assert response.json() == {"detail": str(error)}
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)

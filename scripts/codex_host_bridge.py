@@ -6,17 +6,81 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import traceback
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn, UnixStreamServer
 from typing import Any
+
+# The environment Codex gets: what the controller gives its own provider CLIs (cli_environment in
+# controller/app/providers/base.py: CLI_BASE_ENV_NAMES, CLI_BASE_ENV_PREFIXES, and the OpenAI adapter's
+# cli_env_names), plus each --pass-env NAME. Copies, since the bridge runs with the host's Python and cannot import
+# the controller; controller/tests/test_codex_host_bridge_env.py keeps them equal. Without it Codex, and every
+# command a prompt-injected Codex runs, got the whole environment of the shell the bridge was started from.
+CODEX_BASE_ENV_NAMES = frozenset(
+    {
+        "PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT",
+        "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "TZ",
+        "TERM", "NO_COLOR", "CI", "USER", "LOGNAME", "SHELL",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    }
+)  # fmt: skip
+CODEX_BASE_ENV_PREFIXES = ("LC_",)
+CODEX_PROVIDER_ENV_NAMES = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY", "CODEX_CA_CERTIFICATE")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def codex_environment(pass_env: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
+    """The allowlisted part of this process's environment, compared as cli_environment compares it (upper-cased)."""
+    allowed = CODEX_BASE_ENV_NAMES | {name.upper() for name in CODEX_PROVIDER_ENV_NAMES}
+    allowed |= {name.upper() for name in pass_env}
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in allowed or name.upper().startswith(CODEX_BASE_ENV_PREFIXES)
+    }
+
+
+PR_SET_DUMPABLE = 4
+
+
+def make_non_dumpable() -> bool:
+    """prctl(PR_SET_DUMPABLE, 0) on Linux, as the controller does (controller/app/process_hardening.py).
+
+    The commands Codex runs are processes of the bridge's uid, and proc(5) lets a same-uid process read a dumpable
+    process's /proc/PID/environ: the bridge's whole environment, around the allowlisted one Codex is given. The flag
+    resets at execve, so Codex itself stays ordinary. True when it took; False, after one warning, when it did not.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(*[ctypes.c_ulong(value) for value in (PR_SET_DUMPABLE, 0, 0, 0, 0)]) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+    except (OSError, AttributeError, ImportError) as exc:
+        print(
+            f"[codex-bridge] warning: could not make the bridge non-dumpable ({exc}); a process running as its uid "
+            "can read its environment through /proc",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
 
 SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 DEFAULT_SANDBOX_MODE = "read-only"
@@ -28,6 +92,27 @@ MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 # Seconds a client may stall between bytes of a request. Without it one idle or
 # slow connection pinned a handler thread forever.
 REQUEST_READ_TIMEOUT_SECONDS = 30.0
+# Seconds a client may take to deliver the whole body. The per-read timeout above restarts on every byte, so a
+# client sending one byte every 29 s would otherwise hold a handler thread for hours.
+REQUEST_BODY_DEADLINE_SECONDS = 60.0
+# Seconds a client may take to deliver the request line and headers, in total, for the same reason.
+REQUEST_HEADER_DEADLINE_SECONDS = 30.0
+# Codex runs at once. Each is a heavy host process, and the socket has no other limit on concurrent requests.
+MAX_CONCURRENT_DECISIONS = 2
+# Seconds a request waits for one of those slots before it is answered 503.
+DECISION_SLOT_WAIT_SECONDS = 2.0
+# Seconds a killed codex run's pipes are drained, and then its exit waited for, before the run gives up on each: a
+# descendant that left codex's process group (setsid) can hold stdout open long after the kill.
+CODEX_DRAIN_TIMEOUT_SECONDS = 3.0
+# Connections served at once. Each holds a handler thread, and a timer thread while its headers come in; a connection
+# past this is answered 503 and closed at once.
+MAX_CONNECTIONS = 32
+_BUSY_BODY = b'{"error": "too many connections"}'
+_BUSY_REPLY = (
+    b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
+    + b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(_BUSY_BODY)
+    + _BUSY_BODY
+)
 
 
 def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str]:
@@ -43,6 +128,140 @@ def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str
     if mode not in SANDBOX_MODES:
         raise SystemExit(f"CODEX_SANDBOX_MODE must be one of {', '.join(SANDBOX_MODES)} (got {mode!r})")
     return ["-s", mode]
+
+
+# Same pattern as MODEL_NAME_PATTERN in controller/app/models.py (this script ships without the controller; a test
+# keeps the two equal). The leading alphanumeric keeps a model from being read as a codex flag.
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$"
+_MODEL_NAME_RE = re.compile(MODEL_NAME_PATTERN)
+
+
+# sockaddr_un.sun_path, terminator included: 104 on macOS and the BSDs, 108 on Linux.
+AF_UNIX_PATH_MAX = 104 if sys.platform == "darwin" else 108
+
+
+class SocketPathError(RuntimeError):
+    pass
+
+
+def prepare_socket_path(raw: str) -> Path:
+    """The resolved path to bind, with a stale socket there removed; SocketPathError when it cannot be used, a socket
+    another bridge is listening on included.
+
+    Only a socket is ever unlinked: the path used to be resolved and whatever file it named was deleted, so a
+    --socket-path that pointed at a regular file or a symlink removed it (or the symlink's target).
+    """
+    socket_path = Path(raw).resolve()
+    if len(os.fsencode(str(socket_path))) >= AF_UNIX_PATH_MAX:
+        raise SocketPathError(
+            f"socket path is too long for a unix socket ({len(os.fsencode(str(socket_path)))} bytes, "
+            f"limit {AF_UNIX_PATH_MAX - 1}): {socket_path}; pass a shorter --socket-path"
+        )
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    # Held for the bridge's life, before the stale-socket check: two bridges probing at once could each find the
+    # socket refused, and one then removed the socket the other had just bound (W5-7).
+    _hold_socket_lock(socket_path)
+    try:
+        for candidate in (Path(raw), socket_path):
+            try:
+                mode = os.lstat(candidate).st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISSOCK(mode):
+                raise SocketPathError(f"{candidate} exists and is not a socket; refusing to remove it")
+        if socket_path.exists():
+            if _socket_is_listening(socket_path):
+                raise SocketPathError(
+                    f"another bridge is listening on {socket_path}; stop it or pass another --socket-path"
+                )
+            socket_path.unlink()  # refused: nothing listens, so it is stale
+    except BaseException:
+        _release_socket_lock(socket_path)
+        raise
+    return socket_path
+
+
+# The lock each socket path's bridge holds (path to descriptor), kept open for the process's life: an flock ends
+# with its holder, so the lock file itself stays.
+_SOCKET_LOCKS: dict[Path, int] = {}
+
+
+def _hold_socket_lock(socket_path: Path) -> None:
+    """Take an exclusive flock on <socket-path>.lock (created 0600); SocketPathError when another bridge holds it.
+
+    Skipped where fcntl is missing (Windows), as the rest of the POSIX-only code is.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return
+    lock_path = socket_path.with_name(socket_path.name + ".lock")
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        # EACCES for another uid's 0600 lock file, ELOOP for a symlink there.
+        raise SocketPathError(
+            f"cannot open the lock file {lock_path} ({exc.strerror or exc}); remove it or pass another --socket-path"
+        ) from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise SocketPathError(
+            f"another bridge is running on {socket_path}; stop it or pass another --socket-path"
+        ) from None
+    except OSError as exc:
+        # ENOLCK, or EOPNOTSUPP on a filesystem without locks (W9-9): as an unopenable lock file, not a traceback.
+        os.close(fd)
+        raise SocketPathError(
+            f"cannot lock {lock_path} ({exc.strerror or exc}); remove it or pass another --socket-path"
+        ) from None
+    except BaseException:
+        os.close(fd)
+        raise
+    _SOCKET_LOCKS[socket_path] = fd
+
+
+def _release_socket_lock(socket_path: Path) -> None:
+    fd = _SOCKET_LOCKS.pop(socket_path, None)
+    if fd is not None:
+        os.close(fd)
+
+
+def _socket_identity(path: Path) -> tuple[int, int] | None:
+    """(st_dev, st_ino) of what `path` names, not following a symlink; None when nothing is there."""
+    try:
+        found = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return found.st_dev, found.st_ino
+
+
+def _socket_is_listening(path: Path) -> bool:
+    """True when a connection to the socket at `path` is accepted, or times out on a full backlog; a refused or
+    missing one means a stale socket. Any other failure (EACCES: another uid's 0600 socket) says nothing about a
+    listener, so it is SocketPathError.
+    """
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(2.0)
+        probe.connect(str(path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        return False
+    except (TimeoutError, BlockingIOError):
+        return True  # a full backlog: something listens there, so it is not ours to remove
+    except OSError as exc:
+        raise SocketPathError(
+            f"cannot tell whether a bridge is listening on {path} ({exc.strerror or exc}); "
+            "remove it or pass another --socket-path"
+        ) from None
+    finally:
+        probe.close()
+    return True
+
+
+def model_name_is_valid(model: str) -> bool:
+    return bool(_MODEL_NAME_RE.fullmatch(model)) and ".." not in model
 
 
 CONFIG_OVERRIDES = (
@@ -70,7 +289,17 @@ class CodexBridgeService:
         request_timeout_seconds: float = 55.0,
         sandbox_mode: str = DEFAULT_SANDBOX_MODE,
         allow_host_exec: bool = False,
+        max_concurrent_decisions: int = MAX_CONCURRENT_DECISIONS,
+        pass_env: tuple[str, ...] = (),
     ) -> None:
+        # Extra environment variable names Codex gets beside the allowlist (--pass-env).
+        self.pass_env = tuple(pass_env)
+        self._decision_slots = threading.BoundedSemaphore(max(1, max_concurrent_decisions))
+        # Codex runs still going, and whether each leads its own process group: kill_in_flight stops them. Codex is
+        # started under the lock and the sweep sets _stopping under it, so a run is either swept or never started.
+        self._in_flight: dict[subprocess.Popen, bool] = {}
+        self._in_flight_lock = threading.Lock()
+        self._stopping = False
         self.codex_path = codex_path
         self.default_model = default_model
         self.request_timeout_seconds = request_timeout_seconds
@@ -85,6 +314,14 @@ class CodexBridgeService:
             )
 
     def handle_openai_decide(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._decision_slots.acquire(timeout=DECISION_SLOT_WAIT_SECONDS):
+            raise BridgeError("bridge is busy: too many decisions in flight", status_code=503)
+        try:
+            return self._decide(payload)
+        finally:
+            self._decision_slots.release()
+
+    def _decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = str(payload.get("prompt") or "").strip()
         schema = payload.get("schema")
         screenshot = payload.get("screenshot")
@@ -97,6 +334,8 @@ class CodexBridgeService:
             raise BridgeError("screenshot must be an object", status_code=400)
 
         model = str(payload.get("model") or self.default_model or "").strip() or None
+        if model is not None and not model_name_is_valid(model):
+            raise BridgeError("model must match " + MODEL_NAME_PATTERN + " and not contain '..'", status_code=400)
         image_bytes: bytes | None = None
         suffix = ".png"
         if screenshot is not None:
@@ -141,35 +380,128 @@ class CodexBridgeService:
                 ]
             )
 
-            try:
-                result = subprocess.run(
-                    command,
-                    input=prompt.encode("utf-8"),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=self.request_timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise BridgeError(
-                    f"codex timed out after {self.request_timeout_seconds:.0f}s",
-                    status_code=504,
-                ) from exc
-
-            stdout = result.stdout.decode("utf-8", errors="replace")
-            stderr = result.stderr.decode("utf-8", errors="replace")
+            returncode, stdout_bytes, stderr_bytes = self._run_codex(command, prompt.encode("utf-8"))
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+            if stderr.strip():
+                # Codex's stderr stays on the bridge side; the reply to the controller carries the decision only.
+                print(f"[codex-bridge] codex stderr: {stderr.strip()[:2000]}", file=sys.stderr, flush=True)
             raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else stdout
-            if result.returncode != 0:
-                detail = (stderr or stdout or f"codex exited with {result.returncode}").strip()
-                raise BridgeError(detail[:4000], status_code=502)
+            if returncode != 0:
+                # Codex's output can name host paths or a token: it is logged here (stderr above, stdout when stderr
+                # is empty), and the controller gets a fixed message. It decides retries on the status code only.
+                if not stderr.strip() and stdout.strip():
+                    print(f"[codex-bridge] codex stdout: {stdout.strip()[:2000]}", file=sys.stderr, flush=True)
+                elif not stderr.strip():
+                    # Nothing to show, but the reply points here: say what happened (CB2-5).
+                    print(
+                        f"[codex-bridge] codex exited with {returncode} and printed nothing",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                raise BridgeError(f"codex exited with {returncode}; see the bridge log", status_code=502)
             if not raw_text.strip():
                 raise BridgeError("codex returned an empty response", status_code=502)
 
             return {
                 "model": model or self.default_model or "",
                 "raw_text": raw_text,
-                "stderr": stderr,
             }
+
+    def _run_codex(self, command: list[str], prompt: bytes) -> tuple[int, bytes, bytes]:
+        """Run codex with `prompt` on stdin; on timeout kill its whole process group, not just the direct child."""
+        grouped = hasattr(os, "killpg")  # POSIX; the bridge listens on a Unix socket, so this is its normal case
+        with self._in_flight_lock:
+            if self._stopping:
+                raise BridgeError("the bridge is stopping", status_code=503)
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=grouped,
+                env=codex_environment(self.pass_env),
+            )
+            self._in_flight[process] = grouped
+        try:
+            stdout, stderr = process.communicate(prompt, timeout=self.request_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_tree(process, grouped)
+            _reap_killed(process)
+            raise BridgeError(
+                f"codex timed out after {self.request_timeout_seconds:.0f}s",
+                status_code=504,
+            ) from exc
+        except BaseException:
+            _kill_process_tree(process, grouped)
+            _reap_killed(process)
+            raise
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.pop(process, None)
+        return process.returncode, stdout, stderr
+
+    def kill_in_flight(self) -> int:
+        """Kill every codex run still going (its whole process group on POSIX), for bridge shutdown; returns how many
+        it signalled.
+
+        Codex leads its own session, so it does not get the terminal's SIGINT when the bridge is stopped by hand, and
+        the handler threads that wait on it are daemon threads: without this it would run on, orphaned. From here on
+        the service starts no codex: a decision that gets that far is refused with 503.
+
+        A run whose returncode is set just before its signal is skipped: only the handler thread's communicate() sets
+        it, by reaping codex, and the pid may belong to another process by then. The sweep never polls: a poll would
+        reap a leader that exited while its children still hold its pipes, and the group would go unsignalled. An
+        exited leader nobody has reaped stays a zombie, so its pid and process group stay reserved and killpg reaches
+        the children. The race with communicate() narrows to the moment between that check and the signal; it is not
+        closed.
+        """
+        with self._in_flight_lock:
+            self._stopping = True  # no codex starts after this sweep
+            in_flight = list(self._in_flight.items())
+        signalled = 0
+        for process, grouped in in_flight:
+            if process.returncode is not None:
+                continue  # reaped by the handler's communicate() since the list was taken
+            _kill_process_tree(process, grouped)
+            signalled += 1
+        return signalled
+
+
+def _kill_process_tree(process: subprocess.Popen, grouped: bool) -> None:
+    try:
+        if grouped:
+            os.killpg(process.pid, signal.SIGKILL)  # the group codex leads (start_new_session): its children too
+        else:
+            process.kill()
+    except (ProcessLookupError, PermissionError):
+        pass  # already gone
+
+
+def _reap_killed(process: subprocess.Popen) -> None:
+    """Drain a killed run's pipes, then close them and wait for it, each for at most CODEX_DRAIN_TIMEOUT_SECONDS.
+
+    An unbounded communicate() waited for EOF on stdout, which a descendant that moved to its own session (setsid),
+    out of the group the kill reached, could hold open for as long as it lived. This never blocks longer than twice
+    the bound; a run still not reaped by then is not waited for again: its group was already killed, and a
+    descendant that left the group is the OS's (_run_codex drops the run from _in_flight either way, so the shutdown
+    sweep never sees it).
+    """
+    try:
+        process.communicate(timeout=CODEX_DRAIN_TIMEOUT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    try:
+        process.wait(timeout=CODEX_DRAIN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        print(f"[codex-bridge] killed codex run {process.pid} did not exit in time", file=sys.stderr, flush=True)
 
 
 class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
@@ -177,7 +509,45 @@ class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
 
     def __init__(self, socket_path: str, service: CodexBridgeService):
         self.service = service
+        self._connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         super().__init__(socket_path, BridgeRequestHandler)
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            _answer_busy(request)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()  # no handler thread started, so none will release it
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
+def _answer_busy(request: socket.socket) -> None:
+    """The 503 for a connection past the cap, sent without waiting: the serving thread must not block on a client
+    that does not read. One that cannot take it gets the close alone."""
+    try:
+        request.setblocking(False)
+        request.send(_BUSY_REPLY)
+    except OSError:
+        pass
+
+
+class _HeaderDeadline:
+    """One request's header deadline: under its lock, the headers coming in and the deadline passing exclude each
+    other. A late timer of an earlier request on the same connection sees its own, settled, state."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.headers_in = False
+        self.late = False
 
 
 class BridgeRequestHandler(BaseHTTPRequestHandler):
@@ -205,15 +575,66 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"invalid json: {exc}"})
             return
+        except UnicodeDecodeError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "request body must be UTF-8 encoded JSON"})
+            return
         except TimeoutError:
             self.close_connection = True
             self._send_json(HTTPStatus.REQUEST_TIMEOUT, {"error": "timed out reading the request body"})
             return
-        except Exception as exc:  # pragma: no cover - defensive
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+        except Exception:
+            # The detail goes to the bridge's log, not to the caller.
+            traceback.print_exc(file=sys.stderr)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
             return
 
         self._send_json(HTTPStatus.OK, response)
+
+    def handle_one_request(self) -> None:
+        # The request line and headers get a total deadline, as the body does. Past it the connection is shut down,
+        # which ends the blocked read; parse_request stops the timer once the headers are in.
+        self._header_deadline = _HeaderDeadline()
+        self._header_timer = threading.Timer(
+            REQUEST_HEADER_DEADLINE_SECONDS, self._end_late_headers, args=(self._header_deadline,)
+        )
+        self._header_timer.daemon = True
+        self._header_timer.start()
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            # The deadline shut the connection down under a request line or headers still coming in, so the stdlib's
+            # answer to what had arrived (a 400) had nowhere to go. A broken connection the deadline did not cause is
+            # not this handler's to hide.
+            with self._header_deadline.lock:
+                late = self._header_deadline.late
+            if not late:
+                raise
+            self.close_connection = True
+        finally:
+            self._header_timer.cancel()
+
+    def parse_request(self) -> bool:
+        try:
+            parsed = super().parse_request()
+        finally:
+            self._header_timer.cancel()
+            # cancel() cannot stop a callback that has already started: which came first is settled here.
+            with self._header_deadline.lock:
+                self._header_deadline.headers_in = True
+                late = self._header_deadline.late
+        # Headers cut short by the deadline are not a request.
+        return parsed and not late
+
+    def _end_late_headers(self, deadline: _HeaderDeadline) -> None:
+        with deadline.lock:
+            if deadline.headers_in:
+                return  # the headers made it: the timer fired as parse_request was stopping it
+            deadline.late = True
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[codex-bridge] {format % args}", file=sys.stderr)
@@ -234,11 +655,33 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 f"request body of {length} bytes exceeds the {MAX_REQUEST_BODY_BYTES} byte limit",
                 status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
-        body = self.rfile.read(length)
+        body = self._read_exactly(length)
         payload = json.loads(body.decode("utf-8"))
         if not isinstance(payload, dict):
             raise BridgeError("request body must be a JSON object", status_code=400)
         return payload
+
+    def _read_exactly(self, length: int) -> bytes:
+        """`length` bytes of the body, within REQUEST_BODY_DEADLINE_SECONDS in total (TimeoutError past it)."""
+        deadline = time.monotonic() + REQUEST_BODY_DEADLINE_SECONDS
+        chunks: list[bytes] = []
+        remaining = length
+        try:
+            while remaining > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("request body not delivered in time")
+                self.connection.settimeout(min(left, self.timeout))
+                chunk = self.rfile.read1(min(remaining, 65536))
+                if not chunk:
+                    self.close_connection = True
+                    raise BridgeError("request body shorter than its Content-Length", status_code=400)
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            # The reply and the next keep-alive request get the full per-read timeout, not what the body left.
+            self.connection.settimeout(self.timeout)
+        return b"".join(chunks)
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -275,15 +718,36 @@ def parse_args() -> argparse.Namespace:
         default=55.0,
         help="Kill host codex requests that exceed this timeout",
     )
+    parser.add_argument(
+        "--pass-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Also pass environment variable NAME to Codex (repeatable). Codex otherwise gets only an allowlist: "
+            "CODEX_BASE_ENV_NAMES, any LC_* name and CODEX_PROVIDER_ENV_NAMES, each listed in docs/deployment.md "
+            "(Codex host bridge). Its value reaches Codex and every command Codex runs."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
+    make_non_dumpable()  # first, before any Codex run (W2-27)
     args = parse_args()
-    socket_path = Path(args.socket_path).resolve()
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    if socket_path.exists():
-        socket_path.unlink()
+    for name in args.pass_env:
+        if not _ENV_NAME_RE.fullmatch(name) or not name.isascii():
+            print(
+                f"[codex-bridge] --pass-env {name!r} is not an environment variable name: use letters, digits and "
+                "underscores, not starting with a digit",
+                file=sys.stderr,
+            )
+            return 2
+    try:
+        socket_path = prepare_socket_path(args.socket_path)
+    except SocketPathError as exc:
+        print(f"[codex-bridge] {exc}", file=sys.stderr)
+        return 2
 
     os.umask(0o077)
     service = CodexBridgeService(
@@ -293,8 +757,15 @@ def main() -> int:
         sandbox_mode=os.environ.get("CODEX_SANDBOX_MODE", DEFAULT_SANDBOX_MODE),
         allow_host_exec=os.environ.get("CODEX_BRIDGE_ALLOW_HOST_EXEC", "").strip().lower()
         in {"1", "true", "yes", "on"},
+        pass_env=tuple(args.pass_env),
     )
     server = UnixHTTPServer(str(socket_path), service)
+    # What this bridge bound: just before its shutdown removes the socket it checks that the path still names it
+    # (W5-7). That keeps out a socket a later bridge bound (each bridge holds its lock until it exits), but not one a
+    # process ignoring the lock puts there between the check and the unlink (W7-6).
+    bound = _socket_identity(socket_path)
+    # The umask above already makes it 0600; say so explicitly rather than rely on it.
+    os.chmod(socket_path, 0o600)
 
     def shutdown(_: int, __: Any) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -306,8 +777,11 @@ def main() -> int:
     try:
         server.serve_forever()
     finally:
+        stopped = service.kill_in_flight()
+        if stopped:
+            print(f"[codex-bridge] stopped {stopped} codex run(s) still in flight", file=sys.stderr)
         server.server_close()
-        if socket_path.exists():
+        if bound is not None and _socket_identity(socket_path) == bound:
             socket_path.unlink()
     return 0
 

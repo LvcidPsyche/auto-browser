@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -52,9 +56,17 @@ class SkillCandidate(BaseModel):
 
 
 class SkillInducer:
-    def __init__(self, staging_root: str | Path, signer: Signer | None = None):
+    def __init__(self, staging_root: str | Path, signer: Signer | None = None, lock: threading.Lock | None = None):
         self.staging_root = Path(staging_root)
         self.signer = signer
+        # Held around the rename into place; HarnessService passes its store's staging lock, which retention's prune
+        # holds from a candidate's age check through its removal, so a fresh re-stage is never removed as old.
+        self.lock = lock if lock is not None else threading.Lock()
+
+    def place(self, build_dir: Path, target_dir: Path) -> None:
+        """Rename a finished build over `target_dir` under the staging lock."""
+        with self.lock:
+            _move_into_place(build_dir, target_dir)
 
     def induce(
         self,
@@ -78,7 +90,34 @@ class SkillInducer:
             target_dir.relative_to(staging_root)
         except ValueError as exc:
             raise ValueError(f"staged skill path escapes staging root: {skill_id}") from exc
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # Everything is built and signed in a sibling directory and renamed into place at the end, so a failure
+        # (the signer, a full disk) leaves no half-written candidate under the final name.
+        build_dir = staging_root / f".tmp-{uuid.uuid4().hex[:12]}"
+        build_dir.mkdir(parents=True)
+        try:
+            candidate = self._build(
+                contract, trace, verification, build_dir, target_dir, skill_id, attempts, cost_usd, model_tiers, owner
+            )
+            self.place(build_dir, target_dir)
+        except BaseException:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            raise
+        return candidate
+
+    def _build(
+        self,
+        contract: TaskContract,
+        trace: TraceEnvelope,
+        verification: VerificationResult,
+        build_dir: Path,
+        target_dir: Path,
+        skill_id: str,
+        attempts: int,
+        cost_usd: float,
+        model_tiers: dict[str, str] | None,
+        owner: str | None,
+    ) -> SkillCandidate:
+        """Write the candidate's files into `build_dir`, recording the paths they will have in `target_dir`."""
         contract_hash = contract.hash()
         trace_hash = trace.trace_hash
         candidate = SkillCandidate(
@@ -115,7 +154,7 @@ class SkillInducer:
         files_sha256: dict[str, str] = {}
         for name, content in rendered.items():
             body = content.encode("utf-8")
-            (target_dir / name).write_bytes(body)
+            (build_dir / name).write_bytes(body)
             candidate.files[name] = str(target_dir / name)
             files_sha256[name] = hashlib.sha256(body).hexdigest()
         provenance = {
@@ -172,25 +211,44 @@ class SkillInducer:
             "envelope.json": json.dumps(candidate.envelope, indent=2, sort_keys=True),
         }
         for name, content in files.items():
-            path = target_dir / name
-            path.write_text(content, encoding="utf-8")
-            candidate.files[name] = str(path)
-        (target_dir / "contract.json").write_text(contract.model_dump_json(indent=2), encoding="utf-8")
-        (target_dir / "trace.json").write_text(trace.model_dump_json(indent=2), encoding="utf-8")
+            (build_dir / name).write_text(content, encoding="utf-8")
+            candidate.files[name] = str(target_dir / name)
+        (build_dir / "contract.json").write_text(contract.model_dump_json(indent=2), encoding="utf-8")
+        (build_dir / "trace.json").write_text(trace.model_dump_json(indent=2), encoding="utf-8")
         candidate.files["contract.json"] = str(target_dir / "contract.json")
         candidate.files["trace.json"] = str(target_dir / "trace.json")
-        (target_dir / "candidate.json").write_text(candidate.model_dump_json(indent=2), encoding="utf-8")
+        (build_dir / "candidate.json").write_text(candidate.model_dump_json(indent=2), encoding="utf-8")
         candidate.files["candidate.json"] = str(target_dir / "candidate.json")
         return candidate
 
 
+def _move_into_place(build_dir: Path, target_dir: Path) -> None:
+    """Rename the finished directory over the target; a candidate staged before is set aside and restored on failure."""
+    if not target_dir.exists():
+        os.replace(build_dir, target_dir)
+        return
+    aside = build_dir.with_name(build_dir.name + ".old")
+    os.replace(target_dir, aside)
+    try:
+        os.replace(build_dir, target_dir)
+    except BaseException:
+        os.replace(aside, target_dir)
+        raise
+    shutil.rmtree(aside, ignore_errors=True)
+
+
 def _skill_id(contract: TaskContract, owner: str | None = None) -> str:
+    return skill_id_for(contract.id, contract.hash(), owner)
+
+
+def skill_id_for(contract_id: str, contract_hash: str, owner: str | None = None) -> str:
+    """The staged candidate's id for a contract (its id and hash, as a run record keeps them) and owner."""
     # The id is derived from the contract alone, so two operators staging the
     # same contract would write into one directory and the later run would take
     # over the earlier operator's candidate. An owned candidate's id therefore
     # also depends on its owner; an unowned one keeps the id it always had.
-    digest = hashlib.sha256(f"{contract.hash()}:{owner}".encode()).hexdigest() if owner else contract.hash()
-    return _slug(contract.id, suffix=digest[:12])
+    digest = hashlib.sha256(f"{contract_hash}:{owner}".encode()).hexdigest() if owner else contract_hash
+    return _slug(contract_id, suffix=digest[:12])
 
 
 def _slug(value: str, *, suffix: str | None = None) -> str:
@@ -206,7 +264,7 @@ def _render_skill_markdown(
     candidate: SkillCandidate,
     verification: VerificationResult,
 ) -> str:
-    postconditions = "\n".join(f"- `{item.kind}`: {item.value}" for item in contract.postconditions)
+    postconditions = "\n".join(f"- `{item.kind}`: {_md_literal(item.value)}" for item in contract.postconditions)
     return f"""---
 name: {candidate.skill_id}
 description: {_yaml_quote(contract.goal)}
@@ -221,11 +279,11 @@ verifier: {candidate.verifier_backend}
 
 ## Goal
 
-{contract.goal}
+{_md_literal(contract.goal)}
 
 ## Preconditions
 
-{_render_list([f"{item.kind}: {item.value}" for item in contract.preconditions])}
+{_render_list([f"{item.kind}: {_md_literal(item.value)}" for item in contract.preconditions])}
 
 ## Postconditions
 
@@ -235,7 +293,7 @@ verifier: {candidate.verifier_backend}
 
 - passed: `{verification.passed}`
 - confidence: `{verification.confidence:.3f}`
-- notes: {verification.notes}
+- notes: {_md_literal(verification.notes)}
 
 ## Runtime
 
@@ -269,6 +327,20 @@ def _yaml_quote(value: str) -> str:
         else:
             out.append(f"\\U{ord(char):08x}")
     return '"' + "".join(out) + '"'
+
+
+def _md_literal(value: str) -> str:
+    """The value as one inline code span: newlines collapsed, and a fence longer than any backtick run inside.
+
+    The goal, condition values and notes come from the caller, and SKILL.md is what a reviewer reads before
+    promoting the skill, so none of it may add a heading, a link, HTML or a fence of its own.
+    """
+    flat = " ".join(str(value).split())
+    if not flat:
+        return "(empty)"
+    longest = max((len(run) for run in re.findall(r"`+", flat)), default=0)
+    fence = "`" * (longest + 1)
+    return f"{fence} {flat} {fence}"
 
 
 def _render_list(items: list[str]) -> str:

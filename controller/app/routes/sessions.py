@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hmac
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 
-from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..action_errors import RefusedPageError
+from ..api_token import TAKEOVER_LINK_UNAVAILABLE_DETAIL
+from ..auth_state import AuthStateDecryptError
 from ..browser.services.session_creation import SessionLimitError
 from ..browser.services.tabs import TabRefusedByAnotherTabError, TabUnjudgedError
 from ..models import (
@@ -19,6 +23,7 @@ from ..models import (
     ObserveRequest,
     OpenTabRequest,
     PressRequest,
+    ProtectionMode,
     ScreenshotRequest,
     ScrollRequest,
     SelectOptionRequest,
@@ -33,12 +38,18 @@ from ._utils import (
     OFF_LIST_OTHER_TAB_DETAIL,
     OFF_LIST_PAGE_DETAIL,
     OFF_LIST_TAB_DETAIL,
+    TAKEOVER_LINK_ROUTE,
     UNJUDGED_TAB_DETAIL,
     persona_file_errors,
+    require_safe_segment,
     typed_route_errors,
 )
 
 logger = logging.getLogger(__name__)
+
+# One text for a missing and a wrong takeover token, and for a session that exists and one that does not. It names
+# only the header, not where the token lives: every caller without the token reads it (W2-22).
+TAKEOVER_LINK_REFUSED_DETAIL = "This endpoint needs the takeover token in the X-Takeover-Token header."
 
 
 def create_sessions_router(*, manager: Any) -> APIRouter:
@@ -52,7 +63,6 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "create session failed"):
             try:
-                # A human-handoff response: its takeover URL carries the session's noVNC password.
                 with persona_file_errors():
                     created = await manager.create_session(
                         name=payload.name,
@@ -71,13 +81,54 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                     )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
+            except AuthStateDecryptError as exc:
+                # A fixed text that says what to check; it names no path.
+                raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
-            return manager.remote_access.with_takeover_password(created)
+            return created
 
     @router.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, Any]:
-        return manager.remote_access.with_takeover_password(await manager.get_session_record(session_id))
+        return await manager.get_session_record(session_id)
+
+    @router.get(TAKEOVER_LINK_ROUTE)
+    async def get_takeover_link(
+        session_id: str,
+        x_takeover_token: Annotated[str | None, Header(alias="X-Takeover-Token")] = None,
+    ) -> JSONResponse:
+        # Human-only (NAV-14): the full link, an isolated session's noVNC password in its fragment. No MCP tool and
+        # no agent-facing package calls this; the dashboard and scripts/takeover_link.sh do. Beside the bearer
+        # token, which agents hold, it demands the takeover token (NAV-14b), in every scope, tokenless loopback
+        # included, and before the session lookup, so a caller without it cannot tell which sessions exist: the
+        # route is exempt from the app-wide require_session_access (W2-19). A malformed id is a 400 first; a
+        # closed, unknown or other operator's session is then a 404 (get_session). The audit events name the read
+        # or the refusal, never a token, the URL or the password.
+        require_safe_segment(session_id, field="session_id")
+        expected = getattr(manager.settings, "takeover_token", None)
+        if not expected:
+            raise HTTPException(status_code=503, detail=TAKEOVER_LINK_UNAVAILABLE_DETAIL)
+        # Spaces and tabs around the token are not part of it, as normalize_authorization treats the bearer token.
+        presented = (x_takeover_token or "").strip(" \t").encode("utf-8")
+        if not hmac.compare_digest(presented, expected.encode("utf-8")):
+            await manager.audit.append(
+                event_type="takeover_link_refused",
+                status="refused",
+                action="get_takeover_link",
+                session_id=session_id,
+                details={"reason": "missing takeover token" if not x_takeover_token else "wrong takeover token"},
+            )
+            raise HTTPException(status_code=403, detail=TAKEOVER_LINK_REFUSED_DETAIL)
+        session = await manager.get_session(session_id)
+        link = manager.remote_access.takeover_link(session)
+        await manager.audit.append(
+            event_type="takeover_link_viewed",
+            status="ok",
+            action="get_takeover_link",
+            session_id=session.id,
+            details={},
+        )
+        return JSONResponse(link, headers={"Cache-Control": "no-store"})
 
     @router.get("/sessions/{session_id}/observe")
     async def observe(session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
@@ -246,9 +297,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     @router.post("/sessions/{session_id}/takeover")
     async def request_human_takeover(session_id: str, payload: HumanTakeoverRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "takeover request failed for session %s", session_id):
-            return manager.remote_access.with_takeover_password(
-                await manager.request_human_takeover(session_id, payload.reason)
-            )
+            return await manager.request_human_takeover(session_id, payload.reason)
 
     @router.delete("/sessions/{session_id}")
     async def close_session(session_id: str) -> dict[str, Any]:
@@ -256,7 +305,14 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.close_session(session_id)
 
     @router.post("/sessions/{session_id}/fork")
-    async def fork_session(session_id: str, name: str | None = None, start_url: str | None = None) -> dict[str, Any]:
+    async def fork_session(
+        session_id: str,
+        name: str | None = None,
+        start_url: str | None = None,
+        proxy_persona: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+        user_agent: Annotated[str | None, Query(min_length=1, max_length=2000)] = None,
+        protection_mode: ProtectionMode | None = None,
+    ) -> dict[str, Any]:
         # Query parameters skip the request models every other route uses, so
         # the URL gets the same validation here.
         with typed_route_errors(logger, "fork failed for session %s", session_id):
@@ -264,17 +320,26 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 refuse_another_navigation_host(start_url, field_name="start_url")
                 start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
             try:
-                return await manager.fork_session(session_id, name=name, start_url=start_url)
+                # The fork's session reads its proxy persona, as POST /sessions does: an unreadable file is a 503.
+                with persona_file_errors():
+                    return await manager.fork_session(
+                        session_id,
+                        name=name,
+                        start_url=start_url,
+                        proxy_persona=proxy_persona,
+                        user_agent=user_agent,
+                        protection_mode=protection_mode,
+                    )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
+            except AuthStateDecryptError as exc:
+                # The fork's own stored state, read back by create_session: the fixed text POST /sessions answers.
+                raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
-            except ErrorPageSourceError as exc:
-                # Its fixed text says what to pass instead, and names no host or path.
-                raise HTTPException(status_code=400, detail=str(exc)) from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes answer it. Every other PermissionError
-                # (create_session's URL check, a fresh page's about:blank among them) stays the generic one.
+                # (create_session's URL check among them) stays the generic one.
                 raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
 
     return router

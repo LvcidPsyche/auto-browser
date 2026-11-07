@@ -44,6 +44,19 @@ def validate_coordinate_pair(
         raise ValueError(f"{field_name} requires both x and y coordinates")
 
 
+# One shape for every model name that reaches a URL path or a CLI argument: provider_model here, and the Codex host
+# bridge (scripts/codex_host_bridge.py keeps a copy; a test pins the two together). The leading alphanumeric rules out
+# a "-flag"; ".." is refused separately because "." is allowed inside a name.
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$"
+_MODEL_NAME_RE = re.compile(MODEL_NAME_PATTERN)
+
+
+def check_model_name(value: str | None) -> str | None:
+    if value is not None and (not _MODEL_NAME_RE.fullmatch(value) or ".." in value):
+        raise ValueError("model name must match " + MODEL_NAME_PATTERN + " and not contain '..'")
+    return value
+
+
 _TOTP_HOST_PATTERN = re.compile(r"(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
 
 
@@ -487,6 +500,11 @@ class AgentStepRequest(StrictInputModel):
     context_hints: str | None = Field(default=None, max_length=CONTEXT_HINTS_MAX_CHARS)
     upload_approved: bool = False
     approval_id: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("provider_model")
+    @classmethod
+    def _provider_model_is_a_model_name(cls, value: str | None) -> str | None:
+        return check_model_name(value)
 
 
 AGENT_RUN_MAX_STEPS = 20

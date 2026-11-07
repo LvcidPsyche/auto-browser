@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 import httpx
 
-from .auth import resolve_bearer_token
+from .auth import loopback_transport, resolve_bearer_token
 from .errors import AutoBrowserToolError
 
 
@@ -79,7 +79,8 @@ class AutoBrowserNode:
         return headers
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
+        transport = loopback_transport(self.base_url, asynchronous=True)
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
             response = await client.post(
                 "/mcp/tools/call",
                 json={"name": name, "arguments": arguments},

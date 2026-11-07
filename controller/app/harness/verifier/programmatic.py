@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import sys
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..contracts import ForbiddenState, Postcondition, TaskContract
 from .base import VerificationResult
@@ -157,6 +160,14 @@ async def _regex_search_many(patterns: list[str], text: str, *, timeout: float) 
     `timeout` of the previous result (of the child's start, for the first) gets
     None and its child is killed; the patterns after it run in a fresh child, so
     each stuck pattern costs one timeout and the others keep their own verdicts.
+
+    Cost, measured 2026-11-05 with Python 3.12 on two Windows 11 laptops (100 calls with one pattern each): the
+    price is the interpreter spawn, about the same for one pattern as for 100, so it is one start per verification
+    unless a pattern times out; each stuck pattern with patterns left after it adds one (at most one verification
+    per attempt, 20 attempts at most), not one per check. With `-I` alone a call took 176 ms on one laptop and
+    88-93 ms on the other; with `-I -S` (the worker needs no site module) 124 ms and 69 ms. A long-lived worker is
+    not worth its complexity for that; revisit if a verification ever needs more than one spawn per attempt. Linux
+    was not measured.
     """
     results: list[bool | None] = []
     remaining = patterns
@@ -175,8 +186,11 @@ async def _regex_search_child(patterns: list[str], text: str, *, timeout: float)
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
+        "-S",  # the worker imports only json, re and sys: no site module, so a cheaper start
         "-c",
         _REGEX_WORKER,
+        # It needs no variable (W2-27); Windows' Python cannot start without SYSTEMROOT.
+        env={name: os.environ[name] for name in ("SYSTEMROOT",) if name in os.environ},
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -269,6 +283,13 @@ def _forbidden_state_hit(
     searchable_text: str,
     dom_text: str,
 ) -> bool:
+    """Whether the observation shows the forbidden state.
+
+    The built-in kinds are heuristics. captcha_screen and payment_screen match their phrases as whole words in the URL
+    and the page text (for captcha names `_`, `-` and camelCase humps end words too); login_redirect reads where the
+    browser is. Known false hits, left as they are: a page-code flag such as `captcha_enabled` counts as a captcha
+    name, and an API path such as `/payments/1/authorize` as a login page (`authorize`).
+    """
     value = forbidden.value
     if forbidden.kind == "url_contains":
         return value.lower() in url.lower()
@@ -289,23 +310,117 @@ def _forbidden_state_hit(
             or value.lower() in url.lower()
             or value.lower() in {item.lower() for item in status_values}
         )
-    combined = f"{url}\n{searchable_text}\n{dom_text}".lower()
+    combined = f"{url}\n{searchable_text}\n{dom_text}"
     if forbidden.kind == "captcha_screen":
-        needles = ["captcha", "recaptcha", "hcaptcha", "verify you are human", "cloudflare"]
-        if value:
-            needles.append(value.lower())
-        return any(needle in combined for needle in needles)
+        return _has_captcha_name(combined) or _has_value(combined, value)
     if forbidden.kind == "payment_screen":
-        needles = ["payment", "credit card", "card number", "billing address", "checkout payment"]
-        if value:
-            needles.append(value.lower())
-        return any(needle in combined for needle in needles)
+        return (
+            _has_phrase(combined, _PAYMENT_PHRASES)
+            or _path_has_segment(url, _PAYMENT_SEGMENTS)
+            or _has_value(combined, value)
+        )
     if forbidden.kind == "login_redirect":
-        needles = ["/login", "/signin", "sign in", "log in", "login required", "authenticate"]
-        if value:
-            needles.append(value.lower())
-        return any(needle in combined for needle in needles)
+        # What the browser was sent to, not what the page says: a marketing page that offers "sign in" is not a
+        # redirect. The URL's path or host, a 401/403 status, and the caller's value as part of the URL.
+        status = {str(observation.get(key) or "").strip() for key in ("status_code", "http_status", "status")}
+        return (
+            _path_has_segment(url, _LOGIN_SEGMENTS)
+            or _host_is_login(url)
+            or bool(status & {"401", "403"})
+            or bool(value and value.lower() in url.lower())
+        )
     return False
+
+
+_CAPTCHA_PHRASES = ("captcha", "recaptcha", "hcaptcha", "grecaptcha", "verify you are human", "cloudflare")
+_PAYMENT_PHRASES = (
+    "credit card",
+    "card number",
+    "billing address",
+    "checkout payment",
+    "payment method",
+    "payment details",
+    "payment information",
+)
+_PAYMENT_SEGMENTS = frozenset({"payment", "payments"})
+_LOGIN_SEGMENTS = frozenset(
+    {
+        "login",
+        "log-in",
+        "log_in",
+        "logon",
+        "signin",
+        "sign-in",
+        "sign_in",
+        "auth",
+        "authorize",
+        "wp-login",  # WordPress, with or without .php
+        "servicelogin",  # Google accounts (ServiceLogin; paths are compared lower-cased)
+        "login-actions",  # Keycloak
+        "signin-oidc",  # ASP.NET Core
+    }
+)
+_LOGIN_HOST_LABELS = _LOGIN_SEGMENTS | {"sso"}
+# Where an identifier in page code changes case: captchaToken -> captcha Token, reCAPTCHAWidget -> re CAPTCHA Widget.
+_CAMEL_HUMP = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _has_captcha_name(text: str) -> bool:
+    """A captcha phrase as whole words, in the text as written or split at camelCase humps (`captchaToken`).
+
+    Both, so splitting costs no hit the text as written has (`CloudFlare` is not `Cloud Flare`); `captchaless` is not
+    a hit either way.
+    """
+    return _has_phrase(text, _CAPTCHA_PHRASES, underscore_ends_words=True) or _has_phrase(
+        _CAMEL_HUMP.sub(" ", text), _CAPTCHA_PHRASES, underscore_ends_words=True
+    )
+
+
+def _has_phrase(text: str, phrases: list[str] | tuple[str, ...], *, underscore_ends_words: bool = False) -> bool:
+    """Whether any phrase occurs in the text as whole words, ignoring case ("accredit cards" is not "credit card").
+
+    With `underscore_ends_words`, `_` also separates words, for names in page code (`captcha_image`, `h_captcha`).
+    """
+    word = r"[^\W_]" if underscore_ends_words else r"\w"
+    return any(
+        re.search(rf"(?<!{word}){re.escape(phrase.strip())}(?!{word})", text, re.IGNORECASE)
+        for phrase in phrases
+        if phrase.strip()
+    )
+
+
+def _host_is_login(url: str) -> bool:
+    """Whether the URL's host starts with a login label (`login.microsoftonline.com`, `sso.example.com`)."""
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host.split(".")[0] in _LOGIN_HOST_LABELS
+
+
+def _has_value(text: str, value: str) -> bool:
+    """The caller's own value, as a case-insensitive substring as it always was: a path such as `/billing` must
+    still match next to a letter, so the whole-word rule is for the built-in phrases only."""
+    return bool(value) and value.lower() in text.lower()
+
+
+def _path_has_segment(url: str, segments: frozenset[str]) -> bool:
+    """Whether a path segment of the URL is one of `segments`, with or without a file extension (`SignIn.html`) or
+    path parameters (`login;jsessionid=...`). A fragment that is an app's route (`#/login`, `#!/signin`) is read as a
+    path too; an in-page anchor (`#login`) is not."""
+    try:
+        parts = urlsplit(url)
+        paths = [parts.path]
+        if parts.fragment.startswith(("/", "!/")):
+            paths.append(urlsplit(parts.fragment.removeprefix("!")).path)
+    except ValueError:
+        return False
+    return any(
+        segment.split(";")[0].split(".")[0] in segments
+        for path in paths
+        for segment in path.lower().split("/")
+        if segment
+    )
 
 
 def _network_entries(trace: Any) -> list[Any]:

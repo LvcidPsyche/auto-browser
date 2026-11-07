@@ -4,6 +4,10 @@ from typing import Any
 
 from ...action_records import write_record
 from ...utils import utc_now
+from .remote_access import TAKEOVER_NOTE
+
+# The response hands these to whoever opens the desktop; the record on disk (served under /artifacts) does not keep them.
+_LINK_FIELDS = frozenset({"takeover_url", "remote_access"})
 
 
 class BrowserTakeoverService:
@@ -24,7 +28,15 @@ class BrowserTakeoverService:
                 else "Human takeover requested. Open the noVNC URL to continue visually. In this POC, takeover is global to the single browser desktop."
             ),
         }
-        line = {"timestamp": utc_now(), "action": "request_human_takeover", **payload}
+        if session.isolation_mode == "docker_ephemeral":
+            # Its own noVNC password reaches the person only by a path the model cannot call (NAV-14).
+            payload["takeover_note"] = TAKEOVER_NOTE
+        line = {
+            "timestamp": utc_now(),
+            "action": "request_human_takeover",
+            **{key: value for key, value in payload.items() if key not in _LINK_FIELDS},
+            "session": {key: value for key, value in payload["session"].items() if key not in _LINK_FIELDS},
+        }
 
         async def writes() -> None:
             await manager._append_jsonl(session.artifact_dir / "actions.jsonl", line)

@@ -52,6 +52,13 @@ class CliProviderEnvironmentTests(unittest.TestCase):
             self.assertEqual(env["NO_COLOR"], "1")
             self.assertEqual(env["CI"], "1")
 
+    def test_codex_ca_certificate_reaches_the_codex_child(self):
+        # W2-30: Codex reads CODEX_CA_CERTIFICATE (a PEM bundle path) before SSL_CERT_FILE, for a TLS-intercepting
+        # proxy or a private root CA; it passed neither this allowlist nor the bridge's.
+        codex = _env_for(OpenAIAdapter, CODEX_CA_CERTIFICATE="/etc/ssl/corp-ca.pem")
+
+        self.assertEqual(codex["CODEX_CA_CERTIFICATE"], "/etc/ssl/corp-ca.pem")
+
     def test_the_codex_automation_key_is_passed_to_the_codex_child_only(self):
         codex = _env_for(OpenAIAdapter, CODEX_API_KEY="codex-key")
         claude = _env_for(ClaudeAdapter, CODEX_API_KEY="codex-key")

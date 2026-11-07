@@ -232,19 +232,27 @@ class PolicyEvaluator:
     @staticmethod
     def _find_grant(peer: PeerRecord, capability: str) -> Optional[CapabilityGrant]:
         """
-        Find the first grant that matches the requested capability.
+        Find the most specific grant that matches the requested capability.
 
         Supports exact matches and wildcard suffix:
           "tool:browser.observe" matches "tool:browser.observe"
           "tool:*"               matches any tool capability
           "session:*"            matches any session capability
+
+        An exact match beats a wildcard, a longer wildcard prefix beats a shorter one, and equal
+        specificity goes to the grant listed first, so a broad grant listed early cannot shadow a
+        stricter one for the same capability.
         """
+        best: Optional[CapabilityGrant] = None
+        best_rank = (-1, -1)
         for grant in peer.grants:
             pattern = grant.capability
             if pattern == capability:
-                return grant
-            if pattern.endswith(":*"):
-                prefix = pattern[:-1]  # "tool:"
-                if capability.startswith(prefix):
-                    return grant
-        return None
+                rank = (1, len(pattern))
+            elif pattern.endswith(":*") and capability.startswith(pattern[:-1]):  # "tool:*" -> "tool:"
+                rank = (0, len(pattern) - 1)
+            else:
+                continue
+            if rank > best_rank:
+                best, best_rank = grant, rank
+        return best

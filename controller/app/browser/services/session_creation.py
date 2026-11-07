@@ -7,8 +7,11 @@ A mixin of BrowserSessionService (sessions.py), which holds what creation shares
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -82,7 +85,6 @@ class SessionCreation:
         self.manager._check_session_limit()
 
         session_id = new_session_id()
-        artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
         source_path: Path | None = None
 
         if proxy_persona:
@@ -124,12 +126,17 @@ class SessionCreation:
         gate = None
         gate_context_id: str | None = None
         created_hook_started = False
-        # No await since check_limit, so nothing slipped in between.
+        # Checked again: the reads above await, and another create may have reserved a slot meanwhile. Nothing awaits
+        # between this check and the reservation.
+        self.manager._check_session_limit()
         self._creating += 1
         reserved = True
         try:
             from ...browser_manager import BrowserSession
 
+            # After every check that can refuse the request, and inside the try: whatever fails from here on
+            # removes them again (cleanup_failed).
+            artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
             browser, runtime = await self.manager._acquire_session_browser(session_id)
             # Before the first context: no session runs on a browser without its pre-request gate.
             gate = await self.manager.request_gates.require(browser)
@@ -169,6 +176,7 @@ class SessionCreation:
                 shared_browser_process=runtime is None,
                 max_live_sessions_per_browser_node=1,
                 proxy_persona=proxy_persona,
+                user_agent=context_kwargs.get("user_agent"),  # the effective one: a stealth draw included
                 last_auth_state_path=source_path if storage_state_path else None,
                 auth_profile_name=self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else None,
                 mouse_position=(
@@ -354,33 +362,123 @@ class SessionCreation:
         runtime: "IsolatedBrowserRuntime | None",
         created_hook_started: bool = False,
     ) -> None:
+        """Roll back a create that failed: every step runs to its end even when the task awaiting it is cancelled
+        during one (W7-2), and the cancel is raised once the rollback is done. A cancel at any step left the isolated
+        runtime running, the directories in place and the record reading active."""
+        await self._run_to_completion(
+            self._cleanup_failed_steps(
+                session_id,
+                session=session,
+                context=context,
+                browser=browser,
+                runtime=runtime,
+                created_hook_started=created_hook_started,
+            )
+        )
+
+    async def _cleanup_failed_steps(
+        self,
+        session_id: str,
+        *,
+        session: "BrowserSession | None",
+        context: "BrowserContext | None",
+        browser: "Browser | None",
+        runtime: "IsolatedBrowserRuntime | None",
+        created_hook_started: bool,
+    ) -> None:
         self.manager.sessions.pop(session_id, None)
         if session is not None:
             # Registered with the window-birth watcher before the failure (watch runs early): a dead session
             # left there was held, and re-registered with every replacement watcher.
             self.manager.window_births.forget_session(session)
-        if created_hook_started and self.manager._session_create_failed_hook is not None:
+        # The hook, the tunnel release, the context close, the owned browser's close and the runtime release below are
+        # each bounded as close_session's teardown steps are (W9-3): this unit runs to completion under a cancel, so a
+        # context.close() or runtime release that stalled held its caller for ever. The directory removal and the
+        # record close in _forget_failed_session_state are not bounded. The labels name the rollback (W10-17), so its
+        # log lines are not read as a close_session's.
+        hook = self.manager._session_create_failed_hook
+        if created_hook_started and hook is not None:
             # The created hook registered per-session state (network inspector,
             # CDP session) that only the closed path removed; a failed create
             # never reaches that path, so the dead session's entries stayed.
-            try:
-                await self.manager._session_create_failed_hook(session_id)
-            except Exception as exc:
-                logger.warning("session create-failed hook failed for %s: %s", session_id, exc)
+            await self._teardown_step(
+                session_id, "run the create-failed hook of a failed create", lambda: hook(session_id)
+            )
         if session is not None and session.tunnel is not None:
-            try:
-                await self.manager.tunnel_broker.release(session.tunnel)
-            except Exception as exc:
-                logger.warning("failed to release session tunnel during create_session rollback: %s", exc)
+            tunnel = session.tunnel
+            await self._teardown_step(
+                session_id,
+                "release the session tunnel of a failed create",
+                lambda: self.manager.tunnel_broker.release(tunnel),
+            )
         if context is not None:
-            try:
-                await context.close()
-            except Exception as exc:
-                logger.warning("failed to close browser context during create_session rollback: %s", exc)
+            await self._teardown_step(session_id, "close the browser context of a failed create", context.close)
         if browser is not None and runtime is not None:
             await self._close_owned_browser(browser, session_id)
         if runtime is not None:
+            await self._teardown_step(
+                session_id,
+                "release the isolated runtime of a failed create",
+                lambda: self.manager.runtime_provisioner.release(runtime),
+            )
+        await self._forget_failed_session_state(session, session_id)
+
+    def remove_session_dirs(self, session_id: str) -> None:
+        """Remove what prepare_dirs made for a session that never came to be.
+
+        Each directory on its own (W10-6): an OSError from its removal or its check (Path.exists raises for EACCES or
+        EIO on Python 3.11) is logged and the loop goes on, so the other directories and the record close still run.
+        A removal error inside rmtree is logged with the directory and the error, and rmtree goes on through the rest
+        of that tree (W11-5); a path already gone is not an error. One warning per directory, naming its first error,
+        the root cause (W12-4): the parent's "Directory not empty" that follows a file's unlink error is not logged.
+        """
+        for directory in (
+            self.manager.artifacts.artifact_root / session_id,
+            self.auth_root(session_id),
+            self.upload_root(session_id),
+        ):
+            reported: list[BaseException] = []
+
+            def logged(
+                _function: Any, _path: Any, error: Any, directory: Path = directory, reported: list = reported
+            ) -> None:
+                if isinstance(error, tuple):  # onerror's exc_info
+                    error = error[1]
+                if isinstance(error, FileNotFoundError) or reported:
+                    return
+                reported.append(error)
+                logger.warning("rollback could not remove %s: %s", directory, error)
+
             try:
-                await self.manager.runtime_provisioner.release(runtime)
-            except Exception as exc:
-                logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
+                # onexc from Python 3.12, where onerror is deprecated; onerror on 3.11.
+                if sys.version_info >= (3, 12):
+                    shutil.rmtree(directory, onexc=logged)
+                else:
+                    shutil.rmtree(directory, onerror=logged)
+                if not reported and directory.exists():
+                    logger.warning("rollback could not remove %s", directory)
+            except OSError as exc:
+                if not reported:
+                    logger.warning("rollback could not remove %s: %s", directory, exc)
+
+    async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
+        """Remove the directories a failed create made, and close the record it persisted, if it got that far.
+
+        Part of a protected unit in both its callers, cleanup_failed's (W5-6, W7-2) and enable_shadow_browse's
+        rollback (W9-11): each await below was a point where a cancel stopped the rollback before the record read
+        closed.
+        """
+        # In a worker thread: rmtree of a large profile or artifact tree would stall every request on the loop.
+        await asyncio.to_thread(self.remove_session_dirs, session_id)
+        if session is None:
+            return  # no record is written before the session object exists
+        try:
+            await self.manager.session_store.get(session_id)
+        except KeyError:
+            return
+        except ValueError:
+            pass  # a record that cannot be parsed is closed over (W8-2)
+        except Exception as exc:
+            logger.warning("could not read the record of failed session %s: %s", session_id, exc)
+            return
+        await self._persist_closed_without_summary(session, "create_failed")

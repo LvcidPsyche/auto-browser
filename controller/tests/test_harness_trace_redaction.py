@@ -31,6 +31,51 @@ def _event(trace: TraceEnvelope, event_type: str):
     return next(event for event in trace.events if event.event_type == event_type)
 
 
+class PageDataKeepsItsValuesTests(unittest.TestCase):
+    """`value`, `label` and `username` are hidden only in an action's own payload, not in what the page held."""
+
+    ROW = {"label": "Plan", "value": "Pro", "username": "team-admin", "sensitive": True}
+
+    def test_a_sensitive_flag_in_page_data_does_not_hide_its_neighbours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = TraceRecorder(tmp, run_id="r1", contract_hash="h")
+            trace = recorder.finalize(final_observation={"rows": [self.ROW]}, extracted_data={"row": self.ROW})
+
+        stored = trace.scrubbed()
+        self.assertEqual(stored.final_observation["rows"][0]["value"], "Pro")
+        self.assertEqual(stored.extracted_data["row"]["label"], "Plan")
+        self.assertEqual(stored.extracted_data["row"]["username"], "team-admin")
+
+    def test_typed_text_beside_a_sensitive_flag_in_page_data_is_still_hidden(self) -> None:
+        # Only `value`, `label` and `username` moved to action payloads: `text` and `text_preview` in a dict that
+        # carries a sensitive flag stay hidden wherever the dict is, as they were before.
+        typed = "ordinary typed words"
+        for flag in ("sensitive", "text_redacted"):
+            row = {"text": typed, "text_preview": typed, "value": "Pro", flag: True}
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                recorder = TraceRecorder(tmp, run_id="r1", contract_hash="h")
+                trace = recorder.finalize(final_observation={"rows": [row]}, extracted_data={"row": row})
+
+                stored = trace.scrubbed()
+                self.assertNotIn(typed, json.dumps(stored.model_dump(mode="json")))
+                self.assertEqual(stored.final_observation["rows"][0]["value"], "Pro")
+                self.assertEqual(stored.extracted_data["row"]["value"], "Pro")
+
+    def test_an_agent_result_final_observation_keeps_page_data(self) -> None:
+        result = {"steps": [{"status": "ok", "observation": {"url": "https://example.com/", "rows": [self.ROW]}}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        self.assertEqual(trace.final_observation["rows"][0]["value"], "Pro")
+
+    def test_an_action_payload_still_hides_what_it_typed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = TraceRecorder(tmp, run_id="r1", contract_hash="h")
+            event = recorder.append("action", {"action": "type", "value": SECRET_TEXT, "sensitive": True}, step_idx=1)
+
+        self.assertNotIn(SECRET_TEXT, json.dumps(event.payload))
+
+
 class TraceRedactionTests(unittest.TestCase):
     def test_typed_text_of_a_sensitive_action_is_redacted(self) -> None:
         trace = TraceEnvelope.from_agent_result(
@@ -194,6 +239,15 @@ class StoredUrlTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual([url], _URL_PATTERN.findall(text))
+
+    def test_a_url_in_quotes_ends_before_a_closing_quote_followed_by_sentence_punctuation(self) -> None:
+        url = "https://example.com/a?b=1"
+        for text in (f"see '{url}'.", f"he said '{url}'! ok", f"is it '{url}'?", f"'{url}'. Next"):
+            with self.subTest(text=text):
+                self.assertEqual([url], _URL_PATTERN.findall(text))
+        # An apostrophe inside the URL is still part of it.
+        inside = "https://example.com/?q=o'neil&x=1"
+        self.assertEqual([inside], _URL_PATTERN.findall(f"look at {inside}"))
 
     def test_the_file_on_disk_holds_no_url_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

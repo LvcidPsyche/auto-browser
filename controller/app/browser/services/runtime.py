@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from playwright.async_api import Browser
 
-from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
+from ...action_errors import SESSION_CLOSED_GATE_LOST, BrowserUnreachableError, SessionNotFoundError
 from ...auth_policy import credentials_for
 from ...browser_sandbox import read_endpoint_file, redact_endpoints, refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
@@ -22,6 +24,40 @@ ATTACHED: dict[str, Any] = {"sandbox": "attached"}
 
 # Closing the browser a CDP attach replaces must not hang the browser lock.
 PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS = 10.0
+
+
+def scrubbed_cdp_url(url: str) -> str:
+    """scheme://host[:port] of a CDP URL: its userinfo, path and query can be the credential for that Chrome."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return "<unparseable CDP URL>"
+    host = parsed.hostname
+    if not parsed.scheme or not host:
+        return "<unparseable CDP URL>"
+    shown_host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{shown_host}" + (f":{port}" if port is not None else "")
+
+
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+
+
+async def _connect_over_cdp(playwright: Any, cdp_url: str) -> Browser:
+    """connect_over_cdp, failing with what went wrong but never with the URL's credentials.
+
+    Playwright's error repeats the whole CDP URL (userinfo, the /devtools/browser/<id> path) in its call log, and
+    /readyz, deep health and the startup log show what this raises: its first line is kept, any URL in it reduced to
+    scheme://host:port, and the error is not chained. A route or an MCP call answers it 503 with a fixed text.
+    """
+    try:
+        return await playwright.chromium.connect_over_cdp(cdp_url)
+    except Exception as exc:
+        first_line = (str(exc).splitlines() or [type(exc).__name__])[0]
+        reason = _URL_IN_TEXT.sub(lambda match: scrubbed_cdp_url(match.group()), first_line)
+        message = f"could not connect to Chrome over CDP at {scrubbed_cdp_url(cdp_url)}: {reason}"
+        logger.warning("%s", message)
+        raise BrowserUnreachableError(message) from None
 
 
 class BrowserRuntimeService:
@@ -51,8 +87,10 @@ class BrowserRuntimeService:
 
             if manager.settings.cdp_connect_url:
                 self.shared_sandbox = None
-                logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
-                browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
+                logger.info(
+                    "connecting to existing Chrome via CDP at %s", scrubbed_cdp_url(manager.settings.cdp_connect_url)
+                )
+                browser = await _connect_over_cdp(manager.playwright, manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
                 await manager.request_gates.attach(browser, attach_mode=True)
                 manager.browser = browser
@@ -133,12 +171,16 @@ class BrowserRuntimeService:
                     "using the current browser first, since replacing it would end them."
                 )
             previous = manager.browser
-            browser = await manager.playwright.chromium.connect_over_cdp(cdp_url)
+            browser = await _connect_over_cdp(manager.playwright, cdp_url)
             await manager.request_gates.attach(browser, attach_mode=True)
             manager.browser = browser
             self.shared_sandbox = dict(ATTACHED)
             self._watch_disconnect(browser)
-            logger.info("attached to Chrome via CDP at %s", cdp_url)
+            # Everything below shows the scrubbed URL. The guards on this tool are the ones above (refused with more than
+            # one operator credential and under BROWSER_SANDBOX=on); the attach target is the caller's to name, as it
+            # is for CDP_CONNECT_URL, so it is not matched against ALLOWED_HOSTS.
+            shown_url = scrubbed_cdp_url(cdp_url)
+            logger.info("attached to Chrome via CDP at %s", shown_url)
             if previous is not None and previous is not browser:
                 await manager.request_gates.release(previous)
                 await self._close_previous_browser(previous)
@@ -147,11 +189,11 @@ class BrowserRuntimeService:
                 status="ok",
                 action="cdp_attach",
                 session_id=None,
-                details={"cdp_url": cdp_url},
+                details={"cdp_url": shown_url},
             )
             return {
                 "attached": True,
-                "cdp_url": cdp_url,
+                "cdp_url": shown_url,
                 "browser_version": browser.version,
             }
 
@@ -194,9 +236,10 @@ class BrowserRuntimeService:
                 last_error = exc
                 await asyncio.sleep(manager.settings.connect_retry_delay_seconds)
         # Not chained: Playwright's connect error names the endpoint with its path (the server's only secret), and
-        # /readyz, deep health and startup log the chain. The cause is logged here with the path redacted.
+        # /readyz, deep health and startup log the chain. The cause is logged here with the path redacted. Not a
+        # RuntimeError: the routes answer 503 with a fixed text, as for a CDP connect, not 409 Conflict.
         logger.warning("%s; last connect error: %s", failure_context, redact_endpoints(repr(last_error)))
-        raise RuntimeError(failure_context) from None
+        raise BrowserUnreachableError(failure_context) from None
 
     async def resolve_browser_ws_endpoint(self) -> str:
         manager = self.manager
@@ -243,7 +286,10 @@ class BrowserRuntimeService:
             )
             return browser, runtime
         except BaseException:  # cancellation included, or the container leaks
-            await manager.runtime_provisioner.release(runtime)
+            try:
+                await manager.runtime_provisioner.release(runtime)
+            except Exception as exc:  # the connect failure is the one to raise; this one is logged
+                logger.warning("isolated runtime of session %s was not fully released: %s", session_id, exc)
             raise
 
     def gate_lost(self, gate: RequestGate) -> None:

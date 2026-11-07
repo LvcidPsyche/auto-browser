@@ -202,6 +202,60 @@ class GateScriptTests(unittest.TestCase):
         (profile / "browser-sandbox.json").write_text(json.dumps({"endpoint": state_endpoint}), encoding="utf-8")
         (profile / "browser-ws-endpoint.txt").write_text(file_endpoint, encoding="utf-8")
 
+    def test_w9_6_a_redirect_is_reported_and_not_followed(self) -> None:
+        # urllib's default handler copied the Authorization header onto a redirect to any origin.
+        seen: list = []
+
+        class Elsewhere(_Api):
+            def do_GET(self) -> None:
+                seen.append((self.path, self.headers.get("Authorization")))
+                self._send(200, {"id": "s1"})
+
+            do_POST = do_GET
+
+        elsewhere = HTTPServer(("127.0.0.1", 0), Elsewhere)
+        threading.Thread(target=elsewhere.serve_forever, daemon=True).start()
+        self.addCleanup(elsewhere.server_close)
+        self.addCleanup(elsewhere.shutdown)
+        location = f"http://127.0.0.1:{elsewhere.server_address[1]}/stolen"
+
+        class Redirecting(_Api):
+            def do_POST(self) -> None:
+                self._drain()
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+        self.assertEqual(self._run_with(Redirecting, "--expect", "200"), 1)
+        self.assertIn("create session: HTTP 302", self.output)
+        self.assertEqual(seen, [])
+
+    def test_w9_6_no_request_goes_through_an_environment_proxy(self) -> None:
+        seen: list = []
+
+        class Proxy(_Api):
+            def do_GET(self) -> None:
+                seen.append(self.path)
+                self._send(200, {"ok": True})
+
+            do_POST = do_DELETE = do_GET
+
+        proxy = HTTPServer(("127.0.0.1", 0), Proxy)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+        names = ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY")
+        with patch.dict(os.environ, dict.fromkeys(names, proxy_url)):
+            for name in ("no_proxy", "NO_PROXY"):
+                os.environ.pop(name, None)
+            # Loaded with the proxy set, as an operator's shell would have it from the start.
+            self.module = _load_gate_script()
+            self._files("ws://a/1", "ws://a/1")
+            self.assertEqual(self._run(200, "--expect", "200"), 0)
+        self.assertEqual(seen, [])
+
     def test_200_with_matching_endpoints_passes_and_mismatched_fails(self) -> None:
         self._files("ws://a/1", "ws://a/1")
         self.assertEqual(self._run(200, "--expect", "200"), 0)

@@ -31,6 +31,13 @@ make release-audit   # launch-prep audit; run before any release PR
   lists them). A release bumps all of them together with `python scripts/bump_version.py X.Y.Z`.
 - **Playwright pin parity:** the controller (pip) and `browser-node` (npm) Playwright versions must
   be identical (`scripts/check_playwright_pins.py`).
+- **Child-environment wraps:** `controller/app/process_hardening.py` confines two children by replacing a private
+  name in a dependency. At every pytesseract bump, re-check that `pytesseract.pytesseract` still passes its
+  module-level `environ` as `env=` in the two launches that read it, `subprocess_args` and `get_tesseract_version`,
+  read at call time (`confine_tesseract_environment`); `get_languages` passes no `env=`, so the controller must not
+  call it (a test in `test_process_hardening.py` fails if `controller/app` names it). At every Playwright bump,
+  re-check that `PipeTransport.connect` still starts the driver with `get_driver_env()` from
+  `playwright._impl._transport` (`confine_playwright_driver_environment`).
 - Security-sensitive changes (auth, isolation, witness receipts, PII scrubbing) follow `SECURITY.md`.
 
 ## Releases

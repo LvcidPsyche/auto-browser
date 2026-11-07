@@ -1,0 +1,559 @@
+"""The takeover token: a second secret, held by the person, that GET /sessions/{id}/takeover-link demands (NAV-14b).
+
+The bearer token is the agents' token, so an agent that can make its own HTTP calls read any isolated session's
+password link with it. The takeover token is loaded or generated at startup next to the API token, and nothing
+agent-facing reads it.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+from app.api_token import ensure_takeover_token
+from app.config import Settings
+from app.runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+
+REPO = Path(__file__).resolve().parents[2]
+SENTINEL = "takeover-sentinel-" + "t" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+API_SENTINEL = "api-sentinel-" + "a" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+LOGGER = "app.api_token"
+
+
+def make_settings(tmp_path: Path, **overrides: str) -> Settings:
+    values = {"TAKEOVER_TOKEN_FILE": str(tmp_path / "takeover-token"), "API_TOKEN_FILE": str(tmp_path / "api-token")}
+    return Settings(_env_file=None, **{**values, **overrides})
+
+
+def test_the_settings_keep_the_token_out_of_repr_and_dumps(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL)
+    assert settings.takeover_token == SENTINEL
+    assert SENTINEL not in repr(settings)
+    assert SENTINEL not in str(settings.model_dump())
+    assert Settings.model_fields["takeover_token_file"].default == "/data/takeover-token"
+
+
+def test_a_whitespace_only_takeover_token_is_unset(tmp_path: Path) -> None:
+    assert make_settings(tmp_path, TAKEOVER_TOKEN="   ").takeover_token is None
+
+
+@pytest.mark.parametrize("scope", ["loopback", "exposed"])
+def test_the_first_start_generates_a_private_file_and_the_next_reuses_it(
+    tmp_path: Path, scope: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "takeover-token"
+    settings = make_settings(tmp_path, API_BIND_SCOPE=scope)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_takeover_token(settings)
+    token = settings.takeover_token
+    assert token and len(token) >= MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    assert path.read_text(encoding="utf-8").strip() == token
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert token not in caplog.text
+
+    again = make_settings(tmp_path, API_BIND_SCOPE=scope)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_takeover_token(again)
+    assert again.takeover_token == token
+    assert "Using the takeover token" in caplog.text  # the reuse logs a fingerprint, never the token
+    assert token not in caplog.text
+
+
+def test_tokenless_loopback_still_gets_a_takeover_token(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, API_BIND_SCOPE="loopback", API_ALLOW_TOKENLESS_LOOPBACK="true")
+    ensure_takeover_token(settings)
+    assert settings.takeover_token
+
+
+def test_a_configured_token_wins_and_the_file_is_neither_read_nor_written(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL)
+    ensure_takeover_token(settings)
+    assert settings.takeover_token == SENTINEL
+    assert not (tmp_path / "takeover-token").exists()
+
+
+def test_a_configured_token_wins_over_an_existing_file_which_is_left_as_it_was(tmp_path: Path) -> None:
+    # W2-3: the test above starts with no file, so a regression that preferred an existing file passed.
+    path = tmp_path / "takeover-token"
+    on_disk = "file-sentinel-" + "f" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH + "\n"
+    path.write_text(on_disk, encoding="utf-8")
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL)
+    ensure_takeover_token(settings)
+    assert settings.takeover_token == SENTINEL
+    assert path.read_text(encoding="utf-8") == on_disk
+
+
+def test_a_short_configured_token_refuses_startup(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN="short-sentinel")
+    with pytest.raises(RuntimeError, match="TAKEOVER_TOKEN") as raised:
+        ensure_takeover_token(settings)
+    assert "short-sentinel" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"API_BEARER_TOKEN": SENTINEL},
+        {"API_BEARER_TOKENS": f"alice:{API_SENTINEL},bob:{SENTINEL}"},
+    ],
+)
+def test_a_configured_token_equal_to_an_api_credential_refuses_startup(tmp_path: Path, overrides: dict) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL, **overrides)
+    with pytest.raises(RuntimeError, match="TAKEOVER_TOKEN") as raised:
+        ensure_takeover_token(settings)
+    assert SENTINEL not in str(raised.value)
+
+
+def test_an_unwritable_file_warns_and_leaves_no_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN_FILE=str(blocker / "takeover-token"))
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)  # does not raise: the controller starts
+    assert settings.takeover_token is None
+    assert any(r.levelno == logging.WARNING and "503" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_an_unusable_file_warns_and_is_not_overwritten(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    path = tmp_path / "takeover-token"
+    path.write_text("too-short\n", encoding="utf-8")
+    settings = make_settings(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert path.read_text(encoding="utf-8") == "too-short\n"
+    assert "too-short" not in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+def test_w2_23_a_file_whose_mode_cannot_be_tightened_fails_closed_and_says_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A root-owned 0444 secret mount reads fine, but its mode cannot be changed: the warning said the file must
+    # "hold a usable token (or can be written)", which it did.
+    from unittest.mock import patch
+
+    from app import api_token
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o644)
+    settings = make_settings(tmp_path)
+    with (
+        patch.object(api_token.os, "fchmod", side_effect=PermissionError(1, "Operation not permitted")),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+    ):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert "mode could not be tightened" in caplog.text
+    assert "can be written" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w8_6_a_file_that_cannot_be_opened_for_its_mode_check_says_so_and_the_link_is_503(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A regular file that vanished or turned unreadable between the read and the O_NOFOLLOW open was reported with
+    # the fchmod failure's message, "its mode could not be tightened".
+    import errno
+    from unittest.mock import Mock, patch
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import api_token
+    from app.routes.sessions import create_sessions_router
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    settings = make_settings(tmp_path)
+    real_open = os.open
+
+    def open_refusing_the_mode_check(file, flags, *args, **kwargs):
+        if flags & os.O_NOFOLLOW:
+            raise PermissionError(errno.EACCES, "Permission denied", str(file))
+        return real_open(file, flags, *args, **kwargs)
+
+    with (
+        patch.object(api_token.os, "open", side_effect=open_refusing_the_mode_check),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+    ):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened or read for its mode check" in caplog.text
+    assert "Permission denied" in caplog.text
+    assert "mode could not be tightened" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=Mock(settings=settings)))
+    with TestClient(app) as client:
+        response = client.get("/sessions/abc123/takeover-link", headers={"X-Takeover-Token": SENTINEL})
+    assert response.status_code == 503, response.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w10_9_a_file_whose_mode_cannot_be_read_says_so_and_the_link_is_503(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An fstat that failed on the opened file reached the caller's generic branch, whose message says the file "is
+    # readable beyond its owner and its mode could not be tightened", though no mode was read.
+    import errno
+    from unittest.mock import Mock, patch
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import api_token
+    from app.routes.sessions import create_sessions_router
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    settings = make_settings(tmp_path)
+    real_open, real_close, real_fstat = os.open, os.close, os.fstat
+    checked: set[int] = set()
+    closed: set[int] = set()
+
+    def recording_open(file, flags, *args, **kwargs):
+        fd = real_open(file, flags, *args, **kwargs)
+        if flags & os.O_NOFOLLOW:
+            checked.add(fd)
+        return fd
+
+    def recording_close(fd):
+        if fd in checked:
+            closed.add(fd)
+        return real_close(fd)
+
+    def fstat_failing_the_mode_check(fd, *args, **kwargs):
+        if fd in checked:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_fstat(fd, *args, **kwargs)
+
+    with (
+        patch.object(api_token.os, "open", side_effect=recording_open),
+        patch.object(api_token.os, "close", side_effect=recording_close),
+        patch.object(api_token.os, "fstat", side_effect=fstat_failing_the_mode_check),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+    ):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert checked and closed == checked, "the mode check's descriptor was not closed"
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened or read for its mode check" in caplog.text
+    assert "Input/output error" in caplog.text
+    assert "mode could not be tightened" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=Mock(settings=settings)))
+    with TestClient(app) as client:
+        response = client.get("/sessions/abc123/takeover-link", headers={"X-Takeover-Token": SENTINEL})
+    assert response.status_code == 503, response.text
+
+
+def _fstat_failing_after_the_chmod(path: Path):
+    """Patches for api_token's os: the second fstat of the mode check's descriptor (after fchmod) raises EIO."""
+    import errno
+    from unittest.mock import patch
+
+    from app import api_token
+
+    real_open, real_close, real_fstat = os.open, os.close, os.fstat
+    checked: set[int] = set()
+    closed: set[int] = set()
+    calls: dict[int, int] = {}
+
+    def recording_open(file, flags, *args, **kwargs):
+        fd = real_open(file, flags, *args, **kwargs)
+        if flags & os.O_NOFOLLOW and Path(file) == path:
+            checked.add(fd)
+        return fd
+
+    def recording_close(fd):
+        if fd in checked:
+            closed.add(fd)
+        return real_close(fd)
+
+    def fstat_failing_the_second_read(fd, *args, **kwargs):
+        if fd in checked:
+            calls[fd] = calls.get(fd, 0) + 1
+            if calls[fd] == 2:
+                raise OSError(errno.EIO, "Input/output error")
+        return real_fstat(fd, *args, **kwargs)
+
+    patches = (
+        patch.object(api_token.os, "open", side_effect=recording_open),
+        patch.object(api_token.os, "close", side_effect=recording_close),
+        patch.object(api_token.os, "fstat", side_effect=fstat_failing_the_second_read),
+    )
+    return patches, checked, closed, calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w11_6_a_mode_that_cannot_be_reread_after_the_chmod_says_so_and_the_link_is_503(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The second fstat, after fchmod, had no handling: its OSError reached the generic branch, whose message says the
+    # file "is readable beyond its owner and its mode could not be tightened", though the chmod went through.
+    from unittest.mock import Mock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.routes.sessions import create_sessions_router
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o644)
+    settings = make_settings(tmp_path)
+    patches, checked, closed, calls = _fstat_failing_after_the_chmod(path)
+
+    with patches[0], patches[1], patches[2], caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert checked and all(calls[fd] == 2 for fd in checked), calls
+    assert closed == checked, "the mode check's descriptor was not closed"
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened or read for its mode check" in caplog.text
+    assert "Input/output error" in caplog.text
+    assert "mode could not be tightened" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=Mock(settings=settings)))
+    with TestClient(app) as client:
+        response = client.get("/sessions/abc123/takeover-link", headers={"X-Takeover-Token": SENTINEL})
+    assert response.status_code == 503, response.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w11_6_api_token_file_keeps_the_original_error_when_its_mode_cannot_be_reread(tmp_path: Path) -> None:
+    from app import api_token
+
+    path = tmp_path / "api-token"
+    path.write_text(API_SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o644)
+    patches, checked, closed, _ = _fstat_failing_after_the_chmod(path)
+
+    with patches[0], patches[1], patches[2], pytest.raises(OSError, match="Input/output error") as raised:
+        api_token._restrict_mode(path, name="API_TOKEN_FILE")
+    assert type(raised.value) is OSError
+    assert checked and closed == checked
+
+
+def test_a_file_token_equal_to_an_api_credential_is_not_used(tmp_path: Path) -> None:
+    (tmp_path / "takeover-token").write_text(SENTINEL + "\n", encoding="utf-8")
+    settings = make_settings(tmp_path, API_BEARER_TOKEN=SENTINEL)
+    ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+
+
+def test_the_lifespan_loads_the_takeover_token_after_the_api_token() -> None:
+    text = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    assert text.index("ensure_api_credential(settings)") < text.index("ensure_takeover_token(settings)")
+
+
+@pytest.mark.skipif(not (REPO / "client").is_dir(), reason="the agent-facing packages are not shipped in the image")
+def test_no_agent_facing_package_reads_the_takeover_token() -> None:
+    for package in ("client", "integrations/langchain", "packaging/auto-browser-mcp"):
+        for path in (REPO / package).rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for needle in ("TAKEOVER_TOKEN", "takeover-token", "takeover_token", "X-Takeover-Token"):
+                assert needle not in text, f"{path} names {needle}"
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "takeover-sentinel-with a-space-" + "s" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+        "takeover-sentinel-ümlaut-" + "u" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+        "takeover-sentinel-tab\t-" + "t" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+    ],
+)
+def test_w2_21_a_configured_token_outside_printable_ascii_refuses_startup_without_naming_it(
+    tmp_path: Path, configured: str
+) -> None:
+    # The file's rule now holds for TAKEOVER_TOKEN too, so both accept the same tokens and every client sends one
+    # unchanged (curl sends a UTF-8 .env value that Starlette reads as latin-1).
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=configured)
+    with pytest.raises(RuntimeError, match="printable ASCII") as raised:
+        ensure_takeover_token(settings)
+    assert configured not in str(raised.value)
+    assert "sentinel" not in str(raised.value)
+
+
+@pytest.mark.parametrize("root", ["ARTIFACT_ROOT", "UPLOAD_ROOT"])
+def test_w2_21_a_token_file_inside_a_served_or_uploadable_root_refuses_startup(tmp_path: Path, root: str) -> None:
+    # /artifacts serves ARTIFACT_ROOT and uploads land in UPLOAD_ROOT: a token there can be read or replaced.
+    served = tmp_path / "served"
+    settings = make_settings(tmp_path, **{root: str(served), "TAKEOVER_TOKEN_FILE": str(served / "x" / ".." / "tok")})
+    with pytest.raises(RuntimeError, match=root):
+        ensure_takeover_token(settings)
+    assert not (served / "tok").exists()
+
+
+# The data roots that expose a file by path (W5-3): ARTIFACT_ROOT is served under /artifacts, UPLOAD_ROOT's files can
+# be uploaded into a page, GET /auth-profiles/{name}/export exports AUTH_ROOT's profiles as archives, and maintenance
+# sweeps all three. The other roots are read by fixed names, so a token file there reaches no agent.
+REFUSED_ROOT_SETTINGS = ["ARTIFACT_ROOT", "UPLOAD_ROOT", "AUTH_ROOT"]
+FIXED_NAME_ROOT_SETTINGS = [
+    "APPROVAL_ROOT",
+    "AUDIT_ROOT",
+    "WITNESS_ROOT",
+    "SESSION_STORE_ROOT",
+    "JOB_STORE_ROOT",
+    "HARNESS_ROOT",
+    "MEMORY_ROOT",
+    "MESH_IDENTITY_DIR",
+    "ISOLATED_TUNNEL_INFO_ROOT",
+]
+# The directories mounted into a container (by compose, or browser-sessions/<id> by the controller through the
+# Docker SDK), found under the parent of ARTIFACT_ROOT (/data in the image), with what the refusal names each by.
+MOUNTED_DIRECTORIES = {
+    "browser-profile": "browser-profile",
+    "downloads": "downloads",
+    "browser-sessions/abc123/profile": "browser-sessions",
+    "tunnels": "tunnels",
+    # W7-10: compose mounts ./data/ssh read-only into reverse-ssh (and the smoke's test-bastion).
+    "ssh": "the ssh directory",
+}
+
+
+def data_layout(data: Path) -> dict[str, str]:
+    """The shipped layout under ``data`` (/data in the image), so the fixed mount paths resolve under it too."""
+    return {
+        "ARTIFACT_ROOT": str(data / "artifacts"),
+        "UPLOAD_ROOT": str(data / "uploads"),
+        "AUTH_ROOT": str(data / "auth"),
+        "APPROVAL_ROOT": str(data / "approvals"),
+        "AUDIT_ROOT": str(data / "audit"),
+        "WITNESS_ROOT": str(data / "witness"),
+        "SESSION_STORE_ROOT": str(data / "sessions"),
+        "JOB_STORE_ROOT": str(data / "jobs"),
+        "HARNESS_ROOT": str(data / "harness"),
+        "MEMORY_ROOT": str(data / "memory"),
+        "MESH_IDENTITY_DIR": str(data / "mesh" / "identity"),
+        "ISOLATED_TUNNEL_INFO_ROOT": str(data / "tunnels" / "sessions"),
+        "BROWSER_WS_ENDPOINT_FILE": str(data / "browser-profile" / "browser-ws-endpoint.txt"),
+    }
+
+
+@pytest.mark.parametrize("root", REFUSED_ROOT_SETTINGS)
+def test_w4_1_a_token_file_inside_a_served_exported_or_swept_root_refuses_startup(tmp_path: Path, root: str) -> None:
+    data = tmp_path / "data"
+    inside = Path(data_layout(data)[root]) / "demo" / "takeover-token"
+    settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))
+    with pytest.raises(RuntimeError, match=root):
+        ensure_takeover_token(settings)
+    assert not inside.exists()
+
+
+@pytest.mark.parametrize("root", [*FIXED_NAME_ROOT_SETTINGS, "BROWSER_WS_ENDPOINT_FILE"])
+def test_w5_3_a_root_read_by_fixed_names_set_to_the_data_root_keeps_the_default_token_file(
+    tmp_path: Path, root: str
+) -> None:
+    # The mesh-key upgrade note points MESH_IDENTITY_DIR at /data: refusing every root put the compose-pinned
+    # /data/takeover-token inside a refused one and stopped startup after the upgrade.
+    data = tmp_path / "data"
+    layout = data_layout(data)
+    layout[root] = str(data / "browser-ws-endpoint.txt") if root == "BROWSER_WS_ENDPOINT_FILE" else str(data)
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(data / "takeover-token"))
+    ensure_takeover_token(settings)
+    assert settings.takeover_token
+    assert (data / "takeover-token").read_text(encoding="utf-8").strip() == settings.takeover_token
+
+
+def test_w5_3_artifact_root_set_to_the_data_root_refuses_the_default_token_file(tmp_path: Path) -> None:
+    # /artifacts would serve /data/takeover-token itself.
+    data = tmp_path / "data"
+    settings = make_settings(
+        tmp_path, **{**data_layout(data), "ARTIFACT_ROOT": str(data)}, TAKEOVER_TOKEN_FILE=str(data / "takeover-token")
+    )
+    with pytest.raises(RuntimeError, match="ARTIFACT_ROOT"):
+        ensure_takeover_token(settings)
+    assert not (data / "takeover-token").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink on Windows needs a privilege CI's runner lacks")
+@pytest.mark.parametrize("refused", [*REFUSED_ROOT_SETTINGS, *MOUNTED_DIRECTORIES])
+def test_w4_1_a_token_file_reached_through_a_symlinked_parent_is_refused(tmp_path: Path, refused: str) -> None:
+    data = tmp_path / "data"
+    layout = data_layout(data)
+    target = Path(layout[refused]) if refused in layout else data / refused
+    target.mkdir(parents=True)
+    link = tmp_path / "elsewhere"
+    link.symlink_to(target, target_is_directory=True)
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(link / "takeover-token"))
+    with pytest.raises(RuntimeError, match=refused if refused in layout else MOUNTED_DIRECTORIES[refused]):
+        ensure_takeover_token(settings)
+    assert not (target / "takeover-token").exists()
+
+
+@pytest.mark.parametrize(("relative", "named"), MOUNTED_DIRECTORIES.items())
+def test_w4_1_a_token_file_in_a_directory_mounted_into_a_container_refuses_startup(
+    tmp_path: Path, relative: str, named: str
+) -> None:
+    # browser-node mounts browser-profile and downloads, each isolated session gets browser-sessions/<id>/, and
+    # reverse-ssh mounts the tunnels and ssh directories: a compromised container could read or replace a token
+    # there.
+    data = tmp_path / "data"
+    inside = data / relative / "takeover-token"
+    settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))
+    with pytest.raises(RuntimeError, match=named):
+        ensure_takeover_token(settings)
+    assert not inside.exists()
+
+
+def test_w5_3_the_tunnels_directory_is_refused_wherever_isolated_tunnel_info_root_points(tmp_path: Path) -> None:
+    # Codex F01: the tunnels directory was guessed as ISOLATED_TUNNEL_INFO_ROOT's parent, so with the info root
+    # elsewhere a token in the tunnels directory compose mounts into reverse-ssh passed.
+    data = tmp_path / "data"
+    layout = {**data_layout(data), "ISOLATED_TUNNEL_INFO_ROOT": str(data / "isolated-info" / "sessions")}
+    inside = data / "tunnels" / "takeover-token"
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(inside))
+    with pytest.raises(RuntimeError, match="tunnels"):
+        ensure_takeover_token(settings)
+    assert not inside.exists()
+
+
+def test_w4_1_the_default_token_file_in_the_data_root_itself_is_accepted(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(data / "takeover-token"))
+    ensure_takeover_token(settings)
+    assert settings.takeover_token
+    assert (data / "takeover-token").read_text(encoding="utf-8").strip() == settings.takeover_token
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX modes, and creating a symlink on Windows needs a privilege CI's runner lacks"
+)
+@pytest.mark.parametrize(("mode", "warned"), [(0o644, True), (0o600, False)])
+def test_w4_4_a_symlinked_takeover_token_file_is_used_and_warns_when_its_target_is_open(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: int, warned: bool
+) -> None:
+    # A Kubernetes secret mount: a symlink to a file that is 0644 by default and not the controller's to change.
+    target = tmp_path / "secret-mount" / "..data" / "takeover-token"
+    target.parent.mkdir(parents=True)
+    target.write_text(SENTINEL + "\n", encoding="utf-8")
+    target.chmod(mode)
+    link = tmp_path / "takeover-token"
+    link.symlink_to(target)
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN_FILE=str(link))
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+
+    assert settings.takeover_token == SENTINEL
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert ("readable beyond its owner" in caplog.text) is warned
+    assert SENTINEL not in caplog.text

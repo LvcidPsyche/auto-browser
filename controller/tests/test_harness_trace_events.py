@@ -146,6 +146,41 @@ class AgentResultEventTests(unittest.TestCase):
                 self.assertEqual(action["execution"]["target"]["selector"], "#acct")
                 self.assertEqual(action["execution"]["after"]["url"], "https://x.test/done")
 
+    def test_a_sites_sensitive_row_in_the_observation_keeps_its_value_in_the_action_event(self) -> None:
+        # R-21: the action rule reached the page data inside the action event, so a site's row there lost value,
+        # label and username while the same row in final_observation kept them.
+        row = {"sensitive": True, "value": "Pro", "label": "Plan", "username": "site-user"}
+        observation = {"url": "https://x.test/", "interactables": [row]}
+        result = {"steps": [{"status": "ok", "decision": {"action": "click"}, "observation": observation}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        action = next(e for e in trace.events if e.event_type == "action").payload
+        self.assertEqual(action["observation"]["interactables"][0]["value"], "Pro")
+        self.assertEqual(action["observation"]["interactables"][0], trace.final_observation["interactables"][0])
+
+    def test_a_sites_sensitive_row_in_the_page_after_the_action_keeps_its_value(self) -> None:
+        row = {"sensitive": True, "value": "Pro", "label": "Plan"}
+        after = {"url": "https://x.test/done", "text_excerpt": "done", "interactables": [row]}
+        result = {"steps": [{"status": "ok", "decision": {"action": "click"}, "execution": {"after": after}}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        action = next(e for e in trace.events if e.event_type == "action").payload
+        self.assertEqual(action["execution"]["after"]["interactables"][0]["value"], "Pro")
+        self.assertEqual(trace.final_observation["interactables"][0]["value"], "Pro")
+
+    def test_a_sensitive_select_options_choice_appears_nowhere_in_the_action_event(self) -> None:
+        account = "ACCT-55120"
+        decision = {"action": "select_option", "selector": "#acct", "value": account, "sensitive": True}
+        execution = {"target": {"selector": "#acct", "value": account, "label": account}, "after": {"url": "u"}}
+        result = {"steps": [{"status": "ok", "decision": decision, "execution": execution}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        action = next(e for e in trace.events if e.event_type == "action")
+        self.assertNotIn(account, action.model_dump_json())
+
     def test_an_ordinary_selects_target_keeps_its_value_and_label(self) -> None:
         execution = {"target": {"selector": "#size", "value": "m", "label": "Medium"}}
         result = {"steps": [{"status": "ok", "decision": {"action": "select_option"}, "execution": execution}]}

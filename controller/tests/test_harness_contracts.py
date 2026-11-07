@@ -33,6 +33,15 @@ class ContractModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Postcondition(kind="url_matches", value="(unclosed")
 
+    def test_deeply_nested_and_oversized_patterns_are_a_validation_error_not_a_crash(self) -> None:
+        # re.compile raises RecursionError for deep nesting and OverflowError for a huge repeat count.
+        for pattern in ("(" * 500 + ")" * 500, "a{4294967296}"):
+            with self.subTest(pattern=pattern[:12]):
+                with self.assertRaises(ValidationError):
+                    Postcondition(kind="url_matches", value=pattern)
+                with self.assertRaises(ValidationError):
+                    ForbiddenState(kind="url_matches", value=pattern)
+
     def test_forbidden_state_requires_value(self) -> None:
         with self.assertRaises(ValidationError):
             ForbiddenState(kind="url_contains", value="")
@@ -561,6 +570,24 @@ class ProgrammaticRegexTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("app.harness.verifier.programmatic._REGEX_WORKER", worker):
             with self.assertRaisesRegex(RuntimeError, r"code 3\).*worker broke"):
                 await _regex_search_many([r"a"], "a", timeout=5.0)
+
+    async def test_the_regex_child_starts_without_the_site_module(self) -> None:
+        # HARN-17: the worker imports only json, re and sys, so the child skips site (-S) as well as the user's
+        # environment (-I): the cheapest start, paid once per verification. The verdicts still come back.
+        argv: list[tuple] = []
+        original = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            argv.append(args)
+            return await original(*args, **kwargs)
+
+        with mock.patch("app.harness.verifier.programmatic.asyncio.create_subprocess_exec", spy):
+            results = await _regex_search_many(
+                [r"checkout/\d+", r"admin"], "https://shop.test/checkout/42", timeout=5.0
+            )
+
+        self.assertEqual(results, [True, False])
+        self.assertEqual(argv[0][1 : argv[0].index("-c")], ("-I", "-S"))
 
     async def test_regex_child_is_killed_when_the_caller_cancels(self) -> None:
         started: list = []

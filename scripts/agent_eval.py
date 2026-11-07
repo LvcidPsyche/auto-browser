@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,20 @@ from app.agent_eval import (  # noqa: E402
     summarize_scores,
 )
 
+CONTROLLER_AUTH_ENV = "AUTO_BROWSER_TOKEN"
+
+
+def resolve_bearer_token(flag_value: str, environ: Mapping[str, str]) -> str | None:
+    """The controller token: the environment's, or the deprecated --bearer-token (visible to every local user)."""
+    if flag_value:
+        print(
+            f"warning: --bearer-token puts the token on the command line, where every local user can read it; "
+            f"set {CONTROLLER_AUTH_ENV} instead",
+            file=sys.stderr,
+        )
+        return flag_value
+    return environ.get(CONTROLLER_AUTH_ENV, "").strip() or None
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run or score repeatable auto-browser agent evaluations.")
@@ -37,7 +53,11 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true", help="Execute cases against a running controller.")
     parser.add_argument("--mock", action="store_true", help="Score deterministic mock results without a provider.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000", help="Controller base URL for --execute.")
-    parser.add_argument("--bearer-token", default="")
+    parser.add_argument(
+        "--bearer-token",
+        default="",
+        help=f"Deprecated: visible in the process list. Set {CONTROLLER_AUTH_ENV} instead.",
+    )
     parser.add_argument("--operator-id", default="")
     parser.add_argument("--operator-name", default="")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -54,7 +74,7 @@ def main() -> int:
     if args.execute:
         client = ControllerEvalClient(
             args.base_url,
-            bearer_token=args.bearer_token or None,
+            bearer_token=resolve_bearer_token(args.bearer_token, os.environ),
             operator_id=args.operator_id or None,
             operator_name=args.operator_name or None,
         )

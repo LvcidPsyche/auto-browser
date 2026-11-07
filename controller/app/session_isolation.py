@@ -141,7 +141,8 @@ class IsolatedBrowserRuntime:
     # which release removes. A shared network is never removed.
     network_owned: bool = False
     # This session's noVNC password. Never logged, stored or put in takeover_url
-    # itself: only the human-handoff responses carry it (takeover_url_with_password).
+    # itself: only the human-only takeover link carries it (takeover_url_with_password, for
+    # GET /sessions/{id}/takeover-link), never a result the model gets.
     vnc_password: str = field(default="", repr=False)
     # What the container's server.mjs wrote to browser-sandbox.json: Chromium sandboxed or not, and why.
     sandbox: dict[str, Any] | None = None
@@ -177,8 +178,10 @@ class DockerBrowserNodeProvisioner:
         # to each session network, and _discover_host_data_root reads its mounts.
         self._controller_container: Any | None = None
         # Whether the daemon honours GwPriority (read once), and whether the sort-order hazard was already warned about.
+        # Provisions run on worker threads, so both are read and set under one lock.
         self._gw_priority_ok: bool | None = None
         self._gw_hazard_warned = False
+        self._gw_lock = threading.Lock()
         # Subnets of the session networks the controller is (or may still be)
         # attached to, by network name. Browser containers never call the
         # controller, so the HTTP layer refuses any peer inside one
@@ -375,11 +378,10 @@ class DockerBrowserNodeProvisioner:
             if sandbox is not None and sandbox.get("endpoint") != ws_endpoint:
                 sandbox = {"sandbox": "unknown", "detail": "browser-sandbox.json describes another run"}
             if self.settings.browser_sandbox == "on" and not verified_on(sandbox):
-                # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX.
-                raise RuntimeError(
-                    refusal(f"isolated browser container {pending.container_name}", sandbox)
-                    + " Its container was removed."
-                )
+                # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX. The text
+                # claims nothing about the container: the rollback below runs after it is written, may fail to
+                # remove it, and only stops it under ISOLATED_BROWSER_KEEP_CONTAINERS (CB1-7).
+                raise RuntimeError(refusal(f"isolated browser container {pending.container_name}", sandbox))
             await asyncio.to_thread(pending.container.reload)
             ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
             novnc_port = self._extract_host_port(ports, "6080/tcp")
@@ -408,7 +410,12 @@ class DockerBrowserNodeProvisioner:
         except BaseException:
             # BaseException: a cancelled create (client gone, shutdown) left the
             # container running with nothing tracking it until the next restart.
-            await asyncio.to_thread(self._cleanup_pending_container, pending)
+            try:
+                await asyncio.to_thread(self._cleanup_pending_container, pending)
+            except Exception as exc:  # the original error is the one to raise; this one is logged
+                logger.warning(
+                    "Could not release browser container %s after a failed provision: %s", pending.container_name, exc
+                )
             raise
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
@@ -545,10 +552,18 @@ class DockerBrowserNodeProvisioner:
             # No runtime exists to release, so release() will never run for
             # this id. containers.run is create + start: a failed start leaves a
             # created container behind, and it holds the network's endpoint.
-            self._remove_stale_container(client, container_name)
+            container_problem = self._remove_stale_container(client, container_name)
             if network is not None:
                 self._remove_session_network(network, session_id, controller_id)
-            self._remove_runtime_dirs(session_id, client=client)
+            if container_problem is None:
+                self._remove_runtime_dirs(session_id, client=client)
+            else:
+                # CB1-6, as R-12 on release: the container may still run with the profile and downloads mounted,
+                # so they stay, as the startup sweep leaves a container's that it could not remove. A lookup that
+                # failed (an unreachable daemon) cannot tell whether one was ever created, so they stay then too.
+                logger.warning(
+                    "Keeping %s: browser container %s %s", local_runtime_root, container_name, container_problem
+                )
             raise
 
     def _join_session_network(self, client, network, controller_id: str) -> None:
@@ -570,38 +585,56 @@ class DockerBrowserNodeProvisioner:
 
     def _gw_priority_supported(self, client) -> bool:
         """Whether the daemon, and the API version this client speaks, honour GwPriority (read once)."""
-        if self._gw_priority_ok is None:
-            try:
-                versions = [str(client.version()["ApiVersion"])]
-                pinned = getattr(client.api, "_version", None)
-                if isinstance(pinned, str):
-                    versions.append(pinned)
-                self._gw_priority_ok = all(_api_version(v) >= GW_PRIORITY_MIN_API_VERSION for v in versions)
-            except Exception as exc:
-                # The answer only decides whether to warn; GwPriority is sent either way, so a version that cannot
-                # be read never fails a session. Assumed supported, which drops only the warning.
-                logger.debug("could not read the Docker API version (%s); assuming GwPriority is honoured", exc)
-                self._gw_priority_ok = True
-        return self._gw_priority_ok
+        with self._gw_lock:
+            if self._gw_priority_ok is None:
+                try:
+                    versions = [str(client.version()["ApiVersion"])]
+                    pinned = getattr(client.api, "_version", None)
+                    if isinstance(pinned, str):
+                        versions.append(pinned)
+                    self._gw_priority_ok = all(_api_version(v) >= GW_PRIORITY_MIN_API_VERSION for v in versions)
+                except Exception as exc:
+                    # The answer only decides whether to warn; GwPriority is sent either way, so a version that
+                    # cannot be read never fails a session. Assumed supported, which drops only the warning.
+                    logger.debug("could not read the Docker API version (%s); assuming GwPriority is honoured", exc)
+                    self._gw_priority_ok = True
+            return self._gw_priority_ok
 
     def _warn_gateway_hazard(self, session_network_name: str) -> None:
-        """One WARNING per controller start when a session network sorts ahead of every network the controller is on."""
-        if self._gw_hazard_warned:
-            return
-        # The controller's own networks only: after a restart-policy restart the cached attrs still list the session
-        # networks it had joined, which sort lowest in exactly this hazard and would hide it.
-        session_prefix = f"{self.settings.isolated_browser_container_prefix}-"
-        attached = (self._controller_container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
-        own = sorted(name for name in attached if not (name.startswith(session_prefix) and name.endswith("-net")))
+        """One WARNING per controller start, at the first isolated provision on a daemon without GwPriority.
+
+        Whatever the names: Docker also weighs a network's other properties, so the gateway (and the published
+        port) can move even when the session network sorts after the controller's. When it sorts first, the
+        warning names that order problem and how to avoid it.
+        """
+        with self._gw_lock:
+            if self._gw_hazard_warned:
+                return
+            self._gw_hazard_warned = True
+            # The controller's own networks only: after a restart-policy restart the cached attrs still list the
+            # session networks it had joined, which sort lowest in exactly this hazard and would hide it.
+            session_prefix = f"{self.settings.isolated_browser_container_prefix}-"
+            attached = (self._controller_container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
+            own = sorted(name for name in attached if not (name.startswith(session_prefix) and name.endswith("-net")))
         if not own or session_network_name >= own[0]:
+            logger.warning(
+                "GwPriority is not honoured (the Docker daemon's API, or the API version this client speaks, is "
+                "below 1.48), so the controller joins session network %s without it. Its name does not sort before "
+                "the controller's own networks, but this check compares network names only, and Docker also weighs "
+                "a network's other properties: the controller's default gateway, and its published ports, can still "
+                "move to a session network, which cuts the request that creates a session. Use Docker Engine 28 or "
+                "later.",
+                session_network_name,
+            )
             return
-        self._gw_hazard_warned = True
         logger.warning(
-            "This Docker daemon ignores GwPriority (API below 1.48), so the controller joins session network %s "
-            "without it, and that name sorts before %s, a network the controller is on. Docker then moves the "
-            "controller's default gateway, and its published ports, to the session network: the request that "
-            "creates a session can be cut, and the published port stops answering. Use Docker Engine 28 or "
-            "later, or set ISOLATED_BROWSER_CONTAINER_PREFIX to a prefix that sorts after %s.",
+            "GwPriority is not honoured (the Docker daemon's API, or the API version this client speaks, is below "
+            "1.48), so the controller joins session network %s without it, and that name sorts before %s, a "
+            "network the controller is on. Docker then moves the controller's default gateway, and its published "
+            "ports, to the session network: the request that creates a session can be cut, and the published port "
+            "stops answering. Use Docker Engine 28 or later, or set ISOLATED_BROWSER_CONTAINER_PREFIX to a prefix "
+            "that sorts after %s. This check compares network names only, so the gateway can move even when the "
+            "names sort the other way (Docker also weighs a network's other properties).",
             session_network_name,
             own[0],
             own[0],
@@ -614,14 +647,25 @@ class DockerBrowserNodeProvisioner:
     def _session_network_name(container_name: str) -> str:
         return f"{container_name}-net"
 
-    def _remove_stale_container(self, client, container_name: str) -> None:
-        existing = self._safe_get_container(client, container_name)
+    def _remove_stale_container(self, client, container_name: str) -> str | None:
+        """Remove a container by name, best effort, on a path that may be reporting another failure already.
+
+        None when no such container is left; otherwise what went wrong ("could not be looked up", "could not be
+        removed"), so the container may still exist (and run, with the session's profile mounted). Either failure
+        is logged at WARNING with the daemon's reason (W2-17: a failed removal was DEBUG only)."""
+        try:
+            existing = self._safe_get_container(client, container_name)
+        except Exception as exc:
+            logger.warning("Could not look up a stale container %s: %s", container_name, exc)
+            return "could not be looked up"
         if existing is None:
-            return
+            return None
         try:
             existing.remove(force=True)
         except Exception as exc:
-            logger.debug("Could not remove stale container %s: %s", container_name, exc)
+            logger.warning("Could not remove stale container %s: %s", container_name, exc)
+            return "could not be removed"
+        return None
 
     def _create_session_network(self, client, network_name: str, session_id: str):
         try:
@@ -738,8 +782,13 @@ class DockerBrowserNodeProvisioner:
         environment["VNC_PASSWORD"] = vnc_password
         # noVNC in the container only accepts its own page on a loopback name or
         # a listed host (a DNS-rebinding guard), and the takeover URL for this
-        # container uses ISOLATED_TAKEOVER_HOST.
-        environment["NOVNC_ALLOWED_HOSTS"] = self.settings.isolated_takeover_host
+        # container uses ISOLATED_TAKEOVER_HOST, or the tunnel's public host once the session has a tunnel.
+        allowed_hosts = [self.settings.isolated_takeover_host]
+        if self.settings.isolated_tunnel_enabled:
+            tunnel_host = self.settings.isolated_tunnel_public_host or self.settings.isolated_tunnel_host
+            if tunnel_host and tunnel_host not in allowed_hosts:
+                allowed_hosts.append(tunnel_host)
+        environment["NOVNC_ALLOWED_HOSTS"] = " ".join(allowed_hosts)
 
         container = client.containers.run(
             self.settings.isolated_browser_image,
@@ -790,16 +839,30 @@ class DockerBrowserNodeProvisioner:
             except Exception as exc:
                 logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
         stranded = None
+        removal_error: Exception | None = None
+        not_found = (docker.errors.NotFound,) if docker is not None else ()
         if not self.settings.isolated_browser_keep_containers:
             if container is not None:
                 try:
                     container.remove(force=True)
+                except not_found:
+                    pass  # gone already: nothing holds the profile
                 except Exception as exc:
                     logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
                     # It still holds an endpoint on the session network.
                     stranded = container
+                    removal_error = exc
         if runtime.network_owned:
             self._release_session_network(client, runtime, stranded=stranded)
+        if removal_error is not None:
+            # The container may still run with the profile and downloads mounted: emptying them under it is not a
+            # release. They stay, as the startup sweep leaves a container's that it could not remove.
+            logger.warning(
+                "Keeping %s: browser container %s could not be removed",
+                self._local_runtime_root(runtime.session_id),
+                runtime.container_name,
+            )
+            raise RuntimeError(f"browser container {runtime.container_name} could not be removed") from removal_error
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
@@ -1102,14 +1165,18 @@ class DockerBrowserNodeProvisioner:
 
     @staticmethod
     def _safe_get_container(client, identifier: str):
+        """The container, or None when the daemon says there is none. Any other failure (an unreachable daemon, an
+        API error) propagates: it is not the answer "gone", and a release that took it for one removed the session's
+        directories while the container may still have been running."""
         try:
             return client.containers.get(identifier)
-        except Exception:
+        except docker.errors.NotFound:
             return None
 
     @staticmethod
     def _safe_get_network(client, identifier: str):
+        """As _safe_get_container, for networks."""
         try:
             return client.networks.get(identifier)
-        except Exception:
+        except docker.errors.NotFound:
             return None

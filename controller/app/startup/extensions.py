@@ -10,7 +10,6 @@ Missing credentials = subsystem disabled with a warning (never crash on startup)
 from __future__ import annotations
 
 import logging
-import os
 import shlex
 from pathlib import Path
 
@@ -82,8 +81,8 @@ def _init_curator(app) -> None:
 
 
 def _init_mesh(app) -> None:
-    mesh_enabled = os.environ.get("MESH_ENABLED", "false").lower() == "true"
-    if not mesh_enabled:
+    settings = getattr(app.state, "settings", None)
+    if not getattr(settings, "mesh_enabled", False):
         app.state.mesh_identity = None
         app.state.peer_registry = None
         app.state.delegation_manager = None
@@ -95,9 +94,9 @@ def _init_mesh(app) -> None:
         from app.mesh.identity import NodeIdentity
         from app.mesh.peers import PeerRegistryFile
 
-        identity_dir = Path(os.environ.get("MESH_IDENTITY_DIR", "/data/mesh/identity"))
-        peers_path = Path(os.environ.get("MESH_PEERS_PATH", "/data/mesh/peers.json"))
-        timestamp_window = float(os.environ.get("MESH_TIMESTAMP_WINDOW", "30"))
+        identity_dir = Path(settings.mesh_identity_dir)
+        peers_path = Path(settings.mesh_peers_path)
+        timestamp_window = settings.mesh_timestamp_window
 
         identity = NodeIdentity(identity_dir)
         peers = PeerRegistryFile(peers_path)
@@ -130,7 +129,7 @@ def _init_harness(app) -> None:
         from app.harness.register import mesh_identity_signer, mesh_identity_verifier
 
         settings = getattr(app.state, "settings", None)
-        root = Path(getattr(settings, "harness_root", None) or os.environ.get("HARNESS_ROOT", "/data/harness"))
+        root = Path(getattr(settings, "harness_root", None) or "/data/harness")
         identity = getattr(app.state, "mesh_identity", None)
         signer = mesh_identity_signer(identity) if identity is not None else None
         service = HarnessService(
@@ -139,7 +138,18 @@ def _init_harness(app) -> None:
             signer=signer,
             envelope_verifier=mesh_identity_verifier(identity) if identity is not None else None,
             model_tiers=_harness_model_tiers(settings),
+            max_runs_per_operator=int(getattr(settings, "harness_max_runs_per_operator", 0) or 0),
         )
+        swept = service.store.mark_stale_running()
+        if swept:
+            logger.warning("startup.harness: marked %d run(s) left running by the last process interrupted", swept)
+        # Before the prune: a candidate a kill left in a staging aside is put back first, never pruned as a leftover.
+        recovered = service.store.recover_interrupted_staging()
+        if recovered:
+            logger.warning("startup.harness: settled %d entries an interrupted skill staging left behind", recovered)
+        pruned = service.store.prune(float(getattr(settings, "harness_retention_days", 0) or 0))
+        if pruned:
+            logger.info("startup.harness: removed %d run/candidate directories past HARNESS_RETENTION_DAYS", pruned)
         app.state.harness_service = service
         gateway = getattr(app.state, "tool_gateway", None)
         if gateway is not None:
@@ -153,9 +163,12 @@ def _init_harness(app) -> None:
 def _build_harness_verifier(settings):
     from app.harness.verifier import EnsembleVerifier, ProgrammaticVerifier, UniversalVerifierAdapter
 
-    mode = str(getattr(settings, "harness_verifier", "") or os.environ.get("HARNESS_VERIFIER", "programmatic")).lower()
-    uv_command = str(getattr(settings, "harness_uv_command", "") or os.environ.get("HARNESS_UV_COMMAND", ""))
-    uv = UniversalVerifierAdapter(command=shlex.split(uv_command) if uv_command else None)
+    mode = str(getattr(settings, "harness_verifier", "") or "programmatic").lower()
+    uv_command = str(getattr(settings, "harness_uv_command", "") or "")
+    uv = UniversalVerifierAdapter(
+        command=shlex.split(uv_command) if uv_command else None,
+        env_passthrough=list(getattr(settings, "harness_uv_env_passthrough_names", []) or []),
+    )
     programmatic = ProgrammaticVerifier()
     if mode == "uv":
         return uv
@@ -166,15 +179,9 @@ def _build_harness_verifier(settings):
 
 def _harness_model_tiers(settings) -> dict[str, str]:
     return {
-        "explorer": str(
-            getattr(settings, "harness_explorer_model", "") or os.environ.get("HARNESS_EXPLORER_MODEL", "")
-        ),
-        "verifier": str(
-            getattr(settings, "harness_verifier_model", "") or os.environ.get("HARNESS_VERIFIER_MODEL", "")
-        ),
-        "executor": str(
-            getattr(settings, "harness_executor_model", "") or os.environ.get("HARNESS_EXECUTOR_MODEL", "")
-        ),
+        "explorer": str(getattr(settings, "harness_explorer_model", "") or ""),
+        "verifier": str(getattr(settings, "harness_verifier_model", "") or ""),
+        "executor": str(getattr(settings, "harness_executor_model", "") or ""),
     }
 
 

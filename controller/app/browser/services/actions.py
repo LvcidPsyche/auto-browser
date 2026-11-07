@@ -673,6 +673,7 @@ class BrowserActionService:
                     approval,
                     webhook_url=self.manager.settings.approval_webhook_url,
                     webhook_secret=self.manager.settings.approval_webhook_secret,
+                    allow_private_targets=self.manager.settings.approval_webhook_allow_private_targets,
                 )
             )
         raise ApprovalRequiredError(approval)

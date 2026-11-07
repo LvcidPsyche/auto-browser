@@ -6,11 +6,14 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
 mesh_router = APIRouter(prefix="/mesh", tags=["mesh"])
+
+# Used when the settings carry no MESH_MAX_BODY_BYTES (a bare app in tests).
+_DEFAULT_MAX_BODY_BYTES = 1024 * 1024
 
 
 class MeshReceiveRequest(BaseModel):
@@ -22,22 +25,58 @@ class MeshReceiveRequest(BaseModel):
     signature_b64: str
 
 
-@mesh_router.post("/receive")
-async def mesh_receive(body: MeshReceiveRequest, request: Request):
+async def _read_capped_body(request: Request, limit: int) -> bytes:
+    """The request body, refused with 413 past `limit` bytes: by its Content-Length, then as it is read."""
+    declared = request.headers.get("content-length")
+    if declared is None or not declared.isascii() or not declared.isdigit() or int(declared) > limit:
+        raise HTTPException(413, "Mesh envelope too large or of unknown length (send Content-Length)")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "Mesh envelope too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@mesh_router.post(
+    "/receive",
+    # The body is read by hand (capped before it is parsed), so FastAPI sees no body model: declare it for /docs.
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": MeshReceiveRequest.model_json_schema()}},
+        }
+    },
+)
+async def mesh_receive(request: Request):
     """
     Inbound delegation endpoint. Peers POST signed envelopes here.
     Calls DelegationManager.receive_inbound() and returns the reply envelope.
+
+    The route takes no bearer token, so it reads at most MESH_MAX_BODY_BYTES (1 MiB by default) before it
+    parses anything or looks at the sender.
     """
     app = request.app
     delegation_mgr = getattr(app.state, "delegation_manager", None)
     if delegation_mgr is None:
         raise HTTPException(503, "Mesh not initialized")
 
-    from app.mesh import DelegationRejected, DelegationReplayError, SignedEnvelope, make_envelope
+    limit = int(getattr(getattr(app.state, "settings", None), "mesh_max_body_bytes", _DEFAULT_MAX_BODY_BYTES))
+    raw = await _read_capped_body(request, limit)
+    try:
+        body = MeshReceiveRequest.model_validate_json(raw)
+    except ValidationError:
+        raise HTTPException(422, "Invalid mesh envelope") from None
+
+    from app.mesh import DelegationRejected, DelegationReplayError, MeshReplayCacheFull, SignedEnvelope, make_envelope
 
     envelope = SignedEnvelope(**body.model_dump())
     try:
         response = await delegation_mgr.receive_inbound(envelope)
+    except MeshReplayCacheFull:
+        raise HTTPException(503, "mesh replay cache is full; retry later")
     except (DelegationRejected, DelegationReplayError):
         raise HTTPException(403, "Mesh delegation rejected")
     except Exception:

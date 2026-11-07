@@ -10,13 +10,18 @@ edit here must be mirrored to the other copy.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
+import socket
 import sys
 from dataclasses import dataclass
+from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import unquote, unwrap, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 # MCP spec header names, kept as local constants so the bridge has no
 # controller dependency. The controller test suite asserts these match
@@ -42,8 +47,195 @@ class _NoRedirects(HTTPRedirectHandler):
         return None
 
 
+_DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
+
+# A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1).
+# The lookbehind lets a match start only where a run starts, so the scan is linear in the text's length (W14-1).
+_USERINFO_RUN = re.compile(r"""(?<![^\s'"/@])[^\s'"/@]*@""")
+
+
+class InvalidControllerURL(InvalidURL):
+    """The controller URL cannot be read, or reads as a local host it would not connect to; nothing was sent.
+
+    Its text is a fixed reason in the bridges' own words, never an exception's text, which can quote the URL (W14-1).
+    """
+
+
+def _without_userinfo(text: str) -> str:
+    """``text`` with every userinfo-shaped run removed, so an error the agent sees carries no ``user:password@``."""
+    return _USERINFO_RUN.sub("", text)
+
+
+def _split_userinfo(url: str) -> tuple[str, str, str]:
+    """``url`` as (everything before the userinfo, the userinfo, everything after its ``@``), cut as a string.
+
+    The userinfo runs from ``//``, or the start when there is none, up to the last ``@`` before the first ``/``,
+    ``?`` or ``#``; it is empty when there is no such ``@``.
+    """
+    head, slashes, rest = url.partition("//")
+    if not slashes:
+        head, rest = "", url
+    end = min((index for index in (rest.find(delimiter) for delimiter in "/?#") if index != -1), default=len(rest))
+    at = rest.rfind("@", 0, end)
+    return head + slashes, rest[: max(at, 0)], rest[at + 1 :]
+
+
+def _display_url(url: str) -> str:
+    """``url`` without its userinfo, query or fragment, cut as a string so a malformed URL is handled too (W13-1).
+
+    The URL is read first as urllib's Request reads it, without surrounding whitespace or a ``<URL:...>`` wrapper
+    (W15-6).
+    """
+    before, _, after = _split_userinfo(unwrap(url))
+    return _without_userinfo((before + after).split("#", 1)[0].split("?", 1)[0])
+
+
+def _redacted(text: str, url: str) -> str:
+    """``text`` with ``url``'s userinfo, password, query and fragment replaced and any userinfo run dropped (W14-1).
+
+    The URL is read first as urllib's Request reads it (W15-6): a CR left on it by a CRLF .env file, which urllib
+    strips, would otherwise end the query and match no text. Each is found with string operations, so a malformed
+    URL is handled, and is replaced as written and percent-decoded, longest first, with ``[redacted]``; then
+    ``_without_userinfo`` drops any other ``user:password@``.
+    """
+    url = unwrap(url)
+    userinfo = _split_userinfo(url)[1]
+    parts = (userinfo, userinfo.partition(":")[2], url.partition("?")[2].partition("#")[0], url.partition("#")[2])
+    known = {value for part in parts for value in (part, unquote(part)) if value}
+    for value in sorted(known, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return _without_userinfo(text)
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """Whether a request to this host stays on this machine, so it goes past any environment proxy.
+
+    One rule for every Python sender of the token: localhost, also with one trailing dot, or an address that is
+    loopback or unspecified (0.0.0.0 and ::, which a server's startup line prints and which reach this host on Linux
+    and macOS), an IPv4-mapped IPv6 address counting as the IPv4 address it maps. The address is the IP literal, or
+    what the platform's numeric parser reads the host as (W9-5: 127.2, 2130706434 and 0x7f000002 are 127.0.0.2 to
+    the socket layer), never a DNS answer. A *.localhost name is not local here. The name compared is the one the
+    socket layer resolves (W12-1): the host encoded with the ``idna`` codec, as getaddrinfo encodes it, and
+    lowercased, so local<U+00AD>host and l<U+00BA>calhost are localhost; a host the codec refuses is compared as
+    given.
+    """
+    host = host or ""
+    try:
+        name = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        name = host
+    if name.removesuffix(".") == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        numeric = _numeric_address(host)
+        if numeric is None:
+            return False
+        address = numeric
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_unspecified
+
+
+def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address getaddrinfo reads ``host`` as with AI_NUMERICHOST only, which never queries DNS; None otherwise."""
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, None, flags=socket.AI_NUMERICHOST)
+        return ipaddress.ip_address(infos[0][4][0])
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return None
+
+
+def _goes_direct(request: Request) -> bool:
+    """Whether the request goes past any environment proxy: the host http.client connects to is local (W13-2).
+
+    One fail-closed rule over five readings of the host. Direct only when (1) the host http.client connects to,
+    which reads an unbracketed ::1:8000 as ::1, is local: going direct sends the request to that host and no other.
+    When it is not, but another reading is, the request is refused with InvalidControllerURL: (2) the host of
+    urllib's percent-decoded ``request.host`` read as a URL authority (W9-5: %31%32%37.0.0.2 is 127.0.0.2), which
+    drops a userinfo http.client keeps in its host; (3) the host of the URL as written, which a proxy reads, so a
+    percent-encoded / ? or # in a userinfo (x%2f@127.0.0.1) cannot hide a loopback host; (4) urllib's decoded
+    ``request.host`` as a whole after its last @ (W12-2), so an unbracketed ::1 or :: without a port, which
+    http.client reads as host ":" and urlsplit as no host, is found local, also behind a userinfo (user@::1); (5) the
+    host http.client reads from that decoded host after its last @ (W14-4), so a userinfo before an unbracketed IPv6
+    loopback with a port (user@::1:8000, whose connect host is user@::1) cannot hide it. Such a
+    host would be connected to as another name (127.0.0.2#.bad, x/@127.0.0.1, ":") that the resolver is asked for,
+    and a proxy would get the token, so it goes nowhere. A host no reading finds local uses the proxy.
+    Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), a port it
+    reads outside 0 to 65535 (W15-4), and a reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and
+    its ValueError (W12-3), raise InvalidControllerURL (W13-1), so a malformed authority is refused before any
+    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector``
+    holding a space or a control character (U+0000 to U+0020 or U+007F), which http.client refuses only once a
+    connection is chosen. Each reason is the
+    bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
+    (``request.host`` None) is not direct and falls through to urllib's own error, raised before any proxy is used
+    (W10-14).
+    """
+    if request.host is None:
+        return False
+    if any(character <= " " or character == "\x7f" for character in request.selector):
+        raise InvalidControllerURL("its path or query holds a space or a control character; percent-encode it")
+    try:
+        connection = HTTPConnection(request.host)
+    except InvalidURL as exc:
+        raise InvalidControllerURL(
+            "http.client cannot read its host and port (a port that is not a number, a userinfo, or a space or "
+            "control character)"
+        ) from exc
+    # http.client reads :99999, :65536 and :-1 as those numbers, and the socket layer wraps them (on Windows,
+    # getaddrinfo connects them to 34463, 0 and 65535), so the token could reach another port than the one written.
+    if not 0 <= connection.port <= 65535:
+        raise InvalidControllerURL("its port is outside 0 to 65535")
+    connected = connection.host
+    try:
+        others = (
+            urlsplit("//" + request.host).hostname,
+            urlsplit(request.full_url).hostname,
+            request.host.rpartition("@")[2],
+            HTTPConnection(request.host.rpartition("@")[2]).host,
+        )
+    except (InvalidURL, ValueError) as exc:
+        raise InvalidControllerURL("a reading cannot parse its host (for example, a malformed bracket)") from exc
+    # Codex R01: urllib reads http://:8000/mcp's host as ":8000" and no reading finds a local host in an empty
+    # one, so the request went to the environment proxy with the token. The fifth reading is the host http.client
+    # reads after the last @.
+    if not others[-1]:
+        raise InvalidControllerURL("its host is empty")
+    if _is_loopback_host(connected):
+        return True
+    if any(_is_loopback_host(host) for host in others):
+        # Never the host or its userinfo: the message reaches the agent through the bridges' answer.
+        raise InvalidControllerURL(
+            "the host reads as a local host one way and as another host the way it would be connected to "
+            "(a userinfo, an IPv6 address without brackets, or an encoded delimiter); name a local controller "
+            "plainly, as http://127.0.0.1:PORT or http://[::1]:PORT"
+        )
+    return False
+
+
 # Module-level, as urllib's own urlopen was, so tests can patch it.
-urlopen = build_opener(_NoRedirects).open
+def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
+    """Open the request without following redirects, past any environment proxy when its host is loopback.
+
+    urllib skips a proxy for localhost only when no_proxy names it, so with http_proxy set the bridge's
+    Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
+    environment names, read for each request. ``_goes_direct`` decides, from the host http.client connects to, and
+    refuses a host another reading finds local.
+    """
+    if _goes_direct(request):
+        return _DIRECT.open(request, *args, **kwargs)
+    return build_opener(_NoRedirects).open(request, *args, **kwargs)
+
+
+# Why a request went without the token that --bearer-token gives, added to a 401's answer (W15-7): fixed text, which
+# names the source and never the token.
+_ARGUMENT_HOLDS_A_LINE_BREAK = (
+    "--bearer-token or AUTO_BROWSER_BEARER_TOKEN holds a line break, which an HTTP header cannot carry, so no token "
+    "was sent"
+)
 
 
 @dataclass
@@ -68,7 +260,7 @@ class HttpMcpClient:
         self.timeout_seconds = timeout_seconds
         self.operator_id = operator_id
         self.token_file = os.path.expanduser(token_file) if token_file else None
-        # Why the last request went without a token from token_file; added to a 401's message.
+        # Why the last request went without a token, from token_file or bearer_token; added to a 401's message.
         self.token_file_problem: str | None = None
 
     def _bearer(self) -> str | None:
@@ -78,7 +270,14 @@ class HttpMcpClient:
         controller has written the file, and a regenerated token must not need a
         restart. A missing or unreadable file sends no header, so a controller
         running without a token still works.
+
+        A token holding a line break, from either source, sends no header either (W15-7): http.client refuses that
+        header with a ValueError quoting it whole, which an answer would show the agent. ``token_file_problem`` says
+        why the last request went without a token, for bearer_token as well as for token_file.
         """
+        if self.bearer_token and ("\r" in self.bearer_token or "\n" in self.bearer_token):
+            self.token_file_problem = _ARGUMENT_HOLDS_A_LINE_BREAK
+            return None
         if self.bearer_token or not self.token_file:
             return self.bearer_token
         try:
@@ -86,6 +285,12 @@ class HttpMcpClient:
                 token = handle.read().strip()
         except (OSError, UnicodeDecodeError) as exc:
             self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
+            return None
+        if "\r" in token or "\n" in token:
+            self.token_file_problem = (
+                f"the token file {self.token_file} holds a line break, which an HTTP header cannot carry, so no token "
+                "was sent"
+            )
             return None
         self.token_file_problem = None if token else f"the token file {self.token_file} is empty"
         return token or None
@@ -125,7 +330,20 @@ class HttpMcpClient:
 
     def _request(self, method: str, *, headers: dict[str, str], body: dict[str, Any] | None) -> HttpMcpResponse:
         payload = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-        request = Request(self.base_url, data=payload, headers=headers, method=method)
+        try:
+            request = Request(self.base_url, data=payload, headers=headers, method=method)
+        except ValueError as exc:
+            # urllib's text quotes the URL, query and fragment included (W14-1).
+            raise InvalidControllerURL(
+                "urllib cannot read it as an http:// or https:// URL (for example, no scheme, a malformed bracket or "
+                "a character it refuses)"
+            ) from exc
+        # Before any opener is chosen, so nothing is sent (W15-3). urllib reads a scheme-less userinfo's user name as
+        # the scheme (sentinel:x@host/mcp), answers a data: or file: URL from the URL or the local file as if a
+        # controller had, and leaves a URL without a host to fail later. Its type is lowercased; its host is "" for
+        # http:///mcp and None for http:mcp.
+        if request.type not in ("http", "https") or not request.host:
+            raise InvalidControllerURL("it is not an http:// or https:// URL with a host")
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read()
@@ -219,17 +437,32 @@ class StdioMcpBridge:
                 )
             if method == "notifications/initialized":
                 self._initialized_sent = True
+        # The answers go to the agent. The answer that no controller is reachable names the URL without its userinfo,
+        # query or fragment (W13-1); the invalid-URL answer names no part of it, since a URL that cannot be read
+        # cannot be cut safely either (W15-2); and the error text they show has the URL's userinfo, password, query
+        # and fragment and any user:password@ removed (W14-1).
         except URLError as exc:
             return self._jsonrpc_error(
                 request_id,
                 -32000,
-                f"No Auto Browser controller reachable at {self.client.base_url} — "
+                f"No Auto Browser controller reachable at {_display_url(self.client.base_url)} — "
                 "start one with 'docker compose up -d' in the auto-browser repo, or pass "
-                f"--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. (underlying: {exc.reason})",
+                "--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. "
+                f"(underlying: {self._shown(str(exc.reason))})",
+            )
+        except InvalidControllerURL as exc:
+            # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3). Only the controller
+            # URL's own: an InvalidURL from elsewhere (an environment proxy's port) is answered as a failure. Its
+            # text is a fixed reason in the bridges' own words (W14-1).
+            return self._jsonrpc_error(
+                request_id,
+                -32000,
+                "The configured controller URL is not a valid Auto Browser controller URL — fix "
+                f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
-            return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {exc}")
+            return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
 
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if next_session_id:
@@ -270,13 +503,18 @@ class StdioMcpBridge:
             "result": {**result, "capabilities": {**capabilities, "resources": {**resources, "subscribe": False}}},
         }
 
+    def _shown(self, text: str) -> str:
+        """An error's ``text`` as an answer shows it, without the base URL's known secrets (W14-1)."""
+        base_url = getattr(self.client, "base_url", "")
+        return _redacted(text, base_url if isinstance(base_url, str) else "")
+
     def _http_error_message(self, response: HttpMcpResponse) -> str:
         if response.body is None:
             return f"Empty or non-JSON response from Auto Browser MCP endpoint ({response.status_code})"
         detail = response.body.get("detail") if isinstance(response.body, dict) else None
         message = f"Auto Browser controller returned HTTP {response.status_code}"
         if detail:
-            message += f": {detail}"
+            message += f": {self._shown(str(detail))}"
         if response.status_code == 401:
             message += (
                 " (set --token-file or AUTO_BROWSER_TOKEN_FILE to the controller's token file, data/api-token in"
@@ -284,15 +522,20 @@ class StdioMcpBridge:
             )
             problem = getattr(self.client, "token_file_problem", None)
             if problem:
-                message += f"; {problem}"
+                message += f"; {self._shown(str(problem))}"
         elif response.status_code == 400 and "operator" in str(detail).lower():
             message += (
                 " (this controller requires an operator id on every request: pass --operator-id or set"
                 " AUTO_BROWSER_OPERATOR_ID, or turn off REQUIRE_OPERATOR_ID on the controller)"
             )
         elif response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            message += f" (rate limited; retry after {retry_after}s)" if retry_after else " (rate limited)"
+            # Seconds only (W15-6): an HTTP-date, or any other text, which can quote the URL, is not shown.
+            retry_after = (response.headers.get("retry-after") or "").strip()
+            # Codex R03: not when it is a secret of the URL, such as a numeric password or fragment.
+            if retry_after.isascii() and retry_after.isdigit() and self._shown(retry_after) == retry_after:
+                message += f" (rate limited; retry after {retry_after}s)"
+            else:
+                message += " (rate limited)"
         return message
 
     def _reinitialize(self) -> bool:

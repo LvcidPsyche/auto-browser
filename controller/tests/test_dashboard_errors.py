@@ -321,15 +321,25 @@ def test_replay_screenshots_load_with_the_token_and_never_send_it_elsewhere() ->
 
 
 @requires_chromium
-def test_the_session_lists_takeover_link_opens_the_records_url_with_its_password() -> None:
-    """The list's URL is password-free; the link opens the one from GET /sessions/{id}, which carries it."""
+def test_the_session_lists_takeover_link_opens_the_takeover_link_endpoints_url() -> None:
+    """The list's URL is password-free; the link opens the one from GET /sessions/{id}/takeover-link."""
     listed = "http://novnc.test/vnc.html?autoconnect=true"
     stub = Stub(
         {
-            ("GET", "/sessions"): (200, [{"id": "sess-abcdef123456", "status": "active", "takeover_url": listed}]),
-            ("GET", "/sessions/sess-abcdef123456"): (
+            ("GET", "/sessions"): (
                 200,
-                {"id": "sess-abcdef123456", "takeover_url": listed + "#password=Ab3dEf7h"},
+                [
+                    {
+                        "id": "sess-abcdef123456",
+                        "status": "active",
+                        "takeover_url": listed,
+                        "isolation": {"mode": "docker_ephemeral"},
+                    }
+                ],
+            ),
+            ("GET", "/sessions/sess-abcdef123456/takeover-link"): (
+                200,
+                {"session_id": "sess-abcdef123456", "takeover_url": listed + "#password=Ab3dEf7h"},
             ),
         }
     )
@@ -337,9 +347,9 @@ def test_the_session_lists_takeover_link_opens_the_records_url_with_its_password
     async def scenario(page, dialogs) -> list[str]:
         await page.context.route("http://novnc.test/**", lambda route: route.fulfill(status=200, body="novnc"))
         opened: list[str] = []
-        for record in (("GET", "/sessions/sess-abcdef123456"), None):
+        for record in (("GET", "/sessions/sess-abcdef123456/takeover-link"), None):
             if record is None:  # the record cannot be read: the list's URL still opens
-                stub.routes[("GET", "/sessions/sess-abcdef123456")] = (500, {"detail": "boom"})
+                stub.routes[("GET", "/sessions/sess-abcdef123456/takeover-link")] = (500, {"detail": "boom"})
             async with page.expect_popup() as popup_info:
                 await page.click("text=Open noVNC")
             popup = await popup_info.value
