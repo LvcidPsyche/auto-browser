@@ -68,6 +68,16 @@ class SkillInducer:
         with self.lock:
             _move_into_place(build_dir, target_dir)
 
+    def try_place(self, build_dir: Path, target_dir: Path) -> bool:
+        """place() when the staging lock is free now; False, having changed nothing, while something holds it."""
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            _move_into_place(build_dir, target_dir)
+        finally:
+            self.lock.release()
+        return True
+
     def induce(
         self,
         *,
@@ -79,6 +89,37 @@ class SkillInducer:
         model_tiers: dict[str, str] | None = None,
         owner: str | None = None,
     ) -> SkillCandidate:
+        """Build a candidate and place it."""
+        candidate, build_dir, target_dir = self.build(
+            contract=contract,
+            trace=trace,
+            verification=verification,
+            attempts=attempts,
+            cost_usd=cost_usd,
+            model_tiers=model_tiers,
+            owner=owner,
+        )
+        try:
+            self.place(build_dir, target_dir)
+        except BaseException:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            raise
+        return candidate
+
+    def build(
+        self,
+        *,
+        contract: TaskContract,
+        trace: TraceEnvelope,
+        verification: VerificationResult,
+        attempts: int,
+        cost_usd: float = 0.0,
+        model_tiers: dict[str, str] | None = None,
+        owner: str | None = None,
+    ) -> tuple[SkillCandidate, Path, Path]:
+        """Build and sign a candidate in a new directory beside the staged ones: (the candidate, that directory, the
+        directory it is placed at). Nothing is staged until the caller places it (place, try_place) or removes it; a
+        failure leaves no directory."""
         # The candidate stores the trace, so it stores the scrubbed one; the hash must match what is on disk.
         trace = trace.scrubbed()
         # Likewise the verification: it holds the raw URL, and it is written to the provenance and the envelope.
@@ -98,11 +139,10 @@ class SkillInducer:
             candidate = self._build(
                 contract, trace, verification, build_dir, target_dir, skill_id, attempts, cost_usd, model_tiers, owner
             )
-            self.place(build_dir, target_dir)
         except BaseException:
             shutil.rmtree(build_dir, ignore_errors=True)
             raise
-        return candidate
+        return candidate, build_dir, target_dir
 
     def _build(
         self,

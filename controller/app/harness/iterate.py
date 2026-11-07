@@ -34,6 +34,9 @@ _RUN_ID_RE = re.compile(RUN_ID_PATTERN)
 # The event loop may fire a wait_for timer a clock tick early (15 ms on Windows); within this much of the deadline the
 # wall-clock budget is what ran out.
 _DEADLINE_SLACK_SECONDS = 0.05
+# How often a converged run tries the staging lock again while retention's prune holds it (one candidate's removal):
+# it waits on the event loop without holding the loop.
+_STAGING_LOCK_RETRY_SECONDS = 0.01
 
 
 class HarnessAttempt(BaseModel):
@@ -636,13 +639,16 @@ class HarnessService:
     ) -> None:
         """Stage a converged run's skill candidate and record it.
 
-        In a worker thread (R5C-12): placing the candidate takes the staging lock, which retention's prune holds in a
-        thread from a candidate's age check through its removal, and waiting for it on the event loop stalled every
-        task; the candidate's files are written and signed there too.
+        Built and signed in a worker thread, then placed on the event loop once the staging lock is free, which the loop
+        does not wait for (R5C-12): retention's prune holds that lock in a thread from a candidate's age check through
+        its removal, and waiting for it stalled every task. Placed on the loop, not in the thread: a re-stage's two
+        renames ran between candidate reads on the loop, which take no lock, and a read found no candidate or the new
+        files under the old one's signature. The record is saved right after, with no await between, so a shutdown
+        that cancels this places nothing its record does not name.
         """
         try:
-            record.candidate = await asyncio.to_thread(
-                self.inducer.induce,
+            candidate, build_dir, target_dir = await asyncio.to_thread(
+                self.inducer.build,
                 contract=contract,
                 trace=trace,
                 verification=verification,
@@ -650,6 +656,15 @@ class HarnessService:
                 model_tiers=self.model_tiers,
                 owner=record.owner,
             )
+            placed = False
+            try:
+                while not self.inducer.try_place(build_dir, target_dir):
+                    await asyncio.sleep(_STAGING_LOCK_RETRY_SECONDS)
+                placed = True
+            finally:
+                if not placed:
+                    shutil.rmtree(build_dir, ignore_errors=True)
+            record.candidate = candidate
         except Exception as exc:
             # The inducer cleans up after itself; the run must not stay "converged" with no candidate.
             logger.exception("harness run %s: staging the skill candidate failed", record.id)

@@ -118,8 +118,10 @@ All notable changes to auto-browser are documented here.
 - **A converging harness run no longer holds up the controller while retention removes an old skill candidate.** A
   converged run built and placed its candidate on the event loop, and placing it waits for the staging lock, which
   the `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal
-  (milliseconds for one candidate's files). The candidate is now built, signed and placed in a worker thread; a run
-  cancelled meanwhile waits for that work, and its record names the candidate it staged.
+  (milliseconds for one candidate's files). The candidate is now built and signed in a worker thread, and placed once
+  the lock is free, which the event loop no longer waits for; a run cancelled meanwhile waits for that work, and its
+  record names the candidate it staged. A shutdown that cancels the staging itself places nothing, and the next start
+  marks that run failed.
 - **A browser action that ran is no longer reported as failed when its session's record cannot be saved.** Once an
   action had taken effect and been recorded (its `actions.jsonl` line, audit entry and witness receipt), saving the
   session's record could still fail (a full disk, or Redis failing the write), and that error reached the caller as

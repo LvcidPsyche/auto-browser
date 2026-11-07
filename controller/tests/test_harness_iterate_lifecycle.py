@@ -320,15 +320,15 @@ class StagingLockTests(_Base):
 
     @staticmethod
     def _watch_place(service: HarnessService) -> threading.Event:
-        """Set once the inducer starts placing a candidate (it then waits for the staging lock)."""
+        """Set once the run first tries to place its candidate (it then waits for the staging lock)."""
         entered = threading.Event()
-        place = service.inducer.place
+        try_place = service.inducer.try_place
 
-        def watched(build_dir: Path, target_dir: Path) -> None:
+        def watched(build_dir: Path, target_dir: Path) -> bool:
             entered.set()
-            place(build_dir, target_dir)
+            return try_place(build_dir, target_dir)
 
-        service.inducer.place = watched  # type: ignore[method-assign]
+        service.inducer.try_place = watched  # type: ignore[method-assign]
         return entered
 
     async def test_r5c_12_the_event_loop_runs_while_a_prune_holds_the_staging_lock(self) -> None:
@@ -363,6 +363,99 @@ class StagingLockTests(_Base):
         (stored,) = service.store.list()
         self.assertEqual(stored.status, "converged")
         self.assertTrue(Path(stored.candidate.files["candidate.json"]).is_file())
+
+    async def test_a_candidate_read_on_the_event_loop_during_a_restage_finds_a_whole_candidate(self) -> None:
+        # Review of c2 (Codex 2): placed in a worker thread, a re-stage's two renames (the staged candidate aside, the
+        # new build into its place) ran between candidate reads on the event loop, which take no lock: a read between
+        # them found no candidate, or the new files under the old candidate's signature.
+        from app.harness import induce
+
+        service = HarnessService(self.root)
+        first = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        skill_id = first.candidate.skill_id
+        staged = Path(first.candidate.files["candidate.json"]).parent
+        loop_thread = threading.get_ident()
+        set_aside, resume = threading.Event(), threading.Event()
+        self.addCleanup(resume.set)
+        real_replace = induce.os.replace
+
+        def replace(src, dst) -> None:
+            real_replace(src, dst)
+            if Path(src) == staged:  # the staged candidate is set aside; the new one is not in its place yet
+                set_aside.set()
+                if threading.get_ident() != loop_thread:
+                    resume.wait(PRUNE_HOLD_SECONDS)  # a read on the event loop runs here
+
+        with patch.object(induce.os, "replace", replace):
+            run = asyncio.create_task(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+            self.assertTrue(await asyncio.to_thread(set_aside.wait, 5))
+            try:
+                read: object = service.get_candidate(skill_id)
+            except (KeyError, PermissionError) as exc:
+                read = exc
+            finally:
+                resume.set()
+            record = await asyncio.wait_for(run, 10)
+
+        self.assertIsInstance(read, dict, f"a read during the re-stage failed: {read!r}")
+        self.assertEqual(read["skill_id"], skill_id)
+        self.assertEqual(record.candidate.skill_id, skill_id)
+
+
+class StagingShutdownTests(unittest.TestCase):
+    """Review of c2 (Codex 1, GLM 2): asyncio.run cancels every task left when its main returns, a run's staging task
+    too. Placed by a worker thread that went on after that cancel, the candidate was staged while the run's record
+    never named it."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def test_a_shutdown_during_staging_leaves_no_candidate_the_runs_record_does_not_name(self) -> None:
+        service = HarnessService(self.root)
+        held, release = threading.Event(), threading.Event()
+
+        def prune() -> None:
+            with service.store.staging_lock:
+                held.set()
+                release.wait(PRUNE_HOLD_SECONDS)
+
+        thread = threading.Thread(target=prune, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        built = threading.Event()
+        build = service.inducer._build
+
+        def watched_build(*args, **kwargs):
+            try:
+                return build(*args, **kwargs)
+            finally:
+                built.set()
+
+        service.inducer._build = watched_build  # type: ignore[method-assign]
+
+        async def main() -> None:
+            # Left running when main returns: asyncio.run cancels it, and its staging task, as a shutdown does.
+            asyncio.ensure_future(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+            self.assertTrue(await asyncio.to_thread(built.wait, 5))
+            await asyncio.sleep(0.05)  # the stage now waits for the prune's staging lock
+            threading.Timer(0.2, release.set).start()
+
+        asyncio.run(main())
+
+        (stored,) = service.store.list()
+        placed = sorted(entry.name for entry in service.store.staging_root.iterdir())
+        if stored.candidate is None:
+            self.assertEqual(placed, [], "a candidate was staged that the run's record does not name")
+        else:
+            self.assertTrue(Path(stored.candidate.files["candidate.json"]).is_file())
+        # The next start finds the run converged with no candidate staged for it, and marks it failed.
+        HarnessService(self.root).store.recover_interrupted_staging()
+        (after,) = HarnessService(self.root).store.list()
+        self.assertEqual(after.status, "failed" if stored.candidate is None else "converged")
 
 
 class TraceBindingTests(_Base):
