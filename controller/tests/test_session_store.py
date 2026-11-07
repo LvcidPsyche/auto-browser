@@ -186,9 +186,11 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("redis down" in line for line in logs.output))
 
     async def test_durable_get_prefers_the_redis_record(self) -> None:
-        # Both copies closed, as the stub's file copy is: an open Redis copy no longer wins over it (R5C-5).
+        # Over an open file copy only: written first, a closed file copy is the newest record, and wins over any Redis
+        # copy, open or closed (R5C-5, test_persist_after_close).
         redis_record = _record("session-6", status="closed", live=False).model_copy(update={"title": "from redis"})
         store = await self._durable_with_stub_primary(return_value=redis_record)
+        await store.file_store.upsert(_record("session-6"))
 
         self.assertEqual((await store.get("session-6")).title, "from redis")
 

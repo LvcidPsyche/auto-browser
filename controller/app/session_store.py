@@ -238,7 +238,7 @@ class DurableSessionStore:
             redis_records = []
         for record in redis_records:
             kept = file_records.get(record.id)
-            if kept is not None and kept.status == "closed" and record.status != "closed":
+            if kept is not None and kept.status == "closed":
                 continue
             records[record.id] = record
         return sorted(records.values(), key=lambda item: (item.created_at, item.id), reverse=True)
@@ -257,11 +257,11 @@ class DurableSessionStore:
         except Exception as exc:
             logger.warning("redis session read failed for %s, using file record: %s", session_id, exc)
             return await self.file_store.get(session_id)
-        if record.status != "closed":
-            # A session never reopens: a close whose Redis write failed, with Redis down for the drop of its copy too,
-            # left the record from before the close in Redis (R5C-5).
-            return await self._closed_file_copy(session_id) or record
-        return record
+        # The file copy is written first, so a closed one is the session's newest record. A write whose Redis half failed,
+        # with Redis down for the drop of its copy too, left an older copy in Redis (R5C-5): the record from before the
+        # close (a session never reopens), or a closed record from before a later save of it (the hosted Witness
+        # delivery state that landed after the close).
+        return await self._closed_file_copy(session_id) or record
 
     async def _closed_file_copy(self, session_id: str) -> SessionRecord | None:
         """The file copy when it says closed; None when it does not, or there is no readable one."""

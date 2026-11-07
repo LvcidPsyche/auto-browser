@@ -67,10 +67,11 @@ All notable changes to auto-browser are documented here.
 - **With Redis as the session store (`REDIS_URL`), a close whose Redis write failed no longer leaves the session
   reading as active.** The closed record reached the durable file copy while Redis kept the record from before the
   close, which reads and listings prefer; a later write was refused by the closed guard, nothing repaired Redis, and
-  the controller's next start marked the session `interrupted` there. A closed file copy now wins over a Redis copy
-  that is not closed, in reads and listings, and the next start gives Redis the closed record. The close itself still
-  fails, and drops the stale Redis copy when Redis answers; a write the closed guard refuses gives Redis the closed
-  record too.
+  the controller's next start marked the session `interrupted` there. A closed file copy (written first, so the
+  newest) now wins over the Redis copy in reads and listings, a closed one too when it missed a later save of the
+  record (its hosted Witness delivery state), and the next start gives Redis the closed record in place of an active
+  one. The close itself still fails, and drops the stale Redis copy when Redis answers; a write the closed guard
+  refuses gives Redis the closed record too.
 - **With Redis as the session store, a session record's file copy deleted out of band no longer lets a late write
   reopen the session.** The closed guard read only the file copy, and a missing one meant "not closed", so a late
   write after the close replaced the closed record Redis still held. For a record this controller process wrote (it

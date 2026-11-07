@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app import session_store
-from app.models import SessionRecord
+from app.models import SessionRecord, WitnessRemoteState
 from app.session_ownership import acting_as
 from app.session_store import DurableSessionStore, RedisSessionStore
 from app.utils import record_path
@@ -438,6 +438,23 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
         self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s2"]).status, "interrupted")
         self.assertEqual((await store.file_store.get("s2")).status, "interrupted")
+
+    async def test_r5c_5_a_closed_records_later_save_redis_never_got_reads_from_the_file_copy(self) -> None:
+        # Codex review of c1: a closed record saved again (a hosted Witness outcome that landed after the close) reached
+        # the file copy while Redis, down for the write and for the drop of its copy, kept the closed record from
+        # before; reads and listings took any closed Redis copy, so the later save never showed once Redis was back.
+        store, client = await self._store_with_redis()
+        closed = _record("closed", live=False)
+        await store.upsert(closed.model_copy(update={"witness_remote": WitnessRemoteState(status="delivered")}))
+        client.fail = ConnectionError("redis down")
+        with self.assertRaises(ConnectionError):
+            await store.upsert(closed.model_copy(update={"witness_remote": WitnessRemoteState(status="failed")}))
+        client.fail = None
+        stale = SessionRecord.model_validate_json(client.values["t:record:s1"])
+        self.assertEqual((stale.status, stale.witness_remote.status), ("closed", "delivered"))
+
+        self.assertEqual((await store.get("s1")).witness_remote.status, "failed")
+        self.assertEqual([record.witness_remote.status for record in await store.list()], ["failed"])
 
     async def test_r5c_5_a_failed_active_write_keeps_the_redis_copy(self) -> None:
         store, client = await self._store_with_redis()
