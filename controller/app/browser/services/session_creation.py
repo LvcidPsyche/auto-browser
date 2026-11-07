@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import sys
@@ -431,6 +432,8 @@ class SessionCreation:
         A removal error inside rmtree is logged with the directory and the error, and rmtree goes on through the rest
         of that tree (W11-5); a path already gone is not an error. One warning per directory, naming its first error,
         the root cause (W12-4): the parent's "Directory not empty" that follows a file's unlink error is not logged.
+        A link left at a directory's place is named too (R5C-22): POSIX rmtree reports a dangling symlink as
+        FileNotFoundError and leaves it, and the check after it, which follows links, found nothing.
         """
         for directory in (
             self.manager.artifacts.artifact_root / session_id,
@@ -455,7 +458,8 @@ class SessionCreation:
                     shutil.rmtree(directory, onexc=logged)
                 else:
                     shutil.rmtree(directory, onerror=logged)
-                if not reported and directory.exists():
+                # exists() raises what it cannot answer (W10-6); lexists() then sees a dangling link it took for gone.
+                if not reported and (directory.exists() or os.path.lexists(directory)):
                     logger.warning("rollback could not remove %s", directory)
             except OSError as exc:
                 if not reported:

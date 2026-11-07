@@ -85,6 +85,10 @@ All notable changes to auto-browser are documented here.
   released, the record not closed, and a caller that was never cancelled got a `CancelledError`. Such a step is now a
   failed step, logged, and the rest runs; a cancel of the task itself is still raised. No release is known to trigger
   it.
+- **A failed create's rollback now names a dangling symlink it leaves at a session path.** On Linux, `shutil.rmtree`
+  reports a dangling symlink at a session's artifact, auth or upload path as not found and leaves it, and the check
+  after it follows links, so the rollback said nothing about the link it left. It is now logged as not removed, as a
+  link to an existing directory already was; the rollback removes neither, and never goes through one.
 
 ## [1.16.0] — 2026-11-06
 

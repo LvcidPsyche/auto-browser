@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -507,6 +508,50 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(done)
         self.assertEqual(failed, ["close a thing"])
+
+    def _dangling_link_at_the_artifacts_path(self) -> Path:
+        from tests.test_session_isolation import _link_dir
+
+        artifacts = self.root / "artifacts" / SESSION_ID
+        target = self.root / "gone"
+        target.mkdir()
+        artifacts.parent.mkdir(parents=True, exist_ok=True)
+        _link_dir(artifacts, target)
+        target.rmdir()
+        return artifacts
+
+    @unittest.skipIf(os.name == "nt", "Windows' rmtree refuses a link outright, which the callback reports")
+    async def test_r5c_22_a_dangling_symlink_at_a_session_path_is_reported(self) -> None:
+        # POSIX rmtree's lstat passes for a dangling symlink and its open fails with FileNotFoundError, which the
+        # callback took for a path already gone; the check after it follows links, so the link left was never named.
+        artifacts = self._dangling_link_at_the_artifacts_path()
+
+        with self.assertLogs("app.browser.services.session_creation", "WARNING") as logs:
+            self.manager.session_lifecycle.remove_session_dirs(SESSION_ID)
+
+        self.assertEqual([line for line in logs.output if str(artifacts) in line], [logs.output[0]], logs.output)
+        self.assertTrue(os.path.lexists(artifacts))  # a link is never removed through, as a link to a live dir is not
+
+    async def test_r5c_22_an_entry_left_after_a_not_found_error_is_reported(self) -> None:
+        # The same on every platform: rmtree as POSIX runs it on a dangling link (lstat passes, open fails with
+        # FileNotFoundError, the entry stays), over a real dangling link (a junction where Windows refuses symlinks).
+        from app.browser.services import session_creation
+
+        artifacts = self._dangling_link_at_the_artifacts_path()
+
+        def rmtree_as_posix_on_a_dangling_link(path, *, onexc=None, onerror=None) -> None:
+            error = FileNotFoundError(2, "No such file or directory", str(path))
+            if onexc is not None:
+                onexc(os.open, path, error)
+            else:
+                onerror(os.open, path, (FileNotFoundError, error, None))
+
+        with patch.object(session_creation.shutil, "rmtree", rmtree_as_posix_on_a_dangling_link):
+            with self.assertLogs("app.browser.services.session_creation", "WARNING") as logs:
+                self.manager.session_lifecycle.remove_session_dirs(SESSION_ID)
+
+        self.assertEqual([line for line in logs.output if str(artifacts) in line], [logs.output[0]], logs.output)
+        self.assertEqual(len(logs.output), 1, logs.output)  # the auth and upload paths are not there: not named
 
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()
