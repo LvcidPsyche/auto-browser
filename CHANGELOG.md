@@ -72,19 +72,19 @@ All notable changes to auto-browser are documented here.
   and a Redis that cannot be read skips it until the next write. A new session's first write still asks nothing of
   Redis.
 - **A failed shadow browse now always rolls back fully and reports its own error, and a close always records
-  itself.** Releasing a session-owned browser's pre-request gate or window-birth watcher, after the browser closed,
-  could raise, and nothing caught it: the rollback of a failed `enable_shadow_browse` stopped there, leaving the shadow
-  session's directories and the active record its persist had written, and its caller got that error instead of the
-  one that failed the shadow; the rollback of a failed isolated create stopped before releasing the isolated runtime;
-  and a close of such a session skipped its audit event, witness receipt and closed record. Those steps are now bounded
-  and logged as the other teardown steps are, the rest runs, and a shadow browse's rollback that still fails is logged
-  while the original error is raised.
+  itself.** Marking a session-owned browser's pre-request gate before its close, and releasing the gate and the
+  window-birth watcher after it, could raise, and nothing caught it: the rollback of a failed `enable_shadow_browse`
+  stopped there, leaving the shadow session's directories and the active record its persist had written, and its
+  caller got that error instead of the one that failed the shadow; the rollback of a failed isolated create stopped
+  before releasing the isolated runtime; and a close of such a session skipped its audit event, witness receipt and
+  closed record. Those steps are now bounded and logged as the other teardown steps are, the rest runs, and a shadow
+  browse's rollback that still fails is logged while the original error is raised.
 - **A teardown step cancelled on its own no longer ends a rollback or a close.** A step whose own future was
   cancelled (a context close or a hook cancelled independently) while the task running it was not raised a
   `CancelledError` through a failed create's or shadow browse's rollback, or a close: the isolated runtime was not
   released, the record not closed, and a caller that was never cancelled got a `CancelledError`. Such a step is now a
-  failed step, logged, and the rest runs; a cancel of the task itself is still raised. No release is known to trigger
-  it.
+  failed step, logged, and the rest runs; a cancel of the task itself is still raised. No path in the controller is
+  known to cancel a step's future that way.
 - **A failed create's rollback now names a dangling symlink it leaves at a session path.** On Linux, `shutil.rmtree`
   reports a dangling symlink at a session's artifact, auth or upload path as not found and leaves it, and the check
   after it follows links, so the rollback said nothing about the link it left. It is now logged as not removed, as a
