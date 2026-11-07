@@ -16,17 +16,8 @@ from ..config import get_settings
 from ..network_inspector import scrub_url
 from ..pii_scrub import PiiScrubber
 from ..sqlite_utils import connect_sqlite
+from ..utils import SECRET_KEY_FRAGMENTS
 
-_SENSITIVE_KEY_FRAGMENTS = (
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "api-key",
-    "api_key",
-    "token",
-    "password",
-    "secret",
-)
 _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
 # They are redacted when the action is marked sensitive.
@@ -449,7 +440,7 @@ def _redact_sensitive(
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
-            if any(fragment in key_text for fragment in _SENSITIVE_KEY_FRAGMENTS):
+            if any(fragment in key_text for fragment in SECRET_KEY_FRAGMENTS):
                 redacted[key] = _REDACTED
             elif flagged and key_text in typed_keys:
                 redacted[key] = _REDACTED

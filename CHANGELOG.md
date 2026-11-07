@@ -4,6 +4,20 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **A restricted witness receipt now withholds secrets at any depth, and in its metadata and approval reason too.** A
+  receipt in restricted evidence mode (a confidential session, or a sensitive, high-risk or auth-material action)
+  blanked five top-level target keys (`text`, `text_preview`, `file_path`, `password`, `totp_secret`) and what a
+  select_option chose, and kept its metadata and its approval's reason as given. It now withholds, at any depth of
+  the target and the metadata, those keys, every key whose name holds a word the run trace redacts by
+  (`authorization`, `cookie`, `api-key`, `api_key`, `token`, `password`, `secret`), and the free text an agent or a
+  tool call wrote: a `reason` key, and the approval's reason, which for a governed tool call previews its arguments.
+  A receipt recorded without a policy outcome (an approval request or decision, a human takeover) now takes its
+  session's evidence mode, so a confidential session's approval receipts are restricted; they were standard and kept
+  the reason in full, in the approval and again in the metadata. The approval store and the audit log still keep the
+  reasons. A hosted Witness service and an exported bundle receive the receipt as recorded.
+
 ## [1.16.0] — 2026-11-06
 
 A security and correctness release over 1.15.0 (GHSA-gmvj-rj2h-7528), from the open findings of the review behind

@@ -14,7 +14,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
-from .utils import atomic_write_text, record_path, utc_now, without_lone_surrogates
+from .utils import SECRET_KEY_FRAGMENTS, atomic_write_text, record_path, utc_now, without_lone_surrogates
 from .witness_anchor import (
     anchor_fields,
     anchor_path,
@@ -108,6 +108,32 @@ ActionClass = Literal[
 ]
 
 _HIGH_RISK_CLASSES = {"upload", "post", "payment", "account_change", "destructive", "auth"}
+
+REDACTED = "[REDACTED]"
+# Withheld from a restricted receipt by name, at any depth, beside a secret-named key (SECRET_KEY_FRAGMENTS): what an
+# action typed or uploaded, and the free text an agent or a tool call wrote (an approval's reason previews the call's
+# arguments; a takeover's is the agent's own words). The approval store and the audit log keep the reasons.
+_RESTRICTED_KEYS = frozenset({"text", "text_preview", "file_path", "password", "totp_secret", "reason"})
+# What a select_option chose (by value, label or index); a None is another way of choosing, kept so the receipt shows
+# which was used.
+_CHOICE_KEYS = frozenset({"value", "label", "index"})
+
+
+def _redact_restricted(value: Any) -> Any:
+    """A copy of a restricted receipt's target or metadata with its secrets and typed text withheld, at any depth."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            withheld = name in _RESTRICTED_KEYS or any(fragment in name for fragment in SECRET_KEY_FRAGMENTS)
+            if withheld or (name in _CHOICE_KEYS and item is not None):
+                redacted[key] = REDACTED
+            else:
+                redacted[key] = _redact_restricted(item)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [_redact_restricted(item) for item in value]
+    return value
 
 
 class WitnessConcern(BaseModel):
@@ -334,18 +360,17 @@ class WitnessPolicyEngine:
 
     @staticmethod
     def redact_target(target: dict[str, Any], *, evidence_mode: EvidenceMode) -> dict[str, Any]:
+        """A receipt's target or metadata as the evidence mode keeps it (a copy either way)."""
         if evidence_mode != "restricted":
             return dict(target)
-        redacted = dict(target)
-        for key in ("text", "text_preview", "file_path", "password", "totp_secret"):
-            if key in redacted:
-                redacted[key] = "[REDACTED]"
-        # What a select_option chose (by value, label or index); a None is another way of choosing, kept so the receipt
-        # shows which was used.
-        for key in ("value", "label", "index"):
-            if redacted.get(key) is not None:
-                redacted[key] = "[REDACTED]"
-        return redacted
+        return _redact_restricted(target)
+
+    @staticmethod
+    def redact_approval(approval: WitnessApproval, *, evidence_mode: EvidenceMode) -> WitnessApproval:
+        """A receipt's approval as the evidence mode keeps it: restricted withholds the reason, and a None stays."""
+        if evidence_mode != "restricted" or approval.reason is None:
+            return approval.model_copy()
+        return approval.model_copy(update={"reason": REDACTED})
 
     @staticmethod
     def _is_anonymous(operator: OperatorIdentity) -> bool:

@@ -114,7 +114,8 @@ class BrowserWitnessService:
     ) -> None:
         if not self.manager.settings.witness_enabled:
             return
-        policy = outcome or WitnessPolicyOutcome(profile=session.protection_mode)  # type: ignore[arg-type]
+        policy = outcome or self._session_policy(session)
+        engine = self.manager.witness_policy
         payload = {
             "profile": session.protection_mode,  # type: ignore[arg-type]
             "event_type": event_type,
@@ -124,8 +125,8 @@ class BrowserWitnessService:
             "session_id": session.id,
             "risk_category": risk_category,
             "operator": get_current_operator(),
-            "approval": approval or WitnessApproval(),
-            "target": self.manager.witness_policy.redact_target(target or {}, evidence_mode=policy.evidence_mode),
+            "approval": engine.redact_approval(approval or WitnessApproval(), evidence_mode=policy.evidence_mode),
+            "target": engine.redact_target(target or {}, evidence_mode=policy.evidence_mode),
             "concerns": policy.concerns,
             "evidence_mode": policy.evidence_mode,
             "evidence": WitnessEvidence(
@@ -134,7 +135,7 @@ class BrowserWitnessService:
                 verification=verification,
                 artifacts={},
             ),
-            "metadata": metadata or {},
+            "metadata": engine.redact_target(metadata or {}, evidence_mode=policy.evidence_mode),
         }
         recorded = await self.manager.witness.record(session.id, **payload)
         if not self.manager.witness_remote.enabled:
@@ -163,6 +164,13 @@ class BrowserWitnessService:
         session.witness_remote_state.last_attempted_at = attempted_at
         session.witness_remote_state.last_delivered_at = attempted_at
         session.witness_remote_state.last_error = None
+
+    def _session_policy(self, session: "BrowserSession") -> WitnessPolicyOutcome:
+        """The policy of a receipt recorded with none (an approval, a takeover): the session's evidence mode, which a
+        confidential profile restricts, and no concerns (those are the session receipt's). It used to be standard
+        always, so a confidential session's approval receipts kept the reason its actions' receipts withhold."""
+        mode = self.manager.witness_policy.evaluate_session(self.session_context(session)).evidence_mode
+        return WitnessPolicyOutcome(profile=session.protection_mode, evidence_mode=mode)  # type: ignore[arg-type]
 
     async def record_session_receipt(
         self,

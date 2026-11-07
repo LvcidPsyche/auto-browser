@@ -31,6 +31,19 @@ os.umask(_UMASK)
 # What stores that hold credentials, tokens or typed text ask atomic_write_text for.
 PRIVATE_FILE_MODE = 0o600
 
+# A key whose lower-case name holds one of these names a secret, at any depth: the run trace redacts by them, and so
+# does a restricted witness receipt.
+SECRET_KEY_FRAGMENTS = (
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "api-key",
+    "api_key",
+    "token",
+    "password",
+    "secret",
+)
+
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 # A UTF-16 surrogate code point, which a Python string holds only on its own (a JSON "\ud800" escape
