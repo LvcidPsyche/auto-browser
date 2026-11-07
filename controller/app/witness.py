@@ -28,6 +28,7 @@ from .witness_anchor import (
     read_anchor,
     read_records,
     read_tail_line,
+    shared_lock,
     write_anchor,
 )
 from .witness_signing import SIGNATURE_ALGORITHM
@@ -815,11 +816,13 @@ class WitnessRecorder:
         append writes under the same locks. Read through the locked handle, never
         a second one: a Windows byte-range lock excludes every other handle, this
         process's own included. A chain that does not exist is read as empty, and
-        is not created.
+        is not created. The file lock is a shared one (shared_lock): an exclusive
+        lock on this read-only handle fails on Linux over NFS, and the shared one
+        excludes an append's all the same.
         """
         if not path.exists():
             return use(b"")
-        with self._thread_locks.hold(path), open(path, "rb") as handle, exclusive_lock(handle):
+        with self._thread_locks.hold(path), open(path, "rb") as handle, shared_lock(handle):
             handle.seek(0)
             return use(handle.read())
 
