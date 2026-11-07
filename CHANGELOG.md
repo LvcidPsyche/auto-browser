@@ -48,6 +48,11 @@ All notable changes to auto-browser are documented here.
   ran, holding the session's profile, until the next controller start swept it. The cancelled create now waits up to
   ten seconds for that work and releases what it made (the container, the session network, the profile and
   downloads); work that takes longer is released when it ends.
+- **With `ISOLATED_BROWSER_KEEP_CONTAINERS=true`, a session whose browser container did not stop now closes as a
+  partial teardown.** Nothing removes a kept container, and a failed stop was logged at debug level only, so the close
+  reported `teardown: complete` while the container could still be running. The failed stop is now a warning with
+  the daemon's reason, and the close reports `teardown: partial` with `release isolated runtime` in its
+  `failed_steps`.
 
 ## [1.16.0] — 2026-11-06
 

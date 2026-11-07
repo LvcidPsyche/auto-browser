@@ -10,29 +10,36 @@ import docker.errors
 import requests
 
 from app.config import Settings
-from app.session_isolation import DockerBrowserNodeProvisioner
+from app.session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from tests.test_session_isolation import FakeDockerClient, FakeDockerContainer
+
+
+async def _provisioned(
+    tmp: str, session_id: str, **settings: str
+) -> tuple[DockerBrowserNodeProvisioner, FakeDockerClient, IsolatedBrowserRuntime]:
+    data_root = Path(tmp) / "data"
+    data_root.mkdir()
+    controller = FakeDockerContainer(
+        container_id="controller-id",
+        name="controller",
+        attrs={
+            "Mounts": [{"Destination": "/data", "Source": str(data_root)}],
+            "NetworkSettings": {"Networks": {"auto-browser_default": {}}},
+        },
+    )
+    client = FakeDockerClient(controller)
+    provisioner = DockerBrowserNodeProvisioner(
+        Settings(_env_file=None, ARTIFACT_ROOT=str(data_root / "artifacts"), **settings), client=client
+    )
+    provisioner._controller_container_id = controller.id
+    return provisioner, client, await provisioner.provision(session_id)
 
 
 class DaemonErrorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        data_root = Path(self.tmp.name) / "data"
-        data_root.mkdir()
-        settings = Settings(_env_file=None, ARTIFACT_ROOT=str(data_root / "artifacts"))
-        controller = FakeDockerContainer(
-            container_id="controller-id",
-            name="controller",
-            attrs={
-                "Mounts": [{"Destination": "/data", "Source": str(data_root)}],
-                "NetworkSettings": {"Networks": {"auto-browser_default": {}}},
-            },
-        )
-        self.client = FakeDockerClient(controller)
-        self.provisioner = DockerBrowserNodeProvisioner(settings, client=self.client)
-        self.provisioner._controller_container_id = controller.id
-        self.runtime = await self.provisioner.provision("session-down")
+        self.provisioner, self.client, self.runtime = await _provisioned(self.tmp.name, "session-down")
         self.profile = self.provisioner._local_runtime_root("session-down")
         self.assertTrue(self.profile.is_dir())
 
@@ -67,6 +74,63 @@ class DaemonErrorTests(unittest.IsolatedAsyncioTestCase):
         await self.provisioner.release(self.runtime)
 
         self.assertFalse(self.profile.exists())
+
+    async def test_a_container_that_did_not_stop_is_removed_all_the_same(self) -> None:
+        container = self.client.containers.browser_containers[self.runtime.container_name]
+
+        def refuse(timeout: int = 5) -> None:
+            raise docker.errors.APIError("cannot stop container: permission denied")
+
+        container.stop = refuse
+
+        await self.provisioner.release(self.runtime)
+
+        self.assertTrue(container.removed)
+        self.assertFalse(self.profile.exists())
+
+
+class KeptContainerTests(unittest.IsolatedAsyncioTestCase):
+    """R5C-4: with ISOLATED_BROWSER_KEEP_CONTAINERS nothing removes the container, so one that did not stop may still
+    run: its release failed (close then reports a partial teardown), where it returned as if it had worked."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.provisioner, self.client, self.runtime = await _provisioned(
+            self.tmp.name, "session-kept", ISOLATED_BROWSER_KEEP_CONTAINERS="true"
+        )
+        self.container = self.client.containers.browser_containers[self.runtime.container_name]
+        self.network = self.client.networks.by_name[self.runtime.network_name]
+        self.assertIn("controller-id", self.network.attrs["Containers"])
+
+    async def test_a_kept_container_that_did_not_stop_fails_the_release(self) -> None:
+        def refuse(timeout: int = 5) -> None:
+            raise docker.errors.APIError("cannot stop container: permission denied")
+
+        self.container.stop = refuse
+
+        with self.assertLogs("app.session_isolation", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, f"browser container {self.runtime.container_name} could not be"):
+                await self.provisioner.release(self.runtime)
+
+        self.assertIn("cannot stop container: permission denied", "\n".join(logs.output))
+        self.assertFalse(self.container.removed)  # kept, as configured
+        self.assertNotIn("controller-id", self.network.attrs["Containers"])  # the controller still left its network
+
+    async def test_a_kept_container_that_stopped_is_released(self) -> None:
+        await self.provisioner.release(self.runtime)
+
+        self.assertTrue(self.container.stopped)
+        self.assertFalse(self.container.removed)
+        self.assertNotIn("controller-id", self.network.attrs["Containers"])
+
+    async def test_a_kept_container_already_gone_is_released(self) -> None:
+        def gone(timeout: int = 5) -> None:
+            raise docker.errors.NotFound(self.runtime.container_name)
+
+        self.container.stop = gone
+
+        await self.provisioner.release(self.runtime)
 
 
 if __name__ == "__main__":

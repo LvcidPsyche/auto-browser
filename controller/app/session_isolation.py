@@ -864,14 +864,22 @@ class DockerBrowserNodeProvisioner:
         container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(
             client, runtime.container_name
         )
+        not_found = (docker.errors.NotFound,) if docker is not None else ()
+        stop_error: Exception | None = None
         if container is not None:
             try:
                 container.stop(timeout=5)
+            except not_found:
+                container = None  # gone already
             except Exception as exc:
-                logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
+                if self.settings.isolated_browser_keep_containers:
+                    # Nothing removes a kept container, so it may still run: a partial teardown, not a release.
+                    logger.warning("Could not stop browser container %s: %s", runtime.container_name, exc)
+                    stop_error = exc
+                else:
+                    logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
         stranded = None
         removal_error: Exception | None = None
-        not_found = (docker.errors.NotFound,) if docker is not None else ()
         if not self.settings.isolated_browser_keep_containers:
             if container is not None:
                 try:
@@ -894,6 +902,8 @@ class DockerBrowserNodeProvisioner:
                 runtime.container_name,
             )
             raise RuntimeError(f"browser container {runtime.container_name} could not be removed") from removal_error
+        if stop_error is not None:
+            raise RuntimeError(f"browser container {runtime.container_name} could not be stopped") from stop_error
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
