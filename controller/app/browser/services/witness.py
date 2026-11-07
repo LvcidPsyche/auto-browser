@@ -274,9 +274,11 @@ class BrowserWitnessService:
         return True
 
     async def stop_delivery(self, *, timeout: float = SHUTDOWN_DELIVERY_WAIT_SECONDS) -> None:
-        """Let queued receipts reach the service for up to ``timeout`` seconds, then stop the worker."""
+        """Let queued receipts reach the service for up to ``timeout`` seconds, then stop the worker.
+
+        The worker stays the queue's while it drains: a receipt recorded meanwhile joins its queue, where clearing it
+        first let that receipt start a second worker, which sent it beside the first's."""
         worker, queue = self._worker, self._queue
-        self._worker = None
         if worker is None or queue is None or worker.done() or self._loop is not asyncio.get_running_loop():
             return
         try:

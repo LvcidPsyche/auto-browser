@@ -300,6 +300,38 @@ async def test_stopping_delivery_is_bounded_when_the_service_never_answers(make_
     assert not await service.wait_for_delivery("s1", timeout=0.05)  # nothing delivers them now
 
 
+async def test_a_receipt_recorded_while_delivery_stops_does_not_start_a_second_worker(make_service) -> None:
+    # GLM review: stop_delivery dropped its worker before it drained the queue, so a receipt recorded meanwhile (a
+    # session closing during shutdown) started a second worker on the same queue, which sent it beside the first.
+    answer = asyncio.Event()
+    sending = most_at_once = 0
+    sent: list[str] = []
+
+    async def record(scope: str, payload: dict) -> dict:
+        nonlocal sending, most_at_once
+        sending += 1
+        most_at_once = max(most_at_once, sending)
+        try:
+            await answer.wait()
+        finally:
+            sending -= 1
+        sent.append(payload["action"])
+        return {}
+
+    service, _ = make_service(record)
+    session = _session()
+    await _record(service, session, "first")  # taken by the worker, which waits for the answer
+    stopping = asyncio.create_task(service.stop_delivery(timeout=2))
+    await asyncio.sleep(0.05)  # draining the queue
+    await _record(service, session, "second")
+    await asyncio.sleep(0.05)
+    answer.set()
+    await asyncio.wait_for(stopping, 5)
+
+    assert most_at_once == 1, "two workers sent receipts at once"
+    assert sent == ["first", "second"]
+
+
 def test_the_client_names_the_status_of_a_refused_answer() -> None:
     response = httpx.Response(503, json={"detail": "busy"}, request=httpx.Request("POST", "https://w.example/x"))
 
