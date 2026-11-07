@@ -682,6 +682,65 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(tunnel.info_path.exists())
             self.assertFalse(tunnel.log_path.exists())
 
+    async def test_r5c_18_a_provision_given_up_on_ends_when_autossh_never_exits_after_the_kill(self) -> None:
+        """_abort_starting's wait after kill() was unbounded, as release()'s was before W10-7: a create cancelled while
+        autossh started never ended while an autossh stuck in uninterruptible I/O never exited."""
+
+        class StuckProcess(FakeProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self.exit = asyncio.Event()
+
+            async def wait(self) -> int:
+                await self.exit.wait()
+                return 0
+
+            def kill(self) -> None:
+                self.killed = True
+
+        real_sleep = asyncio.sleep
+        in_grace = asyncio.Event()
+
+        async def gated_sleep(delay, *args):
+            if delay != _GRACE:
+                return await real_sleep(delay, *args)
+            in_grace.set()
+            await asyncio.Event().wait()
+
+        processes: list[StuckProcess] = []
+
+        async def fake_exec(*args, **kwargs):
+            processes.append(StuckProcess())
+            return processes[-1]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with (
+                patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
+                patch("app.session_tunnel.asyncio.sleep", new=gated_sleep),
+                patch("app.session_tunnel._PROCESS_EXIT_WAIT_SECONDS", 0.05),
+            ):
+                provision = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                await asyncio.wait_for(in_grace.wait(), timeout=10)
+                tunnel = broker._tunnels["session-1"]
+                with self.assertLogs("app.session_tunnel", "WARNING") as logs:
+                    provision.cancel()
+                    done, _ = await asyncio.wait({provision}, timeout=5)
+                    finished = provision in done
+                    processes[0].exit.set()  # whatever happened, nothing is left waiting on the fake
+                    with self.assertRaises(asyncio.CancelledError):
+                        await provision
+                    self.assertTrue(finished, "the provision did not end while autossh never exited after the kill")
+
+            process = processes[0]
+            self.assertTrue(process.killed)
+            self.assertTrue(any("session-1" in line and str(process.pid) in line for line in logs.output), logs.output)
+            self.assertEqual(tunnel.error, "provision_cancelled")
+            self.assertEqual((broker._tunnels, broker._allocated_ports), ({}, set()))
+            self.assertIsNone(tunnel.stderr_handle)
+            self.assertFalse(tunnel.info_path.exists())
+            self.assertFalse(tunnel.log_path.exists())
+
     async def _a_registered_tunnel(self, broker, process):
         tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
         tunnel.process = process

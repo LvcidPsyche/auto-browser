@@ -122,6 +122,10 @@ All notable changes to auto-browser are documented here.
   with the same `503` while the others' envelopes still pass. An envelope whose request does not decode is refused
   before its nonce is recorded, since it can run nothing, and a replay of one that runs still meets its seen nonce.
   `docs/mesh.md` says so.
+- **An isolated-session create that gives up on its tunnel no longer waits for ever on an autossh that never exits.**
+  With `ISOLATED_TUNNEL_ENABLED`, a create cancelled (or failing) while its autossh started killed autossh and waited
+  for it with no bound, so one stuck in uninterruptible I/O held the create until it exited. That wait is now bounded
+  at five seconds, as a release's has been since 1.16.0, and then logged as a warning naming the session and the pid.
 
 ## [1.16.0] — 2026-11-06
 
