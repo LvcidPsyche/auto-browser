@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +47,7 @@ class _Delivery:
     action: str
     payload: dict[str, Any]
     done: asyncio.Future[None]
+    seq: int
 
 
 def _never_taken(exc: Exception) -> bool:
@@ -83,6 +85,10 @@ class BrowserWitnessService:
         self._in_flight: _Delivery | None = None
         # Each session's last queued delivery: when it is done, so are the session's earlier ones.
         self._pending: dict[str, asyncio.Future[None]] = {}
+        # Each receipt's place in the order they were recorded, and, for a session with deliveries on their way, the
+        # newest receipt whose outcome its state shows (_settle).
+        self._sequence = itertools.count()
+        self._newest: dict[str, int] = {}
 
     def initial_remote_state(self, protection_mode: str) -> WitnessRemoteState:
         configured = bool(self.manager.settings.witness_enabled and self.manager.witness_remote.enabled)
@@ -190,13 +196,11 @@ class BrowserWitnessService:
     def _submit(self, session: "BrowserSession", action: str, payload: dict[str, Any]) -> None:
         queue = self._delivery_queue()
         done = asyncio.get_running_loop().create_future()
+        seq = next(self._sequence)
         try:
-            queue.put_nowait(_Delivery(session, action, payload, done))
+            queue.put_nowait(_Delivery(session, action, payload, done, seq))
         except asyncio.QueueFull:
-            session.witness_remote_state.status = "failed"
-            session.witness_remote_state.last_error = (
-                f"Hosted Witness delivery queue is full; {action} was not delivered."
-            )
+            self._settle(session, seq, f"Hosted Witness delivery queue is full; {action} was not delivered.")
             logger.warning(
                 "witness remote delivery queue is full (%d receipts): session %s action %s not delivered",
                 queue.maxsize,
@@ -210,12 +214,14 @@ class BrowserWitnessService:
     def _forget_delivered(self, session_id: str, done: asyncio.Future[None]) -> None:
         if self._pending.get(session_id) is done:
             del self._pending[session_id]
+            self._newest.pop(session_id, None)
 
     def _delivery_queue(self) -> asyncio.Queue[_Delivery]:
         """The queue, with its worker running, on the current event loop: a loop that ended took its own with it."""
         loop = asyncio.get_running_loop()
         if self._loop is not loop or self._queue is None:
-            self._loop, self._queue, self._worker, self._pending = loop, asyncio.Queue(DELIVERY_QUEUE_SIZE), None, {}
+            self._loop, self._queue, self._worker = loop, asyncio.Queue(DELIVERY_QUEUE_SIZE), None
+            self._pending, self._newest = {}, {}
         if self._worker is None or self._worker.done():
             self._worker = spawn_background_task(self._deliver_queued(self._queue))
         return self._queue
@@ -226,6 +232,10 @@ class BrowserWitnessService:
             self._in_flight = item
             try:
                 await self._deliver(item)
+            except asyncio.CancelledError:  # stop_delivery: the service may or may not hold the receipt
+                stopped = f"Hosted Witness delivery of {item.action} was stopped before it finished."
+                self._settle(item.session, item.seq, stopped)
+                raise
             finally:
                 self._in_flight = None
                 if not item.done.done():
@@ -233,7 +243,6 @@ class BrowserWitnessService:
                 queue.task_done()
 
     async def _deliver(self, item: _Delivery) -> None:
-        state = item.session.witness_remote_state
         for attempt in range(1, DELIVERY_ATTEMPTS + 1):
             attempted_at = utc_now()
             try:
@@ -242,9 +251,8 @@ class BrowserWitnessService:
                 if attempt < DELIVERY_ATTEMPTS and _never_taken(exc):
                     await asyncio.sleep(DELIVERY_BACKOFF_SECONDS * 2 ** (attempt - 1))
                     continue
-                state.status = "failed"
-                state.last_attempted_at = attempted_at
-                state.last_error = f"Hosted Witness delivery failed for {item.action}."
+                failed = f"Hosted Witness delivery failed for {item.action}."
+                self._settle(item.session, item.seq, failed, attempted_at=attempted_at)
                 logger.warning(
                     "witness remote delivery failed for session %s action %s: %s",
                     item.session.id,
@@ -252,11 +260,26 @@ class BrowserWitnessService:
                     exc,
                 )
                 return
-            state.status = "delivered"
-            state.last_attempted_at = attempted_at
-            state.last_delivered_at = attempted_at
-            state.last_error = None
+            self._settle(item.session, item.seq, None, attempted_at=attempted_at)
             return
+
+    def _settle(self, session: Any, seq: int, error: str | None, *, attempted_at: str | None = None) -> None:
+        """Show one receipt's delivery outcome in its session's state: delivered when ``error`` is None.
+
+        The status and the error stay the newest receipt's. A full queue fails a receipt at once, before the receipts
+        queued ahead of it are sent, so their outcomes arrive later: they record their attempt times, not their status.
+        """
+        state = session.witness_remote_state
+        if attempted_at is not None:
+            state.last_attempted_at = attempted_at
+            if error is None:
+                state.last_delivered_at = attempted_at
+        if seq < self._newest.get(session.id, seq):
+            return
+        if session.id in self._pending:  # older receipts' outcomes may follow: kept until they have (_forget_delivered)
+            self._newest[session.id] = seq
+        state.status = "delivered" if error is None else "failed"
+        state.last_error = error
 
     async def wait_for_delivery(self, session_id: str, *, timeout: float = CLOSE_DELIVERY_WAIT_SECONDS) -> bool:
         """Wait up to ``timeout`` seconds for a session's queued receipts to reach the service or fail.
@@ -277,7 +300,8 @@ class BrowserWitnessService:
         """Let queued receipts reach the service for up to ``timeout`` seconds, then stop the worker.
 
         The worker stays the queue's while it drains: a receipt recorded meanwhile joins its queue, where clearing it
-        first let that receipt start a second worker, which sent it beside the first's."""
+        first let that receipt start a second worker, which sent it beside the first's. A receipt still on its way
+        when the worker stops fails its delivery, so its session's state no longer says idle or delivered for it."""
         worker, queue = self._worker, self._queue
         if worker is None or queue is None or worker.done() or self._loop is not asyncio.get_running_loop():
             return
@@ -292,6 +316,13 @@ class BrowserWitnessService:
             )
         worker.cancel()
         await asyncio.wait({worker})
+        while not queue.empty():
+            item = queue.get_nowait()
+            unsent = f"Hosted Witness delivery of {item.action} was stopped before it was sent."
+            self._settle(item.session, item.seq, unsent)
+            if not item.done.done():
+                item.done.set_result(None)
+            queue.task_done()
 
     def _session_policy(self, session: "BrowserSession") -> WitnessPolicyOutcome:
         """The policy of a receipt recorded with none (an approval, a takeover): the session's evidence mode, which a

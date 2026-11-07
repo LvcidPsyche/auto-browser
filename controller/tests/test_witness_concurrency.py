@@ -297,7 +297,57 @@ async def test_stopping_delivery_is_bounded_when_the_service_never_answers(make_
         await asyncio.wait_for(service.stop_delivery(timeout=0.2), 2)
 
     assert "2 receipt(s) were not delivered to the hosted Witness service before shutdown" in caplog.text
-    assert not await service.wait_for_delivery("s1", timeout=0.05)  # nothing delivers them now
+    assert await service.wait_for_delivery("s1", timeout=0.05)  # failed by the stop: none is left on its way
+
+
+async def test_a_delivery_stopped_mid_send_and_those_queued_behind_it_say_so(make_service) -> None:
+    # Codex and GLM reviews: the stop cancelled the receipt in flight and left the queued ones, and neither changed its
+    # session's state, which kept saying idle (or the last receipt's outcome) for receipts that never went.
+    async def record(scope: str, payload: dict) -> dict:
+        await asyncio.Event().wait()
+        return {}
+
+    service, _ = make_service(record)
+    first, second = _session("s1"), _session("s2")
+    await _record(service, first, "click")  # in flight when delivery stops
+    await _record(service, second, "type")  # still queued
+
+    await asyncio.wait_for(service.stop_delivery(timeout=0.2), 2)
+
+    assert first.witness_remote_state.status == "failed"
+    assert first.witness_remote_state.last_error == "Hosted Witness delivery of click was stopped before it finished."
+    assert second.witness_remote_state.status == "failed"
+    assert second.witness_remote_state.last_error == "Hosted Witness delivery of type was stopped before it was sent."
+
+
+async def test_a_full_queues_failure_is_not_hidden_by_the_receipts_queued_ahead_of_it(
+    make_service, monkeypatch
+) -> None:
+    # Codex review: a full queue fails a receipt at once, and the receipts queued ahead of it, delivered later, set
+    # the session's state back to delivered, so it no longer said the newest receipt never went.
+    monkeypatch.setattr(witness_service, "DELIVERY_QUEUE_SIZE", 1)
+    answer = asyncio.Event()
+
+    async def record(scope: str, payload: dict) -> dict:
+        await answer.wait()
+        return {}
+
+    service, _ = make_service(record)
+    session = _session()
+    state = session.witness_remote_state
+    await _record(service, session, "first")  # taken by the worker, which waits for the answer
+    await _record(service, session, "second")  # fills the queue
+    await _record(service, session, "third")  # failed at once
+    answer.set()
+    assert await service.wait_for_delivery("s1", timeout=2)
+
+    assert state.status == "failed"
+    assert state.last_error == "Hosted Witness delivery queue is full; third was not delivered."
+    assert state.last_delivered_at is not None  # the two ahead of it still count as delivered
+    await _record(service, session, "fourth")  # a newer receipt's outcome is the one shown again
+    assert await service.wait_for_delivery("s1", timeout=2)
+    assert (state.status, state.last_error) == ("delivered", None)
+    assert service._newest == {}  # forgotten once none of the session's receipts is on its way
 
 
 async def test_a_receipt_recorded_while_delivery_stops_does_not_start_a_second_worker(make_service) -> None:
