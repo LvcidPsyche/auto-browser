@@ -153,6 +153,25 @@ class ShadowBrowseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
         self.assertIn("was cancelled on its own", "\n".join(logs.output))
 
+    async def test_r5c_15_a_browser_close_cancelled_on_its_own_does_not_end_the_rollback(self) -> None:
+        # Codex review of R5C-15: _close_owned_browser caught Exception only around the browser's own close, so a close
+        # cancelled on its own still ended the rollback (directories and record left) with a CancelledError.
+        async def persist_then_fail(session, *, status):
+            await self.manager.session_lifecycle.persist(session, status=status)
+            raise RuntimeError("failed after the persist")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        self.shadow_browser.close = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "failed after the persist"):
+                await self.manager.enable_shadow_browse(self.source_id)
+
+        self.assertEqual(self.shadow_dirs(), [])
+        record = await self.manager.session_store.get(SHADOW_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        self.assertIn("did not close (CancelledError", "\n".join(logs.output))
+
     async def test_r5c_11_a_rollback_that_raises_still_raises_the_error_that_started_it(self) -> None:
         self.shadow_browser.new_context.side_effect = RuntimeError("context refused")
         forget = AsyncMock(side_effect=RuntimeError("the record close failed"))

@@ -80,11 +80,12 @@ All notable changes to auto-browser are documented here.
   closed record. Those steps are now bounded and logged as the other teardown steps are, the rest runs, and a shadow
   browse's rollback that still fails is logged while the original error is raised.
 - **A teardown step cancelled on its own no longer ends a rollback or a close.** A step whose own future was
-  cancelled (a context close or a hook cancelled independently) while the task running it was not raised a
-  `CancelledError` through a failed create's or shadow browse's rollback, or a close: the isolated runtime was not
+  cancelled (a context or browser close, or a hook, cancelled independently) while the task running it was not raised
+  a `CancelledError` through a failed create's or shadow browse's rollback, or a close: the isolated runtime was not
   released, the record not closed, and a caller that was never cancelled got a `CancelledError`. Such a step is now a
   failed step, logged, and the rest runs; a cancel of the task itself is still raised. No path in the controller is
-  known to cancel a step's future that way.
+  known to cancel a step's future that way. The session-closed hook of the controller's extensions now runs as a
+  teardown step too, bounded at 30 seconds: one that never returned held the close, and its record, for ever.
 - **A failed create's rollback now names a dangling symlink it leaves at a session path.** On Linux, `shutil.rmtree`
   reports a dangling symlink at a session's artifact, auth or upload path as not found and leaves it, and the check
   after it follows links, so the rollback said nothing about the link it left. It is now logged as not removed, as a

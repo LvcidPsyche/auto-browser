@@ -474,6 +474,22 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
             "\n".join(logs.output),
         )
 
+    async def test_r5c_15_an_owned_browser_close_cancelled_on_its_own_does_not_end_the_rollback(self) -> None:
+        # Codex review of R5C-15: the owned browser's close sat in `except Exception` only, so its own cancellation
+        # still ended the rollback before the runtime release and the record close.
+        import asyncio
+
+        release_runtime = self._isolated_create_that_fails()
+        self.manager.browser.close = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[attr-defined]
+
+        with self.assertRaisesRegex(RuntimeError, "witness down"):
+            await self.manager.create_session()
+
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+
     async def test_r5c_15_a_cancel_of_the_task_running_a_teardown_step_is_still_raised(self) -> None:
         import asyncio
 

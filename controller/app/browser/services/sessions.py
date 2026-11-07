@@ -59,6 +59,13 @@ _LOAD_FAILED = {
 _TIMED_OUT = re.compile(r"Timeout \d+ms exceeded")
 
 
+def _task_cancelled() -> bool:
+    """Whether the running task has been asked to cancel: a CancelledError raised without that came from an
+    awaitable cancelled on its own (a close or hook future), which a teardown treats as that step's failure (R5C-15)."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
     """A page the controller itself loaded (a start_url, shadow browse's page) that failed for a reason of its own."""
     text = getattr(exc, "message", None) or str(exc)
@@ -263,11 +270,11 @@ class BrowserSessionService(SessionCreation):
             # the same way, and it held a MAX_SESSIONS slot until restart.
             self.manager.sessions.pop(session_id, None)
             _events.emit_session(session_id, "closed")
-        if self.manager._session_closed_hook is not None:
-            try:
-                await self.manager._session_closed_hook(session_id)
-            except Exception as exc:
-                logger.warning("session closed hook failed for %s: %s", session_id, exc)
+        hook = self.manager._session_closed_hook
+        if hook is not None:
+            # A teardown step, but not one of the session's (its failure is logged, not a partial teardown): bounded,
+            # and its own cancellation does not end the close before its record (R5C-15).
+            await self._teardown_step(session_id, "run the session-closed hook", lambda: hook(session_id))
         status = "partial" if failed_steps else "ok"
         details: dict[str, Any] = {
             "trace_path": str(session.trace_path),
@@ -396,7 +403,9 @@ class BrowserSessionService(SessionCreation):
         self._mark_gate_ending(browser, session_id, True)
         try:
             await asyncio.wait_for(browser.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and _task_cancelled():
+                raise
             self._mark_gate_ending(browser, session_id, False)
             logger.error(
                 "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
@@ -439,8 +448,7 @@ class BrowserSessionService(SessionCreation):
         except TimeoutError:
             logger.warning("gave up waiting to %s for session %s", label, session_id)
         except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
+            if _task_cancelled():
                 raise
             logger.warning("the step to %s for session %s was cancelled on its own", label, session_id)
         except Exception as exc:
