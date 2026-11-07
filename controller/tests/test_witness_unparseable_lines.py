@@ -216,6 +216,46 @@ async def test_a_bundle_without_a_torn_tail_says_so(tmp_path: Path) -> None:
     assert bundle["torn_tail"] is False
 
 
+TORN_TAIL = b'{"receipt_id": "an append cut sh'  # no newline: never finished
+
+
+async def test_a_listing_that_skipped_a_torn_tail_says_so(tmp_path: Path) -> None:
+    """D1-11: the listing skipped a torn tail as the bundle does, but dropped the flag that says it did."""
+    recorder = await _unsigned_chain(tmp_path)
+    manager = object.__new__(BrowserManager)
+    manager.witness = recorder
+    assert (await recorder.list(SCOPE, limit=10)).torn_tail is False
+    path = recorder._path(SCOPE)
+    path.write_bytes(path.read_bytes() + TORN_TAIL)
+
+    listing = await recorder.list(SCOPE, limit=10)
+    managed = await manager.list_witness_receipts(SCOPE, limit=10)
+
+    assert (len(listing), listing.unparseable_lines, listing.torn_tail) == (3, 0, True)
+    assert (len(managed), managed.unparseable_lines, managed.torn_tail) == (3, 0, True)
+
+
+@requires_verifier
+async def test_the_verifier_notes_a_bundle_that_skipped_a_torn_tail(tmp_path: Path) -> None:
+    """D1-11: the bundle's torn_tail had no word from the verifier, whose failure then named only the chain check."""
+    recorder = await _unsigned_chain(tmp_path)
+    path = recorder._path(SCOPE)
+    path.write_bytes(path.read_bytes() + TORN_TAIL)
+
+    torn = _load_verify_bundle()(await recorder.export_bundle(SCOPE), allow_unsigned=True)
+
+    assert torn["ok"] is False  # the exporter's chain check fails until the next append sets the tail aside
+    assert any("torn tail" in note for note in torn["notes"]), torn["notes"]
+
+    await recorder.record(SCOPE, **_receipt_kwargs("after"))
+    again = await recorder.export_bundle(SCOPE)
+    whole = _load_verify_bundle()(again, allow_unsigned=True)
+
+    assert again["torn_tail"] is False
+    assert whole["ok"], whole["failures"]
+    assert not any("torn tail" in note for note in whole["notes"]), whole["notes"]
+
+
 @requires_verifier
 async def test_a_signed_chain_truncated_by_one_line_fails_on_chain_valid_at_export_alone(
     signed_chain: WitnessRecorder,

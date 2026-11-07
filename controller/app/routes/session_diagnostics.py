@@ -235,6 +235,9 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
             # Lines that did not parse in the listed window (the last `limit` lines of the chain, not the whole
             # file), so they are not in `receipts`. The bundle counts the whole chain.
             "unparseable_lines": receipts.unparseable_lines,
+            # True when the chain ends in a torn tail (an append cut short, never a receipt): skipped, as the bundle
+            # skips it, and not counted above.
+            "torn_tail": receipts.torn_tail,
             "receipts": receipts,
         }
 

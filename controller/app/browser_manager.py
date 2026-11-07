@@ -1124,6 +1124,7 @@ class BrowserManager:
         receipts = await self.witness.list(session_id, limit=limit)
         listing = ReceiptList(item.model_dump() for item in receipts)
         listing.unparseable_lines = receipts.unparseable_lines
+        listing.torn_tail = receipts.torn_tail
         return listing
 
     async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:

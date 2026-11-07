@@ -37,6 +37,11 @@ All notable changes to auto-browser are documented here.
   chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described
   a receipt its `receipts` did not hold, which `scripts/verify_witness_bundle.py` failed as "receipts missing". The
   export now reads the chain once, under the lock an append takes, and an append to that chain waits for it.
+- **A witness receipt listing now says when it skipped a torn tail, and the bundle verifier explains one.**
+  `GET /sessions/{session_id}/witness` skipped a torn tail (bytes after the chain's last newline: an append cut short,
+  never a receipt) without saying so, where a bundle says `torn_tail: true`; the listing now has a `torn_tail` field
+  too. `scripts/verify_witness_bundle.py` adds a note when a bundle left one out: the bundle's own chain check fails
+  on it until the controller's next append sets it aside, so export again after one.
 
 ## [1.16.0] — 2026-11-06
 

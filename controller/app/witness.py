@@ -911,9 +911,10 @@ class WitnessRecorder:
         # the entire receipt chain dumped into a response instead of an empty page.
         if limit <= 0:
             return ReceiptList()
-        lines, _ = _chain_lines(path.read_bytes())
+        lines, torn_tail = _chain_lines(path.read_bytes())
         items = _parse_receipts(lines[-limit:], path)
         items.reverse()
+        items.torn_tail = torn_tail
         return items
 
     @staticmethod
