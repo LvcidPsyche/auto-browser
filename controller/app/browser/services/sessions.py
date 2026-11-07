@@ -24,7 +24,7 @@ from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
-from ...utils import UTC, utc_now
+from ...utils import UTC, run_to_completion, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -210,7 +210,7 @@ class BrowserSessionService(SessionCreation):
         # One protected unit from here: the busy path of _lock_for_close already closes the context, so a cancel
         # between it and _close_locked left a registered session with no close record, audit event or receipt.
         # Every wait inside is bounded.
-        return await self._run_to_completion(self._close(session, reason))
+        return await run_to_completion(self._close(session, reason))
 
     async def _close(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         locked = await self._lock_for_close(session)
@@ -226,22 +226,6 @@ class BrowserSessionService(SessionCreation):
         finally:
             if locked:
                 session.lock.release()
-
-    @staticmethod
-    async def _run_to_completion(work: Any) -> Any:
-        """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised
-        once the work has finished (as the tunnel release does)."""
-        task = asyncio.create_task(work)
-        cancelled: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-        result = task.result()
-        if cancelled is not None:
-            raise cancelled
-        return result
 
     async def _close_locked(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         session_id = session.id
@@ -671,7 +655,7 @@ class BrowserSessionService(SessionCreation):
             # One protected unit, as cleanup_failed's (W9-11): a cancel at any step left the browser, the directories
             # or a record the persist already wrote reading active; the cancel is raised once the rollback is done.
             try:
-                await self._run_to_completion(
+                await run_to_completion(
                     self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
                 )
             except Exception as exc:  # the error to raise is the one that started the rollback (R5C-11)

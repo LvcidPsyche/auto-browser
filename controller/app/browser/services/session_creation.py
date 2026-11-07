@@ -23,7 +23,7 @@ from ...models import resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
-from ...utils import UTC
+from ...utils import UTC, run_to_completion
 from ..request_gate import RequestGateUnavailable
 
 if TYPE_CHECKING:
@@ -366,7 +366,7 @@ class SessionCreation:
         """Roll back a create that failed: every step runs to its end even when the task awaiting it is cancelled
         during one (W7-2), and the cancel is raised once the rollback is done. A cancel at any step left the isolated
         runtime running, the directories in place and the record reading active."""
-        await self._run_to_completion(
+        await run_to_completion(
             self._cleanup_failed_steps(
                 session_id,
                 session=session,

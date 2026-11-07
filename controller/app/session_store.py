@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import SessionRecord
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path, run_to_completion
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +24,6 @@ try:  # pragma: no cover - import path depends on optional dependency
 except Exception:  # pragma: no cover - graceful fallback when redis isn't installed
     Redis = None  # type: ignore[assignment]
     redis_from_url = None
-
-
-async def _run_to_completion(work) -> None:
-    """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised once the
-    work has finished (the pattern of BrowserSessionService._run_to_completion)."""
-    task = asyncio.create_task(work)
-    cancelled: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            cancelled = exc
-    task.result()
-    if cancelled is not None:
-        raise cancelled
 
 
 class SessionStoreBackend(Protocol):
@@ -279,7 +264,7 @@ class DurableSessionStore:
         # before its write lands, and the Redis copy lands in the same order as the file. Run to completion when the
         # caller is cancelled: a to_thread write keeps going after a cancel, so letting the lock go early reopens the
         # race.
-        await _run_to_completion(self._upsert_locked(record))
+        await run_to_completion(self._upsert_locked(record))
 
     @asynccontextmanager
     async def _record_lock(self, record_id: str) -> AsyncIterator[None]:
