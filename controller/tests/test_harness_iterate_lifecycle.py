@@ -17,8 +17,10 @@ from app.audit import reset_current_operator, set_current_operator
 from app.config import Settings
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessRunRecord, HarnessService
+from app.harness.register import mesh_identity_signer, mesh_identity_verifier
 from app.harness.trace import TraceIntegrityError
 from app.harness.verifier.base import VerificationResult
+from app.mesh.identity import NodeIdentity
 
 DONE = {"url": "https://example.com/done", "text": "done"}
 
@@ -520,6 +522,84 @@ class TraceBindingTests(_Base):
         self.assertEqual(service.get_trace(record.id)["final_observation"]["url"], "https://example.com/forged")
 
 
+class RetentionReadTests(_Base):
+    """c2's "not done": retention's prune removed a candidate in a worker thread while candidate reads on the event
+    loop took no lock, so a read met a candidate half removed, which a signed candidate reads as tampered with."""
+
+    def _signed_service(self) -> HarnessService:
+        identity = NodeIdentity(self.root / "identity")
+        return HarnessService(
+            self.root / "harness",
+            signer=mesh_identity_signer(identity),
+            envelope_verifier=mesh_identity_verifier(identity),
+        )
+
+    async def _aged_candidate(self, service: HarnessService) -> tuple[str, Path]:
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        directory = Path(record.candidate.files["candidate.json"]).parent
+        for path in [*directory.iterdir(), directory]:
+            _age(path, 40)
+        return record.candidate.skill_id, directory
+
+    async def test_a_candidate_read_while_retention_removes_it_is_not_found_not_tampered_with(self) -> None:
+        from app.harness import iterate
+
+        service = self._signed_service()
+        skill_id, directory = await self._aged_candidate(service)
+        removing, resume = threading.Event(), threading.Event()
+        self.addCleanup(resume.set)
+        real_rmtree = shutil.rmtree
+
+        def paused_rmtree(path, *args, **kwargs):
+            if Path(path).parent.resolve() == directory.parent.resolve() and not removing.is_set():
+                (Path(path) / "SKILL.md").unlink()  # the removal is under way: the reads below run here
+                removing.set()
+                resume.wait(PRUNE_HOLD_SECONDS)
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(iterate.shutil, "rmtree", paused_rmtree):
+            pruning = asyncio.ensure_future(asyncio.to_thread(service.store.prune, 30))
+            self.assertTrue(await asyncio.to_thread(removing.wait, 5))
+            try:
+                with self.assertRaises(KeyError):
+                    service.get_candidate(skill_id)
+                with self.assertNoLogs("app.harness.register", "WARNING"):
+                    self.assertEqual(service.list_candidates(), [])
+                drift = await service.check_drift(skill_id)
+            finally:
+                resume.set()
+            self.assertEqual(await pruning, 1)
+
+        self.assertEqual(drift["status"], "missing")
+        self.assertFalse(directory.exists())
+
+    async def test_retention_waits_for_a_candidate_read_in_progress(self) -> None:
+        from app.harness.register import SkillStagingRegistry
+
+        service = self._signed_service()
+        skill_id, directory = await self._aged_candidate(service)
+        prune = threading.Thread(target=service.store.prune, args=(30,))
+        self.addCleanup(prune.join, 10)
+        finished_during_the_read: list[bool] = []
+        real_verify_files = SkillStagingRegistry._verify_files
+
+        def verify_files(registry, candidate, signed_hashes, folder):
+            # candidate.json is read; the files it signs are read next, and retention runs in between.
+            if prune.ident is None:
+                prune.start()
+                prune.join(0.5)
+                finished_during_the_read.append(not prune.is_alive())
+            return real_verify_files(registry, candidate, signed_hashes, folder)
+
+        with patch.object(SkillStagingRegistry, "_verify_files", verify_files):
+            read = service.get_candidate(skill_id)
+        prune.join(10)
+
+        self.assertEqual(finished_during_the_read, [False], "retention removed the candidate while it was read")
+        self.assertEqual(read["skill_id"], skill_id)
+        self.assertFalse(directory.exists())
+
+
 def _age(path: Path, days: float) -> None:
     old = time.time() - days * 86400
     os.utime(path, (old, old))
@@ -548,7 +628,8 @@ class RetentionTests(_Base):
 
     async def test_w4_11_a_candidate_restaged_while_prune_waits_to_remove_it_survives(self) -> None:
         # Prune read the old candidate's age, then removed whatever was at that path: a re-stage that replaced it in
-        # between lost the new candidate. Staging's replace now waits for prune's check-and-remove.
+        # between lost the new candidate. Staging's replace now waits for prune's age check and its rename of the
+        # candidate to a hidden name, which it removes from (since c3's A6; it removed the candidate in place before).
         import threading
 
         from app.harness import iterate
@@ -561,20 +642,22 @@ class RetentionTests(_Base):
         build = service.store.staging_root / ".tmp-restaged"
         shutil.copytree(target, build)
         (build / "candidate.json").write_text('{"fresh": true}', encoding="utf-8")
-        real_rmtree = shutil.rmtree
+        real_replace = os.replace
+        prune_thread = threading.get_ident()
         restage = threading.Thread(target=service.inducer.place, args=(build, target))
 
-        def paused_rmtree(path, *args, **kwargs):
+        def paused_replace(src, dst, *args, **kwargs):
             # Resolved (W10-12): the record's path is resolved, while prune walks the staging root as configured,
             # which differs under a symlinked or 8.3-form temp directory (C:/Users/RUNNER~1 on a Windows runner).
-            if Path(path).resolve() == target.resolve() and not restage.is_alive() and restage.ident is None:
+            pruning = threading.get_ident() == prune_thread
+            if pruning and Path(src).resolve() == target.resolve() and restage.ident is None:
                 restage.start()
                 restage.join(0.5)  # the replace runs now unless prune holds the staging lock
-            return real_rmtree(path, *args, **kwargs)
+            return real_replace(src, dst, *args, **kwargs)
 
-        with patch.object(iterate.shutil, "rmtree", paused_rmtree):
+        with patch.object(iterate.os, "replace", paused_replace):
             service.store.prune(30)
-        self.assertIsNotNone(restage.ident, f"prune never removed the aged candidate at {target}")
+        self.assertIsNotNone(restage.ident, f"prune never set the aged candidate at {target} aside")
         restage.join(10)
 
         self.assertFalse(restage.is_alive())

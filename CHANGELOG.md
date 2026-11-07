@@ -123,6 +123,13 @@ All notable changes to auto-browser are documented here.
   the lock is free, which the event loop no longer waits for, and the candidate a re-stage replaces is removed in a
   worker thread too; a run cancelled meanwhile waits for that work, and its record names the candidate it staged. A
   shutdown that cancels the staging itself places nothing, and the next start marks that run failed.
+- **A staged skill candidate that `HARNESS_RETENTION_DAYS` is removing no longer reads as tampered with.** The
+  retention prune removed an aged candidate's files in a worker thread while `harness.get_candidate`,
+  `harness.list_candidates` and the drift checks read candidates without a lock, so a read in between found some of
+  its files gone: a signed candidate was refused as "not the one it was signed with" (listing logged it as
+  unverifiable), and a drift check failed with that error or reported the candidate degraded. The prune now renames
+  the candidate to a hidden name before it removes it there, under the staging lock that those reads now hold too, so
+  a read finds the whole candidate or none; a removal cut short leaves the hidden name, which the next start removes.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,

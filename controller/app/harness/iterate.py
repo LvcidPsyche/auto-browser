@@ -113,8 +113,10 @@ class HarnessRunStore:
         self._active: dict[str, str | None] = {}
         self._active_lock = threading.Lock()
         self.generation = uuid.uuid4().hex
-        # Shared with the SkillInducer: prune holds it from a candidate's age check through its removal, staging
-        # around its rename into place, so a candidate re-staged in between is never removed as old.
+        # Shared with the SkillInducer: prune holds it from a candidate's age check through its rename to a hidden name,
+        # staging around its rename into place, so a candidate re-staged in between is never removed as old, and
+        # candidate reads (HarnessService, the drift monitor) around theirs, so none meets a candidate half replaced or
+        # half removed. Never held for a removal, so a read on the event loop waits at most for one rename.
         self.staging_lock = threading.Lock()
 
     def begin_run(self, run_id: str, owner: str | None, *, max_owned: int = 0) -> bool:
@@ -382,12 +384,15 @@ class HarnessRunStore:
         for directory, marker, staged in candidates:
             if directory.name in self._active:
                 continue
+            doomed = directory
             try:
                 # Inside the try (W9-7): is_dir() raises for EACCES or EIO, and one such entry ended the prune.
                 if not directory.is_dir():
                     continue
-                # A staged entry's age check and removal are one step against staging's rename into place; staging
-                # never replaces a run directory, so removing one does not hold staging up.
+                # A staged entry's age check and its rename to a hidden `.tmp-` name are one step against staging's
+                # rename into place and against candidate reads, which hold the lock too; it is removed after, under
+                # that name, which nothing serves (and startup recovery removes), so no read meets a candidate half
+                # removed or waits for its removal. Staging never replaces a run directory: removing one takes no lock.
                 with self.staging_lock if staged else contextlib.nullcontext():
                     marker_path = directory / marker
                     newest = max(
@@ -395,10 +400,13 @@ class HarnessRunStore:
                     )
                     if newest >= cutoff:
                         continue
-                    shutil.rmtree(directory)
+                    if staged:
+                        doomed = directory.with_name(f".tmp-{uuid.uuid4().hex[:12]}")
+                        os.replace(directory, doomed)
+                shutil.rmtree(doomed)
                 removed += 1
             except OSError as exc:
-                logger.warning("harness prune could not remove %s: %s", directory, exc)
+                logger.warning("harness prune could not remove %s: %s", doomed, exc)
         return removed
 
     def run_dir(self, run_id: str) -> Path:
@@ -485,7 +493,7 @@ class HarnessService:
         # Signing without a matching check is decoration; the registry gets the
         # counterpart to whatever the inducer signs with.
         self.registry = SkillStagingRegistry(self.store.staging_root, verifier=envelope_verifier)
-        self.drift_monitor = SkillDriftMonitor(self.registry, verifier=self.verifier)
+        self.drift_monitor = SkillDriftMonitor(self.registry, verifier=self.verifier, lock=self.store.staging_lock)
 
     async def start_convergence(
         self,
@@ -641,11 +649,11 @@ class HarnessService:
 
         Built and signed in a worker thread, then placed on the event loop once the staging lock is free, which the loop
         does not wait for (R5C-12): retention's prune holds that lock in a thread from a candidate's age check through
-        its removal, and waiting for it stalled every task. Placed on the loop, not in the thread: a re-stage's two
-        renames ran between candidate reads on the loop, which take no lock, and a read found no candidate or the new
-        files under the old one's signature. The record is saved right after, with no await between, so a shutdown
-        that cancels this places nothing its record does not name. The candidate it replaced is removed after that, in
-        a worker thread: removed on the loop, a slow removal stalled every task.
+        its rename aside (it held it through the removal), and waiting for it stalled every task. Placed on the loop,
+        not in the thread: a re-stage's two renames ran between candidate reads on the loop, and a read found no
+        candidate or the new files under the old one's signature. The record is saved right after, with no await
+        between, so a shutdown that cancels this places nothing its record does not name. The candidate it replaced is
+        removed after that, in a worker thread: removed on the loop, a slow removal stalled every task.
         """
         try:
             candidate, build_dir, target_dir = await asyncio.to_thread(
@@ -789,10 +797,13 @@ class HarnessService:
         return trace.model_dump(mode="json")
 
     def list_candidates(self) -> list[dict[str, Any]]:
-        return self.registry.list_candidates()
+        # Under the staging lock: retention removes a candidate in a worker thread (HarnessRunStore.staging_lock).
+        with self.store.staging_lock:
+            return self.registry.list_candidates()
 
     def get_candidate(self, skill_id: str) -> dict[str, Any]:
-        return self.registry.get_candidate(skill_id).model_dump(mode="json")
+        with self.store.staging_lock:
+            return self.registry.get_candidate(skill_id).model_dump(mode="json")
 
     async def check_drift(self, skill_id: str) -> dict[str, Any]:
         return (await self.drift_monitor.check_candidate(skill_id)).model_dump(mode="json")

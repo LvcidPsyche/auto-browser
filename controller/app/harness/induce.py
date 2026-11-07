@@ -60,7 +60,7 @@ class SkillInducer:
         self.staging_root = Path(staging_root)
         self.signer = signer
         # Held around the rename into place; HarnessService passes its store's staging lock, which retention's prune
-        # holds from a candidate's age check through its removal, so a fresh re-stage is never removed as old.
+        # holds from a candidate's age check through its rename aside, so a fresh re-stage is never removed as old.
         self.lock = lock if lock is not None else threading.Lock()
 
     def place(self, build_dir: Path, target_dir: Path) -> None:
