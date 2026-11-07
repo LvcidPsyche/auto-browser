@@ -111,6 +111,11 @@ All notable changes to auto-browser are documented here.
   the `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal
   (milliseconds for one candidate's files). The candidate is now built, signed and placed in a worker thread; a run
   cancelled meanwhile waits for that work, and its record names the candidate it staged.
+- **A browser action that ran is no longer reported as failed when its session's record cannot be saved.** Once an
+  action had taken effect and been recorded (its `actions.jsonl` line, audit entry and witness receipt), saving the
+  session's record could still fail (a full disk, or Redis failing the write), and that error reached the caller as
+  the action's, so an agent that retried made the change twice. The failure is now logged with the session id and
+  the action's result is returned; the stored record catches up at the session's next save.
 
 ## [1.16.0] — 2026-11-06
 
