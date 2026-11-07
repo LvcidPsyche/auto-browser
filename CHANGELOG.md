@@ -15,8 +15,8 @@ All notable changes to auto-browser are documented here.
   tool call wrote: a `reason` key, and the approval's reason, which for a governed tool call previews its arguments.
   A receipt recorded without a policy outcome (an approval request or decision, a human takeover) now takes its
   session's evidence mode, so a confidential session's approval receipts are restricted; they were standard and kept
-  the reason in full, in the approval and again in the metadata. The approval store and the audit log still keep the
-  reasons. A hosted Witness service and an exported bundle receive the receipt as recorded.
+  the reason in full, in the approval and again in the metadata. The approval store still keeps an approval's reason,
+  and the audit log a takeover's. A hosted Witness service and an exported bundle receive the receipt as recorded.
 
 ### Fixed
 
