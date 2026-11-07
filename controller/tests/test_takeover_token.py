@@ -349,6 +349,81 @@ def test_w11_6_api_token_file_keeps_the_original_error_when_its_mode_cannot_be_r
     assert checked and closed == checked
 
 
+class _PosixOsWithFailingReads:
+    """The os calls _restrict_mode makes, as on POSIX, over one descriptor; fstat and close raise what they are given.
+
+    A fake, so the check runs on every platform (the real one returns at once on Windows)."""
+
+    name = "posix"
+    O_RDONLY = 0
+    O_NOFOLLOW = 0o400000
+    FD = 7
+
+    def __init__(self, *, st_mode: int = 0o100644, fstat_error=None, close_error=None) -> None:
+        self.st_mode, self.fstat_error, self.close_error = st_mode, fstat_error, close_error
+        self.closed: list[int] = []
+
+    def open(self, path, flags):
+        return self.FD
+
+    def fstat(self, fd):
+        if self.fstat_error is not None:
+            raise self.fstat_error
+        return os.stat_result((self.st_mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def fchmod(self, fd, mode) -> None:
+        self.st_mode = stat.S_IFREG | mode
+
+    def close(self, fd) -> None:
+        self.closed.append(fd)
+        if self.close_error is not None:
+            raise self.close_error
+
+
+@pytest.mark.parametrize("name", ["TAKEOVER_TOKEN_FILE", "API_TOKEN_FILE"])
+def test_r5c_19_a_close_that_fails_after_the_mode_read_failed_keeps_the_reads_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    # The descriptor was closed in a finally: a close that failed too replaced the read's error, and the takeover
+    # token's check logged the generic "mode could not be tightened" cause instead of the read that failed.
+    import errno
+    from unittest.mock import patch
+
+    from app import api_token
+
+    fake = _PosixOsWithFailingReads(
+        fstat_error=OSError(errno.EIO, "Input/output error"), close_error=OSError(errno.EBADF, "close sentinel")
+    )
+    with (
+        patch.object(api_token, "os", fake),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+        pytest.raises(OSError) as raised,
+    ):
+        api_token._restrict_mode(tmp_path / "token", name=name)
+
+    expected = api_token._ModeCheckOpenError if name == "TAKEOVER_TOKEN_FILE" else OSError
+    assert (type(raised.value), raised.value.errno) == (expected, errno.EIO)
+    assert fake.closed == [fake.FD]
+    assert "close sentinel" in caplog.text  # the close's own failure is logged, not lost
+
+
+def test_r5c_19_a_private_files_descriptor_is_still_closed_and_a_failing_close_still_raises(tmp_path: Path) -> None:
+    import errno
+    from unittest.mock import patch
+
+    from app import api_token
+
+    private = _PosixOsWithFailingReads(st_mode=0o100600)
+    with patch.object(api_token, "os", private):
+        api_token._restrict_mode(tmp_path / "token", name="TAKEOVER_TOKEN_FILE")
+    assert private.closed == [private.FD]
+
+    failing_close = _PosixOsWithFailingReads(close_error=OSError(errno.EBADF, "close sentinel"))
+    with patch.object(api_token, "os", failing_close), pytest.raises(OSError, match="close sentinel"):
+        api_token._restrict_mode(tmp_path / "token", name="TAKEOVER_TOKEN_FILE")
+    assert failing_close.st_mode & 0o777 == 0o600  # tightened, then the close failed: raised as before
+
+
 def test_a_file_token_equal_to_an_api_credential_is_not_used(tmp_path: Path) -> None:
     (tmp_path / "takeover-token").write_text(SENTINEL + "\n", encoding="utf-8")
     settings = make_settings(tmp_path, API_BEARER_TOKEN=SENTINEL)

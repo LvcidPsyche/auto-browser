@@ -128,6 +128,11 @@ All notable changes to auto-browser are documented here.
   at five seconds, as a release's has been since 1.16.0, and then logged as a warning naming the session and the pid.
   A second cancel during that wait also left autossh's log open and its metadata (which names the bastion, its user
   and the key path) on disk; both now go whatever ends the wait.
+- **A token file whose mode cannot be read, and whose descriptor then fails to close, is reported for the read.**
+  When the mode check of `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE` failed to read the file's mode (an I/O error) and
+  closing the file failed too, the close's error replaced the read's, so the takeover token's warning gave the
+  generic "its mode could not be tightened" cause. The read's error is now the one raised, and the failed close is
+  logged as a warning of its own.
 
 ## [1.16.0] — 2026-11-06
 
