@@ -22,7 +22,7 @@ from app.browser.services import witness as witness_service
 from app.browser.services.witness import BrowserWitnessService
 from app.models import SessionRecord, WitnessRemoteState
 from app.session_ownership import acting_as
-from app.witness import WitnessPolicyEngine, WitnessRecorder, WitnessRemoteClient, WitnessRemoteError
+from app.witness import WitnessPolicyEngine, WitnessRecorder, WitnessRemoteClient
 from tests.test_auth_state_ownership import ALICE, build_manager
 
 OPERATOR = {"id": "alice", "source": "header"}
@@ -103,6 +103,11 @@ async def make_service(tmp_path: Path):
     yield make
     for service in made:
         await service.stop_delivery(timeout=1)
+
+
+def _refused(status: int, detail: str) -> RuntimeError:
+    """The error WitnessRemoteClient raises for an answer that is not a success."""
+    return RuntimeError(f"Witness remote record witness receipt for scope s1 failed with HTTP {status}: {detail}")
 
 
 def _session(session_id: str = "s1") -> SimpleNamespace:
@@ -232,11 +237,11 @@ async def test_delivery_gives_up_after_three_attempts(make_service, no_backoff, 
         pytest.param(lambda: httpx.ReadTimeout("no answer"), id="read-timeout"),
         # An answer, even 503 or 429, does not prove the service did not record the receipt (Codex review): with no
         # id to tell a second copy by, sending it again could record it twice.
-        pytest.param(lambda: WitnessRemoteError("busy", status_code=503), id="http-503"),
-        pytest.param(lambda: WitnessRemoteError("slow down", status_code=429), id="http-429"),
-        pytest.param(lambda: WitnessRemoteError("oops", status_code=500), id="http-500"),
-        pytest.param(lambda: WitnessRemoteError("bad gateway", status_code=502), id="http-502"),
-        pytest.param(lambda: WitnessRemoteError("bad request", status_code=400), id="http-400"),
+        pytest.param(lambda: _refused(503, "busy"), id="http-503"),
+        pytest.param(lambda: _refused(429, "slow down"), id="http-429"),
+        pytest.param(lambda: _refused(500, "oops"), id="http-500"),
+        pytest.param(lambda: _refused(502, "bad gateway"), id="http-502"),
+        pytest.param(lambda: _refused(400, "bad request"), id="http-400"),
         pytest.param(lambda: RuntimeError("Witness remote client is not started"), id="not-started"),
     ],
 )
@@ -386,12 +391,12 @@ async def test_a_receipt_recorded_while_delivery_stops_does_not_start_a_second_w
 def test_the_client_names_the_status_of_a_refused_answer() -> None:
     response = httpx.Response(503, json={"detail": "busy"}, request=httpx.Request("POST", "https://w.example/x"))
 
-    with pytest.raises(WitnessRemoteError) as raised:
+    with pytest.raises(RuntimeError) as raised:
         WitnessRemoteClient._parse_response(response, operation="record witness receipt for scope s1")
 
-    assert raised.value.status_code == 503
-    assert str(raised.value) == "Witness remote record witness receipt for scope s1 failed with HTTP 503: busy"
-    assert isinstance(raised.value, RuntimeError)  # callers that catch RuntimeError still do
+    # A plain RuntimeError, as before 1.17.0: nothing reads the status apart from the message (A7).
+    assert type(raised.value) is RuntimeError
+    assert str(raised.value) == str(_refused(503, "busy"))
 
 
 class CloseRecordsTheDeliveredStateTests(unittest.IsolatedAsyncioTestCase):
@@ -411,7 +416,7 @@ class CloseRecordsTheDeliveredStateTests(unittest.IsolatedAsyncioTestCase):
                 await self.held[action].wait()
             await asyncio.sleep(0.05)
             if action in self.refused:
-                raise WitnessRemoteError("refused", status_code=400)
+                raise _refused(400, "refused")
             self.sent.append(action)
             return {}
 

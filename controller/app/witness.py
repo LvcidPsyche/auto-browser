@@ -951,14 +951,6 @@ class WitnessRecorder:
         return sha256(f"{receipt.chain_prev_hash or ''}:{canonical}".encode("utf-8")).hexdigest()
 
 
-class WitnessRemoteError(RuntimeError):
-    """An answer from the hosted Witness service that was not a success, with its HTTP status."""
-
-    def __init__(self, message: str, *, status_code: int) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-
-
 class WitnessRemoteClient:
     def __init__(
         self,
@@ -1034,7 +1026,4 @@ class WitnessRemoteClient:
         except Exception:
             payload = response.text
         detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
-        raise WitnessRemoteError(
-            f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}",
-            status_code=response.status_code,
-        )
+        raise RuntimeError(f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}")
