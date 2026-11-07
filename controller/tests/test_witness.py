@@ -396,6 +396,8 @@ class WitnessBrowserManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 reset_current_operator(token)
+            # Delivery to the hosted service runs in the background (ACT-34).
+            self.assertTrue(await manager.witness_bridge.wait_for_delivery(session.id))
 
             receipts = await manager.list_witness_receipts(session.id, limit=10)
             self.assertEqual(len(receipts), 1)
@@ -455,6 +457,7 @@ class WitnessBrowserManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 reset_current_operator(token)
+            self.assertTrue(await manager.witness_bridge.wait_for_delivery(session.id))
 
             remote_record.assert_awaited_once()
             forwarded_payload = remote_record.await_args.args[1]

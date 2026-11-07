@@ -5,6 +5,9 @@ import json
 import logging
 import os
 import threading
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -377,29 +380,80 @@ class WitnessPolicyEngine:
         return (operator.id or "anonymous").strip() in {"", "anonymous"}
 
 
+@dataclass
+class _SharedLock:
+    """A lock and how many holders and waiters it has, so it is dropped when it has none."""
+
+    lock: Any
+    users: int = 0
+
+
+class _ChainThreadLocks:
+    """One threading.Lock per chain file, dropped once no thread holds or waits for it.
+
+    Per file, so appends to different chains run side by side. Two threads on one file still queue here, which is
+    what Windows needs: its byte-range locks are owned per process, so two of this process's threads contending for
+    the file lock deadlock rather than queue. The key is the path as the file system compares it (case-folded on
+    Windows), so two spellings of one file share a lock."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, _SharedLock] = {}
+
+    @contextmanager
+    def hold(self, path: Path) -> Iterator[None]:
+        key = os.path.normcase(os.path.abspath(path))
+        with self._guard:
+            shared = self._locks.setdefault(key, _SharedLock(threading.Lock()))
+            shared.users += 1
+        try:
+            with shared.lock:
+                yield
+        finally:
+            with self._guard:
+                shared.users -= 1
+                if not shared.users:
+                    del self._locks[key]
+
+
 class WitnessRecorder:
     """Append-only, hash-chained receipt log (one JSONL file per scope).
 
-    Chain integrity assumes a single writer process: the asyncio.Lock serializes
-    concurrent appends within one event loop and self._heads caches each scope's
-    head hash in memory. This holds for the supported deployment (uvicorn with a
-    single worker — see controller/Dockerfile). Running multiple worker processes
-    against the same witness_root would fork the chain (duplicate chain_prev_hash)
-    and needs OS-level file locking or a shared store — out of scope until
-    multi-worker is actually adopted.
+    Chain integrity assumes a single writer process: a scope's asyncio lock
+    orders its appends within one event loop (other scopes' appends run beside
+    them) and self._heads caches each scope's head hash in memory. This holds for
+    the supported deployment (uvicorn with a single worker — see
+    controller/Dockerfile). Running multiple worker processes against the same
+    witness_root would fork the chain (duplicate chain_prev_hash) and needs
+    OS-level file locking or a shared store — out of scope until multi-worker is
+    actually adopted.
     """
 
     def __init__(self, root: str | Path, *, signer: Any = None):
         self.root = Path(root)
-        self._lock = asyncio.Lock()
-        # Three scopes, because each covers what the next cannot: the asyncio
-        # lock orders tasks on one event loop, this one orders threads inside
-        # this process (appends run in a worker thread, and Windows byte-range
-        # locks are owned per process, so two threads contending for the file
-        # lock deadlock rather than queue), and the file lock orders processes.
-        self._thread_lock = threading.Lock()
+        # Three kinds of lock, because each covers what the next cannot: a
+        # scope's asyncio lock orders its tasks on one event loop, first come
+        # first served; a chain file's thread lock orders threads inside this
+        # process (appends run in a worker thread; see _ChainThreadLocks); and
+        # the file lock orders processes. The first two are per scope and per
+        # file, so one session's appends never wait for another's.
+        self._scope_locks: dict[str, _SharedLock] = {}
+        self._thread_locks = _ChainThreadLocks()
         self._heads: dict[str, str] = {}
         self.signer = signer
+
+    @asynccontextmanager
+    async def _scope_lock(self, scope: str) -> AsyncIterator[None]:
+        """Hold the scope's asyncio lock; it is dropped once no task holds or waits for it."""
+        shared = self._scope_locks.setdefault(scope, _SharedLock(asyncio.Lock()))
+        shared.users += 1
+        try:
+            async with shared.lock:
+                yield
+        finally:
+            shared.users -= 1
+            if not shared.users:
+                del self._scope_locks[scope]
 
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -428,7 +482,7 @@ class WitnessRecorder:
         atomic_write_text(marker, utc_now())
 
     def _anchor_chain(self, path: Path) -> None:
-        with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+        with self._thread_locks.hold(path), open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
             if anchor_path(path).exists():  # another worker anchored it first
                 return
             self._set_aside_torn_tail(path, handle)
@@ -453,7 +507,7 @@ class WitnessRecorder:
         return await self.append(scope, receipt)
 
     async def append(self, scope: str, receipt: WitnessReceipt) -> WitnessReceipt:
-        async with self._lock:
+        async with self._scope_lock(scope):
             path = self._path(scope)
             # A copy, its lone surrogates replaced before it is hashed: UTF-8 cannot encode one, so the receipt
             # could not be written, and the action it records had already run.
@@ -470,7 +524,7 @@ class WitnessRecorder:
 
     def _append_locked(self, path: Path, item: WitnessReceipt) -> WitnessReceipt:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+        with self._thread_locks.hold(path), open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
             self._set_aside_torn_tail(path, handle)
             last_line = read_tail_line(handle)
             item.chain_prev_hash = WitnessReceipt.model_validate_json(last_line).chain_hash if last_line else None
@@ -848,6 +902,14 @@ class WitnessRecorder:
         return sha256(f"{receipt.chain_prev_hash or ''}:{canonical}".encode("utf-8")).hexdigest()
 
 
+class WitnessRemoteError(RuntimeError):
+    """An answer from the hosted Witness service that was not a success, with its HTTP status."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class WitnessRemoteClient:
     def __init__(
         self,
@@ -923,4 +985,7 @@ class WitnessRemoteClient:
         except Exception:
             payload = response.text
         detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
-        raise RuntimeError(f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}")
+        raise WitnessRemoteError(
+            f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}",
+            status_code=response.status_code,
+        )

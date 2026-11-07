@@ -291,6 +291,8 @@ class BrowserSessionService(SessionCreation):
             action_class="control",
             metadata=dict(details),
         )
+        # The hosted copy of the close receipt goes in the background; the closed record shows how it went (bounded).
+        await self.manager.witness_bridge.wait_for_delivery(session.id)
         summary["witness_remote"] = session.witness_remote_state.model_dump()
         summary["close_reason"] = reason
         await self.manager.session_store.upsert(SessionRecord.model_validate(summary))

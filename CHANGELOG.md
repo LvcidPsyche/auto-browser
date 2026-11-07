@@ -18,6 +18,21 @@ All notable changes to auto-browser are documented here.
   the reason in full, in the approval and again in the metadata. The approval store and the audit log still keep the
   reasons. A hosted Witness service and an exported bundle receive the receipt as recorded.
 
+### Fixed
+
+- **One session's witness receipts no longer wait for another's, and a hosted Witness service no longer slows
+  actions.** Every receipt append took one recorder-wide lock, so each session's receipts queued behind every other
+  session's file writes; an append now takes a lock per scope and per chain file. A receipt for the hosted Witness
+  service (`WITNESS_REMOTE_URL`) was sent inline, under the session's lock, so a slow or unreachable service delayed
+  each action by up to its timeout. The receipt still goes to the local chain first; the hosted copy now goes from a
+  background queue (first in, first out, up to 1,000 receipts), and the session's `witness_remote` state is updated
+  when it lands or fails. A delivery that never reached the service (no connection, or a 429 or 503 answer) is tried
+  up to three times with backoff; any other failure is not sent again, since the payload carries no id the service
+  could tell a second copy by. A full queue fails that receipt's delivery (`witness_remote.last_error` says so), not
+  the action. A close waits up to a second for its session's receipts, so the closed record shows how they went, and
+  shutdown up to three seconds for the queue; what is left is logged. The hosted Witness preflight before a
+  confidential session's actions is unchanged.
+
 ## [1.16.0] — 2026-11-06
 
 A security and correctness release over 1.15.0 (GHSA-gmvj-rj2h-7528), from the open findings of the review behind

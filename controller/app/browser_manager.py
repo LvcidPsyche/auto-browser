@@ -354,6 +354,8 @@ class BrowserManager:
             await self.playwright.stop()
             self.playwright = None
         await self.tunnel_broker.shutdown()
+        # Receipts still queued for the hosted Witness service get a bounded chance to go before its client closes.
+        await self.witness_bridge.stop_delivery()
         await self.witness_remote.shutdown()
         await self.session_store.shutdown()
 
