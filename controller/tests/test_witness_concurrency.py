@@ -181,8 +181,7 @@ async def test_receipts_reach_the_service_in_the_order_they_were_recorded(make_s
     [
         pytest.param(lambda: httpx.ConnectError("refused"), id="connect-error"),
         pytest.param(lambda: httpx.ConnectTimeout("no connection"), id="connect-timeout"),
-        pytest.param(lambda: WitnessRemoteError("busy", status_code=503), id="http-503"),
-        pytest.param(lambda: WitnessRemoteError("slow down", status_code=429), id="http-429"),
+        pytest.param(lambda: httpx.PoolTimeout("no free connection"), id="pool-timeout"),
     ],
 )
 async def test_a_failure_the_service_never_took_is_sent_again(make_service, no_backoff, failure) -> None:
@@ -230,6 +229,10 @@ async def test_delivery_gives_up_after_three_attempts(make_service, no_backoff, 
     "failure",
     [
         pytest.param(lambda: httpx.ReadTimeout("no answer"), id="read-timeout"),
+        # An answer, even 503 or 429, does not prove the service did not record the receipt (Codex review): with no
+        # id to tell a second copy by, sending it again could record it twice.
+        pytest.param(lambda: WitnessRemoteError("busy", status_code=503), id="http-503"),
+        pytest.param(lambda: WitnessRemoteError("slow down", status_code=429), id="http-429"),
         pytest.param(lambda: WitnessRemoteError("oops", status_code=500), id="http-500"),
         pytest.param(lambda: WitnessRemoteError("bad gateway", status_code=502), id="http-502"),
         pytest.param(lambda: WitnessRemoteError("bad request", status_code=400), id="http-400"),

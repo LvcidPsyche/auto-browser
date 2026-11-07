@@ -26,12 +26,12 @@ All notable changes to auto-browser are documented here.
   service (`WITNESS_REMOTE_URL`) was sent inline, under the session's lock, so a slow or unreachable service delayed
   each action by up to its timeout. The receipt still goes to the local chain first; the hosted copy now goes from a
   background queue (first in, first out, up to 1,000 receipts), and the session's `witness_remote` state is updated
-  when it lands or fails. A delivery that never reached the service (no connection, or a 429 or 503 answer) is tried
-  up to three times with backoff; any other failure is not sent again, since the payload carries no id the service
-  could tell a second copy by. A full queue fails that receipt's delivery (`witness_remote.last_error` says so), not
-  the action. A close waits up to a second for its session's receipts, so the closed record shows how they went, and
-  shutdown up to three seconds for the queue; what is left is logged. The hosted Witness preflight before a
-  confidential session's actions is unchanged.
+  when it lands or fails. A delivery that never reached the service (no connection was made) is tried up to three
+  times with backoff; any other failure, a 429 or 503 answer included, is not sent again, since the payload carries
+  no id the service could tell a second copy by. A full queue fails that receipt's delivery
+  (`witness_remote.last_error` says so), not the action. A close waits up to a second for its session's receipts, so
+  the closed record shows how they went, and shutdown up to three seconds for the queue; what is left is logged. The
+  hosted Witness preflight before a confidential session's actions is unchanged.
 - **A witness bundle's receipts and its chain check now come from one read of the chain.** The export
   (`GET /sessions/{session_id}/witness/bundle`, `browser.export_witness_bundle`) read the receipts, then read the
   chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described

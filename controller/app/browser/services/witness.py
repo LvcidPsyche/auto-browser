@@ -19,7 +19,6 @@ from ...witness import (
     WitnessApproval,
     WitnessEvidence,
     WitnessPolicyOutcome,
-    WitnessRemoteError,
     WitnessSessionContext,
 )
 
@@ -34,8 +33,6 @@ logger = logging.getLogger(__name__)
 DELIVERY_QUEUE_SIZE = 1000
 DELIVERY_ATTEMPTS = 3
 DELIVERY_BACKOFF_SECONDS = 0.5
-# Answers that say the service did not take the receipt: sent again, as a connection that was never made is.
-_RETRY_STATUSES = frozenset({429, 503})
 # How long a close waits for its session's receipts to reach the service before it saves their delivery state (about
 # what the inline delivery of its close receipt took at worst), and how long shutdown lets the queue drain. Whatever
 # is left is logged; the local chain holds it either way.
@@ -53,11 +50,10 @@ class _Delivery:
 
 def _never_taken(exc: Exception) -> bool:
     """Whether a failed delivery certainly left the service without the receipt, so sending it again cannot record
-    it twice: no connection was made, or the service answered 429 or 503. After a timeout or any other answer the
-    service may hold it, and the payload carries no id it could tell a second copy by."""
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-        return True
-    return isinstance(exc, WitnessRemoteError) and exc.status_code in _RETRY_STATUSES
+    it twice: no connection was made. After a timeout or any answer, a 429 or 503 included, the service may hold it
+    (a proxy can answer for a service that recorded it), and the payload carries no id it could tell a second copy
+    by."""
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
 # The witness context (risk, approval) of the action being dispatched, handed to the pipeline that records its
