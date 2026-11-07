@@ -116,6 +116,12 @@ All notable changes to auto-browser are documented here.
   session's record could still fail (a full disk, or Redis failing the write), and that error reached the caller as
   the action's, so an agent that retried made the change twice. The failure is now logged with the session id and
   the action's result is returned; the stored record catches up at the session's next save.
+- **One mesh peer flooding the replay cache no longer locks every other peer out.** A registered peer that got
+  10,000 signed envelopes through inside a timestamp window filled the 10,000-nonce replay cache, and every peer was
+  refused (`503`) until those nonces expired. Each peer now holds at most 1,000 of them: one at its share is refused
+  with the same `503` while the others' envelopes still pass. An envelope whose request does not decode is refused
+  before its nonce is recorded, since it can run nothing, and a replay of one that runs still meets its seen nonce.
+  `docs/mesh.md` says so.
 
 ## [1.16.0] — 2026-11-06
 

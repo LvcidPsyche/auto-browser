@@ -118,13 +118,15 @@ remembered until the latest time this node's clock has shown is more than one wi
 timestamp, then forgotten (a clock stepped back does not free it early). The cache remembers at most 10,000 nonces
 at once, and nothing it remembers is dropped before it expires: when it is full of nonces still inside their
 window, a new envelope is refused with `503` ("mesh replay cache is full; retry later") and not recorded, and a
-retry passes once older nonces expire. The limit: a nonce is recorded once the envelope's signature checks out,
-before the request is decoded or granted, so registered peers that get 10,000 signed envelopes through inside a
-window fill the cache, and every peer is refused (`503`) until they expire (`/mesh/receive` takes no bearer token,
-so the request rate limit, on by default at 120 requests a minute, counts it per client address; since a nonce is
-kept for up to two windows, one address can hold about four times as many nonces as the window has seconds (120 at
-the default 30-second `MESH_TIMESTAMP_WINDOW`), so alone it cannot fill the cache unless that limit is raised or
-off or the window is about 2,500 seconds or more; when the controller serves without a token
+retry passes once older nonces expire. A nonce is recorded once the envelope's signature checks out and its request
+decodes (an envelope whose request does not decode runs nothing, and is refused without being recorded), before the
+request is granted, and it counts against its sender's share: each peer holds at most 1,000 unexpired nonces, and a
+peer at its share is refused with the same `503` while other peers' envelopes still pass, so filling the cache
+takes ten or more peers at once (`/mesh/receive` takes no bearer token, so the request rate limit, on by default at
+120 requests a minute, counts it per client address; since a nonce is kept for up to two windows, one address can
+hold about four times as many nonces as the window has seconds (120 at the default 30-second
+`MESH_TIMESTAMP_WINDOW`), so a peer behind one address reaches its share only if that limit is raised or off or the
+window is about 250 seconds or more; when the controller serves without a token
 (`API_ALLOW_TOKENLESS_LOOPBACK`), the limit counts each `Authorization` or `X-Operator-Id` value apart, so a
 sender that varies one is not limited). The timestamp window is checked against that same latest time, never the
 raw clock, so a clock stepped back cannot put an envelope whose nonce is already forgotten inside the window

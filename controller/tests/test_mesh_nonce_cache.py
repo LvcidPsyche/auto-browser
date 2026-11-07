@@ -126,6 +126,32 @@ class NonceExpiryTests(unittest.TestCase):
             self.assertTrue(cache.check_and_record(nonce))
         self.assertEqual(list(cache._seen), ["b", "c"])
 
+    def test_r5c_17_a_sender_at_its_share_is_refused_and_another_sender_is_not(self) -> None:
+        # One sender's unexpired nonces filled the whole cache, and every sender was refused until they expired.
+        clock = _Clock()
+        cache = _NonceCache(max_size=100, ttl_seconds=60, clock=clock, max_per_owner=2)
+        self.assertTrue(cache.check_and_record("a1", owner="flood"))
+        self.assertTrue(cache.check_and_record("a2", owner="flood"))
+
+        with self.assertRaises(MeshReplayCacheFull):
+            cache.check_and_record("a3", owner="flood")
+        self.assertTrue(cache.check_and_record("b1", owner="other"))
+        self.assertFalse(cache.check_and_record("a1", owner="flood"))  # still remembered: a replay, not a refusal
+
+        clock.now += 61  # its nonces have expired, and its share is free again
+        self.assertTrue(cache.check_and_record("a3", owner="flood"))
+        self.assertEqual(dict(cache._held), {"flood": 1})
+
+    def test_r5c_17_an_expired_nonce_behind_a_newer_one_frees_its_senders_share(self) -> None:
+        clock = _Clock()
+        cache = _NonceCache(max_size=100, ttl_seconds=60, clock=clock, max_per_owner=2)
+        self.assertTrue(cache.check_and_record("x", stamped_at=1000, owner="flood"))
+        self.assertTrue(cache.check_and_record("y", stamped_at=950, owner="flood"))
+
+        clock.now = 1015  # "y" is 65 s past its stamp, "x" only 15
+        self.assertTrue(cache.check_and_record("z", stamped_at=1015, owner="flood"))
+        self.assertEqual(list(cache._seen), ["x", "z"])
+
 
 def _signed(identity: NodeIdentity, payload: dict, *, recipient: str, timestamp: float) -> SignedEnvelope:
     """An envelope built and signed by hand, stamped when the test says."""
@@ -161,6 +187,51 @@ class _Mesh:
 
     def envelope(self, timestamp: float) -> SignedEnvelope:
         return _signed(self.legit, self.payload, recipient=self.server.node_id, timestamp=timestamp)
+
+
+class FloodingPeerTests(unittest.TestCase):
+    """R5C-17: one registered peer that sent enough signed envelopes inside a window filled the replay cache, and every
+    peer was refused (503) until its nonces expired; a nonce was recorded before its request was even decoded."""
+
+    def test_r5c_17_a_flooding_peer_fills_only_its_share_and_another_peer_is_still_served(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            flooder = NodeIdentity(Path(tmp) / "flooder")
+            mesh.peers.add(
+                PeerRecord(
+                    node_id=flooder.node_id,
+                    pubkey_b64=flooder.pubkey_b64,
+                    grants=[CapabilityGrant(capability="tool:*")],
+                )
+            )
+            with patch.object(delegation, "_NONCE_CACHE_MAX_PER_SENDER", 2, create=True):
+                manager = mesh.manager(timestamp_window=30)
+            manager._nonce_cache._max = 3
+            manager._started_at = 4000
+            with patch.object(delegation.time, "time", return_value=5000):
+                for stamp in (5000, 5001):
+                    flood = _signed(flooder, mesh.payload, recipient=mesh.server.node_id, timestamp=stamp)
+                    self.assertEqual(asyncio.run(manager.receive_inbound(flood)).status, "ok")
+                third = _signed(flooder, mesh.payload, recipient=mesh.server.node_id, timestamp=5002)
+                with self.assertRaises(MeshReplayCacheFull):
+                    asyncio.run(manager.receive_inbound(third))
+
+                self.assertEqual(asyncio.run(manager.receive_inbound(mesh.envelope(5003))).status, "ok")
+
+            self.assertEqual(mesh.runs, 3)
+
+    def test_r5c_17_an_envelope_whose_request_does_not_decode_records_no_nonce(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            manager._started_at = 4000
+            garbled = _signed(mesh.legit, {"arguments": {}}, recipient=mesh.server.node_id, timestamp=5000)
+            with patch.object(delegation.time, "time", return_value=5000):
+                with self.assertRaisesRegex(DelegationRejected, "Malformed DelegationRequest"):
+                    asyncio.run(manager.receive_inbound(garbled))
+
+            self.assertNotIn(garbled.nonce, manager._nonce_cache._seen)
+            self.assertEqual(mesh.runs, 0)
 
 
 class ReplyReplayTests(unittest.TestCase):
