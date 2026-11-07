@@ -106,6 +106,11 @@ All notable changes to auto-browser are documented here.
   reports a dangling symlink at a session's artifact, auth or upload path as not found and leaves it, and the check
   after it follows links, so the rollback said nothing about the link it left. It is now logged as not removed, as a
   link to an existing directory already was; the rollback removes neither, and never goes through one.
+- **A converging harness run no longer holds up the controller while retention removes an old skill candidate.** A
+  converged run built and placed its candidate on the event loop, and placing it waits for the staging lock, which
+  the `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal
+  (milliseconds for one candidate's files). The candidate is now built, signed and placed in a worker thread; a run
+  cancelled meanwhile waits for that work, and its record names the candidate it staged.
 
 ## [1.16.0] — 2026-11-06
 

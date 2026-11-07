@@ -292,6 +292,79 @@ class StagingFailureTests(_Base):
         self.assertEqual([item["skill_id"] for item in service.list_candidates()], [record.candidate.skill_id])
 
 
+# How long the gated prune holds the staging lock unless the test lets it go first: a loop stuck behind the lock
+# gets it back after this, so a regression fails instead of hanging.
+PRUNE_HOLD_SECONDS = 2.0
+
+
+class StagingLockTests(_Base):
+    """R5C-12: placing a candidate takes the staging lock, which retention's prune holds (in a worker thread) from a
+    candidate's age check through its removal. Staged on the event loop, a run that met a prune stalled the loop."""
+
+    def _gated_prune(self, service: HarnessService) -> tuple[threading.Event, threading.Event]:
+        """A prune holding the staging lock in its own thread: (the event that lets it go, the one set once it has)."""
+        held, release, released = threading.Event(), threading.Event(), threading.Event()
+
+        def prune() -> None:
+            with service.store.staging_lock:
+                held.set()
+                release.wait(PRUNE_HOLD_SECONDS)
+            released.set()
+
+        thread = threading.Thread(target=prune, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        return release, released
+
+    @staticmethod
+    def _watch_place(service: HarnessService) -> threading.Event:
+        """Set once the inducer starts placing a candidate (it then waits for the staging lock)."""
+        entered = threading.Event()
+        place = service.inducer.place
+
+        def watched(build_dir: Path, target_dir: Path) -> None:
+            entered.set()
+            place(build_dir, target_dir)
+
+        service.inducer.place = watched  # type: ignore[method-assign]
+        return entered
+
+    async def test_r5c_12_the_event_loop_runs_while_a_prune_holds_the_staging_lock(self) -> None:
+        service = HarnessService(self.root)
+        release, released = self._gated_prune(service)
+        entered = self._watch_place(service)
+        run = asyncio.create_task(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+
+        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+        self.assertFalse(released.is_set(), "the event loop waited for the prune's staging lock")
+        release.set()
+        record = await asyncio.wait_for(run, 10)
+
+        self.assertEqual(record.status, "converged")
+        self.assertTrue(Path(record.candidate.files["candidate.json"]).is_file())
+
+    async def test_r5c_12_a_cancel_while_the_candidate_is_placed_waits_for_it_and_records_it(self) -> None:
+        # The worker thread cannot be stopped: the cancel waits for it, so the run names the candidate it staged.
+        service = HarnessService(self.root)
+        release, _ = self._gated_prune(service)
+        entered = self._watch_place(service)
+        run = asyncio.create_task(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+
+        run.cancel()
+        await asyncio.sleep(0.05)
+        self.assertFalse(run.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 10)
+
+        (stored,) = service.store.list()
+        self.assertEqual(stored.status, "converged")
+        self.assertTrue(Path(stored.candidate.files["candidate.json"]).is_file())
+
+
 class TraceBindingTests(_Base):
     def _edit_observation(self, record) -> None:
         path = Path(record.attempts[0].trace_path)

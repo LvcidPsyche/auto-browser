@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
+from ..utils import run_to_completion
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -626,32 +627,46 @@ class HarnessService:
                 break
 
         if record.status == "converged" and latest_trace is not None and results:
-            try:
-                record.candidate = self.inducer.induce(
-                    contract=contract,
-                    trace=latest_trace,
-                    verification=results[-1],
-                    attempts=len(record.attempts),
-                    model_tiers=self.model_tiers,
-                    owner=record.owner,
-                )
-            except Exception as exc:
-                # The inducer cleans up after itself; the run must not stay "converged" with no candidate.
-                logger.exception("harness run %s: staging the skill candidate failed", run_id)
-                record.status = "failed"
-                record.decision = ConvergenceDecision(
-                    status="failed",
-                    converged=False,
-                    should_continue=False,
-                    reason=f"staging the skill candidate failed: {type(exc).__name__}",
-                    successful_attempts=record.decision.successful_attempts if record.decision else 0,
-                    total_attempts=len(record.attempts),
-                )
-                record.notes.append(f"Skill candidate staging failed: {type(exc).__name__}")
-                self.store.save(record)
-                return
-            record.notes.append("Staged skill candidate emitted; promotion requires review.")
+            # Run to its end: the candidate is staged in a worker thread, which a cancel cannot stop, so a cancel waits
+            # for it, and the record names what it staged, before the cancel goes on.
+            await run_to_completion(self._stage_candidate(record, contract, latest_trace, results[-1]))
+
+    async def _stage_candidate(
+        self, record: HarnessRunRecord, contract: TaskContract, trace: TraceEnvelope, verification: VerificationResult
+    ) -> None:
+        """Stage a converged run's skill candidate and record it.
+
+        In a worker thread (R5C-12): placing the candidate takes the staging lock, which retention's prune holds in a
+        thread from a candidate's age check through its removal, and waiting for it on the event loop stalled every
+        task; the candidate's files are written and signed there too.
+        """
+        try:
+            record.candidate = await asyncio.to_thread(
+                self.inducer.induce,
+                contract=contract,
+                trace=trace,
+                verification=verification,
+                attempts=len(record.attempts),
+                model_tiers=self.model_tiers,
+                owner=record.owner,
+            )
+        except Exception as exc:
+            # The inducer cleans up after itself; the run must not stay "converged" with no candidate.
+            logger.exception("harness run %s: staging the skill candidate failed", record.id)
+            record.status = "failed"
+            record.decision = ConvergenceDecision(
+                status="failed",
+                converged=False,
+                should_continue=False,
+                reason=f"staging the skill candidate failed: {type(exc).__name__}",
+                successful_attempts=record.decision.successful_attempts if record.decision else 0,
+                total_attempts=len(record.attempts),
+            )
+            record.notes.append(f"Skill candidate staging failed: {type(exc).__name__}")
             self.store.save(record)
+            return
+        record.notes.append("Staged skill candidate emitted; promotion requires review.")
+        self.store.save(record)
 
     def _close_unfinished(self, record: HarnessRunRecord, error: BaseException) -> None:
         if record.status != "running":
