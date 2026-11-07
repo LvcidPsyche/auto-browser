@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ...audit import get_current_operator
-from ...models import SessionRecord, WitnessRemoteState
+from ...models import BrowserActionDecision, SessionRecord, WitnessRemoteState
 from ...utils import spawn_background_task, utc_now
 from ...witness import (
     WitnessActionContext,
@@ -160,10 +160,12 @@ class BrowserWitnessService:
         verification: dict[str, Any] | None = None,
         approval: WitnessApproval | None = None,
         metadata: dict[str, Any] | None = None,
+        approved_action: BrowserActionDecision | None = None,
     ) -> None:
+        """Record a receipt; ``approved_action`` is the action an approval receipt's approval is for (_session_policy)."""
         if not self.manager.settings.witness_enabled:
             return
-        policy = outcome or self._session_policy(session)
+        policy = outcome or self._session_policy(session, approved_action=approved_action)
         engine = self.manager.witness_policy
         payload = {
             "profile": session.protection_mode,  # type: ignore[arg-type]
@@ -353,11 +355,30 @@ class BrowserWitnessService:
         if self._saving:  # before the session store shuts down
             await asyncio.wait(set(self._saving), timeout=timeout)
 
-    def _session_policy(self, session: "BrowserSession") -> WitnessPolicyOutcome:
-        """The policy of a receipt recorded with none (an approval, a takeover): the session's evidence mode, which a
-        confidential profile restricts, and no concerns (those are the session receipt's). It used to be standard
-        always, so a confidential session's approval receipts kept the reason its actions' receipts withhold."""
-        mode = self.manager.witness_policy.evaluate_session(self.session_context(session)).evidence_mode
+    def _session_policy(
+        self, session: "BrowserSession", *, approved_action: BrowserActionDecision | None = None
+    ) -> WitnessPolicyOutcome:
+        """The policy of a receipt recorded with none (an approval, a takeover), with no concerns (those are the
+        session's and the action's own receipts'): the session's evidence mode, which a confidential profile
+        restricts, or for an approval's receipts the mode of the action it approves, as the policy engine evaluates
+        that action. It used to be standard always, and then the session's mode alone, so the approval receipts of a
+        sensitive or high-risk action in a normal session kept the reason (which previews the call's arguments) that
+        the action's own receipt withholds."""
+        engine = self.manager.witness_policy
+        context = self.session_context(session)
+        if approved_action is None:
+            mode = engine.evaluate_session(context).evidence_mode
+        else:
+            # As execute_decision gives the action its witness context when it runs.
+            action = self.build_action_context(
+                action_name=approved_action.action,
+                target={},
+                witness_context={
+                    "risk_category": approved_action.risk_category,
+                    "sensitive_input": approved_action.sensitive,
+                },
+            )
+            mode = engine.evaluate_action(session=context, action=action).evidence_mode
         return WitnessPolicyOutcome(profile=session.protection_mode, evidence_mode=mode)  # type: ignore[arg-type]
 
     async def record_session_receipt(

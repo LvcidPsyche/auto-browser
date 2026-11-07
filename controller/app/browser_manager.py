@@ -1177,6 +1177,7 @@ class BrowserManager:
         verification: dict[str, Any] | None = None,
         approval: WitnessApproval | None = None,
         metadata: dict[str, Any] | None = None,
+        approved_action: BrowserActionDecision | None = None,
     ) -> None:
         await self.witness_bridge.record_receipt(
             session,
@@ -1192,6 +1193,7 @@ class BrowserManager:
             verification=verification,
             approval=approval,
             metadata=metadata,
+            approved_action=approved_action,
         )
 
     def _witness_action_class(self, action_name: str, *, risk_category: str | None = None) -> str:

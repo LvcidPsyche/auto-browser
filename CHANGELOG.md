@@ -13,10 +13,12 @@ All notable changes to auto-browser are documented here.
   the target and the metadata, those keys, every key whose name holds a word the run trace redacts by
   (`authorization`, `cookie`, `api-key`, `api_key`, `token`, `password`, `secret`), and the free text an agent or a
   tool call wrote: a `reason` key, and the approval's reason, which for a governed tool call previews its arguments.
-  A receipt recorded without a policy outcome (an approval request or decision, a human takeover) now takes its
-  session's evidence mode, so a confidential session's approval receipts are restricted; they were standard and kept
-  the reason in full, in the approval and again in the metadata. The approval store still keeps an approval's reason,
-  and the audit log a takeover's. A hosted Witness service and an exported bundle receive the receipt as recorded.
+  Receipts recorded without a policy outcome were standard, and kept the reason in full, in the approval and again in
+  the metadata: an approval's receipts (its request, decision and execution) now take the evidence mode of the action
+  it approves, so those of an action marked sensitive, a high-risk one or one that moves auth material are restricted
+  as that action's own receipt is, in a normal session too; and every approval receipt of a confidential session,
+  like a human takeover's receipt there, is restricted. The approval store still keeps an approval's reason, and the
+  audit log a takeover's. A hosted Witness service and an exported bundle receive the receipt as recorded.
 
 ### Fixed
 

@@ -247,6 +247,7 @@ class BrowserApprovalService:
             ),
             target={"kind": approval.kind, "action": approval.action.action, **approval_provenance(approval)},
             metadata={"comment": comment, "decided_via": decided_via},
+            approved_action=approval.action,
         )
 
     async def execute(self, approval_id: str) -> dict[str, Any]:
@@ -334,6 +335,7 @@ class BrowserApprovalService:
                     reason=approval.reason,
                 ),
                 target={"kind": approval.kind, "action": decision.action, **approval_provenance(approval)},
+                approved_action=approval.action,
             )
         return {
             "approval": latest.model_dump(),

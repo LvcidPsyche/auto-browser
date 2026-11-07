@@ -656,6 +656,7 @@ class BrowserActionService:
                     **approval_provenance(approval),
                 },
                 metadata={"reason": approval.reason},
+                approved_action=decision,
             )
             _events.emit_approval(
                 session_id,

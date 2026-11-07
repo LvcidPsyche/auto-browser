@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.approvals import ApprovalRequiredError
+from app.audit import reset_current_operator, set_current_operator
 from app.browser.services.witness import BrowserWitnessService
-from app.models import WitnessRemoteState
+from app.browser_manager import BrowserManager, BrowserSession
+from app.config import Settings
+from app.models import BrowserActionDecision, WitnessRemoteState
+from app.utils import UTC
 from app.witness import (
     WitnessActionContext,
     WitnessApproval,
@@ -213,21 +220,24 @@ def _browser_session(profile: str) -> SimpleNamespace:
 
 
 REASON = 'Approve browser.eval_js with {"expression": "fill(\'4111 1111 1111 1111\')"}'
+WRITE_CLICK = BrowserActionDecision(action="click", reason=REASON, selector="#pay", risk_category="write")
 
 
-async def _record_approval_request(tmp_path: Path, profile: str):
+async def _record_approval_request(tmp_path: Path, profile: str, decision: BrowserActionDecision = WRITE_CLICK):
     service, manager = _recording_service(tmp_path)
-    # As actions.py records an approval request: no policy outcome, the reason in the approval and the metadata.
+    # As actions.py records an approval request: no policy outcome, the reason in the approval and the metadata, and
+    # the action the approval is for.
     await service.record_receipt(
         _browser_session(profile),
         event_type="approval",
         status="pending",
         action="approval_requested",
         action_class="control",
-        risk_category="payment",
+        risk_category=decision.risk_category,
         approval=WitnessApproval(required=True, approval_id="a1", status="pending", reason=REASON),
         target={"kind": "write", "action": "click", "selector": "#pay", "element_id": None, "origin": "action"},
         metadata={"reason": REASON},
+        approved_action=decision,
     )
     receipts = await manager.witness.list("s1")
     assert len(receipts) == 1
@@ -256,7 +266,117 @@ async def test_a_normal_sessions_approval_request_receipt_keeps_the_reason(tmp_p
     assert receipt.evidence_mode == "standard"
     assert receipt.approval.reason == REASON
     assert receipt.metadata == {"reason": REASON}
-    assert receipt.concerns == []  # the session's mode only: its concerns are the session receipt's
+    assert receipt.concerns == []  # the evidence mode only: the concerns are the session's and the action's receipts'
+
+
+# Approvals for actions whose own receipts are restricted in a normal session: high-risk, sensitive, an upload, and
+# a governed tool call that moves auth material (its stand-in carries the tool's kind).
+RESTRICTED_ACTIONS = [
+    pytest.param(
+        BrowserActionDecision(action="click", reason=REASON, selector="#pay", risk_category="payment"), id="payment"
+    ),
+    pytest.param(
+        BrowserActionDecision(action="type", reason=REASON, selector="#card", text="4111", sensitive=True),
+        id="sensitive-type",
+    ),
+    pytest.param(
+        BrowserActionDecision(action="upload", reason=REASON, selector="#file", file_path="payslip.pdf"), id="upload"
+    ),
+    pytest.param(
+        BrowserActionDecision(
+            action="request_human_takeover",
+            reason=REASON,
+            risk_category="account_change",
+            text="browser.save_auth_profile sha256:0",
+        ),
+        id="auth-tool-call",
+    ),
+]
+
+
+@pytest.mark.parametrize("decision", RESTRICTED_ACTIONS)
+async def test_a_normal_sessions_approval_request_for_a_restricted_action_withholds_the_reason(
+    tmp_path: Path, decision: BrowserActionDecision
+) -> None:
+    receipt = await _record_approval_request(tmp_path, "normal", decision)
+
+    assert receipt.evidence_mode == "restricted"
+    assert receipt.approval.reason == "[REDACTED]"
+    assert receipt.metadata == {"reason": "[REDACTED]"}
+    assert receipt.concerns == []
+
+
+async def _manager_with_session(tmp_path: Path) -> tuple[BrowserManager, BrowserSession]:
+    """A real manager (approvals and witness started) holding a normal session whose click is a stub."""
+    settings = Settings(
+        _env_file=None,
+        ARTIFACT_ROOT=str(tmp_path / "artifacts"),
+        AUTH_ROOT=str(tmp_path / "auth"),
+        UPLOAD_ROOT=str(tmp_path / "uploads"),
+        APPROVAL_ROOT=str(tmp_path / "approvals"),
+        AUDIT_ROOT=str(tmp_path / "audit"),
+        WITNESS_ROOT=str(tmp_path / "witness"),
+        SESSION_STORE_ROOT=str(tmp_path / "sessions"),
+    )
+    manager = BrowserManager(settings)
+    await manager.approvals.startup()
+    await manager.witness.startup()
+
+    class _Page:
+        url = "https://shop.example/checkout"
+
+        async def title(self) -> str:
+            return "Checkout"
+
+    artifact_dir = tmp_path / "artifacts" / "s1"
+    artifact_dir.mkdir(parents=True)
+    session = BrowserSession(
+        id="s1",
+        name="s1",
+        created_at=datetime.now(UTC),
+        context=object(),  # type: ignore[arg-type]
+        page=_Page(),  # type: ignore[arg-type]
+        artifact_dir=artifact_dir,
+        auth_dir=tmp_path / "auth" / "s1",
+        upload_dir=tmp_path / "uploads" / "s1",
+        takeover_url="http://127.0.0.1:6080/vnc.html",
+        trace_path=artifact_dir / "trace.zip",
+        protection_mode="normal",
+    )
+    session.auth_dir.mkdir(parents=True)
+    session.upload_dir.mkdir(parents=True)
+    manager.sessions[session.id] = session
+    manager.click = AsyncMock(return_value={"action": "click"})  # type: ignore[method-assign]
+    return manager, session
+
+
+async def test_a_normal_sessions_approval_receipts_take_the_restricted_mode_of_the_action_they_approve(
+    tmp_path: Path,
+) -> None:
+    # GLM review of c1 (H1): an approval's receipts took the session's mode only, so in a normal session the request,
+    # the decision and the execution of a payment click's approval kept the reason (which previews the call) that the
+    # click's own receipt withholds as a high-risk action's.
+    manager, session = await _manager_with_session(tmp_path)
+    decision = BrowserActionDecision(action="click", reason=REASON, element_id="pay", risk_category="payment")
+    token = set_current_operator("alice", name="Alice")
+    try:
+        with pytest.raises(ApprovalRequiredError):
+            await manager.execute_decision(session.id, decision)
+        approval_id = (await manager.approvals.list(session_id=session.id))[0].id
+        await manager.approve(approval_id)
+        await manager.execute_approval(approval_id)
+    finally:
+        reset_current_operator(token)
+
+    receipts = {item.status: item for item in await manager.witness.list(session.id) if item.event_type == "approval"}
+    assert set(receipts) == {"pending", "approved", "executed"}
+    for receipt in receipts.values():
+        assert receipt.evidence_mode == "restricted"
+        assert receipt.approval.reason == "[REDACTED]"
+        assert receipt.approval.approval_id == approval_id
+        assert receipt.concerns == []  # the action's concerns are its own receipt's
+    assert receipts["pending"].metadata == {"reason": "[REDACTED]"}
+    assert receipts["pending"].target["element_id"] == "pay"
 
 
 async def test_a_restricted_receipt_redacts_its_metadata_as_its_target(tmp_path: Path) -> None:
