@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -749,9 +749,15 @@ class WitnessRecorder:
         hash, the public key, and the algorithm, so a recipient with
         `scripts/verify_witness_bundle.py` — which imports nothing from this
         project — can check the chain and its signatures independently.
+
+        The receipts and the chain check come from one read of the chain: read
+        twice, an append that landed in between gave a bundle whose head hash
+        and verdict described a receipt its list did not hold.
         """
-        receipts = await asyncio.to_thread(self._read_all_sync, self._path(scope))
-        chain = await self.verify(scope)
+        path = self._path(scope)
+        receipts, chain = await asyncio.to_thread(
+            self._locked_read, path, lambda data: (self._receipts_of(path, data), self._verify_data(scope, path, data))
+        )
         return {
             "format": "auto-browser-witness-bundle",
             "version": 1,
@@ -781,17 +787,34 @@ class WitnessRecorder:
             "receipts": [r.model_dump(mode="json") for r in receipts],
         }
 
-    @staticmethod
-    def _read_all_sync(path: Path) -> ReceiptList:
+    def _locked_read(self, path: Path, use: Callable[[bytes], Any]) -> Any:
+        """``use`` applied to the chain's bytes, read once and used under the chain's thread and file locks.
+
+        No append lands in between, nor between the chain and its anchor, which an
+        append writes under the same locks. Read through the locked handle, never
+        a second one: a Windows byte-range lock excludes every other handle, this
+        process's own included. A chain that does not exist is read as empty, and
+        is not created.
+        """
         if not path.exists():
-            return ReceiptList()
-        lines, torn_tail = _chain_lines(path.read_bytes())
+            return use(b"")
+        with self._thread_locks.hold(path), open(path, "rb") as handle, exclusive_lock(handle):
+            handle.seek(0)
+            return use(handle.read())
+
+    @staticmethod
+    def _receipts_of(path: Path, data: bytes) -> ReceiptList:
+        lines, torn_tail = _chain_lines(data)
         receipts = _parse_receipts(lines, path)
         receipts.torn_tail = torn_tail
         return receipts
 
     @classmethod
     def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
+        return cls._verify_data(scope, path, path.read_bytes() if path.exists() else b"")
+
+    @classmethod
+    def _verify_data(cls, scope: str, path: Path, data: bytes) -> dict[str, Any]:
         result: dict[str, Any] = {
             "scope": scope,
             "valid": True,
@@ -803,7 +826,7 @@ class WitnessRecorder:
             "first_invalid_receipt_id": None,
             "reason": None,
         }
-        lines = chain_records(path.read_bytes()) if path.exists() else []
+        lines = chain_records(data)
 
         previous: str | None = None
         index = -1

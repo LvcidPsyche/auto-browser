@@ -32,6 +32,11 @@ All notable changes to auto-browser are documented here.
   the action. A close waits up to a second for its session's receipts, so the closed record shows how they went, and
   shutdown up to three seconds for the queue; what is left is logged. The hosted Witness preflight before a
   confidential session's actions is unchanged.
+- **A witness bundle's receipts and its chain check now come from one read of the chain.** The export
+  (`GET /sessions/{session_id}/witness/bundle`, `browser.export_witness_bundle`) read the receipts, then read the
+  chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described
+  a receipt its `receipts` did not hold, which `scripts/verify_witness_bundle.py` failed as "receipts missing". The
+  export now reads the chain once, under the lock an append takes, and an append to that chain waits for it.
 
 ## [1.16.0] — 2026-11-06
 
