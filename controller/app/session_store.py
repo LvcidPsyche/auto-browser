@@ -227,12 +227,20 @@ class DurableSessionStore:
             return await self.file_store.list()
         # Same reasoning as get(): the file records are the durable copy, so an
         # empty or unreachable Redis must not hide closed sessions or turn the
-        # listing into an error. Redis records win for an id both stores hold.
-        records = {record.id: record for record in await self.file_store.list()}
+        # listing into an error. Redis records win for an id both stores hold,
+        # except over a closed file copy (get()).
+        file_records = {record.id: record for record in await self.file_store.list()}
+        records = dict(file_records)
         try:
-            records.update({record.id: record for record in await self._primary.list()})
+            redis_records = await self._primary.list()
         except Exception as exc:
             logger.warning("redis session listing failed, using file records: %s", exc)
+            redis_records = []
+        for record in redis_records:
+            kept = file_records.get(record.id)
+            if kept is not None and kept.status == "closed" and record.status != "closed":
+                continue
+            records[record.id] = record
         return sorted(records.values(), key=lambda item: (item.created_at, item.id), reverse=True)
 
     async def get(self, session_id: str) -> SessionRecord:
@@ -243,12 +251,28 @@ class DurableSessionStore:
         # connection must not make a closed session look unowned to another
         # operator's ownership check.
         try:
-            return await self._primary.get(session_id)
+            record = await self._primary.get(session_id)
         except KeyError:
-            pass
+            return await self.file_store.get(session_id)
         except Exception as exc:
             logger.warning("redis session read failed for %s, using file record: %s", session_id, exc)
-        return await self.file_store.get(session_id)
+            return await self.file_store.get(session_id)
+        if record.status != "closed":
+            # A session never reopens: a close whose Redis write failed, with Redis down for the drop of its copy too,
+            # left the record from before the close in Redis (R5C-5).
+            return await self._closed_file_copy(session_id) or record
+        return record
+
+    async def _closed_file_copy(self, session_id: str) -> SessionRecord | None:
+        """The file copy when it says closed; None when it does not, or there is no readable one."""
+        try:
+            record = await self.file_store.get(session_id)
+        except (KeyError, ValueError):
+            return None
+        except OSError as exc:
+            logger.warning("could not read the file copy of session %s to check for a close: %s", session_id, exc)
+            return None
+        return record if record.status == "closed" else None
 
     async def upsert(self, record: SessionRecord) -> None:
         # One write at a time per record id, from the closed check through both backends, so a check cannot go stale
@@ -383,5 +407,11 @@ class DurableSessionStore:
 
     async def mark_all_active_interrupted(self) -> None:
         await self.file_store.mark_all_active_interrupted()
-        if self.redis_store is not None and self._primary is self.redis_store:
-            await self.redis_store.mark_all_active_interrupted()
+        if self.redis_store is None or self._primary is not self.redis_store:
+            return
+        for record in await self.redis_store.list():
+            if record.status != "active":
+                continue
+            # A close that reached only the file copy (get()) gives Redis the closed record, not an interrupted one.
+            closed = await self._closed_file_copy(record.id)
+            await self.redis_store.upsert(closed or record.model_copy(update={"status": "interrupted", "live": False}))

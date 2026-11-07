@@ -21,6 +21,7 @@ class _MemoryPipeline:
     def __init__(self, client: _MemoryRedis) -> None:
         self.client = client
         self.writes: list[tuple[str, str]] = []
+        self.members: list[str] = []
 
     async def __aenter__(self) -> _MemoryPipeline:
         return self
@@ -31,22 +32,24 @@ class _MemoryPipeline:
     async def set(self, key: str, value: str) -> None:
         self.writes.append((key, value))
 
-    async def sadd(self, *_args: object) -> None:
-        return None
+    async def sadd(self, _key: str, *members: str) -> None:
+        self.members.extend(members)
 
     async def execute(self) -> None:
         failure = self.client.fail or self.client.write_fail
         if failure is not None:
             raise failure
         self.client.values.update(self.writes)
+        self.client.index.update(self.members)
 
 
 class _MemoryRedis:
-    """An in-memory stand-in for the redis client RedisSessionStore uses: get, delete, and a pipeline's set and
-    execute. `fail` fails every call; `write_fail` only the pipeline's writes."""
+    """An in-memory stand-in for the redis client RedisSessionStore uses: get, mget, smembers (its one index), delete,
+    and a pipeline's set, sadd and execute. `fail` fails every call; `write_fail` only the pipeline's writes."""
 
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.index: set[str] = set()
         self.fail: Exception | None = None
         self.write_fail: Exception | None = None
 
@@ -54,6 +57,16 @@ class _MemoryRedis:
         if self.fail is not None:
             raise self.fail
         return self.values.get(key)
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        if self.fail is not None:
+            raise self.fail
+        return [self.values.get(key) for key in keys]
+
+    async def smembers(self, _key: str) -> set[str]:
+        if self.fail is not None:
+            raise self.fail
+        return set(self.index)
 
     async def delete(self, *keys: str) -> int:
         if self.fail is not None:
@@ -363,7 +376,7 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         store, client = await self._store_with_redis()
         await store.upsert(_record("active", live=True))
         await store.file_store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
-        self.assertEqual((await store.get("s1")).status, "active")
+        self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "active")
 
         await store.upsert(_record("active", live=True))
 
@@ -382,6 +395,49 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         client.write_fail = None
         self.assertNotIn("t:record:s1", client.values)  # so reads fall back to the durable file copy
         self.assertEqual((await store.get("s1")).status, "closed")
+
+    async def test_r5c_5_a_dropped_redis_copy_leaves_the_session_listed_from_its_file_copy(self) -> None:
+        # GLM review, not reproduced: the drop leaves the id in Redis's index, which Redis's own listing skips, and
+        # the store's listing still holds the session, from the file copy it merges first.
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        client.write_fail = ConnectionError("redis write lost")
+        with self.assertRaises(ConnectionError):
+            await store.upsert(_record("closed", live=False))
+        client.write_fail = None
+
+        self.assertIn("s1", client.index)
+        self.assertEqual([(record.id, record.status) for record in await store.list()], [("s1", "closed")])
+
+    async def _close_lost_by_an_unreachable_redis(self) -> tuple[DurableSessionStore, _MemoryRedis]:
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        client.fail = ConnectionError("redis down")  # the close's write and the drop of the old copy both fail
+        with self.assertRaises(ConnectionError):
+            await store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
+        client.fail = None
+        self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "active")
+        return store, client
+
+    async def test_r5c_5_a_close_redis_never_got_reads_closed_once_redis_is_back(self) -> None:
+        # Codex review: with Redis down for the close's write and for the drop, it kept the active record, which reads
+        # and listings preferred, and only a later write the closed guard skipped repaired it. A session never
+        # reopens: a closed file copy now wins over a Redis copy that is not closed.
+        store, _ = await self._close_lost_by_an_unreachable_redis()
+
+        self.assertEqual((await store.get("s1")).close_reason, "operator")
+        self.assertEqual([(record.id, record.status) for record in await store.list()], [("s1", "closed")])
+
+    async def test_r5c_5_a_restart_gives_redis_the_close_it_never_got_instead_of_interrupting_it(self) -> None:
+        store, client = await self._close_lost_by_an_unreachable_redis()
+        await store.upsert(_record("active", live=True).model_copy(update={"id": "s2"}))
+
+        await store.mark_all_active_interrupted()  # the controller's startup
+
+        stored = SessionRecord.model_validate_json(client.values["t:record:s1"])
+        self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
+        self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s2"]).status, "interrupted")
+        self.assertEqual((await store.file_store.get("s2")).status, "interrupted")
 
     async def test_r5c_5_a_failed_active_write_keeps_the_redis_copy(self) -> None:
         store, client = await self._store_with_redis()
