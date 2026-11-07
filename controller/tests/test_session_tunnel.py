@@ -741,6 +741,69 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(tunnel.info_path.exists())
             self.assertFalse(tunnel.log_path.exists())
 
+    async def test_a_second_cancel_while_a_provision_gives_up_still_removes_its_tunnels_files(self) -> None:
+        # Found while fixing R5C-18: a second cancel during the wait after the kill ended _abort_starting before it
+        # gave up the files, so autossh's log stayed open, and it and the metadata (which names the bastion, its user
+        # and the key path) stayed behind. A second cancel still ends that wait, and not the process's own.
+        waiting, exit_process = asyncio.Event(), asyncio.Event()
+        own_wait_cancelled: list[bool] = []
+
+        class StuckProcess(FakeProcess):
+            async def wait(self) -> int:
+                waiting.set()
+                try:
+                    await exit_process.wait()
+                except asyncio.CancelledError:
+                    own_wait_cancelled.append(True)
+                    raise
+                return 0
+
+            def kill(self) -> None:
+                self.killed = True
+
+        real_sleep = asyncio.sleep
+        in_grace = asyncio.Event()
+
+        async def gated_sleep(delay, *args):
+            if delay != _GRACE:
+                return await real_sleep(delay, *args)
+            in_grace.set()
+            await asyncio.Event().wait()
+
+        async def fake_exec(*args, **kwargs):
+            return StuckProcess()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with (
+                patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
+                patch("app.session_tunnel.asyncio.sleep", new=gated_sleep),
+                patch("app.session_tunnel._PROCESS_EXIT_WAIT_SECONDS", 30),
+            ):
+                provision = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                await asyncio.wait_for(in_grace.wait(), timeout=10)
+                tunnel = broker._tunnels["session-1"]
+                handle = tunnel.stderr_handle
+                provision.cancel()  # the provision gives up, kills autossh and waits for it
+                await asyncio.wait_for(waiting.wait(), timeout=10)
+                provision.cancel()
+                done, _ = await asyncio.wait({provision}, timeout=5)
+                exit_process.set()
+                await real_sleep(0)  # the process's own wait finishes, uncancelled
+
+            try:
+                self.assertIn(provision, done, "a second cancel did not end the wait after the kill")
+                self.assertTrue(provision.cancelled())
+                self.assertEqual(own_wait_cancelled, [])
+                self.assertTrue(handle.closed)
+                self.assertIsNone(tunnel.stderr_handle)
+                self.assertEqual(tunnel.error, "provision_cancelled")
+                self.assertFalse(tunnel.info_path.exists())
+                self.assertFalse(tunnel.log_path.exists())
+                self.assertEqual((broker._tunnels, broker._allocated_ports), ({}, set()))
+            finally:
+                handle.close()  # so a failure here is not hidden behind the temporary directory's own on Windows
+
     async def _a_registered_tunnel(self, broker, process):
         tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
         tunnel.process = process
