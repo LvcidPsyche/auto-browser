@@ -271,6 +271,16 @@ class AgentEvalProxyTests(unittest.TestCase):
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
         self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
+    def test_w10_14_a_host_less_base_url_fails_with_urllibs_own_error(self) -> None:
+        # The bridges refuse a host-less URL before _goes_direct since W15-3, so only agent_eval still reaches its
+        # request.host-None branch: urllib's own error, not a TypeError from "//" + None, with nothing sent.
+        result = self._post_raw("localhost:8000")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown url type", result.stderr)
+        self.assertNotIn("TypeError", result.stderr)
+        self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
+
     def test_w15_8_an_empty_host_is_refused(self) -> None:
         # Codex R01: no reading finds a local host in an empty one, so the Authorization header went to the proxy.
         for base_url in ("http://:8000", "http://user@:8000"):
