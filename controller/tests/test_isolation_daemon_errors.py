@@ -52,10 +52,42 @@ class DaemonErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_unreachable_daemon_fails_the_release_and_keeps_the_profile(self) -> None:
         self.daemon_down(self.client.containers)
 
-        with self.assertRaises(requests.exceptions.ConnectionError):
+        # R5C-10: the designed failure, with the daemon's error as its cause, where the lookup's error escaped bare
+        # and the session network was not released at all.
+        with self.assertRaisesRegex(RuntimeError, "could not be looked up") as raised:
             await self.provisioner.release(self.runtime)
 
+        self.assertIsInstance(raised.exception.__cause__, requests.exceptions.ConnectionError)
         self.assertTrue(self.profile.exists(), "the daemon could not be asked, so nothing may be removed")
+        network = self.client.networks.by_name[self.runtime.network_name]
+        self.assertNotIn("controller-id", network.attrs["Containers"], "the controller stayed on the session network")
+
+    async def test_a_failed_removal_stays_the_failure_reported_when_the_network_release_fails_too(self) -> None:
+        container = self.client.containers.browser_containers[self.runtime.container_name]
+
+        def refuse(force: bool = False) -> None:
+            raise requests.exceptions.ConnectionError("Connection aborted while removing")
+
+        container.remove = refuse
+        self.daemon_down(self.client.networks)
+
+        with self.assertLogs("app.session_isolation", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "could not be removed") as raised:
+                await self.provisioner.release(self.runtime)
+
+        self.assertIn("Connection aborted while removing", str(raised.exception.__cause__))
+        self.assertIn("Error while fetching server API version", "\n".join(logs.output))  # the network's, logged
+        self.assertTrue(self.profile.exists())
+
+    async def test_a_failed_lookup_stays_the_failure_reported_when_the_network_release_fails_too(self) -> None:
+        self.daemon_down(self.client.containers)
+        self.daemon_down(self.client.networks)
+
+        with self.assertRaisesRegex(RuntimeError, "could not be looked up") as raised:
+            await self.provisioner.release(self.runtime)
+
+        self.assertIsInstance(raised.exception.__cause__, requests.exceptions.ConnectionError)
+        self.assertTrue(self.profile.exists())
 
     async def test_an_unreachable_daemon_fails_the_network_release_too(self) -> None:
         self.daemon_down(self.client.networks)

@@ -861,53 +861,68 @@ class DockerBrowserNodeProvisioner:
 
     def _release_sync(self, runtime: IsolatedBrowserRuntime) -> None:
         client = self._ensure_context()
-        container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(
-            client, runtime.container_name
-        )
-        not_found = (docker.errors.NotFound,) if docker is not None else ()
-        stop_error: Exception | None = None
-        if container is not None:
-            try:
-                container.stop(timeout=5)
-            except not_found:
-                container = None  # gone already
-            except Exception as exc:
-                if self.settings.isolated_browser_keep_containers:
-                    # Nothing removes a kept container, so it may still run: a partial teardown, not a release.
-                    logger.warning("Could not stop browser container %s: %s", runtime.container_name, exc)
-                    stop_error = exc
-                else:
-                    logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
-        stranded = None
-        removal_error: Exception | None = None
-        if not self.settings.isolated_browser_keep_containers:
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except not_found:
-                    pass  # gone already: nothing holds the profile
-                except Exception as exc:
-                    logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
-                    # It still holds an endpoint on the session network.
-                    stranded = container
-                    removal_error = exc
+        problem, cause, stranded = self._release_container(client, runtime)
         if runtime.network_owned:
-            self._release_session_network(client, runtime, stranded=stranded)
-        if removal_error is not None:
+            try:
+                self._release_session_network(client, runtime, stranded=stranded)
+            except Exception as exc:
+                if problem is None:
+                    raise
+                # The container's failure is the one reported (R5C-10); the network's is logged beside it.
+                logger.warning("Could not release session network %s: %s", runtime.network_name, exc)
+        if problem is not None:
             # The container may still run with the profile and downloads mounted: emptying them under it is not a
             # release. They stay, as the startup sweep leaves a container's that it could not remove.
             logger.warning(
-                "Keeping %s: browser container %s could not be removed",
+                "Keeping %s: browser container %s %s",
                 self._local_runtime_root(runtime.session_id),
                 runtime.container_name,
+                problem,
             )
-            raise RuntimeError(f"browser container {runtime.container_name} could not be removed") from removal_error
-        if stop_error is not None:
-            raise RuntimeError(f"browser container {runtime.container_name} could not be stopped") from stop_error
+            raise RuntimeError(f"browser container {runtime.container_name} {problem}") from cause
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
             self._remove_runtime_dirs(runtime.session_id, client=client)
+
+    def _release_container(self, client, runtime: IsolatedBrowserRuntime) -> tuple[str | None, Exception | None, Any]:
+        """Stop the session's browser container and, unless containers are kept, remove it.
+
+        (None, None, None) when it is gone, or stopped and kept. Otherwise what went wrong ("could not be looked
+        up", "could not be stopped", "could not be removed"), so the container may still run; the daemon's error; and
+        the container when it still holds an endpoint on the session network. Each failure is logged at WARNING with
+        the daemon's reason, and none raises, so the session network's release is still attempted.
+        """
+        name = runtime.container_name
+        try:
+            container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(client, name)
+        except Exception as exc:  # an unreachable daemon is not a gone container (NAV-16)
+            logger.warning("Could not look up browser container %s: %s", name, exc)
+            return "could not be looked up", exc, None
+        if container is None:
+            return None, None, None
+        not_found = (docker.errors.NotFound,) if docker is not None else ()
+        keep = self.settings.isolated_browser_keep_containers
+        try:
+            container.stop(timeout=5)
+        except not_found:
+            return None, None, None  # gone already
+        except Exception as exc:
+            if keep:
+                # Nothing removes a kept container, so it may still run: a partial teardown, not a release (R5C-4).
+                logger.warning("Could not stop browser container %s: %s", name, exc)
+                return "could not be stopped", exc, None
+            logger.debug("Could not stop browser container %s: %s", name, exc)  # the forced removal below stops it
+        if keep:
+            return None, None, None
+        try:
+            container.remove(force=True)
+        except not_found:
+            return None, None, None  # gone already: nothing holds the profile
+        except Exception as exc:
+            logger.warning("Could not remove browser container %s: %s", name, exc)
+            return "could not be removed", exc, container
+        return None, None, None
 
     def _release_session_network(self, client, runtime: IsolatedBrowserRuntime, *, stranded: Any = None) -> None:
         """Leave this session's network, and remove it unless containers are kept.

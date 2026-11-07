@@ -53,6 +53,12 @@ All notable changes to auto-browser are documented here.
   reported `teardown: complete` while the container could still be running. The failed stop is now a warning with
   the daemon's reason, and the close reports `teardown: partial` with `release isolated runtime` in its
   `failed_steps`.
+- **An isolated session's release now names the browser container's own failure when the Docker daemon fails
+  midway.** A container lookup that failed (an unreachable daemon) escaped as the daemon's bare error before the
+  session network was touched, and a failed removal followed by a failed network lookup was logged as the network's
+  error. The release now still leaves the session network (and removes it when it can), logs each of the daemon's
+  errors as a warning, and fails with `browser container <name> could not be looked up` (or `could not be removed`),
+  caused by the daemon's error; the session's profile and downloads stay, as before.
 
 ## [1.16.0] — 2026-11-06
 
