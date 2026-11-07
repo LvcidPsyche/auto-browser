@@ -44,7 +44,9 @@ All notable changes to auto-browser are documented here.
   (`GET /sessions/{session_id}/witness/bundle`, `browser.export_witness_bundle`) read the receipts, then read the
   chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described
   a receipt its `receipts` did not hold, which `scripts/verify_witness_bundle.py` failed as "receipts missing". The
-  export now reads the chain once, under the lock an append takes, and an append to that chain waits for it.
+  export now reads the chain once, under the lock an append takes, and an append to that chain waits for it. The
+  chain check (`GET /sessions/{session_id}/witness/verify`, `browser.verify_witness`) does the same: it walked the
+  hashes of one read and checked the signatures of another, so one verdict could describe two chains.
 - **A witness receipt listing now says when it skipped a torn tail, and the bundle verifier explains one.**
   `GET /sessions/{session_id}/witness` skipped a torn tail (bytes after the chain's last newline: an append cut short,
   never a receipt) without saying so, where a bundle says `torn_tail: true`; the listing now has a `torn_tail` field

@@ -677,17 +677,29 @@ class WitnessRecorder:
         `valid` passes only when the hash walk, the anchor and the signatures all
         do, so a client that reads one field cannot accept a chain whose
         signatures were stripped. `chain_valid` keeps the hash-walk verdict alone.
+
+        Both checks read one copy of the chain, as export_bundle's do: read twice,
+        an append in between gave a verdict over two chains.
         """
-        chain = await self.verify(scope)
-        signatures = await self.verify_signatures(scope)
+        path = self._path(scope)
+        key = self.signer.public_key_b64 if self.signer is not None else None
+        chain, signatures = await asyncio.to_thread(
+            self._locked_read,
+            path,
+            lambda data: (self._verify_data(scope, path, data), self._verify_signatures_data(scope, data, key)),
+        )
         result = {**chain, "chain_valid": chain["valid"], "signatures": signatures}
         if chain["valid"] and not signatures["valid"]:
             result["valid"] = False
             result["reason"] = f"signatures: {signatures['reason']}"
         return result
 
+    @classmethod
+    def _verify_signatures_sync(cls, scope: str, path: Path, public_key_b64: str | None) -> dict[str, Any]:
+        return cls._verify_signatures_data(scope, path.read_bytes() if path.exists() else b"", public_key_b64)
+
     @staticmethod
-    def _verify_signatures_sync(scope: str, path: Path, public_key_b64: str | None) -> dict[str, Any]:
+    def _verify_signatures_data(scope: str, data: bytes, public_key_b64: str | None) -> dict[str, Any]:
         from .witness_signing import verify_signature
 
         result: dict[str, Any] = {
@@ -705,10 +717,8 @@ class WitnessRecorder:
             result["valid"] = False
             result["reason"] = "no public key available to verify against"
             return result
-        if not path.exists():
-            return result
 
-        for index, line in enumerate(chain_records(path.read_bytes())):
+        for index, line in enumerate(chain_records(data)):
             try:
                 receipt = WitnessReceipt.model_validate_json(line)
             except ValueError:
