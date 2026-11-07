@@ -144,6 +144,41 @@ def test_a_provision_whose_event_loop_ends_first_is_released_by_its_thread(tmp_p
     assert not provisioner._local_runtime_root(SESSION).exists()
 
 
+def test_a_result_the_thread_handed_back_before_the_shutdown_is_released(tmp_path: Path) -> None:
+    # Codex review of the fix above: the thread returned its result before any cancel, and the shutdown (asyncio.run
+    # cancels every task left) cancelled the provision and the task awaiting the thread before that result reached
+    # either. The release awaited the cancelled task and never saw the result, so the container and network stayed.
+    provisioner, client = _provisioner(tmp_path)
+    held = _HeldProvision(provisioner)
+    handed_back = threading.Event()
+    hand_back = provisioner._provision_unless_abandoned
+    tasks: list[asyncio.Task] = []
+
+    def watched(*args):
+        try:
+            return hand_back(*args)
+        finally:
+            handed_back.set()
+
+    provisioner._provision_unless_abandoned = watched
+
+    async def end_while_the_result_is_on_its_way() -> None:
+        tasks.append(asyncio.create_task(provisioner.provision(SESSION)))
+        assert await asyncio.to_thread(held.entered.wait, WAIT_SECONDS)
+        held.go.set()
+        # The loop is held until the thread has returned: its result has not reached the loop when asyncio.run
+        # cancels the tasks left, as when a shutdown's cancels land first.
+        assert handed_back.wait(WAIT_SECONDS)
+
+    asyncio.run(end_while_the_result_is_on_its_way())
+
+    assert tasks[0].cancelled()
+    container = client.containers.browser_containers[provisioner._container_name(SESSION)]
+    assert container.removed, "the container the thread handed back was left running"
+    assert provisioner._session_network_name(container.name) not in client.networks.by_name
+    assert not provisioner._local_runtime_root(SESSION).exists()
+
+
 async def test_a_thread_that_fails_after_the_cancel_has_nothing_left_to_release(tmp_path: Path, caplog) -> None:
     provisioner, client = _provisioner(tmp_path)
     held = _HeldProvision(provisioner, fails=True)

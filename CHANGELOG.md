@@ -49,9 +49,10 @@ All notable changes to auto-browser are documented here.
   was creating the session's container and network let that work finish and dropped what it made, so the container
   ran, holding the session's profile, until the next controller start swept it. The cancelled create now waits up to
   ten seconds for that work and releases what it made (the container, the session network, the profile and
-  downloads); work that takes longer releases what it made itself when it ends, even when a shutdown has ended the
-  controller's event loop by then. With `ISOLATED_BROWSER_KEEP_CONTAINERS=true` the container is stopped and kept
-  with its network, profile and downloads, as a close keeps them.
+  downloads), also when the work had just finished and a shutdown's cancel dropped its result on the way back; work
+  that takes longer releases what it made itself when it ends, even when a shutdown has ended the controller's event
+  loop by then. With `ISOLATED_BROWSER_KEEP_CONTAINERS=true` the container is stopped and kept with its network,
+  profile and downloads, as a close keeps them.
 - **With `ISOLATED_BROWSER_KEEP_CONTAINERS=true`, a session whose browser container did not stop now closes as a
   partial teardown.** Nothing removes a kept container, and a failed stop was logged at debug level only, so the close
   reported `teardown: complete` while the container could still be running. The failed stop is now a warning with

@@ -167,6 +167,34 @@ class PendingBrowserProvision:
     vnc_password: str = field(default="", repr=False)
 
 
+@dataclass
+class _ProvisionHandoff:
+    """How a provision's worker thread hands what it made to the provision awaiting it, or releases it itself.
+
+    One lock decides which side releases it: the thread keeps its result here unless the provision was abandoned
+    (cancelled) first, and a cancelled provision takes the result kept here. Kept here, not only returned: a shutdown
+    cancels the task awaiting the thread too, and a result that had not reached that task was dropped with it."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    abandoned: bool = False
+    pending: PendingBrowserProvision | None = None
+
+    def keep(self, pending: PendingBrowserProvision) -> bool:
+        """In the thread: keep the result for the provision; False when it was abandoned first."""
+        with self.lock:
+            if self.abandoned:
+                return False
+            self.pending = pending
+            return True
+
+    def abandon(self) -> PendingBrowserProvision | None:
+        """In the cancelled provision: keep nothing from now on, and take what was kept already."""
+        with self.lock:
+            self.abandoned = True
+            pending, self.pending = self.pending, None
+            return pending
+
+
 class DockerBrowserNodeProvisioner:
     def __init__(self, settings, *, client: Any | None = None):
         self.settings = settings
@@ -375,13 +403,18 @@ class DockerBrowserNodeProvisioner:
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
         # A task the caller's cancellation does not reach: cancelling the await itself let the thread go on to create
         # the container and network and dropped what it returned, so nothing released them until the startup sweep.
-        abandoned = threading.Event()
-        provisioning = asyncio.ensure_future(asyncio.to_thread(self._provision_unless_abandoned, session_id, abandoned))
+        handoff = _ProvisionHandoff()
+        provisioning = asyncio.ensure_future(asyncio.to_thread(self._provision_unless_abandoned, session_id, handoff))
         try:
             pending = await asyncio.shield(provisioning)
         except asyncio.CancelledError:
-            abandoned.set()
-            releasing = spawn_background_task(self._release_abandoned_provision(provisioning, session_id))
+            kept = handoff.abandon()
+            if kept is None:  # the thread is still at work, and now releases what it makes itself
+                releasing = spawn_background_task(self._report_abandoned_provision(provisioning, session_id))
+            else:
+                # Handed back before the cancel, whether or not it reached `provisioning`: released in a thread
+                # started here and now, which the end of a shutting-down event loop waits for.
+                releasing = asyncio.get_running_loop().run_in_executor(None, self._release_cancelled_provision, kept)
             await asyncio.wait({releasing}, timeout=CANCELLED_PROVISION_WAIT_SECONDS)
             raise
         if pending is None:  # only a provision whose caller was cancelled returns none, and that raised above
@@ -436,43 +469,37 @@ class DockerBrowserNodeProvisioner:
             raise
 
     def _provision_unless_abandoned(
-        self, session_id: str, abandoned: threading.Event
+        self, session_id: str, handoff: _ProvisionHandoff
     ) -> PendingBrowserProvision | None:
         """_provision_container_sync, releasing what it made itself when its caller was cancelled meanwhile.
 
         In the thread, not on the event loop: a loop that ends first (a shutdown cancels the tasks left, then waits
-        for the executor's threads) would drop the result again. None when it released them; a result that came
-        back before the cancel is released by the cancelled provision (_release_abandoned_provision).
+        for the executor's threads) would drop the result again. None when it released them; a result kept before
+        the cancel is released by the cancelled provision (_ProvisionHandoff).
         """
         pending = self._provision_container_sync(session_id)
-        if not abandoned.is_set():
+        if handoff.keep(pending):
             return pending
+        self._release_cancelled_provision(pending)
+        return None
+
+    def _release_cancelled_provision(self, pending: PendingBrowserProvision) -> None:
         try:
             self._cleanup_pending_container(pending)
-        except Exception as exc:
+        except Exception as exc:  # its caller is gone, so this is logged, not raised
             logger.warning(
                 "Could not release browser container %s after a cancelled provision: %s", pending.container_name, exc
             )
-        return None
 
-    async def _release_abandoned_provision(
+    async def _report_abandoned_provision(
         self, provisioning: asyncio.Future[PendingBrowserProvision | None], session_id: str
     ) -> None:
-        """Release what a cancelled provision's worker thread created and handed back before it saw the cancel."""
+        """Wait for a cancelled provision's worker thread, which releases what it makes, and log its failure."""
         try:
-            pending = await provisioning
+            await provisioning
         except Exception as exc:  # it removed what it had made (_provision_container_sync), and its caller is gone
             logger.warning(
                 "isolated session %s: provisioning failed after its create was cancelled: %s", session_id, exc
-            )
-            return
-        if pending is None:
-            return  # the thread released what it made
-        try:
-            await asyncio.to_thread(self._cleanup_pending_container, pending)
-        except Exception as exc:
-            logger.warning(
-                "Could not release browser container %s after a cancelled provision: %s", pending.container_name, exc
             )
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
