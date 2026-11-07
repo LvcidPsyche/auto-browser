@@ -162,7 +162,8 @@ class BrowserWitnessService:
         metadata: dict[str, Any] | None = None,
         approved_action: BrowserActionDecision | None = None,
     ) -> None:
-        """Record a receipt; ``approved_action`` is the action an approval receipt's approval is for (_session_policy)."""
+        """Record a receipt; ``approved_action`` is the action an approval receipt's approval is for
+        (_session_policy)."""
         if not self.manager.settings.witness_enabled:
             return
         policy = outcome or self._session_policy(session, approved_action=approved_action)

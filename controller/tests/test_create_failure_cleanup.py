@@ -422,7 +422,9 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         )
         browser = self.manager.browser
         browser.close = AsyncMock()  # type: ignore[attr-defined]
-        self.manager._acquire_session_browser = AsyncMock(return_value=(browser, runtime))  # type: ignore[method-assign]
+        self.manager._acquire_session_browser = AsyncMock(  # type: ignore[method-assign]
+            return_value=(browser, runtime)
+        )
         release_runtime = AsyncMock()
         self.manager.runtime_provisioner.release = release_runtime  # type: ignore[method-assign]
         self.manager.witness_bridge.record_session_receipt = AsyncMock(  # type: ignore[method-assign]
@@ -434,7 +436,9 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         # The owned browser's gate release sat outside every try: raising there skipped the runtime release, the
         # directory removal and the record close, and the caller got the release's error instead of its own.
         release_runtime = self._isolated_create_that_fails()
-        self.manager.request_gates.release = AsyncMock(side_effect=RuntimeError("detach failed"))  # type: ignore[method-assign]
+        self.manager.request_gates.release = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("detach failed")
+        )
 
         with self.assertRaisesRegex(RuntimeError, "witness down"):
             await self.manager.create_session()

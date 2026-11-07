@@ -102,9 +102,13 @@ class ShadowBrowseTests(unittest.IsolatedAsyncioTestCase):
         self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
         gates, births = self.manager.request_gates, self.manager.window_births
         if failing == "gate release":
-            gates.release = AsyncMock(side_effect=RuntimeError("the gate's detach failed"))  # type: ignore[method-assign]
+            gates.release = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError("the gate's detach failed")
+            )
         elif failing == "watcher release":
-            births.release = AsyncMock(side_effect=RuntimeError("the watcher's detach failed"))  # type: ignore[method-assign]
+            births.release = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError("the watcher's detach failed")
+            )
         else:
             gates.ending = Mock(side_effect=RuntimeError("the gate could not be marked"))  # type: ignore[method-assign]
 

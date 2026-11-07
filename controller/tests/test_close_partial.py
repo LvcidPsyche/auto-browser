@@ -97,7 +97,9 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
         # audit event, the witness receipt and the closed record that follow the teardown were never written.
         self.session.owns_browser = True
         self.session.browser = SimpleNamespace(close=AsyncMock())
-        self.manager.request_gates.release = AsyncMock(side_effect=RuntimeError("detach failed"))  # type: ignore[method-assign]
+        self.manager.request_gates.release = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("detach failed")
+        )
 
         result = await self.close()
 

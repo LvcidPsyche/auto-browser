@@ -155,7 +155,8 @@ class _NonceCache:
             del self._held[owner]
 
     def _forget_expired(self) -> None:
-        """Drop every expired nonce (a full scan: entries are in insertion order, not stamp order); none without a TTL."""
+        """Drop every expired nonce (a full scan: entries are in insertion order, not stamp order); none without a
+        TTL."""
         if self._ttl is None:
             return
         for expired in [seen for seen, (stamp, _owner) in self._seen.items() if self._high_water - stamp > self._ttl]:

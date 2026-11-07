@@ -253,7 +253,8 @@ class IsolatedSessionTunnelBroker:
                     await asyncio.wait_for(asyncio.shield(process.wait()), timeout=_PROCESS_EXIT_WAIT_SECONDS)
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "autossh (pid %s) of session %s's tunnel did not exit after SIGKILL; giving up on it without it",
+                        "autossh (pid %s) of session %s's tunnel did not exit after SIGKILL; "
+                        "giving up on it without it",
                         process.pid,
                         tunnel.session_id,
                     )

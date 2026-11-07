@@ -242,10 +242,10 @@ class DurableSessionStore:
         except Exception as exc:
             logger.warning("redis session read failed for %s, using file record: %s", session_id, exc)
             return await self.file_store.get(session_id)
-        # The file copy is written first, so a closed one is the session's newest record. A write whose Redis half failed,
-        # with Redis down for the drop of its copy too, left an older copy in Redis (R5C-5): the record from before the
-        # close (a session never reopens), or a closed record from before a later save of it (the hosted Witness
-        # delivery state that landed after the close).
+        # The file copy is written first, so a closed one is the session's newest record. A write whose Redis half
+        # failed, with Redis down for the drop of its copy too, left an older copy in Redis (R5C-5): the record from
+        # before the close (a session never reopens), or a closed record from before a later save of it (the hosted
+        # Witness delivery state that landed after the close).
         return await self._closed_file_copy(session_id) or record
 
     async def _closed_file_copy(self, session_id: str) -> SessionRecord | None:
