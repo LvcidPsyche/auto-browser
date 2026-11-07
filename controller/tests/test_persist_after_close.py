@@ -34,22 +34,30 @@ class _MemoryPipeline:
         return None
 
     async def execute(self) -> None:
-        if self.client.fail is not None:
-            raise self.client.fail
+        failure = self.client.fail or self.client.write_fail
+        if failure is not None:
+            raise failure
         self.client.values.update(self.writes)
 
 
 class _MemoryRedis:
-    """An in-memory stand-in for the redis client RedisSessionStore uses: get, and a pipeline's set and execute."""
+    """An in-memory stand-in for the redis client RedisSessionStore uses: get, delete, and a pipeline's set and
+    execute. `fail` fails every call; `write_fail` only the pipeline's writes."""
 
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
         self.fail: Exception | None = None
+        self.write_fail: Exception | None = None
 
     async def get(self, key: str) -> str | None:
         if self.fail is not None:
             raise self.fail
         return self.values.get(key)
+
+    async def delete(self, *keys: str) -> int:
+        if self.fail is not None:
+            raise self.fail
+        return sum(self.values.pop(key, None) is not None for key in keys)
 
     def pipeline(self, transaction: bool = True) -> _MemoryPipeline:
         return _MemoryPipeline(self)
@@ -347,6 +355,42 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         client.fail = None
         self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
         self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "closed")
+
+    async def test_r5c_5_a_skipped_late_write_repairs_a_redis_copy_left_active_by_a_failed_close(self) -> None:
+        # A close whose file write landed and whose Redis write failed left the active record in Redis, which get()
+        # and list() prefer; the late write the closed guard skipped was the only write left, and it repaired nothing.
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        await store.file_store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
+        self.assertEqual((await store.get("s1")).status, "active")
+
+        await store.upsert(_record("active", live=True))
+
+        stored = SessionRecord.model_validate_json(client.values["t:record:s1"])
+        self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
+        self.assertEqual((await store.get("s1")).status, "closed")
+
+    async def test_r5c_5_a_close_whose_redis_write_fails_drops_the_stale_redis_copy(self) -> None:
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        client.write_fail = ConnectionError("redis write lost")
+
+        with self.assertRaises(ConnectionError):
+            await store.upsert(_record("closed", live=False))
+
+        client.write_fail = None
+        self.assertNotIn("t:record:s1", client.values)  # so reads fall back to the durable file copy
+        self.assertEqual((await store.get("s1")).status, "closed")
+
+    async def test_r5c_5_a_failed_active_write_keeps_the_redis_copy(self) -> None:
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        client.write_fail = ConnectionError("redis write lost")
+
+        with self.assertRaises(ConnectionError):
+            await store.upsert(_record("active", live=True).model_copy(update={"title": "newer"}))
+
+        self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "active")
 
     async def test_w8_5_a_record_with_bad_utf8_is_replaced_by_the_next_active_write(self) -> None:
         # UnicodeDecodeError is a ValueError: the record cannot be parsed, so the write replaces it.

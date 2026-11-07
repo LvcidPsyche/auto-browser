@@ -157,6 +157,10 @@ class RedisSessionStore(_MarkInterruptedMixin):
             await pipe.sadd(self._index_key(), record.id)
             await pipe.execute()
 
+    async def delete(self, session_id: str) -> None:
+        """Drop a record's copy here, so reads fall back to the file copy (list() skips an indexed id with none)."""
+        await self._require_client().delete(self._record_key(session_id))
+
     def _require_client(self) -> Redis:
         if self.client is None:
             raise RuntimeError("redis session store is not started")
@@ -272,10 +276,44 @@ class DurableSessionStore:
                     # A late write of a session that has been closed: a session never reopens, and an interrupted
                     # write must not replace the close (and its close_reason) either.
                     logger.info("not writing a %s record over the closed session %s", record.status, record.id)
+                    await self._repair_redis_copy(record.id)
                     return
             await self.file_store.upsert(record)
             if self.redis_store is not None and self._primary is self.redis_store:
-                await self.redis_store.upsert(record)
+                try:
+                    await self.redis_store.upsert(record)
+                except Exception:
+                    if record.status == "closed":
+                        await self._drop_redis_copy(record.id)
+                    raise
+
+    async def _repair_redis_copy(self, session_id: str) -> None:
+        """Give Redis the closed file record when the Redis copy is not a readable closed one (R5C-5).
+
+        A close whose file write landed and whose Redis write failed left the old record in Redis, which get() and
+        list() prefer, and a late write the closed guard skips is the only write that comes after it. Never raises.
+        """
+        if self.redis_store is None or self._primary is not self.redis_store:
+            return
+        try:
+            try:
+                if (await self.redis_store.get(session_id)).status == "closed":
+                    return
+            except (KeyError, ValueError):
+                pass  # no copy, or one that cannot be parsed: the closed record replaces it
+            await self.redis_store.upsert(await self.file_store.get(session_id))
+        except Exception as exc:
+            logger.warning("could not give redis the closed record of session %s: %s", session_id, exc)
+            return
+        logger.info("gave redis the closed record of session %s, which it held as not closed", session_id)
+
+    async def _drop_redis_copy(self, session_id: str) -> None:
+        """After a close reached the file copy but not Redis, drop the Redis copy, so reads fall back to the file
+        instead of the record from before the close (R5C-5). Never raises: the write's own failure is raised."""
+        try:
+            await self.redis_store.delete(session_id)  # type: ignore[union-attr]
+        except Exception as exc:
+            logger.warning("could not drop the redis copy of the closed session %s: %s", session_id, exc)
 
     async def _is_closed(self, session_id: str) -> bool | None:
         """Whether the durable (file) record says the session is closed, or None when that cannot be told.
