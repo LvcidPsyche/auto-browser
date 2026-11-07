@@ -19,10 +19,11 @@ USER_AGENT_POOL_SEPARATOR = "|"
 _USER_AGENT_POOL_SPLIT = re.compile(r"[|\r\n]")
 
 # The largest MESH_TIMESTAMP_WINDOW, in seconds. A nonce is kept for up to two windows, so at the default request rate
-# limit one address can hold about four times the window in seconds of them: 2,400 here, under the 10,000-nonce replay
-# cache. A wider window also keeps a captured envelope replayable longer to a controller restarted with its clock set
-# back, and lengthens the refusals after each start (docs/mesh.md).
-MESH_TIMESTAMP_WINDOW_MAX_SECONDS = 600.0
+# limit one address can hold about four times the window in seconds of them: about 1,000 here, one peer's share of the
+# 10,000-nonce replay cache, and that only for a peer stamping its envelopes a full window ahead of this node's clock
+# (one whose clock agrees holds about half). A wider window also keeps a captured envelope replayable longer to a
+# controller restarted with its clock set back, and lengthens the refusals after each start (docs/mesh.md).
+MESH_TIMESTAMP_WINDOW_MAX_SECONDS = 250.0
 
 
 class Settings(BaseSettings):

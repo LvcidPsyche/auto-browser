@@ -55,24 +55,25 @@ class MeshTimestampWindowBoundsTests(unittest.TestCase):
 
     A nonce is kept for up to two windows, so at the default rate limit one address could fill the 10,000-nonce replay
     cache from a window of about 2,500 s, and a wide window keeps a captured envelope replayable longer to a restarted
-    controller; at or below 0 the window refuses every envelope.
+    controller; at or below 0 the window refuses every envelope. The ceiling is 250 s, not 600 (review of c2, GLM 4):
+    at 600 a peer sending at the default rate limit held more nonces than its 1,000 share of the cache.
     """
 
     def _settings(self, raw: str) -> Settings:
         with patch.dict(os.environ, {"MESH_TIMESTAMP_WINDOW": raw}, clear=True):
             return Settings(_env_file=None)
 
-    def test_r5c_26_a_window_above_600_seconds_or_at_or_below_0_stops_startup_and_names_its_limits(self):
+    def test_r5c_26_a_window_above_250_seconds_or_at_or_below_0_stops_startup_and_names_its_limits(self):
         # The mesh is off here: a value out of bounds stops startup either way, as an unparseable one does.
-        for raw in ("600.5", "601", "3600", "0", "-30"):
+        for raw in ("250.5", "251", "600", "3600", "0", "-30"):
             with self.subTest(raw=raw):
                 with self.assertRaises(ValidationError) as ctx:
                     self._settings(raw)
                 message = str(ctx.exception)
-                self.assertIn("MESH_TIMESTAMP_WINDOW must be more than 0 and at most 600 seconds", message)
+                self.assertIn("MESH_TIMESTAMP_WINDOW must be more than 0 and at most 250 seconds", message)
 
     def test_r5c_26_a_window_inside_its_limits_is_kept_the_ceiling_included(self):
-        for raw, expected in (("0.5", 0.5), ("30", 30.0), ("600", 600.0)):
+        for raw, expected in (("0.5", 0.5), ("30", 30.0), ("250", 250.0)):
             with self.subTest(raw=raw):
                 self.assertEqual(self._settings(raw).mesh_timestamp_window, expected)
 
