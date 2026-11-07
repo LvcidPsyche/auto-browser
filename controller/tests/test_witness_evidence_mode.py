@@ -15,6 +15,7 @@ from app.browser.services.witness import BrowserWitnessService
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, WitnessRemoteState
+from app.pii_scrub import PiiScrubber
 from app.utils import UTC
 from app.witness import (
     WitnessActionContext,
@@ -204,6 +205,7 @@ def _recording_service(tmp_path: Path) -> tuple[BrowserWitnessService, SimpleNam
         witness_policy=WitnessPolicyEngine(),
         witness_remote=SimpleNamespace(enabled=False),
         auth_state=SimpleNamespace(require_encryption=False, encryption_enabled=False),
+        pii_scrubber=PiiScrubber.from_settings(Settings(_env_file=None)),
     )
     return BrowserWitnessService(manager), manager
 
@@ -409,3 +411,50 @@ async def test_a_restricted_receipt_redacts_its_metadata_as_its_target(tmp_path:
     }
     assert receipt.approval.reason is None  # no reason given stays None, so the receipt shows there was none
     assert metadata["api_token"] == "t"
+
+
+# A navigate's URL can carry an OAuth code or a token in its query or fragment.
+CODE_URL = "https://example.test/cb?code=sentinel-0123456789&state=x"
+TOKEN_FRAGMENT_URL = "https://example.test/next#access_token=sentinel&x=1"
+TOKEN_QUERY_URL = "https://example.test/p?token=sentinel"
+
+
+async def _record_navigate(tmp_path: Path, profile: str):
+    service, manager = _recording_service(tmp_path)
+    await service.record_receipt(
+        _browser_session(profile),
+        event_type="browser_action",
+        status="failed",
+        action="navigate",
+        action_class="read",
+        target={
+            "url": CODE_URL,
+            "blocked_navigations": [{"URL": TOKEN_FRAGMENT_URL, "origin": "https://example.test"}],
+        },
+        metadata={"error": {"code": "browser_action_failed", "url": TOKEN_QUERY_URL}},
+    )
+    return (await manager.witness.list("s1"))[0]
+
+
+async def test_a_restricted_receipt_scrubs_its_urls_as_the_run_trace_scrubs_a_urls_query(tmp_path: Path) -> None:
+    receipt = await _record_navigate(tmp_path, "confidential")
+
+    assert receipt.evidence_mode == "restricted"
+    assert receipt.target == {
+        "url": "https://example.test/cb?[REDACTED]&state=x",
+        "blocked_navigations": [
+            {"URL": "https://example.test/next#access_token=%5BREDACTED%5D&x=1", "origin": "https://example.test"}
+        ],
+    }
+    assert receipt.metadata == {
+        "error": {"code": "browser_action_failed", "url": "https://example.test/p?token=%5BREDACTED%5D"}
+    }
+
+
+async def test_a_standard_receipt_keeps_its_urls_whole(tmp_path: Path) -> None:
+    receipt = await _record_navigate(tmp_path, "normal")
+
+    assert receipt.evidence_mode == "standard"
+    assert receipt.target["url"] == CODE_URL
+    assert receipt.target["blocked_navigations"][0]["URL"] == TOKEN_FRAGMENT_URL
+    assert receipt.metadata["error"]["url"] == TOKEN_QUERY_URL

@@ -10,13 +10,14 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
+from .network_inspector import URL_SCRUB_MAX_BYTES, scrub_url
 from .utils import SECRET_KEY_FRAGMENTS, atomic_write_text, record_path, utc_now, without_lone_surrogates
 from .witness_anchor import (
     anchor_fields,
@@ -30,6 +31,9 @@ from .witness_anchor import (
     write_anchor,
 )
 from .witness_signing import SIGNATURE_ALGORITHM
+
+if TYPE_CHECKING:
+    from .pii_scrub import PiiScrubber
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +127,10 @@ _RESTRICTED_KEYS = frozenset({"text", "text_preview", "file_path", "password", "
 _CHOICE_KEYS = frozenset({"value", "label", "index"})
 
 
-def _redact_restricted(value: Any) -> Any:
-    """A copy of a restricted receipt's target or metadata with its secrets and typed text withheld, at any depth."""
+def _redact_restricted(value: Any, scrubber: PiiScrubber | None) -> Any:
+    """A copy of a restricted receipt's target or metadata with its secrets and typed text withheld, at any depth, and
+    each URL (a `url` key's string) with its query and fragment scrubbed as the run trace scrubs a URL's: a navigate's
+    can carry an OAuth code or a token."""
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
@@ -132,11 +138,13 @@ def _redact_restricted(value: Any) -> Any:
             withheld = name in _RESTRICTED_KEYS or any(fragment in name for fragment in SECRET_KEY_FRAGMENTS)
             if withheld or (name in _CHOICE_KEYS and item is not None):
                 redacted[key] = REDACTED
+            elif name == "url" and isinstance(item, str):
+                redacted[key] = scrub_url(item, scrubber, URL_SCRUB_MAX_BYTES)[0]
             else:
-                redacted[key] = _redact_restricted(item)
+                redacted[key] = _redact_restricted(item, scrubber)
         return redacted
     if isinstance(value, (list, tuple)):
-        return [_redact_restricted(item) for item in value]
+        return [_redact_restricted(item, scrubber) for item in value]
     return value
 
 
@@ -363,11 +371,14 @@ class WitnessPolicyEngine:
         return outcome
 
     @staticmethod
-    def redact_target(target: dict[str, Any], *, evidence_mode: EvidenceMode) -> dict[str, Any]:
-        """A receipt's target or metadata as the evidence mode keeps it (a copy either way)."""
+    def redact_target(
+        target: dict[str, Any], *, evidence_mode: EvidenceMode, scrubber: PiiScrubber | None = None
+    ) -> dict[str, Any]:
+        """A receipt's target or metadata as the evidence mode keeps it (a copy either way); ``scrubber`` is the PII
+        scrubber a restricted one's URLs go through (without one they are kept)."""
         if evidence_mode != "restricted":
             return dict(target)
-        return _redact_restricted(target)
+        return _redact_restricted(target, scrubber)
 
     @staticmethod
     def redact_approval(approval: WitnessApproval, *, evidence_mode: EvidenceMode) -> WitnessApproval:

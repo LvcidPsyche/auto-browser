@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import get_settings
-from ..network_inspector import scrub_url
+from ..network_inspector import URL_SCRUB_MAX_BYTES, scrub_url
 from ..pii_scrub import PiiScrubber
 from ..sqlite_utils import connect_sqlite
 from ..utils import SECRET_KEY_FRAGMENTS
@@ -38,7 +38,6 @@ _URL_PATTERN = re.compile(
     r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|[.!?](?:\s|\Z)|\Z))*[^\s"'<>,;)\]}]""",
     re.IGNORECASE,
 )
-_URL_SCRUB_MAX_BYTES = 16384
 
 
 def canonical_json(payload: Any) -> str:
@@ -399,7 +398,7 @@ def _scrub_urls_only(value: str) -> str:
 
 
 def _scrub_url(url: str) -> str:
-    return scrub_url(url, _pii_scrubber(), _URL_SCRUB_MAX_BYTES)[0]
+    return scrub_url(url, _pii_scrubber(), URL_SCRUB_MAX_BYTES)[0]
 
 
 def _scrub_url_and_path(url: str) -> str:

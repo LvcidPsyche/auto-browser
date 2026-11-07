@@ -167,6 +167,7 @@ class BrowserWitnessService:
             return
         policy = outcome or self._session_policy(session, approved_action=approved_action)
         engine = self.manager.witness_policy
+        scrubber = self.manager.pii_scrubber
         payload = {
             "profile": session.protection_mode,  # type: ignore[arg-type]
             "event_type": event_type,
@@ -177,7 +178,7 @@ class BrowserWitnessService:
             "risk_category": risk_category,
             "operator": get_current_operator(),
             "approval": engine.redact_approval(approval or WitnessApproval(), evidence_mode=policy.evidence_mode),
-            "target": engine.redact_target(target or {}, evidence_mode=policy.evidence_mode),
+            "target": engine.redact_target(target or {}, evidence_mode=policy.evidence_mode, scrubber=scrubber),
             "concerns": policy.concerns,
             "evidence_mode": policy.evidence_mode,
             "evidence": WitnessEvidence(
@@ -186,7 +187,7 @@ class BrowserWitnessService:
                 verification=verification,
                 artifacts={},
             ),
-            "metadata": engine.redact_target(metadata or {}, evidence_mode=policy.evidence_mode),
+            "metadata": engine.redact_target(metadata or {}, evidence_mode=policy.evidence_mode, scrubber=scrubber),
         }
         recorded = await self.manager.witness.record(session.id, **payload)
         if not self.manager.witness_remote.enabled:

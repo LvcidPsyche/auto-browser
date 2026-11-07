@@ -95,6 +95,7 @@ async def make_service(tmp_path: Path):
             witness_policy=WitnessPolicyEngine(),
             witness_remote=SimpleNamespace(enabled=True, record=record),
             auth_state=SimpleNamespace(require_encryption=False, encryption_enabled=False),
+            pii_scrubber=None,
         )
         made.append(BrowserWitnessService(manager))
         return made[-1], manager

@@ -13,7 +13,9 @@ All notable changes to auto-browser are documented here.
   the target and the metadata, those keys, every key whose name holds a word the run trace redacts by
   (`authorization`, `cookie`, `api-key`, `api_key`, `token`, `password`, `secret`), and the free text an agent or a
   tool call wrote: a `reason` key, and the approval's reason, which for a governed tool call previews its arguments.
-  Receipts recorded without a policy outcome were standard, and kept the reason in full, in the approval and again in
+  Each URL there (a `url` key's) now has its query and fragment scrubbed as the run trace scrubs a URL's, by the PII
+  scrubber (so not with `PII_SCRUB_ENABLED` or `PII_SCRUB_NETWORK` off): a navigate's kept an OAuth code or a token
+  in full. Receipts recorded without a policy outcome were standard, and kept the reason in full, in the approval and again in
   the metadata: an approval's receipts (its request, decision and execution) now take the evidence mode of the action
   it approves, so those of an action marked sensitive, a high-risk one or one that moves auth material are restricted
   as that action's own receipt is, in a normal session too; and every approval receipt of a confidential session,

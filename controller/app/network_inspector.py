@@ -514,6 +514,11 @@ def _mask_sensitive_headers(
     return masked, redacted
 
 
+# scrub_url's cap for a URL that is not a request's, which the inspector caps by its body size: the run trace's URLs
+# and a restricted witness receipt's.
+URL_SCRUB_MAX_BYTES = 16384
+
+
 def scrub_url(url: str, scrubber: "PiiScrubber | None", max_bytes: int) -> tuple[str, bool]:
     """Scrub a URL's query string and fragment. A scrub that fails, or a part too long to scrub, costs the part.
 
