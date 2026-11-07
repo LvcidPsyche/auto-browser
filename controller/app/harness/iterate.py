@@ -644,7 +644,8 @@ class HarnessService:
         its removal, and waiting for it stalled every task. Placed on the loop, not in the thread: a re-stage's two
         renames ran between candidate reads on the loop, which take no lock, and a read found no candidate or the new
         files under the old one's signature. The record is saved right after, with no await between, so a shutdown
-        that cancels this places nothing its record does not name.
+        that cancels this places nothing its record does not name. The candidate it replaced is removed after that, in
+        a worker thread: removed on the loop, a slow removal stalled every task.
         """
         try:
             candidate, build_dir, target_dir = await asyncio.to_thread(
@@ -682,6 +683,7 @@ class HarnessService:
             return
         record.notes.append("Staged skill candidate emitted; promotion requires review.")
         self.store.save(record)
+        await asyncio.to_thread(self.inducer.remove_aside, build_dir)
 
     def _close_unfinished(self, record: HarnessRunRecord, error: BaseException) -> None:
         if record.status != "running":

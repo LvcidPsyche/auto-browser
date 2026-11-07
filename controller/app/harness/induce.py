@@ -64,12 +64,14 @@ class SkillInducer:
         self.lock = lock if lock is not None else threading.Lock()
 
     def place(self, build_dir: Path, target_dir: Path) -> None:
-        """Rename a finished build over `target_dir` under the staging lock."""
+        """Rename a finished build over `target_dir` under the staging lock, then remove the candidate it replaced."""
         with self.lock:
             _move_into_place(build_dir, target_dir)
+        self.remove_aside(build_dir)
 
     def try_place(self, build_dir: Path, target_dir: Path) -> bool:
-        """place() when the staging lock is free now; False, having changed nothing, while something holds it."""
+        """Rename a finished build over `target_dir` when the staging lock is free now; False, having changed nothing,
+        while something holds it. The candidate it replaced is left aside for remove_aside."""
         if not self.lock.acquire(blocking=False):
             return False
         try:
@@ -77,6 +79,12 @@ class SkillInducer:
         finally:
             self.lock.release()
         return True
+
+    @staticmethod
+    def remove_aside(build_dir: Path) -> None:
+        """Remove the candidate that placing `build_dir` set aside, if it replaced one. It removes files: a caller on
+        the event loop runs it in a worker thread."""
+        shutil.rmtree(_aside_of(build_dir), ignore_errors=True)
 
     def induce(
         self,
@@ -263,18 +271,23 @@ class SkillInducer:
 
 
 def _move_into_place(build_dir: Path, target_dir: Path) -> None:
-    """Rename the finished directory over the target; a candidate staged before is set aside and restored on failure."""
+    """Rename the finished directory over the target; a candidate staged before is set aside (restored on failure),
+    and left there for SkillInducer.remove_aside."""
     if not target_dir.exists():
         os.replace(build_dir, target_dir)
         return
-    aside = build_dir.with_name(build_dir.name + ".old")
+    aside = _aside_of(build_dir)
     os.replace(target_dir, aside)
     try:
         os.replace(build_dir, target_dir)
     except BaseException:
         os.replace(aside, target_dir)
         raise
-    shutil.rmtree(aside, ignore_errors=True)
+
+
+def _aside_of(build_dir: Path) -> Path:
+    """Where placing `build_dir` sets aside the candidate it replaces (a `.tmp-<hex>.old` name nothing serves)."""
+    return build_dir.with_name(build_dir.name + ".old")
 
 
 def _skill_id(contract: TaskContract, owner: str | None = None) -> str:

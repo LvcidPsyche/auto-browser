@@ -401,6 +401,39 @@ class StagingLockTests(_Base):
         self.assertEqual(read["skill_id"], skill_id)
         self.assertEqual(record.candidate.skill_id, skill_id)
 
+    async def test_a_restage_removes_the_candidate_it_replaced_off_the_event_loop(self) -> None:
+        # Review of c2's fix (Codex): placed on the event loop, a re-stage also removed the candidate it replaced
+        # there (its aside), so a slow removal stalled every task even with the staging lock free.
+        from app.harness import induce
+
+        service = HarnessService(self.root)
+        await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        removing, loop_ran = threading.Event(), threading.Event()
+        self.addCleanup(loop_ran.set)
+        seen: list[bool] = []
+        real_rmtree = shutil.rmtree
+
+        def rmtree(path, *args, **kwargs):
+            if Path(path).name.endswith(".old"):
+                removing.set()
+                seen.append(loop_ran.wait(PRUNE_HOLD_SECONDS))  # set by a task on the event loop
+            return real_rmtree(path, *args, **kwargs)
+
+        async def on_the_loop() -> None:
+            await asyncio.to_thread(removing.wait, PRUNE_HOLD_SECONDS)
+            loop_ran.set()
+
+        with patch.object(induce.shutil, "rmtree", rmtree):
+            watcher = asyncio.create_task(on_the_loop())
+            record = await service.start_convergence(
+                _contract(max_attempts=1), mock_final_observation={**DONE, "text": "done again"}
+            )
+            await asyncio.wait_for(watcher, 10)
+
+        self.assertEqual(seen, [True], "the event loop waited for the replaced candidate's removal")
+        self.assertEqual(record.status, "converged")
+        self.assertEqual([entry.name for entry in service.store.staging_root.iterdir()], [record.candidate.skill_id])
+
 
 class StagingShutdownTests(unittest.TestCase):
     """Review of c2 (Codex 1, GLM 2): asyncio.run cancels every task left when its main returns, a run's staging task
