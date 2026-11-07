@@ -20,7 +20,7 @@ import pytest
 
 from app.browser.services import witness as witness_service
 from app.browser.services.witness import BrowserWitnessService
-from app.models import WitnessRemoteState
+from app.models import SessionRecord, WitnessRemoteState
 from app.session_ownership import acting_as
 from app.witness import WitnessPolicyEngine, WitnessRecorder, WitnessRemoteClient, WitnessRemoteError
 from tests.test_auth_state_ownership import ALICE, build_manager
@@ -401,10 +401,17 @@ class CloseRecordsTheDeliveredStateTests(unittest.IsolatedAsyncioTestCase):
         self.manager, _ = build_manager(Path(self.tmp.name))
         self.manager.settings.max_sessions = 5
         self.sent: list[str] = []
+        self.refused: set[str] = set()  # actions whose receipts the service refuses
+        self.held: dict[str, asyncio.Event] = {}  # actions whose receipts it answers once their event is set
 
         async def record(scope: str, payload: dict) -> dict:
+            action = payload["action"]
+            if action in self.held:
+                await self.held[action].wait()
             await asyncio.sleep(0.05)
-            self.sent.append(payload["action"])
+            if action in self.refused:
+                raise WitnessRemoteError("refused", status_code=400)
+            self.sent.append(action)
             return {}
 
         self.manager.settings.witness_enabled = True  # build_manager's settings turn the witness off
@@ -412,15 +419,60 @@ class CloseRecordsTheDeliveredStateTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.witness.startup()
 
     async def asyncTearDown(self) -> None:
+        for held in self.held.values():
+            held.set()
         await self.manager.witness_bridge.stop_delivery(timeout=1)
         self.tmp.cleanup()
 
-    async def test_the_closed_record_shows_the_close_receipt_delivered(self) -> None:
+    async def open_and_close(self) -> tuple[str, dict]:
         with acting_as(ALICE):
             session_id = (await self.manager.create_session(name="alice"))["id"]
-            result = await self.manager.close_session(session_id)
+            return session_id, await self.manager.close_session(session_id)
 
-        self.assertEqual(self.sent, ["create_session", "close_session"])
+    async def stored_once(self, session_id: str, ready) -> SessionRecord:
+        """The session's stored record once ``ready`` says so, or after two seconds whatever it says."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2
+        while not ready(record := await self.manager.session_store.get(session_id)) and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        return record
+
+    async def test_the_closed_record_shows_the_close_receipt_delivered(self) -> None:
+        # GLM review: with the create receipt delivered too, the state said delivered before the close receipt went,
+        # so a close that did not wait for it passed as well. Here only the close receipt's delivery succeeds.
+        self.refused.add("create_session")
+
+        session_id, result = await self.open_and_close()
+
+        self.assertEqual(self.sent, ["close_session"])
         self.assertEqual(result["session"]["witness_remote"]["status"], "delivered")
         stored = await self.manager.session_store.get(session_id)
         self.assertEqual(stored.witness_remote.status, "delivered")
+
+    async def test_a_delivery_that_ends_after_the_close_reaches_the_closed_record(self) -> None:
+        # Codex review: the close saved the record with the state it had when its wait ran out, and the outcome that
+        # came later changed only the closed session's object, so the record kept the earlier state for ever.
+        answer = self.held["close_session"] = asyncio.Event()
+        self.refused.add("close_session")
+
+        session_id, result = await self.open_and_close()  # its wait for the close receipt runs out
+        self.assertEqual(result["session"]["witness_remote"]["status"], "delivered")  # the create receipt's
+        answer.set()
+
+        stored = await self.stored_once(session_id, lambda record: record.witness_remote.status == "failed")
+        self.assertEqual(stored.witness_remote.status, "failed")
+        self.assertEqual(stored.witness_remote.last_error, "Hosted Witness delivery failed for close_session.")
+        self.assertEqual(stored.status, "closed")
+
+    async def test_a_delivery_stopped_at_shutdown_reaches_the_closed_record_before_the_stop_returns(self) -> None:
+        # The store shuts down after the stop: a save that came later would be lost.
+        self.held["close_session"] = asyncio.Event()  # never answered
+
+        session_id, _ = await self.open_and_close()
+        await self.manager.witness_bridge.stop_delivery(timeout=0.2)
+
+        stored = await self.manager.session_store.get(session_id)
+        self.assertEqual(stored.witness_remote.status, "failed")
+        self.assertEqual(
+            stored.witness_remote.last_error, "Hosted Witness delivery of close_session was stopped before it finished."
+        )

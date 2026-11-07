@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ...audit import get_current_operator
-from ...models import WitnessRemoteState
+from ...models import SessionRecord, WitnessRemoteState
 from ...utils import spawn_background_task, utc_now
 from ...witness import (
     WitnessActionContext,
@@ -89,6 +89,8 @@ class BrowserWitnessService:
         # newest receipt whose outcome its state shows (_settle).
         self._sequence = itertools.count()
         self._newest: dict[str, int] = {}
+        # Closed sessions' records waiting for their receipts' outcomes (save_when_delivered).
+        self._saving: set[asyncio.Task[None]] = set()
 
     def initial_remote_state(self, protection_mode: str) -> WitnessRemoteState:
         configured = bool(self.manager.settings.witness_enabled and self.manager.witness_remote.enabled)
@@ -296,6 +298,31 @@ class BrowserWitnessService:
             return False
         return True
 
+    def save_when_delivered(self, session: "BrowserSession", record: SessionRecord) -> None:
+        """Save a closed session's record again once the receipts still on their way when it was saved have ended.
+
+        The close saves the state its bounded wait ended with, and an outcome that came later changed only the closed
+        session's object, so the record kept the earlier state for ever."""
+        done = self._pending.get(session.id)
+        if done is not None and done.get_loop() is not asyncio.get_running_loop():
+            return  # queued on a loop that ended: nothing delivers it now
+        saving = spawn_background_task(self._save_closed_record(session, record, done))
+        self._saving.add(saving)
+        saving.add_done_callback(self._saving.discard)
+
+    async def _save_closed_record(
+        self, session: "BrowserSession", record: SessionRecord, done: asyncio.Future[None] | None
+    ) -> None:
+        if done is not None:
+            await asyncio.shield(done)
+        state = session.witness_remote_state
+        if state == record.witness_remote:
+            return
+        try:
+            await self.manager.session_store.upsert(record.model_copy(update={"witness_remote": state.model_copy()}))
+        except Exception as exc:  # the record keeps the state the close saved
+            logger.warning("could not save the hosted Witness delivery state of closed session %s: %s", session.id, exc)
+
     async def stop_delivery(self, *, timeout: float = SHUTDOWN_DELIVERY_WAIT_SECONDS) -> None:
         """Let queued receipts reach the service for up to ``timeout`` seconds, then stop the worker.
 
@@ -323,6 +350,8 @@ class BrowserWitnessService:
             if not item.done.done():
                 item.done.set_result(None)
             queue.task_done()
+        if self._saving:  # before the session store shuts down
+            await asyncio.wait(set(self._saving), timeout=timeout)
 
     def _session_policy(self, session: "BrowserSession") -> WitnessPolicyOutcome:
         """The policy of a receipt recorded with none (an approval, a takeover): the session's evidence mode, which a
