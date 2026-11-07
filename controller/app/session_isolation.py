@@ -31,6 +31,7 @@ from .browser_sandbox import (
     refusal,
     verified_on,
 )
+from .utils import spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,10 @@ _SESSION_DIR_NAME = re.compile(r"[A-Za-z0-9._-]+")
 # _join_session_network). The field exists from Docker Engine 28, API 1.48; older daemons ignore it.
 GATEWAY_PRIORITY_OF_SESSION_NETWORKS = -1
 GW_PRIORITY_MIN_API_VERSION = (1, 48)
+
+# How long a provision cancelled while its worker thread creates the container and network waits for the thread, so
+# what it made is released before the cancellation goes on; a thread that takes longer has it released when it ends.
+CANCELLED_PROVISION_WAIT_SECONDS = 10.0
 
 
 def _api_version(text: str) -> tuple[int, int]:
@@ -368,7 +373,15 @@ class DockerBrowserNodeProvisioner:
             logger.info("Reaped orphaned browser session network %s", name)
 
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
-        pending = await asyncio.to_thread(self._provision_container_sync, session_id)
+        # A task the caller's cancellation does not reach: cancelling the await itself let the thread go on to create
+        # the container and network and dropped what it returned, so nothing released them until the startup sweep.
+        provisioning = asyncio.ensure_future(asyncio.to_thread(self._provision_container_sync, session_id))
+        try:
+            pending = await asyncio.shield(provisioning)
+        except asyncio.CancelledError:
+            releasing = spawn_background_task(self._release_abandoned_provision(provisioning, session_id))
+            await asyncio.wait({releasing}, timeout=CANCELLED_PROVISION_WAIT_SECONDS)
+            raise
         try:
             ws_endpoint = await self._wait_for_ws_endpoint(pending.container, pending.ws_endpoint_file)
             # Written before the endpoint file, so it is there now (absent only from an image older than 1.14.0).
@@ -417,6 +430,24 @@ class DockerBrowserNodeProvisioner:
                     "Could not release browser container %s after a failed provision: %s", pending.container_name, exc
                 )
             raise
+
+    async def _release_abandoned_provision(
+        self, provisioning: asyncio.Future[PendingBrowserProvision], session_id: str
+    ) -> None:
+        """Release what a cancelled provision's worker thread created, once the thread has ended."""
+        try:
+            pending = await provisioning
+        except Exception as exc:  # it removed what it had made (_provision_container_sync), and its caller is gone
+            logger.warning(
+                "isolated session %s: provisioning failed after its create was cancelled: %s", session_id, exc
+            )
+            return
+        try:
+            await asyncio.to_thread(self._cleanup_pending_container, pending)
+        except Exception as exc:
+            logger.warning(
+                "Could not release browser container %s after a cancelled provision: %s", pending.container_name, exc
+            )
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
         with self._sandbox_lock:

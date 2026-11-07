@@ -42,6 +42,12 @@ All notable changes to auto-browser are documented here.
   never a receipt) without saying so, where a bundle says `torn_tail: true`; the listing now has a `torn_tail` field
   too. `scripts/verify_witness_bundle.py` adds a note when a bundle left one out: the bundle's own chain check fails
   on it until the controller's next append sets it aside, so export again after one.
+- **A cancelled isolated-session create no longer leaves its browser container and network running.** With
+  `SESSION_ISOLATION_MODE=docker_ephemeral`, a create cancelled (its caller gave up, or shutdown) while the controller
+  was creating the session's container and network let that work finish and dropped what it made, so the container
+  ran, holding the session's profile, until the next controller start swept it. The cancelled create now waits up to
+  ten seconds for that work and releases what it made (the container, the session network, the profile and
+  downloads); work that takes longer is released when it ends.
 
 ## [1.16.0] — 2026-11-06
 
