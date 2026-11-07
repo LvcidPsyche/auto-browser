@@ -303,9 +303,13 @@ class BrowserSessionService(SessionCreation):
         summary["witness_remote"] = session.witness_remote_state.model_dump()
         summary["close_reason"] = reason
         record = SessionRecord.model_validate(summary)
-        await self.manager.session_store.upsert(record)
-        if not delivered:  # how its receipts went reaches the record when they end
-            self.manager.witness_bridge.save_when_delivered(session, record)
+        try:
+            await self.manager.session_store.upsert(record)
+        finally:
+            # How its receipts went reaches the record when they end; also when this write raised, since it may have
+            # landed in part (the file copy, and not Redis) and the outcome still on its way would never be saved.
+            if not delivered:
+                self.manager.witness_bridge.save_when_delivered(session, record)
         return {
             # The session is gone by now, whatever failed: `closed` says so. A step that failed is named in
             # failed_steps and makes the teardown partial (the audit event and receipt say partial too).

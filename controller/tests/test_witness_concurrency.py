@@ -464,6 +464,33 @@ class CloseRecordsTheDeliveredStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.witness_remote.last_error, "Hosted Witness delivery failed for close_session.")
         self.assertEqual(stored.status, "closed")
 
+    async def test_a_late_delivery_reaches_the_closed_record_when_the_closes_own_write_failed(self) -> None:
+        # Codex review of c1: the close's write raised after its file copy landed (Redis, and the drop of its old copy,
+        # failed), so the save of the outcome still on its way was never scheduled, and that outcome reached only the
+        # closed session's object, not the record.
+        answer = self.held["close_session"] = asyncio.Event()
+        self.refused.add("close_session")
+        store = self.manager.session_store
+        write = store.upsert
+
+        async def close_write_lands_then_fails(record: SessionRecord) -> None:
+            await write(record)
+            if record.status == "closed" and record.witness_remote.status != "failed":
+                raise ConnectionError("redis write lost")
+
+        store.upsert = close_write_lands_then_fails  # type: ignore[method-assign]
+        with acting_as(ALICE):
+            session_id = (await self.manager.create_session(name="alice"))["id"]
+            with self.assertRaises(ConnectionError):
+                await self.manager.close_session(session_id)  # its wait for the close receipt runs out
+        self.assertEqual((await store.get(session_id)).witness_remote.status, "delivered")  # the create receipt's
+        answer.set()
+
+        stored = await self.stored_once(session_id, lambda record: record.witness_remote.status == "failed")
+        self.assertEqual(stored.witness_remote.status, "failed")
+        self.assertEqual(stored.witness_remote.last_error, "Hosted Witness delivery failed for close_session.")
+        self.assertEqual(stored.status, "closed")
+
     async def test_a_delivery_stopped_at_shutdown_reaches_the_closed_record_before_the_stop_returns(self) -> None:
         # The store shuts down after the stop: a save that came later would be lost.
         self.held["close_session"] = asyncio.Event()  # never answered
