@@ -116,7 +116,8 @@ class PipelineUnexpectedExceptionTests(unittest.IsolatedAsyncioTestCase):
         async def operation():
             ran.append(1)
 
-        with self.assertLogs("app.actions.pipeline", level="WARNING") as logs:
+        # Logged by the save every call that took effect shares (BrowserSessionService.persist_after_action).
+        with self.assertLogs("app.browser.services.sessions", level="WARNING") as logs:
             result = await self.manager._run_action(self.session, "click", {"selector": "#b"}, operation)
 
         self.assertEqual(ran, [1])

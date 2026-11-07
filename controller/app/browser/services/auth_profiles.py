@@ -330,7 +330,7 @@ class BrowserAuthProfileService:
                 metadata={"saved_to": auth_info["path"], "encrypted": auth_info["encrypted"]},
             )
             payload["session"] = await self.manager._session_summary(session)
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "save_storage_state")
             return payload
 
     async def save_for_session(
@@ -464,7 +464,7 @@ class BrowserAuthProfileService:
                 metadata={"saved_to": payload["saved_to"]},
             )
             payload["session"] = await self.manager._session_summary(session)
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "save_auth_profile")
             return payload
 
     async def get(self, profile_name: str) -> dict[str, Any]:

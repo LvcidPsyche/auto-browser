@@ -621,17 +621,8 @@ class BrowserActionPipeline:
             )
 
         await self._write_record(session, witness_state, writes)
-        try:
-            await manager._persist_session(session, status="active")
-        except Exception as exc:
-            # The action ran and is recorded: raised, this read as a failed action, and an agent that retried acted
-            # twice. The session's stored record catches up at its next save.
-            logger.warning(
-                "%s in session %s ran, but its session record could not be saved: %s",
-                context.action_name,
-                session.id,
-                exc,
-            )
+        # The action ran and is recorded: a failed save of the session's record is logged, not raised (R5C-13).
+        await manager._persist_session_after_action(session, context.action_name)
         _events.emit_action(session.id, context.action_name, "ok", {"url": manager._shown_url(session.page)})
         return {
             "action": context.action_name,

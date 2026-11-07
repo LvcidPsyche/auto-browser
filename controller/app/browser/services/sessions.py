@@ -812,6 +812,17 @@ class BrowserSessionService(SessionCreation):
             return
         await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
 
+    async def persist_after_action(self, session: "BrowserSession", action: str) -> None:
+        """Save the session's record once `action` has taken effect. A failed save (a full disk, Redis failing the
+        write) is logged with the session id, not raised: raised, it read as a failed action, and an agent that retried
+        acted twice (R5C-13). The stored record catches up at the session's next save."""
+        try:
+            await self.manager._persist_session(session, status="active")
+        except Exception as exc:
+            logger.warning(
+                "%s in session %s ran, but its session record could not be saved: %s", action, session.id, exc
+            )
+
     def isolation_payload(self, session: "BrowserSession") -> dict[str, Any]:
         payload: dict[str, Any] = {
             "mode": session.isolation_mode,

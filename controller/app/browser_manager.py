@@ -498,6 +498,9 @@ class BrowserManager:
     async def _persist_session(self, session: BrowserSession, *, status: SessionStatus) -> None:
         await self.session_lifecycle.persist(session, status=status)
 
+    async def _persist_session_after_action(self, session: BrowserSession, action: str) -> None:
+        await self.session_lifecycle.persist_after_action(session, action)
+
     async def _maybe_provision_session_tunnel(self, session: BrowserSession) -> None:
         await self.session_lifecycle.maybe_provision_tunnel(session)
 

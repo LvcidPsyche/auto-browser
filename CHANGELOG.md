@@ -123,11 +123,14 @@ All notable changes to auto-browser are documented here.
   the lock is free, which the event loop no longer waits for, and the candidate a re-stage replaces is removed in a
   worker thread too; a run cancelled meanwhile waits for that work, and its record names the candidate it staged. A shutdown that cancels the staging itself places nothing, and the next start
   marks that run failed.
-- **A browser action that ran is no longer reported as failed when its session's record cannot be saved.** Once an
-  action had taken effect and been recorded (its `actions.jsonl` line, audit entry and witness receipt), saving the
-  session's record could still fail (a full disk, or Redis failing the write), and that error reached the caller as
-  the action's, so an agent that retried made the change twice. The failure is now logged with the session id and
-  the action's result is returned; the stored record catches up at the session's next save.
+- **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
+  when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
+  `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,
+  or Redis failing the write), and that error reached the caller as the action's, so an agent that retried made the
+  change twice. Opening, switching to or closing a tab, a human takeover request, and saving a session's auth state
+  or an auth profile from it did the same, so an agent that retried a tab's close closed another tab. The failure is
+  now logged with the session id and the result is returned; the stored record catches up at the session's next
+  save.
 - **One mesh peer flooding the replay cache no longer locks every other peer out.** A registered peer that got
   10,000 signed envelopes through inside a timestamp window filled the 10,000-nonce replay cache, and every peer was
   refused (`503`) until those nonces expired. Each peer now holds at most 1,000 of them: one at its share is refused
