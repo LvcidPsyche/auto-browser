@@ -25,12 +25,13 @@ All notable changes to auto-browser are documented here.
   scrubbed as the run trace scrubs a URL's, by the PII scrubber (so not with `PII_SCRUB_ENABLED` or
   `PII_SCRUB_NETWORK` off): a navigate's kept an OAuth code or a token in full. Receipts recorded without a policy
   outcome were standard, and kept the reason in full, in the approval and again in the metadata: an approval's
-  receipts (its request, decision and execution) now take the evidence mode of the action it approves, so those of an
-  action marked sensitive, a high-risk one or one that moves auth material are restricted as that action's own
-  receipt is, in a normal session too; and every approval receipt of a confidential session, like a human takeover's
-  receipt there, is restricted. The approval store still keeps an approval's reason and its decision's comment, and
-  the audit log a takeover's reason and the comment. A hosted Witness service and an exported bundle receive the
-  receipt as recorded.
+  receipts (its request, decision and execution) now take the evidence mode of the action it approves, as the
+  approval describes it, so those of an action marked sensitive, a high-risk one or one that moves auth material are
+  restricted as that action's own receipt is, in a normal session too (a field an action finds sensitive only as it
+  runs restricts that action's own receipt, not its approval's, which hold none of what it typed); and every approval
+  receipt of a confidential session, like a human takeover's receipt there, is restricted. The approval store still
+  keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the comment. A
+  hosted Witness service and an exported bundle receive the receipt as recorded.
 
 ### Fixed
 
@@ -160,7 +161,8 @@ All notable changes to auto-browser are documented here.
   the mesh off too. The window had no limit, and a nonce is kept for up to two windows, so at the default request
   rate limit one address could fill the 10,000-nonce replay cache from a window of about 2,500 seconds, and a wider
   window keeps a captured envelope replayable longer to a controller restarted with its clock set back. At 600
-  seconds one address holds about 2,400 nonces at the default limit. `docs/mesh.md` and `.env.example` say so.
+  seconds one address can hold at most about 2,400 nonces at the default limit, and each peer at most 1,000 (its
+  share). `docs/mesh.md` and `.env.example` say so.
 
 ## [1.16.0] — 2026-11-06
 
