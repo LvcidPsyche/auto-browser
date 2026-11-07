@@ -92,6 +92,21 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["teardown"], "partial")
         self.assertEqual(result["failed_steps"], ["close isolated browser"])
 
+    async def test_r5c_11_a_gate_release_that_raises_after_the_browser_closed_does_not_stop_the_close(self) -> None:
+        # The gate release after the owned browser's close sat outside every try: its error escaped the close, and the
+        # audit event, the witness receipt and the closed record that follow the teardown were never written.
+        self.session.owns_browser = True
+        self.session.browser = SimpleNamespace(close=AsyncMock())
+        self.manager.request_gates.release = AsyncMock(side_effect=RuntimeError("detach failed"))  # type: ignore[method-assign]
+
+        result = await self.close()
+
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "complete")  # the browser closed; its gate's session went with it
+        self.assertEqual(self.closed_audit()["status"], "ok")
+        self.receipt.assert_awaited_once()
+        self.assertEqual((await self.manager.session_store.get(self.session_id)).status, "closed")
+
     async def test_nav36_a_cancel_mid_teardown_still_records_the_close(self) -> None:
         started = asyncio.Event()
         proceed = asyncio.Event()

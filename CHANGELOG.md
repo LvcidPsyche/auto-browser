@@ -71,6 +71,14 @@ All notable changes to auto-browser are documented here.
   remembers the 10,000 most recent), a missing file copy now defers to Redis: a closed record there refuses the write,
   and a Redis that cannot be read skips it until the next write. A new session's first write still asks nothing of
   Redis.
+- **A failed shadow browse now always rolls back fully and reports its own error, and a close always records
+  itself.** Releasing a session-owned browser's pre-request gate or window-birth watcher, after the browser closed,
+  could raise, and nothing caught it: the rollback of a failed `enable_shadow_browse` stopped there, leaving the shadow
+  session's directories and the active record its persist had written, and its caller got that error instead of the
+  one that failed the shadow; the rollback of a failed isolated create stopped before releasing the isolated runtime;
+  and a close of such a session skipped its audit event, witness receipt and closed record. Those steps are now bounded
+  and logged as the other teardown steps are, the rest runs, and a shadow browse's rollback that still fails is logged
+  while the original error is raised.
 
 ## [1.16.0] — 2026-11-06
 

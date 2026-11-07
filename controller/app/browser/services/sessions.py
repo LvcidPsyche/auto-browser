@@ -390,22 +390,41 @@ class BrowserSessionService(SessionCreation):
     async def _close_owned_browser(self, browser: Any, session_id: str) -> bool:
         """Close a browser the session owns, then release its gate; False when the close failed. Until the close has
         succeeded the gate stays attached, still gating whatever runs there, and the close taking the gate's session
-        down is no loss."""
+        down is no loss. The steps around the close are bounded and logged and never raise (R5C-11): a failed create's
+        or shadow browse's rollback runs this, and the rest of it, and its caller's own error, came after."""
         gates = self.manager.request_gates
-        gates.ending(browser)
+        self._mark_gate_ending(browser, session_id, True)
         try:
             await asyncio.wait_for(browser.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except Exception as exc:
-            gates.ending(browser, False)
+            self._mark_gate_ending(browser, session_id, False)
             logger.error(
                 "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
                 session_id,
                 f"{type(exc).__name__}: {exc}"[:200],
             )
             return False
-        await gates.release(browser)
-        await self.manager.window_births.release(browser)
+        await self._teardown_step(
+            session_id, "release the pre-request gate of its browser", lambda: gates.release(browser)
+        )
+        await self._teardown_step(
+            session_id,
+            "release the window-birth watcher of its browser",
+            lambda: self.manager.window_births.release(browser),
+        )
         return True
+
+    def _mark_gate_ending(self, browser: Any, session_id: str, ending: bool) -> None:
+        """request_gates.ending, logged instead of raised: it only marks the gate, and the close goes on either way."""
+        try:
+            self.manager.request_gates.ending(browser, ending)
+        except Exception as exc:
+            logger.warning(
+                "could not mark the pre-request gate of session %s's browser as %s: %s",
+                session_id,
+                "ending" if ending else "still in use",
+                exc,
+            )
 
     @staticmethod
     async def _teardown_step(session_id: str, label: str, step: Any, failed_steps: list[str] | None = None) -> bool:
@@ -627,9 +646,12 @@ class BrowserSessionService(SessionCreation):
                 manager.window_births.forget_session(shadow_session)
             # One protected unit, as cleanup_failed's (W9-11): a cancel at any step left the browser, the directories
             # or a record the persist already wrote reading active; the cancel is raised once the rollback is done.
-            await self._run_to_completion(
-                self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
-            )
+            try:
+                await self._run_to_completion(
+                    self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
+                )
+            except Exception as exc:  # the error to raise is the one that started the rollback (R5C-11)
+                logger.error("the rollback of shadow session %s failed: %s", shadow_session_id, exc)
             raise
 
         await manager.audit.append(

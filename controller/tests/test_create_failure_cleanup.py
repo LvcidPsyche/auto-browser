@@ -402,6 +402,47 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancels, 1)
         await self._assert_rolled_back_past_the_stalled_close(release_runtime, logs)
 
+    def _isolated_create_that_fails(self) -> AsyncMock:
+        """A create on an isolated runtime whose witness receipt fails; returns the runtime release."""
+        from app.session_isolation import IsolatedBrowserRuntime
+
+        runtime = IsolatedBrowserRuntime(
+            session_id=SESSION_ID,
+            container_id="c0",
+            container_name="browser-node-x",
+            network_name="net",
+            browser_node_name="browser-node-x",
+            profile_dir=self.root / "profile",
+            downloads_dir=self.root / "downloads",
+            ws_endpoint_file=self.root / "ws",
+            ws_endpoint="ws://127.0.0.1:1/",
+            takeover_url="http://127.0.0.1:6080/",
+            novnc_port=None,
+        )
+        browser = self.manager.browser
+        browser.close = AsyncMock()  # type: ignore[attr-defined]
+        self.manager._acquire_session_browser = AsyncMock(return_value=(browser, runtime))  # type: ignore[method-assign]
+        release_runtime = AsyncMock()
+        self.manager.runtime_provisioner.release = release_runtime  # type: ignore[method-assign]
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("witness down")
+        )
+        return release_runtime
+
+    async def test_r5c_11_a_gate_release_that_raises_does_not_stop_a_failed_creates_rollback(self) -> None:
+        # The owned browser's gate release sat outside every try: raising there skipped the runtime release, the
+        # directory removal and the record close, and the caller got the release's error instead of its own.
+        release_runtime = self._isolated_create_that_fails()
+        self.manager.request_gates.release = AsyncMock(side_effect=RuntimeError("detach failed"))  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "witness down"):
+            await self.manager.create_session()
+
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()
 
