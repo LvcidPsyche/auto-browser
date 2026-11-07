@@ -18,6 +18,12 @@ ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
 USER_AGENT_POOL_SEPARATOR = "|"
 _USER_AGENT_POOL_SPLIT = re.compile(r"[|\r\n]")
 
+# The largest MESH_TIMESTAMP_WINDOW, in seconds. A nonce is kept for up to two windows, so at the default request rate
+# limit one address can hold about four times the window in seconds of them: 2,400 here, under the 10,000-nonce replay
+# cache. A wider window also keeps a captured envelope replayable longer to a controller restarted with its clock set
+# back, and lengthens the refusals after each start (docs/mesh.md).
+MESH_TIMESTAMP_WINDOW_MAX_SECONDS = 600.0
+
 
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
@@ -501,6 +507,18 @@ class Settings(BaseSettings):
         # Zero and negative stay valid: ARTIFACT_RETENTION_HOURS <= 0 means "keep forever".
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
+        return value
+
+    @field_validator("mesh_timestamp_window")
+    @classmethod
+    def _mesh_timestamp_window_bounded(cls, value: float) -> float:
+        # At 0 or below no envelope fits the window; above the ceiling, see MESH_TIMESTAMP_WINDOW_MAX_SECONDS. Checked
+        # with the mesh off too, as an unparseable value is.
+        if not 0 < value <= MESH_TIMESTAMP_WINDOW_MAX_SECONDS:
+            raise ValueError(
+                f"MESH_TIMESTAMP_WINDOW must be more than 0 and at most {MESH_TIMESTAMP_WINDOW_MAX_SECONDS:g} seconds, "
+                f"got {value!r}"
+            )
         return value
 
     @field_validator("cdp_connect_url", mode="before")

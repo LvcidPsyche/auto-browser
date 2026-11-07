@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.config import Settings
 from app.curator_llm import CuratorLLMAdapter, build_curator_adapter
 from app.startup.extensions import _init_mesh
@@ -46,6 +48,33 @@ class MeshAndCuratorSettingsTests(unittest.TestCase):
         self.assertEqual(settings.mesh_timestamp_window, 45.0)
         self.assertEqual(settings.curator_provider, "openai")
         self.assertEqual(settings.curator_model, "gpt-test")
+
+
+class MeshTimestampWindowBoundsTests(unittest.TestCase):
+    """R5C-26: MESH_TIMESTAMP_WINDOW had no bounds.
+
+    A nonce is kept for up to two windows, so at the default rate limit one address could fill the 10,000-nonce replay
+    cache from a window of about 2,500 s, and a wide window keeps a captured envelope replayable longer to a restarted
+    controller; at or below 0 the window refuses every envelope.
+    """
+
+    def _settings(self, raw: str) -> Settings:
+        with patch.dict(os.environ, {"MESH_TIMESTAMP_WINDOW": raw}, clear=True):
+            return Settings(_env_file=None)
+
+    def test_r5c_26_a_window_above_600_seconds_or_at_or_below_0_stops_startup_and_names_its_limits(self):
+        # The mesh is off here: a value out of bounds stops startup either way, as an unparseable one does.
+        for raw in ("600.5", "601", "3600", "0", "-30"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValidationError) as ctx:
+                    self._settings(raw)
+                message = str(ctx.exception)
+                self.assertIn("MESH_TIMESTAMP_WINDOW must be more than 0 and at most 600 seconds", message)
+
+    def test_r5c_26_a_window_inside_its_limits_is_kept_the_ceiling_included(self):
+        for raw, expected in (("0.5", 0.5), ("30", 30.0), ("600", 600.0)):
+            with self.subTest(raw=raw):
+                self.assertEqual(self._settings(raw).mesh_timestamp_window, expected)
 
 
 class InitMeshReadsSettingsTests(unittest.TestCase):

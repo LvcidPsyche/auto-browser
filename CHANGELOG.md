@@ -4,6 +4,14 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **A `MESH_TIMESTAMP_WINDOW` above 600 seconds, or at or below 0, now stops startup.** Set it inside those limits
+  (the default is 30), on a controller with the mesh off too. With the mesh on, lowering it needs the wait that
+  `docs/mesh.md` describes for any lowering: the startup check assumes the last process ran with no larger window,
+  so start this release only once the old window has passed since the old controller last accepted an envelope
+  (stop it, then wait that long).
+
 ### Security
 
 - **A restricted witness receipt now withholds secrets at any depth, and in its metadata and approval reason too.** A
@@ -139,6 +147,15 @@ All notable changes to auto-browser are documented here.
   so one that varied either was never limited, churned the limiter's buckets, and could fill the mesh replay cache
   from one address. Such requests are now keyed by client address, as unauthenticated requests are; paths exempt
   from the limiter stay exempt in that mode. `docs/mesh.md` says so.
+
+### Changed
+
+- **`MESH_TIMESTAMP_WINDOW` is now bounded: more than 0, and at most 600 seconds.** Any other value stops startup
+  with "MESH_TIMESTAMP_WINDOW must be more than 0 and at most 600 seconds", as an unparseable one already did, with
+  the mesh off too. The window had no limit, and a nonce is kept for up to two windows, so at the default request
+  rate limit one address could fill the 10,000-nonce replay cache from a window of about 2,500 seconds, and a wider
+  window keeps a captured envelope replayable longer to a controller restarted with its clock set back. At 600
+  seconds one address holds about 2,400 nonces at the default limit. `docs/mesh.md` and `.env.example` say so.
 
 ## [1.16.0] — 2026-11-06
 

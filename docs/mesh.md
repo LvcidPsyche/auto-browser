@@ -14,6 +14,9 @@ MESH_TIMESTAMP_WINDOW=30                # seconds an envelope's timestamp may di
 MESH_MAX_BODY_BYTES=1048576             # largest /mesh/receive body in bytes; over it gets 413 unparsed
 ```
 
+`MESH_TIMESTAMP_WINDOW` must be more than 0 and at most 600 seconds: any other value stops startup, with the mesh
+off too.
+
 `GET /mesh/identity` returns this node's `node_id` (the SHA-256 of its public key, hex) and
 `pubkey_b64`. Give those two values to the operator of any node that should call this one.
 
