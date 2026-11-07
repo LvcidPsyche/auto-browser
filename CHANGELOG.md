@@ -145,8 +145,10 @@ All notable changes to auto-browser are documented here.
   Under `API_ALLOW_TOKENLESS_LOOPBACK` with no credential, every request counted as authenticated, so the request
   rate limit keyed it by its `Authorization` header, else its `X-Operator-Id` header: values a sender mints at will,
   so one that varied either was never limited, churned the limiter's buckets, and could fill the mesh replay cache
-  from one address. Such requests are now keyed by client address, as unauthenticated requests are; paths exempt
-  from the limiter stay exempt in that mode. `docs/mesh.md` says so.
+  from one address. Such requests are now keyed by client address, as unauthenticated requests are, so clients
+  behind one address that each sent their own `X-Operator-Id` or `Authorization` now share that address's limit
+  (`REQUEST_RATE_LIMIT_REQUESTS`, 120 a minute by default); paths exempt from the limiter stay exempt in that mode.
+  `docs/mesh.md` says so.
 
 ### Changed
 

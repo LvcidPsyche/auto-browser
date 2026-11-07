@@ -85,8 +85,8 @@ def shared_lock(handle: IO[Any]) -> Iterator[None]:
     byte-range locks, and an exclusive one needs a descriptor open for writing,
     so exclusive_lock on a read-only handle failed there with EBADF; a shared one
     needs only reading, and still excludes the exclusive lock an append holds.
-    Windows has no shared lock: its byte-range lock (exclusive_lock) works on a
-    read-only handle, and is taken instead.
+    On Windows msvcrt offers no shared lock: its byte-range lock (exclusive_lock)
+    works on a read-only handle, and is taken instead.
     """
     if not _HAVE_FCNTL:
         with exclusive_lock(handle):

@@ -58,7 +58,8 @@ class DelegationReplayError(DelegationError):
 
 
 class MeshReplayCacheFull(DelegationError):
-    """The nonce cache holds its cap of nonces still inside their window: the envelope is refused, not recorded."""
+    """The nonce cache, or its sender's share of it, holds its cap of nonces still inside their window: the
+    envelope is refused, not recorded."""
 
 
 # ---------------------------------------------------------------------------
