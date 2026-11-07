@@ -445,6 +445,36 @@ async def test_stopping_delivery_after_its_worker_died_fails_what_it_left_queued
     assert manager.session_store.upsert.await_args.args[0].witness_remote.status == "failed"
 
 
+async def test_the_receipt_a_delivery_worker_dies_on_fails_its_delivery(make_service, monkeypatch) -> None:
+    # Review of c2 (Codex 3, GLM 1): the worker died on a receipt without settling it, and stop_delivery fails only
+    # what was left queued, so a session whose earlier receipt had been delivered kept saying delivered for ever.
+    async def record(scope: str, payload: dict) -> dict:
+        return {}
+
+    service, _ = make_service(record)
+    deliver = service._deliver
+
+    async def deliver_or_die(item) -> None:
+        if item.action == "second":
+            raise RuntimeError("a bug in the delivery")
+        await deliver(item)
+
+    monkeypatch.setattr(service, "_deliver", deliver_or_die)
+    session = _session("s1")
+    await _record(service, session, "first")
+    assert await service.wait_for_delivery("s1", timeout=2)
+    assert session.witness_remote_state.status == "delivered"
+    worker = service._worker
+    with crashes_expected():
+        await _record(service, session, "second")
+        await asyncio.wait({worker}, timeout=2)
+        assert worker.done() and isinstance(worker.exception(), RuntimeError)
+
+    state = session.witness_remote_state
+    assert state.status == "failed"
+    assert state.last_error == "Hosted Witness delivery failed for second."
+
+
 def test_the_client_names_the_status_of_a_refused_answer() -> None:
     response = httpx.Response(503, json={"detail": "busy"}, request=httpx.Request("POST", "https://w.example/x"))
 

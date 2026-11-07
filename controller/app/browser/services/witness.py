@@ -241,6 +241,11 @@ class BrowserWitnessService:
                 stopped = f"Hosted Witness delivery of {item.action} was stopped before it finished."
                 self._settle(item.session, item.seq, stopped)
                 raise
+            except Exception:
+                # An error _deliver does not expect ends the worker (stop_delivery fails what it left queued): the
+                # receipt it was sending fails too, or its session kept the outcome of an earlier one.
+                self._settle(item.session, item.seq, f"Hosted Witness delivery failed for {item.action}.")
+                raise
             finally:
                 self._in_flight = None
                 if not item.done.done():
