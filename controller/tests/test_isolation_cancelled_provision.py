@@ -93,9 +93,10 @@ async def test_a_provision_cancelled_mid_create_releases_what_the_thread_made(tm
 
     container = client.containers.browser_containers[provisioner._container_name(SESSION)]
     network = provisioner._session_network_name(container.name)
+    profile = provisioner._local_runtime_root(SESSION)
     assert await _eventually(lambda: container.removed), "the container the thread created was left running"
     assert await _eventually(lambda: network not in client.networks.by_name), "its session network was left"
-    assert not provisioner._local_runtime_root(SESSION).exists(), "its profile and downloads were left"
+    assert await _eventually(lambda: not profile.exists()), "its profile and downloads were left"
 
 
 async def test_the_cancellation_waits_for_the_thread_only_so_long_and_the_release_still_follows(
@@ -113,7 +114,33 @@ async def test_the_cancellation_waits_for_the_thread_only_so_long_and_the_releas
     held.go.set()
     assert await asyncio.to_thread(held.finished.wait, WAIT_SECONDS)
     container = client.containers.browser_containers[provisioner._container_name(SESSION)]
+    profile = provisioner._local_runtime_root(SESSION)
     assert await _eventually(lambda: container.removed), "the container the thread created was left running"
+    # Removed after the container: waited for, not read at once (Codex review: the release may still be running).
+    assert await _eventually(lambda: not profile.exists()), "its profile and downloads were left"
+
+
+def test_a_provision_whose_event_loop_ends_first_is_released_by_its_thread(tmp_path: Path, monkeypatch) -> None:
+    # Codex review: the release ran as a task of the event loop, so a loop that ended before the thread finished (a
+    # shutdown: asyncio.run cancels the tasks left, then waits for the executor's threads) dropped the thread's result
+    # again, and the container and network stayed until the next startup sweep.
+    monkeypatch.setattr(session_isolation, "CANCELLED_PROVISION_WAIT_SECONDS", 0.05)
+    provisioner, client = _provisioner(tmp_path)
+    held = _HeldProvision(provisioner)
+
+    async def cancel_mid_create_then_end() -> None:
+        task = await _cancelled_while_creating(provisioner)
+        await asyncio.wait({task}, timeout=WAIT_SECONDS)
+        assert task.done() and not held.finished.is_set()
+        # The thread goes on once the loop has begun to end.
+        threading.Timer(0.2, held.go.set).start()
+
+    asyncio.run(cancel_mid_create_then_end())
+
+    assert held.finished.is_set()  # asyncio.run waited for the thread
+    container = client.containers.browser_containers[provisioner._container_name(SESSION)]
+    assert container.removed, "the container the thread created was left running"
+    assert provisioner._session_network_name(container.name) not in client.networks.by_name
     assert not provisioner._local_runtime_root(SESSION).exists()
 
 
