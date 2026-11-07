@@ -126,9 +126,9 @@ takes ten or more peers at once (`/mesh/receive` takes no bearer token, so the r
 120 requests a minute, counts it per client address; since a nonce is kept for up to two windows, one address can
 hold about four times as many nonces as the window has seconds (120 at the default 30-second
 `MESH_TIMESTAMP_WINDOW`), so a peer behind one address reaches its share only if that limit is raised or off or the
-window is about 250 seconds or more; when the controller serves without a token
-(`API_ALLOW_TOKENLESS_LOOPBACK`), the limit counts each `Authorization` or `X-Operator-Id` value apart, so a
-sender that varies one is not limited). The timestamp window is checked against that same latest time, never the
+window is about 250 seconds or more; a controller serving without a token (`API_ALLOW_TOKENLESS_LOOPBACK`) counts
+every request per client address too, whatever `Authorization` or `X-Operator-Id` it sends). The timestamp window
+is checked against that same latest time, never the
 raw clock, so a clock stepped back cannot put an envelope whose nonce is already forgotten inside the window
 again. A peer's reply to a delegation this node sent is checked against the same clock and nonce cache, and
 refused unless it names the request's id. The cost: after a large backward step of the clock, fresh envelopes are

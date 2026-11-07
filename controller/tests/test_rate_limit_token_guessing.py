@@ -43,7 +43,7 @@ def make_client(scope: str = BIND_SCOPE_LOOPBACK, *, tokenless: bool = False) ->
         metrics=SimpleNamespace(enabled=False),
     )
 
-    for path in ("/metrics", "/healthz", "/docs", "/artifacts/{a}/{b}"):
+    for path in ("/metrics", "/healthz", "/docs", "/artifacts/{a}/{b}", "/sessions"):
 
         @app.get(path)
         async def ok(a: str = "", b: str = "") -> dict[str, bool]:
@@ -89,6 +89,17 @@ class ExemptPathTokenGuessingTests(unittest.TestCase):
         for path in ("/metrics", "/artifacts/x/y.png"):
             with self.subTest(path=path):
                 self.assertEqual(set(self.statuses(client, path, {}, 30)), {200})
+
+    def test_r5c_25_a_tokenless_controller_keys_a_request_by_its_address_whatever_headers_it_carries(self) -> None:
+        # Under API_ALLOW_TOKENLESS_LOOPBACK no credential exists, yet every request counted as authenticated, so the
+        # limiter keyed it by its Authorization hash, else its X-Operator-Id hash: values a sender mints at will, so
+        # one that varied either was never limited, and churned the limiter's buckets.
+        for header, value in (("Authorization", "Bearer minted-{n}"), ("X-Operator-Id", "operator-{n}")):
+            with self.subTest(header=header):
+                client = make_client(tokenless=True)
+                codes = [client.get("/sessions", headers={header: value.format(n=n)}).status_code for n in range(12)]
+                self.assertEqual(codes[:LIMIT], [200] * LIMIT)
+                self.assertEqual(codes[LIMIT:], [429] * (12 - LIMIT))
 
 
 if __name__ == "__main__":

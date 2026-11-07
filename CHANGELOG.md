@@ -133,6 +133,12 @@ All notable changes to auto-browser are documented here.
   closing the file failed too, the close's error replaced the read's, so the takeover token's warning gave the
   generic "its mode could not be tightened" cause. The read's error is now the one raised, and the failed close is
   logged as a warning of its own.
+- **A controller serving without a token now rate-limits each client address, whatever headers a request carries.**
+  Under `API_ALLOW_TOKENLESS_LOOPBACK` with no credential, every request counted as authenticated, so the request
+  rate limit keyed it by its `Authorization` header, else its `X-Operator-Id` header: values a sender mints at will,
+  so one that varied either was never limited, churned the limiter's buckets, and could fill the mesh replay cache
+  from one address. Such requests are now keyed by client address, as unauthenticated requests are; paths exempt
+  from the limiter stay exempt in that mode. `docs/mesh.md` says so.
 
 ## [1.16.0] — 2026-11-06
 

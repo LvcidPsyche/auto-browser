@@ -114,6 +114,15 @@ def install_controller_http_middleware(
             return False
         return _matched_credential(request) is not None
 
+    def _proved_a_credential(request: Request) -> bool:
+        """Whether the request holds a configured credential: what lets the limiter key it by its own headers.
+
+        Under API_ALLOW_TOKENLESS_LOOPBACK every request passes the gate (_has_valid_bearer_token), but no
+        credential exists for its Authorization or operator header to prove: keyed by them, a sender that minted a
+        new value for each request was never limited, and churned the limiter's buckets (R5C-25).
+        """
+        return _auth_policy().has_credential and _matched_credential(request) is not None
+
     @application.middleware("http")
     async def require_api_bearer_token(request: Request, call_next):
         path = _request_path(request)
@@ -151,7 +160,7 @@ def install_controller_http_middleware(
                 operator_id_header=settings.operator_id_header,
                 headers=request.headers,
                 client_host=request.client.host if request.client else None,
-                authenticated=_has_valid_bearer_token(request),
+                authenticated=_proved_a_credential(request),
             )
         )
         headers = {
