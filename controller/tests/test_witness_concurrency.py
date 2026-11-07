@@ -14,6 +14,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ from app.browser.services.witness import BrowserWitnessService
 from app.models import SessionRecord, WitnessRemoteState
 from app.session_ownership import acting_as
 from app.witness import WitnessPolicyEngine, WitnessRecorder, WitnessRemoteClient
+from tests._background import crashes_expected
 from tests.test_auth_state_ownership import ALICE, build_manager
 
 OPERATOR = {"id": "alice", "source": "header"}
@@ -386,6 +388,61 @@ async def test_a_receipt_recorded_while_delivery_stops_does_not_start_a_second_w
 
     assert most_at_once == 1, "two workers sent receipts at once"
     assert sent == ["first", "second"]
+
+
+async def test_stopping_delivery_after_its_worker_died_fails_what_it_left_queued(make_service, monkeypatch) -> None:
+    # A8: stop_delivery returned at once when the delivery worker had died (an error it did not expect), so the
+    # receipts queued behind it were never failed, their sessions kept saying idle, and the closed records waiting for
+    # their outcomes were not saved before the session store shut down.
+    taken, crash = asyncio.Event(), asyncio.Event()
+
+    async def record(scope: str, payload: dict) -> dict:
+        return {}
+
+    service, manager = make_service(record)
+    manager.session_store = SimpleNamespace(upsert=AsyncMock())
+    deliver = service._deliver
+
+    async def deliver_then_die(item) -> None:
+        if item.action == "first":
+            taken.set()
+            await crash.wait()
+            raise RuntimeError("a bug in the delivery")
+        await deliver(item)
+
+    monkeypatch.setattr(service, "_deliver", deliver_then_die)
+    first, second = _session("s1"), _session("s2")
+    await _record(service, first, "first")
+    await asyncio.wait_for(taken.wait(), 2)
+    await _record(service, second, "second")  # queued behind the receipt the worker dies on
+    closed = SessionRecord(
+        id="s2",
+        name="s2",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        status="closed",
+        current_url="",
+        title="",
+        artifact_dir="/tmp/artifacts",
+        takeover_url="",
+        remote_access={},
+        witness_remote=second.witness_remote_state.model_copy(),
+    )
+    service.save_when_delivered(second, closed)
+    worker = service._worker
+    with crashes_expected():
+        crash.set()
+        await asyncio.wait({worker}, timeout=2)
+        assert worker.done() and isinstance(worker.exception(), RuntimeError)
+
+        await asyncio.wait_for(service.stop_delivery(timeout=0.5), 2)
+
+    state = second.witness_remote_state
+    assert state.status == "failed"
+    assert state.last_error == "Hosted Witness delivery of second was stopped before it was sent."
+    assert await service.wait_for_delivery("s2", timeout=0.05)
+    manager.session_store.upsert.assert_awaited_once()
+    assert manager.session_store.upsert.await_args.args[0].witness_remote.status == "failed"
 
 
 def test_the_client_names_the_status_of_a_refused_answer() -> None:

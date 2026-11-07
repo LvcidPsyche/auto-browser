@@ -331,21 +331,31 @@ class BrowserWitnessService:
 
         The worker stays the queue's while it drains: a receipt recorded meanwhile joins its queue, where clearing it
         first let that receipt start a second worker, which sent it beside the first's. A receipt still on its way
-        when the worker stops fails its delivery, so its session's state no longer says idle or delivered for it."""
+        when the worker stops fails its delivery, so its session's state no longer says idle or delivered for it. So
+        do the receipts a worker that died (an error it did not expect) left queued, and the closed records waiting
+        for them are saved before the stop returns, as they are after a drain."""
         worker, queue = self._worker, self._queue
-        if worker is None or queue is None or worker.done() or self._loop is not asyncio.get_running_loop():
+        if worker is None or queue is None or self._loop is not asyncio.get_running_loop():
             return
-        try:
-            await asyncio.wait_for(queue.join(), timeout)
-        except TimeoutError:
-            left = queue.qsize() + (self._in_flight is not None)
-            logger.warning(
-                "witness: %d receipt(s) were not delivered to the hosted Witness service before shutdown; "
-                "the local chain holds them",
-                left,
-            )
-        worker.cancel()
-        await asyncio.wait({worker})
+        if worker.done():
+            if not queue.empty():
+                logger.warning(
+                    "witness: the hosted Witness delivery worker had stopped; %d receipt(s) still queued were not "
+                    "delivered, and the local chain holds them",
+                    queue.qsize(),
+                )
+        else:
+            try:
+                await asyncio.wait_for(queue.join(), timeout)
+            except TimeoutError:
+                left = queue.qsize() + (self._in_flight is not None)
+                logger.warning(
+                    "witness: %d receipt(s) were not delivered to the hosted Witness service before shutdown; "
+                    "the local chain holds them",
+                    left,
+                )
+            worker.cancel()
+            await asyncio.wait({worker})
         while not queue.empty():
             item = queue.get_nowait()
             unsent = f"Hosted Witness delivery of {item.action} was stopped before it was sent."

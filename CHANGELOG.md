@@ -38,8 +38,8 @@ All notable changes to auto-browser are documented here.
   receipt's delivery (`witness_remote.last_error` says so), not the action. A close waits up to a second for its
   session's receipts before it saves the closed record, and saves it again when one still on its way lands or fails,
   even when its own save failed. Shutdown waits up to three seconds for the queue, logs what is left and fails its
-  delivery, then waits up to three seconds more for those closed records to be saved. The hosted Witness preflight
-  before a confidential session's actions is unchanged.
+  delivery (as it does what a delivery worker that died left queued), then waits up to three seconds more for those
+  closed records to be saved. The hosted Witness preflight before a confidential session's actions is unchanged.
 - **A witness bundle's receipts and its chain check now come from one read of the chain.** The export
   (`GET /sessions/{session_id}/witness/bundle`, `browser.export_witness_bundle`) read the receipts, then read the
   chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described
