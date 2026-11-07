@@ -65,6 +65,12 @@ All notable changes to auto-browser are documented here.
   closed record whose Redis write fails now drops the Redis copy (best effort, and the write still fails), so reads
   fall back to the file copy, and a write the closed guard refuses gives Redis the closed record when Redis does not
   hold it.
+- **With Redis as the session store, a session record's file copy deleted out of band no longer lets a late write
+  reopen the session.** The closed guard read only the file copy, and a missing one meant "not closed", so a late
+  write after the close replaced the closed record Redis still held. For a record this controller process wrote (it
+  remembers the 10,000 most recent), a missing file copy now defers to Redis: a closed record there refuses the write,
+  and a Redis that cannot be read skips it until the next write. A new session's first write still asks nothing of
+  Redis.
 
 ## [1.16.0] — 2026-11-06
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -12,6 +13,10 @@ from .models import SessionRecord
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path
 
 logger = logging.getLogger(__name__)
+
+# How many record ids the durable store remembers writing (the most recent), so that with Redis primary a missing file
+# copy of one is known to have been deleted, not never written, and the closed guard asks Redis about it (R5C-16).
+WRITTEN_IDS_REMEMBERED = 10_000
 
 try:  # pragma: no cover - import path depends on optional dependency
     from redis.asyncio import Redis
@@ -196,6 +201,8 @@ class DurableSessionStore:
         # session's persist behind one slow write); another controller process on the same store is not covered.
         # An entry goes once no write holds or waits for it, so the table does not grow with every session.
         self._write_locks: dict[str, _RecordLock] = {}
+        # The ids this process wrote, oldest first, up to WRITTEN_IDS_REMEMBERED (_is_closed).
+        self._written: OrderedDict[str, None] = OrderedDict()
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -279,6 +286,10 @@ class DurableSessionStore:
                     await self._repair_redis_copy(record.id)
                     return
             await self.file_store.upsert(record)
+            self._written[record.id] = None
+            self._written.move_to_end(record.id)
+            if len(self._written) > WRITTEN_IDS_REMEMBERED:
+                self._written.popitem(last=False)
             if self.redis_store is not None and self._primary is self.redis_store:
                 try:
                     await self.redis_store.upsert(record)
@@ -324,15 +335,20 @@ class DurableSessionStore:
 
         With Redis as the primary store, a file record that cannot be parsed defers to the Redis copy (W8-1), which
         get() reads first: a readable closed one refuses the write, a missing, unparseable or not closed one lets it
-        replace both, and any other Redis read failure, such as a lost connection, is None.
+        replace both, and any other Redis read failure, such as a lost connection, is None. So does a missing file
+        copy of a record this process wrote (R5C-16): it was deleted out of band, and Redis may hold its close. A
+        record it never wrote (a new session's first write) asks nothing of Redis, which may be down.
         """
+        redis_primary = self.redis_store is not None and self._primary is self.redis_store
         try:
             return (await self.file_store.get(session_id)).status == "closed"
         except KeyError:
+            if redis_primary and session_id in self._written:
+                return await self._redis_is_closed(session_id, "is missing")
             return False
         except ValueError as exc:
-            if self.redis_store is not None and self._primary is self.redis_store:
-                return await self._redis_is_closed(session_id, exc)
+            if redis_primary:
+                return await self._redis_is_closed(session_id, f"cannot be parsed ({exc})")
             logger.warning(
                 "the stored record of session %s cannot be parsed, so this write replaces it: %s", session_id, exc
             )
@@ -341,7 +357,7 @@ class DurableSessionStore:
             self._warn_unreadable(session_id, exc)
             return None
 
-    async def _redis_is_closed(self, session_id: str, file_error: ValueError) -> bool | None:
+    async def _redis_is_closed(self, session_id: str, file_problem: str) -> bool | None:
         try:
             closed = (await self.redis_store.get(session_id)).status == "closed"  # type: ignore[union-attr]
         except (KeyError, ValueError):
@@ -351,10 +367,9 @@ class DurableSessionStore:
             return None
         if not closed:
             logger.warning(
-                "the stored record of session %s cannot be parsed and redis holds no closed one, so this write "
-                "replaces it: %s",
+                "the stored record of session %s %s and redis holds no closed one, so this write replaces it",
                 session_id,
-                file_error,
+                file_problem,
             )
         return closed
 

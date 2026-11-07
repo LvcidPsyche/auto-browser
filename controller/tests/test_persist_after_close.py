@@ -7,8 +7,9 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+from app import session_store
 from app.models import SessionRecord
 from app.session_ownership import acting_as
 from app.session_store import DurableSessionStore, RedisSessionStore
@@ -391,6 +392,63 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
             await store.upsert(_record("active", live=True).model_copy(update={"title": "newer"}))
 
         self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "active")
+
+    async def test_r5c_16_a_deleted_file_copy_of_a_closed_record_refuses_a_late_active_write(self) -> None:
+        # The closed guard read only the file copy, and a missing one meant "not closed": with the copy deleted out of
+        # band, a late write replaced the closed record Redis still held.
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        await store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
+        path = record_path(Path(self.tmp.name) / "rec", "s1", ".json")
+        path.unlink()
+
+        await store.upsert(_record("active", live=True))
+
+        stored = SessionRecord.model_validate_json(client.values["t:record:s1"])
+        self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
+        self.assertEqual((await store.get("s1")).status, "closed")
+        self.assertFalse(path.exists())
+
+    async def test_r5c_16_a_deleted_file_copy_and_an_unreadable_redis_skip_a_late_active_write(self) -> None:
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("closed", live=False))
+        path = record_path(Path(self.tmp.name) / "rec", "s1", ".json")
+        path.unlink()
+        client.fail = ConnectionError("redis down")
+
+        with self.assertLogs("app.session_store", "WARNING") as logged:
+            await store.upsert(_record("active", live=True))
+
+        self.assertIn("so it is not written this time", "\n".join(logged.output))
+        self.assertFalse(path.exists())
+
+    async def test_r5c_16_a_deleted_file_copy_of_an_open_record_is_written_again(self) -> None:
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("active", live=True))
+        record_path(Path(self.tmp.name) / "rec", "s1", ".json").unlink()
+
+        await store.upsert(_record("active", live=True).model_copy(update={"title": "again"}))
+
+        self.assertEqual((await store.file_store.get("s1")).title, "again")
+        self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).title, "again")
+
+    async def test_r5c_16_a_new_sessions_first_write_asks_nothing_of_a_redis_that_is_down(self) -> None:
+        store, client = await self._store_with_redis()
+        client.fail = ConnectionError("redis down")
+
+        with self.assertRaises(ConnectionError):  # the Redis write itself fails, as before
+            await store.upsert(_record("active", live=True))
+
+        self.assertEqual((await store.file_store.get("s1")).status, "active")  # no Redis read refused the file copy
+
+    async def test_r5c_16_the_store_remembers_only_its_most_recent_writes(self) -> None:
+        store, _ = await self._store_with_redis()
+
+        with patch.object(session_store, "WRITTEN_IDS_REMEMBERED", 2):
+            for session_id in ("a", "b", "a", "c"):
+                await store.upsert(_record("active", live=True).model_copy(update={"id": session_id}))
+
+        self.assertEqual(list(store._written), ["a", "c"])  # "a" written again is recent; "b" is the oldest, dropped
 
     async def test_w8_5_a_record_with_bad_utf8_is_replaced_by_the_next_active_write(self) -> None:
         # UnicodeDecodeError is a ValueError: the record cannot be parsed, so the write replaces it.
