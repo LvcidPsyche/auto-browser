@@ -429,11 +429,20 @@ class BrowserSessionService(SessionCreation):
     @staticmethod
     async def _teardown_step(session_id: str, label: str, step: Any, failed_steps: list[str] | None = None) -> bool:
         """Run one teardown step, bounded; on failure log it and append ``label`` to ``failed_steps``. Used by
-        close_session's teardown and by a failed create's rollback, whose session may not exist yet."""
+        close_session's teardown and by a failed create's rollback, whose session may not exist yet.
+
+        A step whose own awaitable was cancelled while the task running it was not (a close or hook future cancelled
+        on its own) is a failed step like any other (R5C-15): raised, it ended the rollback there, and a caller that
+        was never cancelled got a CancelledError. A cancel of the task itself is still raised."""
         try:
             await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("gave up waiting to %s for session %s", label, session_id)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            logger.warning("the step to %s for session %s was cancelled on its own", label, session_id)
         except Exception as exc:
             logger.warning("failed to %s for session %s: %s", label, session_id, exc)
         else:
@@ -675,12 +684,9 @@ class BrowserSessionService(SessionCreation):
         """enable_shadow_browse's rollback, run to completion by its caller."""
         # As create's rollback: the context first, then the browser, and its gate only once that has closed.
         if context is not None:
-            # Bounded as each teardown step is: a stalled close must not keep the original error from
-            # returning, nor the browser from being closed.
-            try:
-                await asyncio.wait_for(context.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
-            except Exception as exc:
-                logger.warning("failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}")
+            # A teardown step: a stalled close must not keep the original error from returning, nor the browser from
+            # being closed, and neither may a close cancelled on its own (R5C-15).
+            await self._teardown_step(shadow_session_id, "close the context of a failed shadow browse", context.close)
         await self._close_owned_browser(headed_browser, shadow_session_id)
         # The directories, and the record a persist may already have written, closed as create_failed.
         await self._forget_failed_session_state(shadow_session, shadow_session_id)

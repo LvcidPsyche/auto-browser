@@ -79,6 +79,12 @@ All notable changes to auto-browser are documented here.
   and a close of such a session skipped its audit event, witness receipt and closed record. Those steps are now bounded
   and logged as the other teardown steps are, the rest runs, and a shadow browse's rollback that still fails is logged
   while the original error is raised.
+- **A teardown step cancelled on its own no longer ends a rollback or a close.** A step whose own future was
+  cancelled (a context close or a hook cancelled independently) while the task running it was not raised a
+  `CancelledError` through a failed create's or shadow browse's rollback, or a close: the isolated runtime was not
+  released, the record not closed, and a caller that was never cancelled got a `CancelledError`. Such a step is now a
+  failed step, logged, and the rest runs; a cancel of the task itself is still raised. No release is known to trigger
+  it.
 
 ## [1.16.0] — 2026-11-06
 

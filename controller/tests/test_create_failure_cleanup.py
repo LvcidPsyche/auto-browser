@@ -443,6 +443,71 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         record = await self.manager.session_store.get(SESSION_ID)
         self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
 
+    async def test_r5c_15_a_step_cancelled_on_its_own_does_not_end_a_failed_creates_rollback(self) -> None:
+        # _teardown_step caught Exception only: a context close whose own future was cancelled (the rollback's task
+        # was not) ended the rollback with a CancelledError, so the runtime was not released, the record not closed,
+        # and a caller that was never cancelled got a CancelledError.
+        import asyncio
+
+        release_runtime = self._isolated_create_that_fails()
+        browser = self.manager.browser
+        real_new_context = browser.new_context.side_effect
+
+        def new_context(**kwargs):
+            context = real_new_context(**kwargs)
+            context.close = AsyncMock(side_effect=asyncio.CancelledError())
+            return context
+
+        browser.new_context = AsyncMock(side_effect=new_context)
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "witness down"):
+                await self.manager.create_session()
+
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        self.assertIn(
+            f"close the browser context of a failed create for session {SESSION_ID} was cancelled on its own",
+            "\n".join(logs.output),
+        )
+
+    async def test_r5c_15_a_cancel_of_the_task_running_a_teardown_step_is_still_raised(self) -> None:
+        import asyncio
+
+        from app.browser.services.sessions import BrowserSessionService
+
+        started = asyncio.Event()
+
+        async def step() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        failed: list[str] = []
+        task = asyncio.create_task(BrowserSessionService._teardown_step(SESSION_ID, "close a thing", step, failed))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(failed, [])
+
+    async def test_r5c_15_a_step_cancelled_on_its_own_is_a_failed_step(self) -> None:
+        import asyncio
+
+        from app.browser.services.sessions import BrowserSessionService
+
+        async def step() -> None:
+            raise asyncio.CancelledError()
+
+        failed: list[str] = []
+        with self.assertLogs("app.browser.services", "WARNING"):
+            done = await BrowserSessionService._teardown_step(SESSION_ID, "close a thing", step, failed)
+
+        self.assertFalse(done)
+        self.assertEqual(failed, ["close a thing"])
+
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()
 
