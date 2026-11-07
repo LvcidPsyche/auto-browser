@@ -118,10 +118,10 @@ _HIGH_RISK_CLASSES = {"upload", "post", "payment", "account_change", "destructiv
 
 REDACTED = "[REDACTED]"
 # Withheld from a restricted receipt by name, at any depth, beside a secret-named key (SECRET_KEY_FRAGMENTS): what an
-# action typed or uploaded, and the free text an agent or a tool call wrote (an approval's reason previews the call's
-# arguments; a takeover's is the agent's own words). The approval store keeps an approval's reason, and the audit log
-# a takeover's.
-_RESTRICTED_KEYS = frozenset({"text", "text_preview", "file_path", "password", "totp_secret", "reason"})
+# action typed or uploaded, the free text an agent or a tool call wrote (an approval's reason previews the call's
+# arguments; a takeover's is the agent's own words), and an operator's comment on an approval decision. The approval
+# store keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the comment.
+_RESTRICTED_KEYS = frozenset({"text", "text_preview", "file_path", "password", "totp_secret", "reason", "comment"})
 # What a select_option chose (by value, label or index); a None is another way of choosing, kept so the receipt shows
 # which was used.
 _CHOICE_KEYS = frozenset({"value", "label", "index"})

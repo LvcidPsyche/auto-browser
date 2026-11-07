@@ -381,6 +381,26 @@ async def test_a_normal_sessions_approval_receipts_take_the_restricted_mode_of_t
     assert receipts["pending"].target["element_id"] == "pay"
 
 
+@pytest.mark.parametrize("decide", ["approve", "reject"])
+async def test_a_restricted_decision_receipt_withholds_the_operators_comment(tmp_path: Path, decide: str) -> None:
+    # A4: the decision's comment is an operator's free text, kept in full beside a reason the receipt withheld.
+    manager, session = await _manager_with_session(tmp_path)
+    decision = BrowserActionDecision(action="click", reason=REASON, element_id="pay", risk_category="payment")
+    token = set_current_operator("alice", name="Alice")
+    try:
+        with pytest.raises(ApprovalRequiredError):
+            await manager.execute_decision(session.id, decision)
+        approval_id = (await manager.approvals.list(session_id=session.id))[0].id
+        await getattr(manager, decide)(approval_id, comment="card 4111 1111 1111 1111 is fine")
+    finally:
+        reset_current_operator(token)
+
+    receipt = (await manager.witness.list(session.id))[0]  # newest first
+    assert (receipt.event_type, receipt.action, receipt.evidence_mode) == ("approval", decide, "restricted")
+    assert receipt.metadata == {"comment": "[REDACTED]", "decided_via": "operator"}
+    assert (await manager.approvals.get(approval_id)).decision_comment == "card 4111 1111 1111 1111 is fine"
+
+
 async def test_a_restricted_receipt_redacts_its_metadata_as_its_target(tmp_path: Path) -> None:
     service, manager = _recording_service(tmp_path)
     metadata = {
