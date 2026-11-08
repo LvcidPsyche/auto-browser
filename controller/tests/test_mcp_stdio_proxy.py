@@ -671,6 +671,56 @@ def test_w15_7_a_token_holding_a_line_break_is_never_sent(tmp_path: Path, token:
     assert controller.seen == [("/mcp", None)]  # type: ignore[attr-defined]
 
 
+def _answer_with_a_401(**client_options: object) -> tuple[dict, list]:
+    """The bridge's answer to a tools/list a controller answers 401, and what that controller saw."""
+    import app.mcp_stdio as bridge
+
+    controller = _serve()
+    controller.answer = (401, b'{"detail": "Missing or invalid bearer token"}')  # type: ignore[attr-defined]
+    try:
+        client = bridge.HttpMcpClient(base_url=f"http://127.0.0.1:{controller.server_port}/mcp", **client_options)
+        reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        )
+    finally:
+        controller.shutdown()
+        controller.server_close()
+    assert reply is not None
+    return reply, controller.seen  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("in_file", [False, True], ids=["bearer_token", "token_file"])
+def test_r5c_30_a_token_holding_a_character_outside_latin_1_is_never_sent(tmp_path: Path, in_file: bool) -> None:
+    # http.client encodes a header as latin-1, and its UnicodeEncodeError named the character and its position in the
+    # header, which the generic answer showed the agent: one character of the controller's token, and where it is.
+    token = "sentinelA" + chr(0x20AC) + "sentinelB"
+    token_file = tmp_path / "api-token"
+    token_file.write_bytes(token.encode("utf-8") + b"\n")
+
+    reply, seen = _answer_with_a_401(
+        bearer_token=None if in_file else token, token_file=str(token_file) if in_file else None
+    )
+    message = reply["error"]["message"]
+
+    assert "HTTP 401" in message
+    assert "holds a character outside latin-1, which an HTTP header cannot carry, so no token was sent" in message
+    assert ("the token file" in message) is in_file
+    assert "sentinel" not in message
+    assert chr(0x20AC) not in message
+    assert seen == [("/mcp", None)]
+
+
+def test_r5c_30_a_token_inside_latin_1_is_still_sent() -> None:
+    # The refusal is what http.client cannot encode, not every non-ASCII token: the controller reads the header as
+    # latin-1 and compares it as UTF-8 (auth_policy.match_credential), so such a token authenticates today.
+    token = "sentinel" + chr(0xE4)
+
+    reply, seen = _answer_with_a_401(bearer_token=token)
+
+    assert "no token was sent" not in reply["error"]["message"]
+    assert seen == [("/mcp", f"Bearer {token}")]
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]

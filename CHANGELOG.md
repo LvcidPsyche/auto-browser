@@ -32,6 +32,11 @@ All notable changes to auto-browser are documented here.
   receipt of a confidential session, like a human takeover's receipt there, is restricted. The approval store still
   keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the comment. A
   hosted Witness service and an exported bundle receive the receipt as recorded.
+- **The MCP bridges no longer show the agent a character of a token they cannot send.** A bearer token holding a
+  character outside latin-1 (from `--bearer-token`, `AUTO_BROWSER_BEARER_TOKEN` or the token file), which an HTTP
+  header cannot carry, was answered as an unexpected bridge failure quoting http.client's encoding error, which names
+  that character and its position in the token. Such a token is now not sent, as one holding a line break has not been
+  since 1.16.0, and a `401`'s answer says which source holds it; a token inside latin-1 is still sent.
 
 ### Fixed
 

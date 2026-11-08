@@ -230,12 +230,27 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     return build_opener(_NoRedirects).open(request, *args, **kwargs)
 
 
-# Why a request went without the token that --bearer-token gives, added to a 401's answer (W15-7): fixed text, which
-# names the source and never the token.
-_ARGUMENT_HOLDS_A_LINE_BREAK = (
-    "--bearer-token or AUTO_BROWSER_BEARER_TOKEN holds a line break, which an HTTP header cannot carry, so no token "
-    "was sent"
-)
+# Where a token given as an argument comes from, as the reason it went unsent names it (W15-7).
+_ARGUMENT_SOURCE = "--bearer-token or AUTO_BROWSER_BEARER_TOKEN"
+
+
+def _unsent_because(source: str, token: str) -> str | None:
+    """Why ``token`` from ``source`` cannot go in a header, as fixed text that names the source and never the token;
+    None when it can (W15-7, R5C-30).
+
+    http.client refuses a line break with a ValueError that quotes the header whole, and encodes a header as latin-1,
+    whose UnicodeEncodeError names a character outside it and its position: an answer would show the agent either.
+    A token inside latin-1 is sent, ASCII or not: the controller reads the header as latin-1.
+    """
+    if "\r" in token or "\n" in token:
+        held = "a line break"
+    else:
+        try:
+            token.encode("latin-1")
+            return None
+        except UnicodeEncodeError:
+            held = "a character outside latin-1"
+    return f"{source} holds {held}, which an HTTP header cannot carry, so no token was sent"
 
 
 @dataclass
@@ -271,26 +286,24 @@ class HttpMcpClient:
         restart. A missing or unreadable file sends no header, so a controller
         running without a token still works.
 
-        A token holding a line break, from either source, sends no header either (W15-7): http.client refuses that
-        header with a ValueError quoting it whole, which an answer would show the agent. ``token_file_problem`` says
-        why the last request went without a token, for bearer_token as well as for token_file.
+        A token holding a line break (W15-7) or a character outside latin-1 (R5C-30), from either source, sends no
+        header either: http.client's errors for those quote the header or name the character, which an answer would
+        show the agent. ``token_file_problem`` says why the last request went without a token, for bearer_token as
+        well as for token_file.
         """
-        if self.bearer_token and ("\r" in self.bearer_token or "\n" in self.bearer_token):
-            self.token_file_problem = _ARGUMENT_HOLDS_A_LINE_BREAK
+        if self.bearer_token:
+            self.token_file_problem = _unsent_because(_ARGUMENT_SOURCE, self.bearer_token)
+            return None if self.token_file_problem else self.bearer_token
+        if not self.token_file:
             return None
-        if self.bearer_token or not self.token_file:
-            return self.bearer_token
         try:
             with open(self.token_file, encoding="utf-8") as handle:
                 token = handle.read().strip()
         except (OSError, UnicodeDecodeError) as exc:
             self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
             return None
-        if "\r" in token or "\n" in token:
-            self.token_file_problem = (
-                f"the token file {self.token_file} holds a line break, which an HTTP header cannot carry, so no token "
-                "was sent"
-            )
+        self.token_file_problem = _unsent_because(f"the token file {self.token_file}", token)
+        if self.token_file_problem:
             return None
         self.token_file_problem = None if token else f"the token file {self.token_file} is empty"
         return token or None
