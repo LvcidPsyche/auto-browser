@@ -518,8 +518,9 @@ class HttpMcpClient:
             return None
         try:
             return json.loads(raw.decode("utf-8"))
-        except ValueError:
-            # A proxy's HTML error page, say. Reported with its status below.
+        except (ValueError, RecursionError):
+            # A proxy's HTML error page, say, or a body nested too deep for json to parse. Reported with its status
+            # below.
             return None
 
 

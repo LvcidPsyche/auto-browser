@@ -1136,9 +1136,10 @@ def test_r5c_20_a_forwarded_json_rpc_errors_data_is_shown_without_secrets(record
 
 
 def test_c4_a_forwarded_error_whose_data_nests_deeper_than_a_walk_can_go_is_still_answered(recording_proxy) -> None:
-    # c4 review: JSON parses deeper than Python's recursion limit lets the data's redaction walk, and that walk's
-    # RecursionError ended the bridge with no answer. Past the walk's depth the value is replaced, not shown.
-    depth = 1500
+    # c4 review: the data's redaction walk had no depth limit, and its RecursionError ended the bridge with no answer.
+    # Past the walk's depth (_REDACTED_DEPTH_MAX, 100) the value is replaced, not shown. This depth is just over it,
+    # and one every supported Python (3.11 to 3.14) parses: 3.11's json.loads fails near 1,000 (CI's host test).
+    depth = 105
     data = "[" * depth + "]" * depth
     error = '{"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "deep", "data": ' + data + "}}"
     recording_proxy.answer = (200, error.encode())  # type: ignore[attr-defined]
@@ -1147,6 +1148,19 @@ def test_c4_a_forwarded_error_whose_data_nests_deeper_than_a_walk_can_go_is_stil
 
     assert (reply["error"]["code"], reply["error"]["message"]) == (-32001, "deep")
     assert "[redacted: nested too deep]" in json.dumps(reply)
+
+
+def test_a_body_too_deep_for_any_python_to_parse_is_answered_as_an_unreadable_one(recording_proxy) -> None:
+    # json.loads raises RecursionError on this on every supported Python (3.11 to 3.14), as it raises ValueError on a
+    # proxy's HTML page: the bridge reports the status of a body it cannot read, not an unexpected failure.
+    depth = 1_000_000
+    body = '{"jsonrpc": "2.0", "id": 1, "result": ' + "[" * depth + "]" * depth + "}"
+    recording_proxy.answer = (200, body.encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge("http://controller.invalid/mcp", recording_proxy)
+
+    assert reply["error"]["code"] == -32000
+    assert reply["error"]["message"] == "Empty or non-JSON response from Auto Browser MCP endpoint (200)"
 
 
 def test_r5c_20_the_unexpected_failure_on_stderr_never_shows_the_urls_secrets_or_the_token(monkeypatch) -> None:
