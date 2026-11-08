@@ -64,6 +64,10 @@ class AutoBrowserNode:
     ):
         refuse_userinfo_with_token(base_url, bearer_token, token_file)
         self.base_url = base_url.rstrip("/")
+        # What the requests go to, split from the base URL as given (review of c5): a query's trailing slashes are its
+        # value's, and only the path's go.
+        base, self._params = split_base_url(base_url)
+        self._base = base.rstrip("/")
         self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout = timeout
         self.operator_id = operator_id
@@ -84,9 +88,8 @@ class AutoBrowserNode:
         token = headers.get("Authorization", "").removeprefix("Bearer ") or None
         with errors_shown(self.base_url, token):
             transport = loopback_transport(self.base_url, asynchronous=True)
-            base, params = split_base_url(self.base_url)
             async with httpx.AsyncClient(
-                base_url=base, params=params, timeout=self.timeout, transport=transport
+                base_url=self._base, params=self._params, timeout=self.timeout, transport=transport
             ) as client:
                 response = await client.post(
                     "/mcp/tools/call",

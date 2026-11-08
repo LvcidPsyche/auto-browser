@@ -262,6 +262,23 @@ class BaseUrlQueryTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    @respx.mock
+    async def test_a_query_value_ending_in_a_slash_is_sent_whole(self) -> None:
+        # Review of c5 (Codex): the node cut a base URL's trailing slashes before it split off the query, so for
+        # ?key=value/ it sent key=value. Only the path's trailing slashes go.
+        route = respx.route(host="auto-browser.test").mock(return_value=httpx.Response(200, json=_content("{}")))
+        url = f"{BASE_URL}/prefix/?key=sentinel-value/"
+
+        await AutoBrowserTool(base_url=url)._arun("browser.observe", {})
+        await AutoBrowserNode(base_url=url).call_tool("browser.observe", {})
+        await asyncio.to_thread(AutoBrowserTool.list_tools, base_url=url)
+
+        self.assertEqual([call.request.url.params["key"] for call in route.calls], ["sentinel-value/"] * 3)
+        self.assertEqual(
+            [call.request.url.path for call in route.calls],
+            ["/prefix/mcp/tools/call", "/prefix/mcp/tools/call", "/prefix/mcp/tools"],
+        )
+
 
 class AutoBrowserNodeTests(unittest.TestCase):
     def test_base_url_trailing_slash_is_stripped(self) -> None:
