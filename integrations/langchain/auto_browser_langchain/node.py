@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 import httpx
 
 from .auth import loopback_transport, resolve_bearer_token
-from .errors import AutoBrowserToolError, raise_for_status
+from .errors import AutoBrowserToolError, errors_shown, raise_for_status
 
 
 class BrowserState(TypedDict, total=False):
@@ -79,15 +79,18 @@ class AutoBrowserNode:
         return headers
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        transport = loopback_transport(self.base_url, asynchronous=True)
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
-            response = await client.post(
-                "/mcp/tools/call",
-                json={"name": name, "arguments": arguments},
-                headers=self._headers(),
-            )
-            raise_for_status(response)
-            return response.json()
+        headers = self._headers()
+        token = headers.get("Authorization", "").removeprefix("Bearer ") or None
+        with errors_shown(self.base_url, token):
+            transport = loopback_transport(self.base_url, asynchronous=True)
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
+                response = await client.post(
+                    "/mcp/tools/call",
+                    json={"name": name, "arguments": arguments},
+                    headers=headers,
+                )
+                raise_for_status(response)
+                return response.json()
 
     async def create_session(self, start_url: str | None = None) -> str:
         arguments: dict[str, Any] = {}

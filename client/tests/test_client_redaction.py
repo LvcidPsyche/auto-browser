@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 from auto_browser_client import AutoBrowserClient
@@ -32,6 +33,80 @@ def _answering(response: httpx.Response, **options: Any) -> AutoBrowserClient:
         base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
     )
     return client
+
+
+def _failing(text: str, base_url: str = BASE_URL) -> AutoBrowserClient:
+    """A client whose every request fails as httpx fails on an answer it cannot read: a RemoteProtocolError whose text
+    quotes what the server sent (h11's "illegal status line"), here ``text`` with the request line filled in."""
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        line = f"{request.method} {request.url.raw_path.decode('ascii')} HTTP/1.1"
+        raise httpx.RemoteProtocolError(text.format(request_line=line), request=request)
+
+    client = AutoBrowserClient(base_url, token=TOKEN)
+    client._sync_client = httpx.Client(
+        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(fail)
+    )
+    client._async_client = httpx.AsyncClient(
+        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(fail)
+    )
+    return client
+
+
+# What a server that echoes the request back can make httpx's error quote: the request line (the base URL's query
+# and the path httpx put after it) or a header (the token).
+ECHOES = ("illegal status line: bytearray(b'{request_line}')", f"illegal header line: b'Authorization: Bearer {TOKEN}'")
+
+
+class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
+    """Review of c3 (Codex 2): httpx's own errors went out as they came, and the one for an answer httpx cannot read
+    quotes what the server sent, which can echo the request line or a header."""
+
+    def _assert_raised_without_secrets(self, caught: Exception) -> None:
+        self.assertIsInstance(caught, httpx.RemoteProtocolError)
+        self.assertNotIn("sentinel", str(caught))
+        self.assertIn("[redacted]", str(caught))
+        self.assertEqual(caught.request.url.host, "auto-browser.test")  # type: ignore[attr-defined]
+
+    def test_a_transport_error_echoing_the_url_or_the_token_is_raised_without_them(self) -> None:
+        for text in ECHOES:
+            with self.subTest(text=text):
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    _failing(text).create_session(name="s")
+                self._assert_raised_without_secrets(caught.exception)
+
+    async def test_the_async_calls_raise_it_without_them_too(self) -> None:
+        with self.assertRaises(httpx.RemoteProtocolError) as caught:
+            await _failing(ECHOES[0]).async_create_session(name="s")
+
+        self._assert_raised_without_secrets(caught.exception)
+
+    def test_the_event_stream_raises_it_without_them_too(self) -> None:
+        # stream_events builds a client of its own, which a loopback base URL gives httpx.HTTPTransport.
+        def fail(request: httpx.Request) -> httpx.Response:
+            line = f"{request.method} {request.url.raw_path.decode('ascii')} HTTP/1.1"
+            raise httpx.RemoteProtocolError(ECHOES[0].format(request_line=line), request=request)
+
+        client = AutoBrowserClient("http://127.0.0.1:9/?key=sentinel-key-0123", token=TOKEN)
+        with patch.object(httpx, "HTTPTransport", lambda: httpx.MockTransport(fail)):
+            with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                list(client.stream_events("s"))
+
+        self.assertNotIn("sentinel", str(caught.exception))
+        self.assertIn("GET /?[redacted]/sessions/s/events", str(caught.exception))
+
+    def test_an_error_that_quotes_neither_is_raised_as_it_came(self) -> None:
+        error = httpx.ConnectError("[Errno 111] Connection refused")
+        client = AutoBrowserClient(BASE_URL, token=TOKEN)
+
+        def fail(request: httpx.Request) -> httpx.Response:
+            raise error
+
+        client._sync_client = httpx.Client(base_url=client.base_url, transport=httpx.MockTransport(fail))
+        with self.assertRaises(httpx.ConnectError) as caught:
+            client.health()
+
+        self.assertIs(caught.exception, error)
 
 
 class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):

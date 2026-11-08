@@ -8,6 +8,7 @@ character outside ASCII and its position.
 
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ import httpx
 import respx
 from auto_browser_langchain import AutoBrowserNode, AutoBrowserTool
 from auto_browser_langchain.auth import resolve_bearer_token
+from auto_browser_langchain.errors import _redacted
 
 SECRET_URL = "http://alice:sentinel-pass@auto-browser.test:8000/?key=sentinel-key#sentinel-fragment"
 SHOWN = "Client error '401 Unauthorized' for url 'http://auto-browser.test:8000/"
@@ -73,6 +75,95 @@ class HttpErrorTests(unittest.IsolatedAsyncioTestCase):
                 )
         _answer(200, OK)
         self.assertEqual(await tool._arun("browser.observe", {}), "ok")
+
+
+def _echoing_the_request_line(request: httpx.Request) -> httpx.Response:
+    """Fail as httpx fails on an answer it cannot read, whose error quotes what the server sent: the request line."""
+    line = f"{request.method} {request.url.raw_path.decode('ascii')} HTTP/1.1"
+    raise httpx.RemoteProtocolError(f"illegal status line: bytearray(b'{line}')", request=request)
+
+
+class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
+    """Review of c3 (Codex 2 and 5): httpx's own errors went out as they came, and the one for an answer httpx cannot
+    read quotes what the server sent, which can echo the request line (the base URL's query) or a header (the token);
+    and a status error's reason phrase is the server's text too."""
+
+    def _assert_raised_without_secrets(self, caught: Exception) -> None:
+        self.assertIsInstance(caught, httpx.RemoteProtocolError)
+        self.assertNotIn("sentinel", str(caught))
+        self.assertIn("[redacted]", str(caught))
+
+    @respx.mock
+    async def test_the_tools_and_the_nodes_transport_errors_never_show_the_urls_secrets(self) -> None:
+        respx.route(host="auto-browser.test").mock(side_effect=_echoing_the_request_line)
+        calls = (
+            ("tool", lambda: AutoBrowserTool(base_url=SECRET_URL)._arun("browser.observe", {})),
+            ("node", lambda: AutoBrowserNode(base_url=SECRET_URL).call_tool("browser.observe", {})),
+        )
+        for caller, call in calls:
+            with self.subTest(caller=caller):
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    await call()
+                self._assert_raised_without_secrets(caught.exception)
+
+    @respx.mock
+    def test_list_tools_transport_error_never_shows_the_urls_secrets(self) -> None:
+        respx.route(host="auto-browser.test").mock(side_effect=_echoing_the_request_line)
+
+        with self.assertRaises(httpx.RemoteProtocolError) as caught:
+            AutoBrowserTool.list_tools(base_url=SECRET_URL)
+
+        self._assert_raised_without_secrets(caught.exception)
+
+    @respx.mock
+    async def test_a_transport_error_echoing_the_token_never_shows_it(self) -> None:
+        def echo_the_token(request: httpx.Request) -> httpx.Response:
+            header = request.headers["Authorization"]
+            raise httpx.RemoteProtocolError(f"illegal header line: b'Authorization: {header}'", request=request)
+
+        respx.route(host="auto-browser.test").mock(side_effect=echo_the_token)
+        tool = AutoBrowserTool(base_url="http://auto-browser.test", bearer_token="sentinel-token-0123456789")
+
+        with self.assertRaises(httpx.RemoteProtocolError) as caught:
+            await tool._arun("browser.observe", {})
+
+        self._assert_raised_without_secrets(caught.exception)
+
+    @respx.mock
+    async def test_a_status_lines_reason_phrase_never_shows_them_either(self) -> None:
+        respx.route(host="auto-browser.test").mock(
+            return_value=httpx.Response(401, extensions={"reason_phrase": b"bad key sentinel-key"})
+        )
+
+        with self.assertRaises(httpx.HTTPStatusError) as caught:
+            await AutoBrowserTool(base_url=SECRET_URL)._arun("browser.observe", {})
+
+        self.assertTrue(str(caught.exception).startswith("Client error '401 bad key [redacted]' for url"))
+        self.assertNotIn("sentinel", str(caught.exception))
+        self.assertEqual(caught.exception.response.status_code, 401)
+
+
+@unittest.skipUnless(importlib.util.find_spec("auto_browser_client"), "the client package is not installed here")
+class RedactionCopyTests(unittest.TestCase):
+    """errors._redacted is a copy of the MCP bridges' redaction, since this package depends on httpx only: the two
+    must show a text the same way."""
+
+    def test_the_copy_shows_a_text_as_the_bridges_do(self) -> None:
+        from auto_browser_client.mcp_bridge import _redacted as the_bridges
+
+        token = "sentinel-token-0123456789"
+        cases = (
+            (f"upstream {SECRET_URL} refused {token}", SECRET_URL),
+            ("bad key sentinel-key, short key abc", "http://h/mcp?key=sentinel-key&page=abc"),
+            ("x u:a y getaddrinfo failed", "http://u:a@h/mcp"),  # a short secret, not again inside [redacted]
+            ("{'upstream': 'key=sentinel\\\\tail'}", "http://h/mcp?key=sentinel%5Ctail"),
+            ('detail {"key": "sentinel tail \\u00e9"}', "http://h/mcp?key=sentinel+tail+%C3%A9"),
+            ("see http://controller.example/a@b/mcp and bob@host", "http://controller.example/a@b/mcp"),
+        )
+        for text, url in cases:
+            with self.subTest(text=text, url=url):
+                self.assertEqual(_redacted(text, url, token), the_bridges(text, url, token))
+                self.assertNotIn("sentinel", _redacted(text, url, token))
 
 
 class UnsendableTokenTests(unittest.IsolatedAsyncioTestCase):

@@ -8,7 +8,7 @@ from typing import Any, Optional, Type, Union
 import httpx
 
 from .auth import loopback_transport, resolve_bearer_token
-from .errors import raise_for_status
+from .errors import errors_shown, raise_for_status
 
 try:
     from langchain_core.tools import BaseTool
@@ -86,11 +86,12 @@ class AutoBrowserTool(BaseTool):
         if self.operator_id:
             headers["X-Operator-Id"] = self.operator_id
         payload = {"name": action, "arguments": arguments or {}}
-        transport = loopback_transport(self.base_url, asynchronous=True)
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
-            response = await client.post("/mcp/tools/call", json=payload, headers=headers)
-            raise_for_status(response)
-            data = response.json()
+        with errors_shown(self.base_url, bearer_token):
+            transport = loopback_transport(self.base_url, asynchronous=True)
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
+                response = await client.post("/mcp/tools/call", json=payload, headers=headers)
+                raise_for_status(response)
+                data = response.json()
         if data.get("isError"):
             content = data.get("content") or [{}]
             return f"ERROR: {content[0].get('text', 'Unknown error')}"
@@ -111,8 +112,9 @@ class AutoBrowserTool(BaseTool):
             headers["Authorization"] = f"Bearer {bearer_token}"
         if operator_id:
             headers["X-Operator-Id"] = operator_id
-        transport = loopback_transport(base_url, asynchronous=False)
-        with httpx.Client(base_url=base_url, timeout=10, transport=transport) as client:
-            response = client.get("/mcp/tools", headers=headers)
-            raise_for_status(response)
-            return response.json()
+        with errors_shown(base_url, bearer_token):
+            transport = loopback_transport(base_url, asynchronous=False)
+            with httpx.Client(base_url=base_url, timeout=10, transport=transport) as client:
+                response = client.get("/mcp/tools", headers=headers)
+                raise_for_status(response)
+                return response.json()

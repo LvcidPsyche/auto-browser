@@ -20,14 +20,15 @@ Usage (async):
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
 from urllib.parse import quote
 
 import httpx
 
-from .mcp_bridge import _is_loopback_host, _redacted_value
+from .mcp_bridge import _is_loopback_host, _redacted, _redacted_value
 
 
 def _seg(value: str) -> str:
@@ -91,6 +92,14 @@ def _header_credentials(headers: Mapping[str, str]) -> str | None:
             scheme, _, credentials = value.strip().partition(" ")
             return credentials.strip() or scheme or None
     return None
+
+
+def _with_text(error: Exception, text: str) -> Exception:
+    """``error`` again, of its type and with its attributes (an httpx error's request), its text ``text``."""
+    shown = type(error).__new__(type(error))
+    shown.__dict__.update(error.__dict__)
+    shown.args = (text,)
+    return shown.with_traceback(error.__traceback__)
 
 
 class AutoBrowserError(Exception):
@@ -204,6 +213,20 @@ class AutoBrowserClient:
             self._async_client = self._new_async_client()
         return self._async_client
 
+    @contextmanager
+    def _errors_shown(self) -> Iterator[None]:
+        """Raise httpx's error for a request again without the base URL's secrets or the token in its text, its type
+        and attributes kept, as AutoBrowserError's detail leaves them out (review of c3, R5C-20): httpx's error for an
+        answer it cannot read quotes what the server sent, which can echo the request line or a header."""
+        try:
+            yield
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
+            text = str(error)
+            shown = _redacted(text, self.base_url, self._token)
+            if shown == text:
+                raise
+            raise _with_text(error, shown) from None
+
     def _raise(self, r: httpx.Response) -> None:
         if r.status_code >= 400:
             try:
@@ -222,32 +245,38 @@ class AutoBrowserClient:
             raise AutoBrowserError(r.status_code, _redacted_value(detail, self.base_url, self._token))
 
     def _get(self, path: str, **params) -> Any:
-        r = self._client().get(path, params=params)
+        with self._errors_shown():
+            r = self._client().get(path, params=params)
         self._raise(r)
         return r.json()
 
     def _post(self, path: str, body: dict | None = None) -> Any:
-        r = self._client().post(path, json=body or {})
+        with self._errors_shown():
+            r = self._client().post(path, json=body or {})
         self._raise(r)
         return r.json()
 
     def _delete(self, path: str) -> Any:
-        r = self._client().delete(path)
+        with self._errors_shown():
+            r = self._client().delete(path)
         self._raise(r)
         return r.json()
 
     async def _aget(self, path: str, **params) -> Any:
-        r = await self._aclient().get(path, params=params)
+        with self._errors_shown():
+            r = await self._aclient().get(path, params=params)
         self._raise(r)
         return r.json()
 
     async def _apost(self, path: str, body: dict | None = None) -> Any:
-        r = await self._aclient().post(path, json=body or {})
+        with self._errors_shown():
+            r = await self._aclient().post(path, json=body or {})
         self._raise(r)
         return r.json()
 
     async def _adelete(self, path: str) -> Any:
-        r = await self._aclient().delete(path)
+        with self._errors_shown():
+            r = await self._aclient().delete(path)
         self._raise(r)
         return r.json()
 
@@ -532,25 +561,26 @@ class AutoBrowserClient:
         # A client of its own, built by the rule _new_sync_client follows (W8-8): module-level httpx.stream used no
         # transport, so a loopback controller's Authorization header went to an environment proxy. Both the client
         # and the stream close when the generator ends or is closed early.
-        transport = httpx.HTTPTransport() if self._direct() else None
-        with (
-            httpx.Client(transport=transport) as http,
-            http.stream("GET", url, headers=self._headers, timeout=timeout) as r,
-        ):
-            if r.status_code >= 400:
-                r.read()
-            self._raise(r)
-            buffer = ""
-            for chunk in r.iter_text():
-                buffer += chunk
-                while "\n\n" in buffer:
-                    block, buffer = buffer.split("\n\n", 1)
-                    for line in block.splitlines():
-                        if line.startswith("data: "):
-                            try:
-                                yield _json.loads(line[6:])
-                            except Exception:
-                                pass
+        with self._errors_shown():
+            transport = httpx.HTTPTransport() if self._direct() else None
+            with (
+                httpx.Client(transport=transport) as http,
+                http.stream("GET", url, headers=self._headers, timeout=timeout) as r,
+            ):
+                if r.status_code >= 400:
+                    r.read()
+                self._raise(r)
+                buffer = ""
+                for chunk in r.iter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        block, buffer = buffer.split("\n\n", 1)
+                        for line in block.splitlines():
+                            if line.startswith("data: "):
+                                try:
+                                    yield _json.loads(line[6:])
+                                except Exception:
+                                    pass
 
     # ── Audit ────────────────────────────────────────────────────────────────
 

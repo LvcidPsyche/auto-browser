@@ -55,13 +55,17 @@ All notable changes to auto-browser are documented here.
   its message now leave them out as the MCP bridges' answers do, any other `user@` run included, and keep the detail's
   shape. The LangChain tool, `AutoBrowserTool.list_tools` and `AutoBrowserNode` raised httpx's `HTTPStatusError` for
   an answer that was not 2xx, whose message names the request URL whole, password, query and fragment included; it
-  now names the URL without them (the path is kept), in httpx's words otherwise. A token httpx cannot send in a header
-  (one holding a line break or another control character but a tab, or a character outside ASCII) failed the first
-  request with httpx's error, which quoted the whole header for a line break, a NUL, a vertical tab or a form feed,
-  and named a character outside ASCII and its position; the client and the LangChain tools now refuse it with a
-  `ValueError` naming `token`, `bearer_token` or the token file, never the token. The client refuses an
-  `Authorization` header given in `headers` the same way, and leaves its credentials out of its errors as it leaves
-  the token out.
+  now names the URL without them (the path is kept), in httpx's words otherwise, and leaves them out of the server's
+  reason phrase too. httpx's own errors (a connection or protocol failure), which both let through, are now raised
+  with them left out as well, their type and request kept: the one for an answer httpx cannot read quotes what the
+  server sent, which can echo the request line or a header. A tool's own error (`isError`), which the LangChain tool
+  returns and `AutoBrowserNode` raises, is passed on as the controller sent it, as the MCP bridges pass on a tool
+  call's result. A token httpx cannot send in a header (one holding a line break or another control character but a
+  tab, or a character outside ASCII) failed the first request with httpx's error, which quoted the whole header for a
+  line break, a NUL, a vertical tab or a form feed, and named a character outside ASCII and its position; the client
+  and the LangChain tools now refuse it with a `ValueError` naming `token`, `bearer_token` or the token file, never
+  the token. The client refuses an `Authorization` header given in `headers` the same way, and leaves its
+  credentials out of its errors as it leaves the token out.
 
 ### Fixed
 

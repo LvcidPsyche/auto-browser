@@ -1,11 +1,74 @@
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
+from urllib.parse import unquote, unquote_plus
 
 import httpx
 
 # httpx's words for each class of status raise_for_status refuses.
 _STATUS_KINDS = {1: "Informational response", 3: "Redirect response", 4: "Client error", 5: "Server error"}
+
+# The MCP bridges' redaction (auto_browser_client.mcp_bridge._redacted, which the client SDK shares); this package
+# depends on httpx only, so it carries a copy. A userinfo-shaped run in a text: characters other than whitespace,
+# quotes, / and @, ending in @, starting where a run starts (W13-1, W14-1). A query value this long or longer is
+# redacted on its own too (R5C-20).
+_USERINFO_RUN = re.compile(r"""(?:(?<![^\s'"@])|(?<=//))[^\s'"/@]*@""")
+_SHORTEST_REDACTED_QUERY_VALUE = 8
+
+
+@contextmanager
+def errors_shown(base_url: str, token: str | None) -> Iterator[None]:
+    """Raise an httpx error from inside again without the base URL's secrets or ``token`` in its text, its type and
+    attributes kept (review of c3, R5C-20): httpx's error for an answer it cannot read quotes what the server sent,
+    which can echo the request line (the base URL's query) or a header (the token), and a status error's reason
+    phrase is the server's text too."""
+    try:
+        yield
+    except (httpx.HTTPError, httpx.InvalidURL) as error:
+        text = str(error)
+        shown = _redacted(text, base_url, token)
+        if shown == text:
+            raise
+        copy = type(error).__new__(type(error))
+        copy.__dict__.update(error.__dict__)
+        copy.args = (shown,)
+        raise copy.with_traceback(error.__traceback__) from None
+
+
+def _redacted(text: str, url: str, token: str | None) -> str:
+    """``text`` with ``url``'s secrets and ``token`` replaced with ``[redacted]`` in one pass, longest first, and any
+    other userinfo run dropped, as the MCP bridges' answers show a text."""
+    secrets = sorted(_secrets_of(url, token), key=lambda secret: (-len(secret), secret))
+    if secrets:
+        text = re.compile("|".join(map(re.escape, secrets))).sub("[redacted]", text)
+    return _USERINFO_RUN.sub("", text)
+
+
+def _secrets_of(url: str, token: str | None) -> set[str]:
+    """``url``'s userinfo, password, query, fragment and each query value of _SHORTEST_REDACTED_QUERY_VALUE or more
+    characters, as written and percent-decoded (a query's ``+`` as a space too), and ``token``, each also as
+    ``repr()`` and ``json.dumps()`` write it. Cut as a string, so a malformed URL is handled too."""
+    url = url.strip()
+    _, slashes, rest = url.partition("//")
+    if not slashes:
+        rest = url
+    end = min((index for index in (rest.find(delimiter) for delimiter in "/?#") if index != -1), default=len(rest))
+    userinfo = rest[: max(rest.rfind("@", 0, end), 0)]
+    query = url.partition("?")[2].partition("#")[0]
+    values = [item.partition("=")[2] if "=" in item else item for item in query.split("&")]
+    in_query = {query, *(value for value in values if len(value) >= _SHORTEST_REDACTED_QUERY_VALUE)}
+    written = {userinfo, userinfo.partition(":")[2], url.partition("#")[2], *in_query}
+    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or ""}
+    quoted = {
+        form[1:-1]
+        for value in forms
+        for form in (repr(value), json.dumps(value), json.dumps(value, ensure_ascii=False))
+    }
+    return {secret for secret in forms | quoted if secret}
 
 
 def raise_for_status(response: httpx.Response) -> None:
