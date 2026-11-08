@@ -128,6 +128,15 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
                     _failing(ECHOES[0], f"http://auto-browser.test:8000/?{query}").create_session(name="s")
                 self._assert_raised_without_secrets(caught.exception)
 
+    def test_a_transport_error_echoing_a_query_whose_param_the_request_replaced_is_raised_without_its_pairs(
+        self,
+    ) -> None:
+        # Review of c5 (Codex): the request's own limit replaces the base URL's, so the query is not sent whole.
+        with self.assertRaises(httpx.RemoteProtocolError) as caught:
+            _failing(ECHOES[0], "http://auto-browser.test:8000/?key=s3c&limit=20").list_audit_events(limit=5)
+
+        self.assertIn("GET /audit/events?[redacted]&limit=5 HTTP/1.1", str(caught.exception))
+
     def test_an_error_that_quotes_neither_is_raised_as_it_came(self) -> None:
         error = httpx.ConnectError("[Errno 111] Connection refused")
         client = AutoBrowserClient(BASE_URL, token=TOKEN)
@@ -207,6 +216,31 @@ class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):
 
                 shown = {"detail": "no route for POST /sessions?[redacted]"}
                 self._assert_raised_without_secrets(caught.exception, shown)
+
+    async def test_a_detail_echoing_a_query_whose_param_the_request_replaced_is_raised_without_its_pairs(
+        self,
+    ) -> None:
+        # Review of c5 (Codex): a request's own params replace the base URL's of the same name, so for ?key=s3c&limit=20
+        # list_audit_events(limit=5) sends key=s3c&limit=5, which holds neither the query as configured nor a value
+        # long enough to count on its own; each of the query's pairs counts on its own now.
+        def echo(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, json={"detail": f"no route for {request.url.raw_path.decode('ascii')}"})
+
+        for query in ("key=s3c&limit=20", "limit=20&key=s3c", "key=s%203&limit=20"):
+            with self.subTest(query=query):
+                client = AutoBrowserClient(f"http://auto-browser.test:8000/?{query}", token=TOKEN)
+                client._sync_client = _mirroring(client, httpx.Client, httpx.MockTransport(echo))
+                client._async_client = _mirroring(client, httpx.AsyncClient, httpx.MockTransport(echo))
+
+                with self.assertRaises(AutoBrowserError) as caught:
+                    client.list_audit_events(limit=5)
+                with self.assertRaises(AutoBrowserError) as caught_async:
+                    await client.async_list_audit_events(limit=5)
+
+                key_first = query.startswith("key=")
+                shown = "/audit/events?[redacted]&limit=5" if key_first else "/audit/events?limit=5&[redacted]"
+                self.assertEqual(caught.exception.detail, {"detail": f"no route for {shown}"})
+                self.assertEqual(caught_async.exception.detail, {"detail": f"no route for {shown}"})
 
     async def test_the_async_calls_raise_the_detail_without_them_too(self) -> None:
         client = _answering(httpx.Response(502, json={"detail": f"refused {TOKEN}"}))

@@ -136,12 +136,19 @@ def _as_sent(base_url: str) -> tuple[str, ...]:
     httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, and writes the query
     again as the params it sends (a space as ``+``), so an echo of the request quotes a form the configured text does
     not hold. Only the first when httpx cannot read it (a lone surrogate fails its encoding), as this runs while
-    another error is shown."""
+    another error is shown.
+
+    Each ``name=value`` pair of the query counts on its own too, as a form ``?name=value`` (review of c5): a request's
+    own params replace the base URL's of the same name, so for ``?key=s3c&limit=20`` list_audit_events(limit=5) sends
+    ``key=s3c&limit=5``, which holds neither the query as configured nor a value long enough to count alone."""
     try:
         url = httpx.URL(base_url)
-        return (base_url, str(url), str(url.copy_with(query=None).copy_merge_params(url.params)))
+        forms = (base_url, str(url), str(url.copy_with(query=None).copy_merge_params(url.params)))
     except (httpx.InvalidURL, UnicodeError):
         return (base_url,)
+    queries = (form.partition("?")[2].partition("#")[0] for form in forms)
+    pairs = {pair for query in queries for pair in query.split("&") if "=" in pair and pair != "="}
+    return (*forms, *(f"?{pair}" for pair in sorted(pairs)))
 
 
 def _with_text(error: Exception, text: str) -> Exception:
