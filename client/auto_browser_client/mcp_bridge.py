@@ -455,9 +455,8 @@ class StdioMcpBridge:
         # cannot be cut safely either (W15-2); and the error text they show has the URL's userinfo, password, query
         # and fragment and any user:password@ removed (W14-1).
         except URLError as exc:
-            return self._jsonrpc_error(
+            return self._failed(
                 request_id,
-                -32000,
                 f"No Auto Browser controller reachable at {_display_url(self.client.base_url)} — "
                 "start one with 'docker compose up -d' in the auto-browser repo, or pass "
                 "--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. "
@@ -467,15 +466,14 @@ class StdioMcpBridge:
             # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3). Only the controller
             # URL's own: an InvalidURL from elsewhere (an environment proxy's port) is answered as a failure. Its
             # text is a fixed reason in the bridges' own words (W14-1).
-            return self._jsonrpc_error(
+            return self._failed(
                 request_id,
-                -32000,
                 "The configured controller URL is not a valid Auto Browser controller URL — fix "
                 f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
-            return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
+            return self._failed(request_id, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
 
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if next_session_id:
@@ -595,6 +593,15 @@ class StdioMcpBridge:
         """Drop the half-open session and go back to the old id, so the next call retries."""
         self.client.delete_session(session_id=self.session_id)
         self.session_id, self.protocol_version = previous
+
+    def _failed(self, request_id: Any, message: str) -> dict[str, Any] | None:
+        """The answer to a request the controller never answered: a JSON-RPC error carrying ``message``. A notification
+        (no id) gets none here either, as it gets none once the controller has answered it: its ``message`` goes to
+        stderr instead (R5C-23)."""
+        if request_id is None:
+            print(f"stdio bridge: {message}", file=self.stderr)
+            return None
+        return self._jsonrpc_error(request_id, -32000, message)
 
     @staticmethod
     def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:

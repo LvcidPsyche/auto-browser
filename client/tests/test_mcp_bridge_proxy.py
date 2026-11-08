@@ -721,6 +721,32 @@ def test_r5c_30_a_token_inside_latin_1_is_still_sent() -> None:
     assert seen == [("/mcp", f"Bearer {token}")]
 
 
+@pytest.mark.parametrize(
+    ("base_url", "said"),
+    [
+        ("http://127.0.0.1:{port}/mcp?key=sentinel", UNREACHABLE),
+        ("http://controller.invalid:abc/mcp?key=sentinel", INVALID),
+    ],
+    ids=["unreachable", "invalid"],
+)
+def test_r5c_23_a_notification_gets_no_answer_when_the_controller_cannot_be_reached(
+    closed_port: int, base_url: str, said: str
+) -> None:
+    # A notification (no id) must get no answer; the URLError and invalid-URL paths answered one with "id": null,
+    # which matches no request the client sent. The diagnostic goes to stderr, without the URL's secrets.
+    import auto_browser_client.mcp_bridge as bridge
+
+    stderr = io.StringIO()
+    client = bridge.HttpMcpClient(base_url=base_url.format(port=closed_port))
+    reply = bridge.StdioMcpBridge(client=client, stderr=stderr)._handle_line(
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+
+    assert reply is None
+    assert said in stderr.getvalue()
+    assert "sentinel" not in stderr.getvalue()
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]

@@ -174,6 +174,11 @@ All notable changes to auto-browser are documented here.
   behind one address that each sent their own `X-Operator-Id` or `Authorization` now share that address's limit
   (`REQUEST_RATE_LIMIT_REQUESTS`, 120 a minute by default); paths exempt from the limiter stay exempt in that mode.
   `docs/mesh.md` says so.
+- **The MCP bridges no longer answer a notification the controller never got.** A notification (a message with no
+  `id`, such as `notifications/initialized`) sent while the controller was unreachable, with an invalid controller
+  URL, or meeting an unexpected bridge failure got an error answer with `"id": null`, which a notification must never
+  get and which matches no request the client sent. It now gets none, as when the controller answers it, and the
+  error goes to the bridge's stderr.
 
 ### Changed
 
