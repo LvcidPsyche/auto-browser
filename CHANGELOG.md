@@ -193,6 +193,12 @@ All notable changes to auto-browser are documented here.
   its contract) got the old one's result, and one retention removed got its directory back, holding only
   `drift.json`. The result is now written only while the directory still holds the candidate that was checked;
   otherwise it is returned with a note saying `drift.json` was not written.
+- **An OCR run that never finishes no longer holds its session for ever.** OCR ran tesseract with no timeout, under
+  the session's lock (an observation, a screenshot and, with screenshots redacted, every action's before and after
+  snapshots), so a tesseract that hung held the session until it exited. A run is now stopped after
+  `OCR_TIMEOUT_SECONDS` (new, default 20; a value at or below 0 stops startup), logged as a warning naming the
+  setting, and counted as a failed OCR run (`ocr_extraction_failed`): a screenshot to be redacted then goes out
+  unscrubbed, saying so, or is withheld under `PII_SCRUB_SCREENSHOT_STRICT`. `.env.example` lists the setting.
 - **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that
   every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
   together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of

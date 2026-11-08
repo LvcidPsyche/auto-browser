@@ -280,6 +280,7 @@ class BrowserManager:
             language=self.settings.ocr_language,
             max_blocks=self.settings.ocr_max_blocks,
             text_limit=self.settings.ocr_text_limit,
+            timeout_seconds=self.settings.ocr_timeout_seconds,
         )
         self.pii_scrubber = PiiScrubber.from_settings(self.settings)
         self.diagnostics = BrowserDiagnosticsService(

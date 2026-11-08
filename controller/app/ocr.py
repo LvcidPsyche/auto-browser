@@ -10,7 +10,13 @@ import pytesseract
 from PIL import Image
 from pytesseract import Output, TesseractNotFoundError
 
+from .config import OCR_TIMEOUT_SECONDS
+
 logger = logging.getLogger(__name__)
+
+# What pytesseract raises (a RuntimeError) once it has killed a tesseract that ran past its timeout (timeout_manager in
+# pytesseract.pytesseract); re-check it at a pytesseract bump.
+_TESSERACT_TIMEOUT = "Tesseract process timeout"
 
 # Tesseract confidence below this is treated as unreliable for the model-facing
 # excerpt. It deliberately does NOT gate `redaction_blocks` — see _extract_sync.
@@ -39,11 +45,20 @@ def _line_key(data: dict[str, Any], idx: int) -> list[int] | None:
 
 
 class OCRExtractor:
-    def __init__(self, *, enabled: bool, language: str, max_blocks: int, text_limit: int):
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        language: str,
+        max_blocks: int,
+        text_limit: int,
+        timeout_seconds: float = OCR_TIMEOUT_SECONDS,
+    ):
         self.enabled = enabled
         self.language = language
         self.max_blocks = max(1, max_blocks)
         self.text_limit = max(200, text_limit)
+        self.timeout_seconds = timeout_seconds
 
     async def extract_from_image(self, image_path: str | Path) -> dict[str, Any]:
         if not self.enabled:
@@ -62,17 +77,28 @@ class OCRExtractor:
         try:
             with Image.open(image_path) as image:
                 width, height = image.size
+                # Bounded (ACT-27): a tesseract that never finished held this worker thread, and the read that awaited
+                # it under the session lock, for ever.
                 data = pytesseract.image_to_data(
                     image,
                     lang=self.language,
                     output_type=Output.DICT,
+                    timeout=self.timeout_seconds,
                 )
         except TesseractNotFoundError:
             return self._error_payload(image_path, "tesseract_not_found")
-        except Exception:
+        except Exception as exc:
             # The catch-all behind ocr_extraction_failed: its hint says what to check, and this says which applies
-            # (a missing temporary directory, a tesseract error, an unreadable image).
-            logger.debug("OCR extraction failed for %s", image_path, exc_info=True)
+            # (a missing temporary directory, a tesseract error, an unreadable image). A timeout, which that hint does
+            # not cover, says itself.
+            if isinstance(exc, RuntimeError) and str(exc) == _TESSERACT_TIMEOUT:
+                logger.warning(
+                    "OCR of %s timed out after %g seconds (OCR_TIMEOUT_SECONDS); tesseract was stopped",
+                    image_path,
+                    self.timeout_seconds,
+                )
+            else:
+                logger.debug("OCR extraction failed for %s", image_path, exc_info=True)
             return self._error_payload(image_path, "ocr_extraction_failed")
 
         blocks: list[dict[str, Any]] = []
