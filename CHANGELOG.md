@@ -61,17 +61,20 @@ All notable changes to auto-browser are documented here.
   server sent, which can echo the request line or a header. The URL's secrets count there, and in a server's detail,
   as httpx sends them too, percent-encoded where the URL held a space or a character outside ASCII, and so do the
   `Authorization: Basic` credentials httpx sends for the URL's user name and password (their base64); the MCP
-  bridges, which share the client's redaction, send no such header. A tool's own error (`isError`),
-  which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the controller sent it, as the MCP
-  bridges pass on a tool call's result. A token httpx cannot send in a header (one holding a line break or another
-  control character but a tab, or a character outside ASCII) failed the first request with httpx's error, which
-  quoted the whole header for a line break, a NUL, a vertical tab or a form feed, and named a character outside ASCII
-  and its position; the client and the LangChain tools now refuse it with a `ValueError` naming `token`,
-  `bearer_token` or the token file, never the token. The client refuses an `Authorization` header given in
-  `headers` the same way, and leaves its credentials out of its errors as it leaves the token out. It refuses more
-  than one (`headers` can hold one per case of the name, and httpx sends each), and a token from `token` or
-  `token_file` now replaces every one of them, where one whose name differed in case from `Authorization` was sent
-  beside the token's.
+  bridges, which share the client's redaction, send no such header. httpx itself still logs every request at INFO on
+  its `httpx` logger, naming the URL as sent (userinfo, query and fragment included) and the server's reason phrase:
+  the packages do not own that logger, and a filter added at import would change the logging of everything else in
+  the process, so they leave it alone, and their READMEs now say to keep a secret in the token, not in the base URL.
+  A tool's own error (`isError`), which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the
+  controller sent it, as the MCP bridges pass on a tool call's result. A token httpx cannot send in a header (one
+  holding a line break or another control character but a tab, or a character outside ASCII) failed the first
+  request with httpx's error, which quoted the whole header for a line break, a NUL, a vertical tab or a form feed,
+  and named a character outside ASCII and its position; the client and the LangChain tools now refuse it with a
+  `ValueError` naming `token`, `bearer_token` or the token file, never the token. The client refuses an
+  `Authorization` header given in `headers` the same way, and leaves its credentials out of its errors as it leaves
+  the token out. It refuses more than one (`headers` can hold one per case of the name, and httpx sends each), and a
+  token from `token` or `token_file` now replaces every one of them, where one whose name differed in case from
+  `Authorization` was sent beside the token's.
 
 ### Fixed
 

@@ -46,6 +46,13 @@ except AutoBrowserToolError as exc:
         ...  # open a new session
 ```
 
+An answer that is not 2xx raises httpx's `HTTPStatusError`, and a connection or
+protocol failure httpx's own error; their text leaves out the token and the base
+URL's userinfo, query and fragment. httpx itself logs every request at INFO on its
+`httpx` logger, naming the URL as sent (userinfo, query and fragment included) and
+the server's reason phrase, and this package does not filter that logger: keep a
+secret in `bearer_token` or `token_file`, not in the base URL.
+
 Full walkthroughs:
 [LangChain / LangGraph](https://github.com/LvcidPsyche/auto-browser/blob/main/examples/langchain-integration.md) ·
 [CrewAI](https://github.com/LvcidPsyche/auto-browser/blob/main/examples/crewai-integration.md)
