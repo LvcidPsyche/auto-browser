@@ -121,6 +121,8 @@ class FingerprintConfig:
     // for a receiver that is not a 2d context, and runs no page code, where the coordinates below can (review of c5).
     const _canvasOf = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'canvas').get;
     const _getPrototypeOf = Object.getPrototypeOf;
+    // Captured with the others: the loop below called the live global, which a page can overwrite to turn the noise off.
+    const _trunc = Math.trunc;
     const _bytesPrototype = Uint8ClampedArray.prototype;
     const _LONG_MIN = -2147483648;
     const _LONG_MAX = 2147483647;
@@ -131,10 +133,14 @@ class FingerprintConfig:
             // call had read it, an object's valueOf ran twice, and could answer differently or throw (review of c5).
             // One at a time: at the first the native's [EnforceRange] refuses (not finite, or out of a long's range
             // when truncated) the native is called at once, with the numbers so far and the rest as they stand, so it
-            // throws at that coordinate and converts nothing after it, as it does alone (review of c6).
+            // throws at that coordinate and converts nothing after it, as it does alone (review of c6). A BigInt or a
+            // Symbol goes to the native as it is: the unary plus would throw V8's bare TypeError, where the native's
+            // message names the method and the interface.
             for (let index = 0; index < 4; index++) {{
+                const type = typeof args[index];
+                if (type === 'bigint' || type === 'symbol') return _origGetImageData.apply(this, args);
                 args[index] = +args[index];
-                const truncated = Math.trunc(args[index]);
+                const truncated = _trunc(args[index]);
                 if (!(truncated >= _LONG_MIN && truncated <= _LONG_MAX)) return _origGetImageData.apply(this, args);
             }}
         }}

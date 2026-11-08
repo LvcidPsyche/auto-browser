@@ -444,7 +444,8 @@ All notable changes to auto-browser are documented here.
   coordinate, as the native does: `getImageData.call({}, ...)` is a `TypeError` that calls no `valueOf`, where the
   wrapper ran the coordinate's own `valueOf` first. And it converts the coordinates one at a time and stops at the
   first the native refuses (not finite, or out of a `long`'s range): the native's `TypeError` comes at that coordinate
-  and no later `valueOf` runs, where a later one that threw replaced the `TypeError` with the page's error.
+  and no later `valueOf` runs. A BigInt or a Symbol coordinate goes to the native as it is, so its `TypeError` is the
+  native's own message, and the wrapper calls the `Math.trunc` it captured at init, not the page's.
 - **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** They ran
   the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran, or
   Git's `bin\bash.exe` wrapper, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a

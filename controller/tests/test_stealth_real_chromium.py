@@ -638,7 +638,31 @@ READ_WITH_A_REFUSED_COORDINATE = """() => {
   const calls = [];
   const once = (index, value) => ({ valueOf() { calls.push(index); return value; } });
   const valid = ctx.getImageData(once(0, 0), once(1, 0), once(2, 1), once(3, 1)).data.length;
+  const read = (args) => {
+    try {
+      const image = ctx.getImageData(...args);
+      return { error: null, width: image.width, height: image.height };
+    } catch (e) {
+      return { error: e.name, message: e.message };
+    }
+  };
+  const throwing = { valueOf() { throw new Error('the page'); } };
+  const extra = {
+    bigint: attempt([1n, 'later', 1, 1]),
+    bigintLater: attempt([0, 1n, 'later', 1]),
+    symbol: attempt([Symbol('s'), 'later', 1, 1]),
+    symbolLater: attempt([0, 0, Symbol('s'), 'later']),
+    throwsAtFirst: attempt([throwing, 'later', 1, 1]),
+    throwsAtSecond: attempt([0, throwing, 'later', 1]),
+    negativeZero: read([-0, -0, 1, 1]),
+    longMax: read([2147483647, 0, 1, 1]),
+    longMaxFraction: read([2147483647.9, 0, 1, 1]),
+    longMin: read([-2147483648, 0, 1, 1]),
+    longMinFraction: read([-2147483648.9, 0, 1, 1]),
+    numericString: read(['0', '0', '1', '1']),
+  };
   return {
+    extra,
     nan: attempt([NaN, 'later', 1, 1]),
     tooLarge: attempt([2 ** 31, 'later', 1, 1]),
     tooSmall: attempt([-(2 ** 31) - 1, 'later', 1, 1]),
@@ -656,10 +680,35 @@ def test_the_read_converts_its_coordinates_one_at_a_time_and_stops_at_the_one_th
     native, _stealthy = asyncio.run(_native_and_stealthy(READ_WITH_A_REFUSED_COORDINATE))
     (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_WITH_A_REFUSED_COORDINATE, FingerprintConfig("s", "light")))
 
-    refused = {name: case for name, case in native.items() if name != "valid"}
+    refused = {name: case for name, case in native.items() if name not in ("valid", "extra")}
     assert all(case["error"] == "TypeError" and case["later"] == 0 for case in refused.values()), native
     assert native["valid"] == {"length": 4, "calls": [0, 1, 2, 3]}, native
     assert seen == native
+
+
+# The page replaces Math.trunc after the init script ran: the wrapper's loop called the live global, and a trunc
+# that returns NaN made it hand every read to the native, with no noise.
+READ_AFTER_MATH_TRUNC_IS_REPLACED = """() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 4, 4);
+  const before = Array.from(ctx.getImageData(0, 0, 4, 4).data);
+  Math.trunc = () => NaN;
+  const after = Array.from(ctx.getImageData(0, 0, 4, 4).data);
+  return { before, after };
+}"""
+
+
+@requires_chromium
+def test_a_page_replacing_math_trunc_does_not_turn_the_noise_off() -> None:
+    """Review of c6b: the loop called the live Math.trunc, which a page can replace to make the wrapper pass every read
+    to the native unchanged."""
+    (seen,) = asyncio.run(
+        _read_on_fingerprinted_pages(READ_AFTER_MATH_TRUNC_IS_REPLACED, FingerprintConfig("s", "light"))
+    )
+
+    assert seen["before"] != [100, 100, 100, 255] * 16, seen
+    assert seen["after"] == seen["before"], seen
 
 
 @requires_chromium
