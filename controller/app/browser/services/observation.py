@@ -518,7 +518,10 @@ class BrowserObservationService:
         except BaseException as exc:
             # Cut off (cancelled, or failed) while the file was written: nothing checked it.
             if isinstance(exc, Exception):
-                read.refuse_raised(written["path"])
+                # Failed, so its write has ended, with whatever part of the image it wrote (a full disk): that part
+                # goes, as nobody gets a screenshot to discard (review of c4b).
+                Path(written["path"]).unlink(missing_ok=True)
+                read.refuse_raised()
             else:
                 _delete_when_done(capture, written["path"])
             raise

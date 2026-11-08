@@ -393,3 +393,21 @@ def test_a_shutdown_while_a_capture_is_written_leaves_no_file(tmp_path: Path, st
         _shut_down_during(read, started, release)
 
     assert list(sessions[0].artifact_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("staged", [True, False], ids=["staged", "not staged"])
+async def test_a_capture_whose_write_fails_leaves_no_file(tmp_path: Path, staged: bool) -> None:
+    # Review of c4b (Codex 3): a capture whose write raised after writing part of the image (a full disk) left that
+    # part: the page had not moved, so the read deleted nothing, and the caller never got a screenshot to discard.
+    service, session, _ = _service(tmp_path)
+    service.manager.pii_scrubber = PiiScrubber(screenshot_enabled=staged, audit_report=False)
+
+    def partly(path: Path, data: bytes) -> int:
+        with open(path, "wb") as handle:
+            handle.write(data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    with patch.object(Path, "write_bytes", partly), pytest.raises(OSError, match="No space left"):
+        await service.capture_screenshot(session.id)
+
+    assert list(session.artifact_dir.iterdir()) == []

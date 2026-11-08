@@ -226,12 +226,14 @@ All notable changes to auto-browser are documented here.
   every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
   together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of
   the session's lock; it now waits for both, as the observation's other paired reads do, then raises the error.
-- **A screenshot capture cut off by a shutdown no longer leaves its image behind.** A capture whose read was
-  cancelled has its file removed once the capture ends, since nothing checked what it shows; but a shutdown cancels
-  the capture itself, which then ended before Playwright's write of the file (in a thread of Playwright's own) did,
-  so the image was written after its removal and stayed in the session's artifact directory. The controller now
-  writes the image Playwright returns, in a worker thread that removes the file itself when it ends after its
-  capture was cancelled.
+- **A screenshot capture cut off by a shutdown, or whose write fails, no longer leaves its image behind.** A capture
+  whose read was cancelled has its file removed once the capture ends, since nothing checked what it shows; but a
+  shutdown cancels the capture itself, which then ended before Playwright's write of the file (in a thread of
+  Playwright's own) did, so the image was written after its removal and stayed in the session's artifact directory.
+  The controller now writes the image Playwright returns, in a worker thread that removes the file itself when it
+  ends after its capture was cancelled. A capture whose write failed partway (a full disk) left the part it wrote, at
+  its published name, or at its hidden one when it was to be redacted; that part is now removed before the error
+  goes on.
 - **A click or key press that opens a tab is verified by it, and its result names the tab.** Observations and actions
   stay on the active tab, which a tab a page opens does not become, so a click on a link that opened a new tab changed
   nothing the action's verification compared and could read `verified: false`: an agent that retried opened a second
