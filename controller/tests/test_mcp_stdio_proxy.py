@@ -722,12 +722,12 @@ def test_w15_7_a_token_holding_a_line_break_is_never_sent(tmp_path: Path, token:
     assert controller.seen == [("/mcp", None)]  # type: ignore[attr-defined]
 
 
-def _answer_with_a_401(**client_options: object) -> tuple[dict, list]:
-    """The bridge's answer to a tools/list a controller answers 401, and what that controller saw."""
+def _answer_with_a_401(detail: str = "Missing or invalid bearer token", **client_options: object) -> tuple[dict, list]:
+    """The bridge's answer to a tools/list a controller answers 401 with ``detail``, and what that controller saw."""
     import app.mcp_stdio as bridge
 
     controller = _serve()
-    controller.answer = (401, b'{"detail": "Missing or invalid bearer token"}')  # type: ignore[attr-defined]
+    controller.answer = (401, json.dumps({"detail": detail}).encode())  # type: ignore[attr-defined]
     try:
         client = bridge.HttpMcpClient(base_url=f"http://127.0.0.1:{controller.server_port}/mcp", **client_options)
         reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
@@ -810,6 +810,147 @@ def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy)
     assert "HTTP 502" in message
     assert "sentinel" not in message
     assert len(recording_proxy.seen) == 1  # type: ignore[attr-defined]
+
+
+_BACKSLASH = chr(92)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "detail"),
+    [
+        # Codex Q01: a query value quoted without its key matched no part of the URL, which was matched whole.
+        ("http://controller.invalid/mcp?key=sentinel-0123&page=2", "bad key sentinel-0123"),
+        # A value quoted as repr() or json.dumps() writes it: str() of a structure in a server's own text.
+        (
+            "http://controller.invalid/mcp?key=sentinel%5Ctail",
+            "rejected " + repr({"key": "sentinel" + _BACKSLASH + "tail"}),
+        ),
+        ("http://controller.invalid/mcp?key=sen%22tinel-0123", "rejected " + json.dumps({"key": 'sen"tinel-0123'})),
+    ],
+    ids=["query_value_alone", "repr_form", "json_form"],
+)
+def test_r5c_20_a_servers_detail_never_shows_a_secret_of_the_url_quoted_another_way(
+    recording_proxy, base_url: str, detail: str
+) -> None:
+    recording_proxy.answer = (502, json.dumps({"detail": detail}).encode())  # type: ignore[attr-defined]
+
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert message.startswith("Auto Browser controller returned HTTP 502: ")
+    assert "[redacted]" in message
+    assert "tinel" not in message
+
+
+@pytest.mark.parametrize(
+    ("base_url", "detail", "shown"),
+    [
+        # FastAPI's 422 detail quotes the value alone, in a list of objects.
+        (
+            "http://controller.invalid/mcp?key=sentinel-0123",
+            [{"loc": ["query", "key"], "input": "sentinel-0123", "ctx": {"n": 7}}],
+            [{"loc": ["query", "key"], "input": "[redacted]", "ctx": {"n": 7}}],
+        ),
+        # str() escaped the backslash a decoded query holds, so the decoded value matched nothing.
+        (
+            "http://controller.invalid/mcp?key=sentinel%5Ctail",
+            {"upstream": "key=sentinel" + _BACKSLASH + "tail"},
+            {"upstream": "[redacted]"},
+        ),
+        # A number that is a secret of the URL, as Codex R03's Retry-After was.
+        (
+            "http://alice:93847561029384756102@controller.invalid:8000/mcp",
+            {"retry": 93847561029384756102},
+            {"retry": "[redacted]"},
+        ),
+    ],
+    ids=["fastapi_422", "decoded_backslash", "numeric_secret"],
+)
+def test_r5c_20_a_structured_detail_is_shown_as_json_without_the_urls_secrets(
+    recording_proxy, base_url: str, detail: object, shown: object
+) -> None:
+    recording_proxy.answer = (502, json.dumps({"detail": detail}).encode())  # type: ignore[attr-defined]
+    prefix = "Auto Browser controller returned HTTP 502: "
+
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert message.startswith(prefix)
+    assert json.loads(message[len(prefix) :]) == shown
+
+
+@pytest.mark.parametrize("in_file", [False, True], ids=["bearer_token", "token_file"])
+def test_r5c_20_a_servers_detail_never_shows_the_token(tmp_path: Path, in_file: bool) -> None:
+    # Codex R02: the answers dropped the URL's secrets but not the bearer token the request carried.
+    token_file = tmp_path / "api-token"
+    token_file.write_text(MARKER + "\n", encoding="utf-8")
+
+    reply, seen = _answer_with_a_401(
+        f"token {MARKER} is not valid",
+        bearer_token=None if in_file else MARKER,
+        token_file=str(token_file) if in_file else None,
+    )
+
+    assert reply["error"]["message"].startswith("Auto Browser controller returned HTTP 401: token [redacted] is not")
+    assert MARKER not in reply["error"]["message"]
+    assert seen == [("/mcp", f"Bearer {MARKER}")]
+
+
+def test_r5c_20_a_forwarded_json_rpc_errors_message_is_shown_without_secrets_and_a_result_is_untouched(
+    recording_proxy,
+) -> None:
+    # Codex P03: the bridges forwarded a controller's JSON-RPC body unchanged, so an error message quoting the URL (a
+    # proxy, a gateway or the controller echoing it) reached the agent. Only an error's message is shown that way.
+    base_url = "http://controller.invalid/mcp?key=sentinel-0123"
+    message = f"upstream {base_url} refused {MARKER}"
+    error = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": message, "data": {"kept": "as sent"}}}
+    recording_proxy.answer = (200, json.dumps(error).encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge(base_url, recording_proxy)
+
+    assert reply["error"] == {
+        "code": -32001,
+        "message": "upstream http://controller.invalid/mcp?[redacted] refused [redacted]",
+        "data": {"kept": "as sent"},
+    }
+    result = {"jsonrpc": "2.0", "id": 1, "result": {"text": message}}
+    recording_proxy.answer = (200, json.dumps(result).encode())  # type: ignore[attr-defined]
+    assert _reply_through_the_bridge(base_url, recording_proxy) == result
+
+
+def test_r5c_20_the_unexpected_failure_on_stderr_never_shows_the_urls_secrets_or_the_token(monkeypatch) -> None:
+    # The answer went through _shown; the line the bridge printed on stderr showed the error's text as it came.
+    import app.mcp_stdio as bridge
+
+    def fails(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"upstream http://controller.invalid/mcp?key=sentinel-0123 with {MARKER}")
+
+    monkeypatch.setattr(bridge, "urlopen", fails)
+    stderr = io.StringIO()
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp?key=sentinel-0123", bearer_token=MARKER)
+    reply = bridge.StdioMcpBridge(client=client, stderr=stderr)._handle_line(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    assert reply is not None
+
+    shown = "upstream http://controller.invalid/mcp?[redacted] with [redacted]"
+    assert stderr.getvalue() == f"stdio bridge unexpected error: {shown}\n"
+    assert reply["error"]["message"] == f"Unexpected stdio bridge failure: {shown}"
+
+
+def test_r5c_20_each_secret_is_replaced_once_and_a_paths_at_sign_is_kept() -> None:
+    from app.mcp_stdio import _display_url, _redacted, _without_userinfo
+
+    # A short secret was replaced again inside the [redacted] already written: "x [red[redacted]cted] ...".
+    assert _redacted("x u:a y getaddrinfo failed", "http://u:a@h/mcp") == (
+        "x [redacted] y get[redacted]ddrinfo f[redacted]iled"
+    )
+    # The display and the detail dropped any x@ run, a path's too: /a@b/mcp showed as /b/mcp.
+    assert _display_url("http://controller.example/a@b/mcp?key=sentinel") == "http://controller.example/a@b/mcp"
+    assert _without_userinfo("upstream http://controller.example/a@b/mcp failed") == (
+        "upstream http://controller.example/a@b/mcp failed"
+    )
+    assert _without_userinfo("via http://alice:sentinel@proxy.invalid/x and 'bob@host'") == (
+        "via http://proxy.invalid/x and 'host'"
+    )
 
 
 def test_w15_1_the_unexpected_failure_answer_never_shows_the_urls_query(

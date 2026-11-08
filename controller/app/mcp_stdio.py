@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, unwrap, urlsplit
+from urllib.parse import unquote, unquote_plus, unwrap, urlsplit
 from urllib.request import (
     HTTPDefaultErrorHandler,
     HTTPErrorProcessor,
@@ -77,9 +77,14 @@ def _opener(proxies: dict[str, str] | None = None) -> OpenerDirector:
 
 _DIRECT = _opener({})
 
-# A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1).
-# The lookbehind lets a match start only where a run starts, so the scan is linear in the text's length (W14-1).
-_USERINFO_RUN = re.compile(r"""(?<![^\s'"/@])[^\s'"/@]*@""")
+# A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1). It
+# starts at the text's start, or after whitespace, a quote, an @ or the // before an authority, never after a path's
+# single / (R5C-20: /a@b/mcp is a path); so a match starts only where a run starts, and the scan is linear (W14-1).
+_USERINFO_RUN = re.compile(r"""(?:(?<![^\s'"@])|(?<=//))[^\s'"/@]*@""")
+
+# A query value this long or longer is redacted on its own too, as a server's detail can quote one without its key; a
+# shorter one (a page number, a flag) would cut words out of every answer (R5C-20).
+_SHORTEST_REDACTED_QUERY_VALUE = 8
 
 
 class InvalidControllerURL(InvalidURL):
@@ -118,21 +123,54 @@ def _display_url(url: str) -> str:
     return _without_userinfo((before + after).split("#", 1)[0].split("?", 1)[0])
 
 
-def _redacted(text: str, url: str) -> str:
-    """``text`` with ``url``'s userinfo, password, query and fragment replaced and any userinfo run dropped (W14-1).
+def _redacted(text: str, url: str, token: str | None = None) -> str:
+    """``text`` with ``url``'s secrets and ``token`` replaced with ``[redacted]``, and any userinfo run dropped (W14-1).
+
+    The secrets (``_secrets_of``) are replaced in one pass, longest first (R5C-20), so a short one is never replaced
+    again inside a ``[redacted]`` already written; then ``_without_userinfo`` drops any other ``user:password@``.
+    """
+    secrets = sorted(_secrets_of(url, token), key=lambda secret: (-len(secret), secret))
+    if secrets:
+        text = re.compile("|".join(map(re.escape, secrets))).sub("[redacted]", text)
+    return _without_userinfo(text)
+
+
+def _secrets_of(url: str, token: str | None) -> set[str]:
+    """What an answer must not show of ``url`` and ``token``, in each form a text can quote it in.
 
     The URL is read first as urllib's Request reads it (W15-6): a CR left on it by a CRLF .env file, which urllib
-    strips, would otherwise end the query and match no text. Each is found with string operations, so a malformed
-    URL is handled, and is replaced as written and percent-decoded, longest first, with ``[redacted]``; then
-    ``_without_userinfo`` drops any other ``user:password@``.
+    strips, would otherwise end the query and match no text. Its userinfo, password, query and fragment, and each
+    query value of _SHORTEST_REDACTED_QUERY_VALUE or more characters (R5C-20), are found with string operations, so a
+    malformed URL is handled, and count as written and percent-decoded (a query's ``+`` as a space too); each of
+    those, and ``token``, counts as ``repr()`` and ``json.dumps()`` write it too (R5C-20).
     """
     url = unwrap(url)
     userinfo = _split_userinfo(url)[1]
-    parts = (userinfo, userinfo.partition(":")[2], url.partition("?")[2].partition("#")[0], url.partition("#")[2])
-    known = {value for part in parts for value in (part, unquote(part)) if value}
-    for value in sorted(known, key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    return _without_userinfo(text)
+    query = url.partition("?")[2].partition("#")[0]
+    values = [item.partition("=")[2] if "=" in item else item for item in query.split("&")]
+    in_query = {query, *(value for value in values if len(value) >= _SHORTEST_REDACTED_QUERY_VALUE)}
+    written = {userinfo, userinfo.partition(":")[2], url.partition("#")[2], *in_query}
+    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or ""}
+    quoted = {
+        form[1:-1]
+        for value in forms
+        for form in (repr(value), json.dumps(value), json.dumps(value, ensure_ascii=False))
+    }
+    return {secret for secret in forms | quoted if secret}
+
+
+def _redacted_value(value: Any, url: str, token: str | None = None) -> Any:
+    """``value``, a server's error detail as JSON parsed it, with each string in it (keys too) through ``_redacted``
+    and each number that is one of the secrets replaced, its shape kept (R5C-20)."""
+    if isinstance(value, str):
+        return _redacted(value, url, token)
+    if isinstance(value, dict):
+        return {_redacted(str(key), url, token): _redacted_value(item, url, token) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted_value(item, url, token) for item in value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value if _redacted(str(value), url, token) == str(value) else "[redacted]"
+    return value
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -319,6 +357,8 @@ class HttpMcpClient:
         self.token_file = os.path.expanduser(token_file) if token_file else None
         # Why the last request went without a token, from token_file or bearer_token; added to a 401's message.
         self.token_file_problem: str | None = None
+        # The token the last request sent, or would not send: what an answer shows never holds it (R5C-20).
+        self.last_token: str | None = None
 
     def _bearer(self) -> str | None:
         """The token to send: bearer_token when set, else the one in token_file, read now.
@@ -334,6 +374,7 @@ class HttpMcpClient:
         well as for token_file.
         """
         if self.bearer_token:
+            self.last_token = self.bearer_token
             self.token_file_problem = _unsent_because(_ARGUMENT_SOURCE, self.bearer_token)
             return None if self.token_file_problem else self.bearer_token
         if not self.token_file:
@@ -344,6 +385,7 @@ class HttpMcpClient:
         except (OSError, UnicodeDecodeError) as exc:
             self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
             return None
+        self.last_token = token or None
         self.token_file_problem = _unsent_because(f"the token file {self.token_file}", token)
         if self.token_file_problem:
             return None
@@ -495,7 +537,7 @@ class StdioMcpBridge:
         # The answers go to the agent. The answer that no controller is reachable names the URL without its userinfo,
         # query or fragment (W13-1); the invalid-URL answer names no part of it, since a URL that cannot be read
         # cannot be cut safely either (W15-2); and the error text they show has the URL's userinfo, password, query
-        # and fragment and any user:password@ removed (W14-1).
+        # and fragment and any user:password@ removed (W14-1), and the token and each long query value (R5C-20).
         except URLError as exc:
             return self._failed(
                 request_id,
@@ -514,7 +556,8 @@ class StdioMcpBridge:
                 f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
-            print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
+            # stderr as the answer: a client can show it to the agent, or keep it in a log the agent reads (R5C-20).
+            print(f"stdio bridge unexpected error: {self._shown(str(exc))}", file=self.stderr)
             return self._failed(request_id, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
 
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
@@ -539,9 +582,20 @@ class StdioMcpBridge:
             # they carried no id, so the client never saw a response to its
             # request and hung without learning why.
             return self._jsonrpc_error(request_id, -32000, self._http_error_message(response))
+        body = self._with_error_message_shown(response.body)
         if method == "initialize":
-            return self._without_resource_subscribe(response.body)
-        return response.body
+            return self._without_resource_subscribe(body)
+        return body
+
+    def _with_error_message_shown(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``body``, a JSON-RPC answer forwarded to the agent, with its error's message shown as the bridges' own
+        answers are (R5C-20): a proxy, an MCP gateway or the controller can quote the URL or the token there.
+        Everything else, and a result, goes as it came."""
+        error = body.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if not isinstance(message, str) or self._shown(message) == message:
+            return body
+        return {**body, "error": {**error, "message": self._shown(message)}}
 
     @staticmethod
     def _without_resource_subscribe(body: dict[str, Any]) -> dict[str, Any]:
@@ -556,10 +610,23 @@ class StdioMcpBridge:
             "result": {**result, "capabilities": {**capabilities, "resources": {**resources, "subscribe": False}}},
         }
 
-    def _shown(self, text: str) -> str:
-        """An error's ``text`` as an answer shows it, without the base URL's known secrets (W14-1)."""
+    def _secrets(self) -> tuple[str, str | None]:
+        """The base URL and the token the last request carried, whose secrets an answer never shows (R5C-20)."""
         base_url = getattr(self.client, "base_url", "")
-        return _redacted(text, base_url if isinstance(base_url, str) else "")
+        token = getattr(self.client, "last_token", None)
+        return (base_url if isinstance(base_url, str) else "", token if isinstance(token, str) else None)
+
+    def _shown(self, text: str) -> str:
+        """An error's ``text`` as an answer shows it, without the base URL's known secrets or the token (W14-1)."""
+        return _redacted(text, *self._secrets())
+
+    def _shown_detail(self, detail: Any) -> str:
+        """A server's error detail as an answer shows it: a structure (a dict or a list) as JSON after
+        ``_redacted_value``, where str() wrote it with repr(), which escapes what the redaction looks for (a backslash
+        in a decoded query); anything else as its text through ``_shown`` (R5C-20)."""
+        if isinstance(detail, (dict, list)):
+            return json.dumps(_redacted_value(detail, *self._secrets()), ensure_ascii=False)
+        return self._shown(str(detail))
 
     def _http_error_message(self, response: HttpMcpResponse) -> str:
         if response.body is None:
@@ -567,7 +634,7 @@ class StdioMcpBridge:
         detail = response.body.get("detail") if isinstance(response.body, dict) else None
         message = f"Auto Browser controller returned HTTP {response.status_code}"
         if detail:
-            message += f": {self._shown(str(detail))}"
+            message += f": {self._shown_detail(detail)}"
         if response.status_code == 401:
             message += (
                 " (set --token-file or AUTO_BROWSER_TOKEN_FILE to the controller's token file, data/api-token in"

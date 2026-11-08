@@ -37,6 +37,16 @@ All notable changes to auto-browser are documented here.
   header cannot carry, was answered as an unexpected bridge failure quoting http.client's encoding error, which names
   that character and its position in the token. Such a token is now not sent, as one holding a line break has not been
   since 1.16.0, and a `401`'s answer says which source holds it; a token inside latin-1 is still sent.
+- **The MCP bridges' answers no longer show the bearer token, a query value, or a secret of the URL quoted another
+  way.** 1.16.0's answers replaced the base URL's userinfo, password, query and fragment, each whole, as written or
+  percent-decoded. A server's error detail that quoted the token, a query value alone (`bad key ...`, or FastAPI's
+  `422` shape), or one of those as `repr()` or `json.dumps()` writes it (a structured detail went through `str()`,
+  which doubles a backslash) was shown as it came, and a JSON-RPC error the bridges forwarded from a proxy, an MCP
+  gateway or the controller was not redacted at all. The answers now also replace the token the request carried and
+  each query value of 8 or more characters, in each of those forms; a structured detail is shown as JSON after its
+  strings are redacted; a forwarded JSON-RPC error's message is redacted (a result is never rewritten); and the line a
+  bridge prints on stderr for an unexpected failure is redacted as its answer is. A short secret is no longer replaced
+  again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a userinfo and dropped.
 
 ### Fixed
 
