@@ -599,6 +599,51 @@ class RetentionReadTests(_Base):
         self.assertEqual(read["skill_id"], skill_id)
         self.assertFalse(directory.exists())
 
+    async def test_retention_waits_for_a_listing_or_a_drift_check_reading_a_candidate(self) -> None:
+        # Review of c3 (Codex 9): the tests above read with get_candidate, or after the candidate was set aside, so
+        # the lock the listing, a drift check's read and check_all's listing take could go and no test would notice.
+        from app.harness.register import SkillStagingRegistry
+
+        service = self._signed_service()
+
+        async def list_candidates(skill_id: str) -> object:
+            return service.list_candidates()  # on the event loop, as the gateway calls it
+
+        async def check_drift(skill_id: str) -> object:
+            return await service.check_drift(skill_id)
+
+        async def check_all_drifts(skill_id: str) -> object:
+            return await service.check_all_drifts()
+
+        real_verify_files = SkillStagingRegistry._verify_files
+        for read in (list_candidates, check_drift, check_all_drifts):
+            with self.subTest(reader=read.__name__):
+                skill_id, directory = await self._aged_candidate(service)
+                prune = threading.Thread(target=service.store.prune, args=(30,))
+                self.addCleanup(prune.join, 10)
+                finished_during_the_read: list[bool] = []
+
+                def verify_files(
+                    registry, candidate, signed_hashes, folder, prune=prune, seen=finished_during_the_read
+                ):
+                    # candidate.json is read; the files it signs are read next, and retention runs in between.
+                    if prune.ident is None:
+                        prune.start()
+                        prune.join(0.5)
+                        seen.append(not prune.is_alive())
+                    return real_verify_files(registry, candidate, signed_hashes, folder)
+
+                with patch.object(SkillStagingRegistry, "_verify_files", verify_files):
+                    result = await read(skill_id)
+                prune.join(10)
+
+                self.assertEqual(finished_during_the_read, [False], "retention removed the candidate while it was read")
+                self.assertFalse(directory.exists())
+                if read is list_candidates:
+                    self.assertEqual([item["skill_id"] for item in result], [skill_id])
+                elif read is check_drift:
+                    self.assertEqual(result["status"], "healthy", result["notes"])
+
 
 class _HeldDriftVerifier:
     """A drift check's verifier that waits until the test lets it answer."""
