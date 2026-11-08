@@ -5,11 +5,13 @@ import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError, ExecutionHold
 from app.browser.page_provenance import PageProvenance
+from app.browser_scripts import FIND_ELEMENTS_SELECTOR_SCRIPT, FIND_ELEMENTS_TEXT_SCRIPT, PAGE_TEXT_SCRIPT
 from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
@@ -1282,6 +1284,40 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent.get("code"), "invalid_selector")
         self.assertIn(f"Invalid selector: {reason}", response.content[0].text)
+
+    async def test_the_isolated_worlds_deadline_never_cuts_a_page_read_off_before_its_own_bound(self) -> None:
+        # Review of c5 (GLM): get_html(text_only) and find_elements by selector, moved into the isolated world (NAV-12),
+        # ran on its deadline (ACTION_TIMEOUT_MS, 15 s by default), so a page slower than that failed as a page not
+        # answering, where they had the 30 s every page read is bounded by. The query's walk had its own pad already.
+        from app.browser.page_read import PAGE_READ_TIMEOUT_SECONDS
+        from app.tool_gateway import gateway as gateway_module
+
+        deadlines: dict[str, int | None] = {}
+
+        class RecordingElementIds:
+            async def evaluate(self, page: Any, script: str, arg: Any = None, *, timeout_ms: int | None = None) -> Any:
+                deadlines[script] = timeout_ms
+                return "text" if script is PAGE_TEXT_SCRIPT else []
+
+        self.manager.element_ids = RecordingElementIds()
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=SimpleNamespace(), lock=asyncio.Lock()))
+        for arguments in ({"text_only": True}, {"selector": "#real"}, {"query": "real"}):
+            name = "browser.get_html" if "text_only" in arguments else "browser.find_elements"
+            response = await self.full_gateway.call_tool(
+                McpToolCallRequest(name=name, arguments={"session_id": "session-1", **arguments})
+            )
+            self.assertFalse(response.isError, response.content[0].text)
+
+        bounds = {
+            PAGE_TEXT_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
+            FIND_ELEMENTS_SELECTOR_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
+            FIND_ELEMENTS_TEXT_SCRIPT: gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS,
+        }
+        self.assertEqual(set(deadlines), set(bounds))
+        for script, bound in bounds.items():
+            with self.subTest(script=script[:40]):
+                self.assertIsNotNone(deadlines[script])
+                self.assertGreater(deadlines[script], bound * 1000)
 
     async def test_invalid_arguments_message_reaches_the_caller(self) -> None:
         # drag_drop with neither selectors nor coordinates fails validation with an

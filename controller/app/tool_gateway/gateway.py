@@ -30,7 +30,7 @@ from ..action_errors import (
 from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
-from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
+from ..browser.page_read import MOVED_DETAIL, PAGE_READ_TIMEOUT_SECONDS, bounded, locked_read, start_read
 from ..browser.request_gate import block_summary
 from ..browser.services.actions import BrowserActionService
 from ..browser.services.diagnostics import checked_screenshot
@@ -127,9 +127,11 @@ logger = logging.getLogger(__name__)
 # catastrophically backtracking regex would otherwise hang the read
 # (and the session) indefinitely.
 FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
-# How much longer the isolated world waits for that walk, so its own deadline (ACTION_TIMEOUT_MS, which can be
-# shorter) never reports the page as not answering before the query's timeout does.
-FIND_ELEMENTS_WORLD_PAD_SECONDS = 5.0
+# How much longer the isolated world waits for a read than the read's own timeout (that walk's, or a page read's
+# PAGE_READ_TIMEOUT_SECONDS), so the world's deadline (ACTION_TIMEOUT_MS, which can be shorter) never reports the page
+# as not answering before that timeout does (NAV-12, review of c5).
+WORLD_PAD_SECONDS = 5.0
+PAGE_READ_WORLD_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000)
 
 # How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
 # answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.
@@ -1083,7 +1085,11 @@ class McpToolGateway:
             if payload.text_only:
                 # In the controller's isolated world, as the observation's scripts run (NAV-12): in the page's own,
                 # a page that replaced the innerText getter gave this its own text.
-                content = await bounded(self.manager.element_ids.evaluate(session.page, PAGE_TEXT_SCRIPT))
+                content = await bounded(
+                    self.manager.element_ids.evaluate(
+                        session.page, PAGE_TEXT_SCRIPT, timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS
+                    )
+                )
                 kind = "text"
             else:
                 content = await bounded(session.page.content())
@@ -1117,7 +1123,7 @@ class McpToolGateway:
                 FIND_ELEMENTS_TEXT_SCRIPT,
                 [payload.query, payload.regex, payload.context, payload.limit],
                 # The world's own deadline must not cut this off before the timeout below says why.
-                timeout_ms=int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS + FIND_ELEMENTS_WORLD_PAD_SECONDS) * 1000),
+                timeout_ms=int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000),
             )
             try:
                 elements = await asyncio.wait_for(evaluate, timeout=FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS)
@@ -1143,6 +1149,7 @@ class McpToolGateway:
                 session.page,
                 FIND_ELEMENTS_SELECTOR_SCRIPT,
                 [payload.selector, payload.limit],
+                timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
             )
         )
         if isinstance(elements, dict) and "__invalid_selector" in elements:
