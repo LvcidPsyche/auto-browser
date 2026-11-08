@@ -80,6 +80,10 @@ class UnsendableTokenTests(unittest.IsolatedAsyncioTestCase):
         for token, held in (
             ("sentinelA\nsentinelB", "a line break"),
             ("sentinel" + chr(0xE4), "a character outside ASCII"),
+            # Review of c3 (Codex 1): h11 refuses these too, quoting the header whole ("Illegal header value").
+            ("sentinelA" + chr(0) + "sentinelB", "a control character"),
+            ("sentinelA" + chr(0x0B) + "sentinelB", "a control character"),
+            ("sentinelA" + chr(0x0C) + "sentinelB", "a control character"),
         ):
             with self.subTest(held=held):
                 with self.assertRaises(ValueError) as caught:

@@ -45,13 +45,17 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
 def _refuse_unsendable(token: str, source: str) -> None:
     """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
 
-    h11 refuses a line break with an error that quotes the header whole, and httpx encodes a header as ASCII, so its
-    error for any other character names that character and its position; either reached an agent shown the error.
+    h11 refuses a line break, a NUL, a vertical tab or a form feed with an error that quotes the header whole, and
+    httpx encodes a header as ASCII, so its error for a character outside ASCII names that character and its
+    position; either reached an agent shown the error. A header carries no control character but a tab (RFC 9110), so
+    any other is refused (review of c3).
     """
     if "\r" in token or "\n" in token:
         held = "a line break"
     elif not token.isascii():
         held = "a character outside ASCII"
+    elif any(not character.isprintable() and character != "\t" for character in token):
+        held = "a control character"
     else:
         return
     raise ValueError(f"{source} holds {held}, which an HTTP header cannot carry")

@@ -56,9 +56,12 @@ All notable changes to auto-browser are documented here.
   shape. The LangChain tool, `AutoBrowserTool.list_tools` and `AutoBrowserNode` raised httpx's `HTTPStatusError` for
   an answer that was not 2xx, whose message names the request URL whole, password, query and fragment included; it
   now names the URL without them (the path is kept), in httpx's words otherwise. A token httpx cannot send in a header
-  (one holding a line break, or a character outside ASCII) failed the first request with httpx's error, which quoted
-  the whole header for a line break and named any other such character and its position; the client and the
-  LangChain tools now refuse it with a `ValueError` naming `token`, `bearer_token` or the token file, never the token.
+  (one holding a line break or another control character but a tab, or a character outside ASCII) failed the first
+  request with httpx's error, which quoted the whole header for a line break, a NUL, a vertical tab or a form feed,
+  and named a character outside ASCII and its position; the client and the LangChain tools now refuse it with a
+  `ValueError` naming `token`, `bearer_token` or the token file, never the token. The client refuses an
+  `Authorization` header given in `headers` the same way, and leaves its credentials out of its errors as it leaves
+  the token out.
 
 ### Fixed
 

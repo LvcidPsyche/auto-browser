@@ -66,17 +66,31 @@ def _read_token_file(path: str | os.PathLike[str]) -> str:
 def _refuse_unsendable(token: str, source: str) -> None:
     """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
 
-    h11 refuses a line break with an error that quotes the header whole, and httpx encodes a header as ASCII, so its
-    error for any other character names that character and its position; raised from the first request, either
-    reached whatever showed the error to an agent.
+    h11 refuses a line break, a NUL, a vertical tab or a form feed with an error that quotes the header whole, and
+    httpx encodes a header as ASCII, so its error for a character outside ASCII names that character and its
+    position; raised from the first request, either reached whatever showed the error to an agent. A header carries
+    no control character but a tab (RFC 9110), so any other is refused (review of c3).
     """
     if "\r" in token or "\n" in token:
         held = "a line break"
     elif not token.isascii():
         held = "a character outside ASCII"
+    elif any(not character.isprintable() and character != "\t" for character in token):
+        held = "a control character"
     else:
         return
     raise ValueError(f"{source} holds {held}, which an HTTP header cannot carry")
+
+
+def _header_credentials(headers: Mapping[str, str]) -> str | None:
+    """The credentials of an Authorization header in ``headers`` (the part after its scheme), which httpx sends as it
+    sends the token's: refused as a token is when httpx cannot send them (review of c3)."""
+    for name, value in headers.items():
+        if name.lower() == "authorization" and isinstance(value, str):
+            _refuse_unsendable(value, "the Authorization header in headers")
+            scheme, _, credentials = value.strip().partition(" ")
+            return credentials.strip() or scheme or None
+    return None
 
 
 class AutoBrowserError(Exception):
@@ -116,13 +130,15 @@ class AutoBrowserClient:
         """
         self.base_url = base_url.rstrip("/")
         self._headers: dict[str, str] = dict(headers or {})
+        credentials = _header_credentials(self._headers)
         token = token.strip() if token else None
         if token:
             _refuse_unsendable(token, "token")
         if not token and token_file is not None:
             token = _read_token_file(token_file)
-        # An error's detail never shows it, nor the base URL's secrets (R5C-20).
-        self._token = token
+        # An error's detail never shows it, nor the base URL's secrets (R5C-20), nor an Authorization header's
+        # credentials given in ``headers`` in its place (review of c3).
+        self._token = token or credentials
         if token:
             self._headers["Authorization"] = f"Bearer {token}"
         if operator_id:

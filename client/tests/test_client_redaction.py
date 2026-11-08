@@ -23,8 +23,8 @@ BASE_URL = "http://alice:sentinel-pass@auto-browser.test:8000/?key=sentinel-key-
 SHOWN_URL = "http://auto-browser.test:8000/?[redacted]"
 
 
-def _answering(response: httpx.Response) -> AutoBrowserClient:
-    client = AutoBrowserClient(BASE_URL, token=TOKEN)
+def _answering(response: httpx.Response, **options: Any) -> AutoBrowserClient:
+    client = AutoBrowserClient(BASE_URL, **(options or {"token": TOKEN}))
     client._sync_client = httpx.Client(
         base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
     )
@@ -61,6 +61,18 @@ class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):
                     _answering(response).health()
                 self._assert_raised_without_secrets(caught.exception, shown)
 
+    def test_a_detail_echoing_an_authorization_header_given_in_headers_is_raised_without_it(self) -> None:
+        # Review of c3 (Codex 3): only token= and token_file= were left out, and httpx sends this header the same way.
+        client = _answering(
+            httpx.Response(502, json={"detail": "bad token sentinel-from-headers"}),
+            headers={"Authorization": "Bearer sentinel-from-headers"},
+        )
+
+        with self.assertRaises(AutoBrowserError) as caught:
+            client.health()
+
+        self._assert_raised_without_secrets(caught.exception, {"detail": "bad token [redacted]"})
+
     async def test_the_async_calls_raise_the_detail_without_them_too(self) -> None:
         client = _answering(httpx.Response(502, json={"detail": f"refused {TOKEN}"}))
 
@@ -79,11 +91,32 @@ class UnsendableTokenTests(unittest.TestCase):
             ("sentinelA\rsentinelB", "a line break"),
             ("sentinel" + chr(0xE4), "a character outside ASCII"),
             ("sentinel" + chr(0x20AC), "a character outside ASCII"),
+            # Review of c3 (Codex 1): h11 refuses these too, quoting the header whole ("Illegal header value").
+            ("sentinelA" + chr(0) + "sentinelB", "a control character"),
+            ("sentinelA" + chr(0x0B) + "sentinelB", "a control character"),
+            ("sentinelA" + chr(0x0C) + "sentinelB", "a control character"),
+            ("sentinelA" + chr(0x7F) + "sentinelB", "a control character"),
         ):
             with self.subTest(held=held, token=repr(token)):
                 with self.assertRaises(ValueError) as caught:
                     AutoBrowserClient("http://auto-browser.test", token=token)
                 self.assertEqual(str(caught.exception), f"token holds {held}, which an HTTP header cannot carry")
+
+    def test_a_token_holding_a_tab_is_still_sent(self) -> None:
+        # A tab inside a header's value is the one control character HTTP allows, and h11 sends it.
+        client = AutoBrowserClient("http://auto-browser.test", token="sentinelA\tsentinelB")
+
+        self.assertEqual(client._headers["Authorization"], "Bearer sentinelA\tsentinelB")
+
+    def test_an_authorization_header_given_in_headers_is_refused_as_a_token_is(self) -> None:
+        # Review of c3 (Codex 3): httpx sends it as it sends the token's, and quoted it the same way.
+        with self.assertRaises(ValueError) as caught:
+            AutoBrowserClient("http://auto-browser.test", headers={"authorization": "Bearer sentinelA\nsentinelB"})
+
+        self.assertEqual(
+            str(caught.exception),
+            "the Authorization header in headers holds a line break, which an HTTP header cannot carry",
+        )
 
     def test_a_token_file_holding_one_is_refused_naming_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
