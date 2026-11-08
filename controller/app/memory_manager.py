@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -147,25 +146,28 @@ class MemoryManager:
                 return []
             profiles: list[dict[str, Any]] = []
             for path in sorted(self.root.glob("*.json")):
-                # A file that is no profile is skipped and logged: one that held a JSON list or a step count that
-                # was not a list failed the whole listing, and one that did not parse was skipped unsaid (STORE-36).
+                # Only a file that loads as a profile, as get() loads one; any other is skipped and logged. One that
+                # held a JSON list failed the whole listing, one that did not parse was skipped unsaid (STORE-36),
+                # and other objects were listed though no get could load them (review of c4). The type only: a
+                # parser's message quotes the file.
                 try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    if not isinstance(data, dict):
-                        raise ValueError(f"it holds a JSON {type(data).__name__}, not an object")
-                    if not may_use(data.get("owner")):
-                        continue
-                    summary = {
-                        "name": data.get("name", path.stem),
-                        "created_at": data.get("created_at"),
-                        "updated_at": data.get("updated_at"),
-                        "goal_summary": data.get("goal_summary", ""),
-                        "step_count": len(data.get("completed_steps", [])),
-                    }
+                    profile = MemoryProfile.model_validate_json(path.read_text(encoding="utf-8"))
                 except Exception as exc:
-                    logger.warning("memory profile file %s skipped: %s: %s", path.name, type(exc).__name__, exc)
+                    logger.warning(
+                        "memory profile file %s skipped: it is not a valid profile (%s)", path.name, type(exc).__name__
+                    )
                     continue
-                profiles.append(summary)
+                if not may_use(profile.owner):
+                    continue
+                profiles.append(
+                    {
+                        "name": profile.name,
+                        "created_at": profile.created_at,
+                        "updated_at": profile.updated_at,
+                        "goal_summary": profile.goal_summary,
+                        "step_count": len(profile.completed_steps),
+                    }
+                )
             return profiles
 
         return await asyncio.to_thread(_list_sync)

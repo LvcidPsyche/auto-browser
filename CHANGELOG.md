@@ -238,13 +238,15 @@ All notable changes to auto-browser are documented here.
   logged as a warning naming the session.
 - **A memory profile file that is no profile no longer breaks the others, or shows its content.**
   `browser.list_memory_profiles` failed as a whole on a file in `MEMORY_ROOT` that held a JSON list, or a
-  `completed_steps` that was not a list, and skipped one that did not parse without saying so; each is now skipped
-  and logged as a warning naming the file. Getting, saving or deleting a profile whose file is not a valid profile
-  failed with the parser's error, which quoted the file (another operator's too); it now fails with "memory profile
-  '<name>' cannot be read", and the file stays for its operator to fix or remove. A delete now waits for a save in
-  progress, as saves wait for each other, so a save's write no longer brings back a profile a delete just removed,
-  nor a delete's unlink removes one a save just wrote; a cancelled save or delete holds the others off until its
-  write or unlink has landed.
+  `completed_steps` with no length (a number), listed objects that no get could load (`{}`, or steps given as a
+  string, counted by its characters), and skipped a file that did not parse without saying so. It now lists only the
+  files that load as a profile, as getting one does, and logs each other as a warning naming the file (and the
+  error's type, not its text). Getting, saving or deleting a profile whose file is not a valid profile failed with
+  the parser's error, which quoted the file (another operator's too); it now fails with "memory profile '<name>'
+  cannot be read", and the file stays for its operator to fix or remove. A delete now waits for a save in progress,
+  as saves wait for each other, so a save's write no longer brings back a profile a delete just removed, nor a
+  delete's unlink removes one a save just wrote; a cancelled save or delete holds the others off until its write or
+  unlink has landed.
 - **An audit event written to SQLite now survives a power loss once committed.** With `STATE_DB_PATH` set, audit
   events go to SQLite, whose connections ran WAL with `synchronous=NORMAL`, under which the last commits can roll back
   after a power loss or an OS crash. The audit store's connections now run `synchronous=FULL`, a sync of the WAL per

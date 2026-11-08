@@ -146,6 +146,20 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("a_list.json", logged)
         self.assertIn("broken.json", logged)
 
+    async def test_a_listing_leaves_out_files_that_do_not_load_as_a_profile(self) -> None:
+        # Review of c4 (Codex 10): an object that is no profile was listed, {} under its file's name and a string of
+        # steps counted by its characters, though getting either fails.
+        (self.root / "empty.json").write_text("{}", encoding="utf-8")
+        (self.root / "steps.json").write_text('{"name": "steps", "completed_steps": "oops"}', encoding="utf-8")
+
+        with self.assertLogs("app.memory_manager", level="WARNING") as logs:
+            profiles = await self.manager.list()
+
+        self.assertEqual([profile["name"] for profile in profiles], ["kept"])
+        logged = "\n".join(logs.output)
+        self.assertIn("empty.json", logged)
+        self.assertIn("steps.json", logged)
+
     async def test_an_unreadable_profile_is_refused_by_name_without_its_content(self) -> None:
         (self.root / "broken.json").write_text('{"name": "broken", "notes": "SECRET-NOTE"', encoding="utf-8")
         calls = {
