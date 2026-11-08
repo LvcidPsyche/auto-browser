@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 import httpx
 
-from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token
+from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token, split_base_url
 from .errors import AutoBrowserToolError, errors_shown, raise_for_status
 
 
@@ -84,7 +84,10 @@ class AutoBrowserNode:
         token = headers.get("Authorization", "").removeprefix("Bearer ") or None
         with errors_shown(self.base_url, token):
             transport = loopback_transport(self.base_url, asynchronous=True)
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
+            base, params = split_base_url(self.base_url)
+            async with httpx.AsyncClient(
+                base_url=base, params=params, timeout=self.timeout, transport=transport
+            ) as client:
                 response = await client.post(
                     "/mcp/tools/call",
                     json={"name": name, "arguments": arguments},

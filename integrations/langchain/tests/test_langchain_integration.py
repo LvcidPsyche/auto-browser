@@ -9,6 +9,7 @@ until a user's agent starts returning empty strings.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 
@@ -234,6 +235,32 @@ class UserinfoWithTokenTests(unittest.TestCase):
         with self.assertRaises(httpx.InvalidURL):
             AutoBrowserTool.list_tools(base_url="http://[::1", bearer_token="s3cret")
         AutoBrowserNode(base_url="http://[::1", bearer_token="s3cret")
+
+
+class BaseUrlQueryTests(unittest.IsolatedAsyncioTestCase):
+    """c4's report: httpx put the request's path after a base URL's query (``/?key=value/mcp/tools/call``). The query
+    now goes with every request, at the request's own path, as the MCP bridges send theirs; no request sends a
+    fragment."""
+
+    URL = f"{BASE_URL}/prefix?key=sentinel-value&flag#frag"
+    QUERY = "key=sentinel-value&flag="  # as httpx writes params: a key with no value gets "="
+
+    @respx.mock
+    async def test_the_tool_the_node_and_list_tools_send_the_query_at_their_own_path(self) -> None:
+        route = respx.route(host="auto-browser.test").mock(return_value=httpx.Response(200, json=_content("{}")))
+
+        await AutoBrowserTool(base_url=self.URL)._arun("browser.observe", {})
+        await AutoBrowserNode(base_url=self.URL).call_tool("browser.observe", {})
+        await asyncio.to_thread(AutoBrowserTool.list_tools, base_url=self.URL)
+
+        self.assertEqual(
+            [f"{call.request.method} {call.request.url.raw_path.decode('ascii')}" for call in route.calls],
+            [
+                f"POST /prefix/mcp/tools/call?{self.QUERY}",
+                f"POST /prefix/mcp/tools/call?{self.QUERY}",
+                f"GET /prefix/mcp/tools?{self.QUERY}",
+            ],
+        )
 
 
 class AutoBrowserNodeTests(unittest.TestCase):

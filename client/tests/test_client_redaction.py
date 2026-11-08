@@ -30,13 +30,14 @@ SHOWN_URL = "http://auto-browser.test:8000/?[redacted]"
 
 def _answering(response: httpx.Response, base_url: str = BASE_URL, **options: Any) -> AutoBrowserClient:
     client = AutoBrowserClient(base_url, **(options or {"token": TOKEN}))
-    client._sync_client = httpx.Client(
-        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
-    )
-    client._async_client = httpx.AsyncClient(
-        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
-    )
+    client._sync_client = _mirroring(client, httpx.Client, httpx.MockTransport(lambda _request: response))
+    client._async_client = _mirroring(client, httpx.AsyncClient, httpx.MockTransport(lambda _request: response))
     return client
+
+
+def _mirroring(client: AutoBrowserClient, kind: Any, transport: httpx.MockTransport) -> Any:
+    """An httpx client built as the SDK builds its own (the base URL's query as params), on ``transport``."""
+    return kind(base_url=client._base, params=client._params, headers=client._headers, transport=transport)
 
 
 def _failing(text: str, base_url: str = BASE_URL) -> AutoBrowserClient:
@@ -48,12 +49,8 @@ def _failing(text: str, base_url: str = BASE_URL) -> AutoBrowserClient:
         raise httpx.RemoteProtocolError(text.format(request_line=line), request=request)
 
     client = AutoBrowserClient(base_url, token=TOKEN)
-    client._sync_client = httpx.Client(
-        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(fail)
-    )
-    client._async_client = httpx.AsyncClient(
-        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(fail)
-    )
+    client._sync_client = _mirroring(client, httpx.Client, httpx.MockTransport(fail))
+    client._async_client = _mirroring(client, httpx.AsyncClient, httpx.MockTransport(fail))
     return client
 
 
@@ -97,7 +94,7 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
                 list(client.stream_events("s"))
 
         self.assertNotIn("sentinel", str(caught.exception))
-        self.assertIn("GET /?[redacted]/sessions/s/events", str(caught.exception))
+        self.assertIn("GET /sessions/s/events?[redacted]", str(caught.exception))
 
     def test_a_transport_error_echoing_the_basic_credentials_of_the_userinfo_is_raised_without_them(self) -> None:
         # Review of c3's fixes (Codex 2): httpx sends a base URL's userinfo as "Authorization: Basic" and the base64 of
@@ -194,17 +191,22 @@ class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):
         self._assert_raised_without_secrets(caught.exception, {"detail": "bad token [redacted]"})
 
     def test_a_detail_quoting_the_url_as_httpx_sends_it_is_raised_without_its_secrets(self) -> None:
-        # Review of c3's fixes (Codex 3): a server quotes the request line as it got it, percent-encoded by httpx.
-        response = httpx.Response(502, json={"detail": "no route for POST /?key=sentinel%20value/sessions"})
-        client = AutoBrowserClient("http://auto-browser.test:8000/?key=sentinel value", token=TOKEN)
-        client._sync_client = httpx.Client(
-            base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
-        )
+        # Review of c3's fixes (Codex 3): a server quotes the request line as it got it, which httpx wrote: the query
+        # percent-encoded, and, sent as params since c4's report, written again as params write it (a space as "+").
+        def echo(request: httpx.Request) -> httpx.Response:
+            line = f"{request.method} {request.url.raw_path.decode('ascii')}"
+            return httpx.Response(502, json={"detail": f"no route for {line}"})
 
-        with self.assertRaises(AutoBrowserError) as caught:
-            client.create_session(name="s")
+        for query in ("key=sentinel value", "key=sentinel%20value"):
+            with self.subTest(query=query):
+                client = AutoBrowserClient(f"http://auto-browser.test:8000/?{query}", token=TOKEN)
+                client._sync_client = _mirroring(client, httpx.Client, httpx.MockTransport(echo))
 
-        self._assert_raised_without_secrets(caught.exception, {"detail": "no route for POST /?[redacted]/sessions"})
+                with self.assertRaises(AutoBrowserError) as caught:
+                    client.create_session(name="s")
+
+                shown = {"detail": "no route for POST /sessions?[redacted]"}
+                self._assert_raised_without_secrets(caught.exception, shown)
 
     async def test_the_async_calls_raise_the_detail_without_them_too(self) -> None:
         client = _answering(httpx.Response(502, json={"detail": f"refused {TOKEN}"}))

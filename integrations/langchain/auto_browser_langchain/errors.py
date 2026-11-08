@@ -42,11 +42,13 @@ def errors_shown(base_url: str, token: str | None) -> Iterator[None]:
 
 def _as_sent(base_url: str) -> tuple[str, ...]:
     """``base_url`` as configured and as httpx sends it, whose secrets an error leaves out (review of c3's fixes):
-    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, so an echo of the
-    request quotes a form the configured text does not hold. Only the first when httpx cannot read it (a lone
-    surrogate fails its encoding), as this runs while another error is shown."""
+    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, and writes the query
+    again as the params it sends (a space as ``+``), so an echo of the request quotes a form the configured text does
+    not hold. Only the first when httpx cannot read it (a lone surrogate fails its encoding), as this runs while
+    another error is shown."""
     try:
-        return (base_url, str(httpx.URL(base_url)))
+        url = httpx.URL(base_url)
+        return (base_url, str(url), str(url.copy_with(query=None).copy_merge_params(url.params)))
     except (httpx.InvalidURL, UnicodeError):
         return (base_url,)
 

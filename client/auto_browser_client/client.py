@@ -119,13 +119,27 @@ def _refuse_userinfo_with(base_url: str, what: str | None) -> None:
         )
 
 
+def _split_query(base_url: str) -> tuple[str, httpx.QueryParams]:
+    """``base_url`` without its query and fragment, and its query as the params sent with every request, as the MCP
+    bridges send theirs (c4's report): httpx put a request's path after a base URL's query (``/?key=value/sessions``),
+    a GET with params of its own lost the query and the path, and the event stream's URL put its path after the
+    fragment, which no request sends. A URL httpx cannot read is kept as it is, for the first request's error."""
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return base_url, httpx.QueryParams()
+    return str(url.copy_with(query=None, fragment=None)).rstrip("/"), url.params
+
+
 def _as_sent(base_url: str) -> tuple[str, ...]:
     """``base_url`` as configured and as httpx sends it, whose secrets an error leaves out (review of c3's fixes):
-    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, so an echo of the
-    request quotes a form the configured text does not hold. Only the first when httpx cannot read it (a lone
-    surrogate fails its encoding), as this runs while another error is shown."""
+    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, and writes the query
+    again as the params it sends (a space as ``+``), so an echo of the request quotes a form the configured text does
+    not hold. Only the first when httpx cannot read it (a lone surrogate fails its encoding), as this runs while
+    another error is shown."""
     try:
-        return (base_url, str(httpx.URL(base_url)))
+        url = httpx.URL(base_url)
+        return (base_url, str(url), str(url.copy_with(query=None).copy_merge_params(url.params)))
     except (httpx.InvalidURL, UnicodeError):
         return (base_url,)
 
@@ -175,6 +189,8 @@ class AutoBrowserClient:
                      replaces any Authorization header here; without one, at most one may be given.
         """
         self.base_url = base_url.rstrip("/")
+        # What the requests go to: the base URL's query goes as params, its fragment nowhere.
+        self._base, self._params = _split_query(base_url)
         self._headers: dict[str, str] = dict(headers or {})
         token = token.strip() if token else None
         if token:
@@ -238,12 +254,14 @@ class AutoBrowserClient:
 
     def _new_sync_client(self) -> httpx.Client:
         transport = httpx.HTTPTransport() if self._direct() else None
-        return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=self._timeout, transport=transport)
+        return httpx.Client(
+            base_url=self._base, params=self._params, headers=self._headers, timeout=self._timeout, transport=transport
+        )
 
     def _new_async_client(self) -> httpx.AsyncClient:
         transport = httpx.AsyncHTTPTransport() if self._direct() else None
         return httpx.AsyncClient(
-            base_url=self.base_url, headers=self._headers, timeout=self._timeout, transport=transport
+            base_url=self._base, params=self._params, headers=self._headers, timeout=self._timeout, transport=transport
         )
 
     def _client(self) -> httpx.Client:
@@ -596,7 +614,7 @@ class AutoBrowserClient:
         """Yield parsed event dicts from the SSE stream. Blocks until disconnected."""
         import json as _json
 
-        url = f"{self.base_url}/sessions/{_seg(session_id)}/events"
+        url = f"{self._base}/sessions/{_seg(session_id)}/events"
         # No read timeout — the stream is meant to stay open — but a bounded
         # connect. `timeout=None` disabled both, so an unreachable controller
         # hung this generator forever instead of raising.
@@ -608,7 +626,7 @@ class AutoBrowserClient:
             transport = httpx.HTTPTransport() if self._direct() else None
             with (
                 httpx.Client(transport=transport) as http,
-                http.stream("GET", url, headers=self._headers, timeout=timeout) as r,
+                http.stream("GET", url, params=self._params, headers=self._headers, timeout=timeout) as r,
             ):
                 if r.status_code >= 400:
                     r.read()

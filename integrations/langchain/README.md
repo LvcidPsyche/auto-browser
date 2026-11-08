@@ -54,6 +54,8 @@ the server's reason phrase, and this package does not filter that logger: keep a
 secret in `bearer_token` or `token_file`, not in the base URL. A base URL holding a
 user name or password is refused with a token (`ValueError`), since httpx would send
 them as Basic credentials in place of it; without a token they go as Basic credentials.
+A base URL's query is sent with every request, as httpx writes parameters; its fragment
+is never sent.
 
 Full walkthroughs:
 [LangChain / LangGraph](https://github.com/LvcidPsyche/auto-browser/blob/main/examples/langchain-integration.md) ·

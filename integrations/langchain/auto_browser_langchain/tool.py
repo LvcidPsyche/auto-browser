@@ -7,7 +7,7 @@ from typing import Any, Optional, Type, Union
 
 import httpx
 
-from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token
+from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token, split_base_url
 from .errors import errors_shown, raise_for_status
 
 try:
@@ -93,7 +93,10 @@ class AutoBrowserTool(BaseTool):
         payload = {"name": action, "arguments": arguments or {}}
         with errors_shown(self.base_url, bearer_token):
             transport = loopback_transport(self.base_url, asynchronous=True)
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
+            base, params = split_base_url(self.base_url)
+            async with httpx.AsyncClient(
+                base_url=base, params=params, timeout=self.timeout, transport=transport
+            ) as client:
                 response = await client.post("/mcp/tools/call", json=payload, headers=headers)
                 raise_for_status(response)
                 data = response.json()
@@ -120,7 +123,8 @@ class AutoBrowserTool(BaseTool):
             headers["X-Operator-Id"] = operator_id
         with errors_shown(base_url, bearer_token):
             transport = loopback_transport(base_url, asynchronous=False)
-            with httpx.Client(base_url=base_url, timeout=10, transport=transport) as client:
+            base, params = split_base_url(base_url)
+            with httpx.Client(base_url=base, params=params, timeout=10, transport=transport) as client:
                 response = client.get("/mcp/tools", headers=headers)
                 raise_for_status(response)
                 return response.json()

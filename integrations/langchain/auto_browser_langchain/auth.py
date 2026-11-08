@@ -45,6 +45,18 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
     return token
 
 
+def split_base_url(base_url: str) -> tuple[str, httpx.QueryParams]:
+    """``base_url`` without its query and fragment, and its query as the params sent with every request, as the MCP
+    bridges send theirs (c4's report): httpx put the request's path after a base URL's query
+    (``/?key=value/mcp/tools/call``). No request sends the fragment. A URL httpx cannot read is kept as it is, for the
+    request's own error."""
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return base_url, httpx.QueryParams()
+    return str(url.copy_with(query=None, fragment=None)), url.params
+
+
 def refuse_userinfo_with_token(base_url: str, bearer_token: str | None, token_file: object) -> None:
     """Raise ValueError, naming the parts and never their values, when ``base_url`` holds a user name or password and
     a token is given too (``bearer_token``, or ``token_file`` read on each call): httpx sends the URL's user name and
