@@ -1002,10 +1002,12 @@ def test_w14_1_the_error_text_shown_drops_the_urls_known_secrets() -> None:
 def test_w14_1_dropping_userinfo_runs_is_linear() -> None:
     from app.mcp_stdio import _without_userinfo
 
-    started = time.monotonic()
+    # CPU seconds, not wall seconds (R5C-29): a suspended or overloaded runner can spend 2 wall seconds on anything. The
+    # linear scan takes milliseconds of CPU here; the quadratic one took about 7 CPU seconds for half this text.
+    started = time.process_time()
     _without_userinfo("a" * 65536)
 
-    assert time.monotonic() - started < 2
+    assert time.process_time() - started < 2
 
 
 def test_w13_1_an_invalid_proxy_port_is_not_answered_as_an_invalid_controller_url(recording_proxy) -> None:
