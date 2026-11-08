@@ -884,9 +884,11 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
         popup = await open_popup(session, f"{env.allowed}/authorize")
 
         await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
-        await settle(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT)
+        assert await settle(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT), (
+            "the popup's birth verdict never landed"
+        )
         await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")  # it closes itself
-        await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
+        assert await settle(lambda: popup.is_closed(), timeout=TIMEOUT), "the popup did not close itself"
 
         assert await settle(
             lambda: any("callback-loaded" in json.dumps(message) for message in session.console_messages),
