@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
+from urllib.request import Request
 
 import pytest
 
@@ -556,6 +557,56 @@ def test_w15_5_a_fixed_reason_gives_its_causes_as_examples(recording_proxy, base
     assert INVALID in message
     assert "(for example, " in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "reason"),
+    [
+        # http.client encodes the request line as ASCII, after the opener is chosen: "Unexpected stdio bridge failure:
+        # 'ascii' codec can't encode character ...".
+        ("http://127.0.0.1:{port}/mcp/" + chr(0xE9), "or a character outside ASCII; percent-encode it"),
+        ("http://controller.invalid/mcp?key=sentinel" + chr(0xE9), "or a character outside ASCII; percent-encode it"),
+        # urllib puts the fragment into a proxied request line, which http.client refuses for a space or a control
+        # character ("URL can't contain control characters") and cannot encode outside ASCII.
+        ("http://controller.invalid/mcp?key=sentinel#frag sentinel", "its fragment holds"),
+        ("http://controller.invalid/mcp#frag" + chr(0x7F) + "sentinel", "its fragment holds"),
+        ("http://controller.invalid/mcp#frag" + chr(0xE9) + "sentinel", "its fragment holds"),
+    ],
+    ids=["path_non_ascii", "query_non_ascii", "fragment_space", "fragment_control", "fragment_non_ascii"],
+)
+def test_r5c_28_a_url_http_client_cannot_send_is_refused_as_an_invalid_controller_url(
+    recording_proxy, base_url: str, reason: str
+) -> None:
+    controller = _serve()
+    try:
+        message = _bridge_error_through_the_bridge(base_url.format(port=controller.server_port), recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert INVALID in message
+    assert reason in message
+    assert "Unexpected stdio bridge failure" not in message
+    assert "sentinel" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    assert controller.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("scheme", ["file", "data"])
+def test_r5c_28_the_bridges_openers_answer_no_file_or_data_url(tmp_path: Path, scheme: str) -> None:
+    # W15-3 refuses such a base URL before any opener is chosen; the openers themselves kept urllib's default
+    # handlers, which answer a file: or data: URL from the local file or the URL itself, as if a controller had.
+    import auto_browser_client.mcp_bridge as bridge
+
+    result_file = tmp_path / "result.json"
+    result_file.write_text(_A_RESULT, encoding="utf-8")
+    url = {
+        "file": "file://localhost" + result_file.as_uri().removeprefix("file://"),
+        "data": "data:application/json," + _A_RESULT,
+    }[scheme]
+
+    with pytest.raises(URLError, match=f"unknown url type: {scheme}"):
+        bridge.urlopen(Request(url), timeout=5)
 
 
 @pytest.mark.parametrize(

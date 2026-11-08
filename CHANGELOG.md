@@ -179,6 +179,14 @@ All notable changes to auto-browser are documented here.
   URL, or meeting an unexpected bridge failure got an error answer with `"id": null`, which a notification must never
   get and which matches no request the client sent. It now gets none, as when the controller answers it, and the
   error goes to the bridge's stderr.
+- **The MCP bridges and `scripts/agent_eval.py` refuse a controller URL http.client cannot send, as an invalid one.**
+  A base URL whose path or query holds a character outside ASCII, or whose fragment holds a space, a control character
+  or a character outside ASCII (urllib puts the fragment into the request line it sends an environment proxy), failed
+  only once a connection was chosen, and the bridges answered it as an unexpected bridge failure quoting
+  http.client's error. It is now refused before anything is sent, with a fixed reason, as a path or query holding a
+  space or a control character has been since 1.16.0. The bridges' openers now handle only `http://` and `https://`:
+  urllib's default handlers, which they kept, answer a `file:`, `data:` or `ftp:` request from a local file, the URL
+  itself or an FTP server, and an environment proxy of such a scheme turns a request into one.
 
 ### Changed
 

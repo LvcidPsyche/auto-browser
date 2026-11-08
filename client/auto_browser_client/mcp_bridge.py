@@ -16,12 +16,22 @@ import os
 import re
 import socket
 import sys
+import urllib.request
 from dataclasses import dataclass
 from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, unwrap, urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import (
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
+    HTTPHandler,
+    HTTPRedirectHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    UnknownHandler,
+)
 
 # MCP spec header names, kept as local constants so the bridge has no
 # controller dependency. The controller test suite asserts these match
@@ -47,7 +57,25 @@ class _NoRedirects(HTTPRedirectHandler):
         return None
 
 
-_DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
+def _opener(proxies: dict[str, str] | None = None) -> OpenerDirector:
+    """An opener for http:// and https:// only that never follows a redirect, using ``proxies`` as ProxyHandler takes
+    them (None: the environment's, read now).
+
+    urllib's build_opener adds its file:, data: and ftp: handlers too, which answer such a URL (or a request an
+    environment proxy of that scheme takes) from a local file, the URL itself or an FTP server, as if a controller had;
+    here any other scheme meets UnknownHandler's URLError (R5C-28).
+    """
+    handlers = [ProxyHandler(proxies), UnknownHandler(), HTTPHandler(), HTTPDefaultErrorHandler(), _NoRedirects()]
+    https = getattr(urllib.request, "HTTPSHandler", None)  # absent from a Python built without ssl
+    if https is not None:
+        handlers.append(https())
+    opener = OpenerDirector()
+    for handler in (*handlers, HTTPErrorProcessor()):
+        opener.add_handler(handler)
+    return opener
+
+
+_DIRECT = _opener({})
 
 # A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1).
 # The lookbehind lets a match start only where a run starts, so the scan is linear in the text's length (W14-1).
@@ -149,6 +177,12 @@ def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
         return None
 
 
+def _not_for_a_request_line(text: str) -> bool:
+    """Whether ``text`` holds a space, a control character (U+0000 to U+0020 or U+007F) or a character outside ASCII,
+    none of which http.client sends in a request line."""
+    return any(not " " < character < "\x7f" for character in text)
+
+
 def _goes_direct(request: Request) -> bool:
     """Whether the request goes past any environment proxy: the host http.client connects to is local (W13-2).
 
@@ -167,17 +201,25 @@ def _goes_direct(request: Request) -> bool:
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), a port it
     reads outside 0 to 65535 (W15-4), and a reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and
     its ValueError (W12-3), raise InvalidControllerURL (W13-1), so a malformed authority is refused before any
-    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector``
-    holding a space or a control character (U+0000 to U+0020 or U+007F), which http.client refuses only once a
-    connection is chosen. Each reason is the
+    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector`` (the
+    path and query) holding a character a request line cannot carry, which http.client refuses (a space or a
+    control character, U+0000 to U+0020 or U+007F) or cannot encode (one outside ASCII) only once a connection is
+    chosen, and a fragment holding one, which urllib puts into a proxied request line (R5C-28). Each reason is the
     bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
     (``request.host`` None) is not direct and falls through to urllib's own error, raised before any proxy is used
     (W10-14).
     """
     if request.host is None:
         return False
-    if any(character <= " " or character == "\x7f" for character in request.selector):
-        raise InvalidControllerURL("its path or query holds a space or a control character; percent-encode it")
+    if _not_for_a_request_line(request.selector):
+        raise InvalidControllerURL(
+            "its path or query holds a space, a control character or a character outside ASCII; percent-encode it"
+        )
+    if _not_for_a_request_line(request.fragment or ""):
+        raise InvalidControllerURL(
+            "its fragment holds a space, a control character or a character outside ASCII; percent-encode it or "
+            "leave the fragment out"
+        )
     try:
         connection = HTTPConnection(request.host)
     except InvalidURL as exc:
@@ -227,7 +269,7 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     """
     if _goes_direct(request):
         return _DIRECT.open(request, *args, **kwargs)
-    return build_opener(_NoRedirects).open(request, *args, **kwargs)
+    return _opener().open(request, *args, **kwargs)
 
 
 # Where a token given as an argument comes from, as the reason it went unsent names it (W15-7).
