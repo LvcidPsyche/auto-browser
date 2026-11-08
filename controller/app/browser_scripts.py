@@ -84,6 +84,8 @@ STEALTH_INIT_SCRIPT = r"""
     // noise; reading through that and writing the result back would change the
     // canvas a little more on every export.
     const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    // And written back with the native putImageData, which a page cannot make throw or watch.
+    const origPutImageData = CanvasRenderingContext2D.prototype.putImageData;
     const context2d = CanvasRenderingContext2D.prototype;
     const getPrototypeOf = Object.getPrototypeOf;
     const nativeToString = Function.prototype.toString;
@@ -100,19 +102,27 @@ STEALTH_INIT_SCRIPT = r"""
         return ctx;
       },
       toDataURL() {
+        let ctx = null;
+        let img = null;
         if (with2d.has(this) && this.width > 0 && this.height > 0) {
           try {
-            const ctx = origGetContext.call(this, '2d');
-            const img = origGetImageData.call(ctx, 0, 0, 1, 1);
+            ctx = origGetContext.call(this, '2d');
+            img = origGetImageData.call(ctx, 0, 0, 1, 1);
             img.data[0] ^= 1;
-            ctx.putImageData(img, 0, 0);
-            const result = origToDataURL.apply(this, arguments);
-            img.data[0] ^= 1;
-            ctx.putImageData(img, 0, 0);
-            return result;
-          } catch (_) {}
+            origPutImageData.call(ctx, img, 0, 0);
+          } catch (_) {
+            img = null;
+          }
         }
-        return origToDataURL.apply(this, arguments);
+        if (img === null) return origToDataURL.apply(this, arguments);
+        // Exported once, and the pixel put back whether that returns or throws (a type whose toString throws):
+        // a second export from a catch read the page's arguments again, with the noise left on the canvas.
+        try {
+          return origToDataURL.apply(this, arguments);
+        } finally {
+          img.data[0] ^= 1;
+          origPutImageData.call(ctx, img, 0, 0);
+        }
       },
     };
     nativeSources.set(patched.toString, nativeToString.call(nativeToString));

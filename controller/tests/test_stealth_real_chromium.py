@@ -71,6 +71,23 @@ CANVAS_PATCH_SOURCES = """() => [
   'prototype' in HTMLCanvasElement.prototype.toDataURL,
 ]"""
 
+# An export that throws as it reads its type: how often the type was read, and the canvas's pixel afterwards.
+THROWING_EXPORT = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 1, 1);
+  let calls = 0;
+  let error = null;
+  try {
+    canvas.toDataURL({ toString() { calls += 1; throw new Error('bad type'); } });
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, calls, pixel: Array.from(ctx.getImageData(0, 0, 1, 1).data) };
+}"""
+
 NOTIFICATIONS_QUERY = """async () => {
   const result = await navigator.permissions.query({ name: 'notifications' });
   return { plainObject: Object.getPrototypeOf(result) === Object.prototype, state: result.state };
@@ -151,6 +168,17 @@ def test_the_canvas_patches_read_as_native_code() -> None:
         "function getContext() { [native code] }",
         "function toString() { [native code] }",
     ], native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_an_export_that_throws_is_made_once_and_leaves_the_canvas_as_it_was() -> None:
+    """Review of c5 (Codex): toDataURL put its noise on the canvas, and an export that threw (a type whose toString
+    throws) was made again from its catch with the noise still there, so the page saw its type read twice and kept
+    a changed pixel."""
+    native, stealthy = asyncio.run(_native_and_stealthy(THROWING_EXPORT))
+
+    assert native == {"error": "bad type", "calls": 1, "pixel": [100, 100, 100, 255]}, native
     assert stealthy == native
 
 

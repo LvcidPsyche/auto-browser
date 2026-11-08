@@ -404,7 +404,9 @@ All notable changes to auto-browser are documented here.
   gave a 2d context, which a wrapped `getContext` records; any other canvas is exported as it is. The patched
   `toDataURL` and `getContext`, and the `Function.prototype.toString` that masks them, now read as native code
   (`function toDataURL() { [native code] }`) with the native name and length; the script's WebGL `getParameter` and
-  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source.
+  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source. An
+  export that throws (a `type` whose `toString` throws) is now made once and leaves the canvas as it was: the noise
+  stayed on its first pixel, and the export was made a second time.
 - **With `STEALTH_PROFILE=light`, a canvas read is noised per pixel and per colour channel.** The noise
   `getImageData` adds came from the session's seed and the byte index, which is a multiple of 4 at every red byte, so
   every pixel got the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of
