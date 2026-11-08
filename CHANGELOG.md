@@ -65,7 +65,9 @@ All notable changes to auto-browser are documented here.
   line break, a NUL, a vertical tab or a form feed, and named a character outside ASCII and its position; the client
   and the LangChain tools now refuse it with a `ValueError` naming `token`, `bearer_token` or the token file, never
   the token. The client refuses an `Authorization` header given in `headers` the same way, and leaves its
-  credentials out of its errors as it leaves the token out.
+  credentials out of its errors as it leaves the token out. It refuses more than one (`headers` can hold one per case
+  of the name, and httpx sends each), and a token from `token` or `token_file` now replaces every one of them, where
+  one whose name differed in case from `Authorization` was sent beside the token's.
 
 ### Fixed
 

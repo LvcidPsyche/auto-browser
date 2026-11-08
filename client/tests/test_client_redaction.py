@@ -193,6 +193,44 @@ class UnsendableTokenTests(unittest.TestCase):
             "the Authorization header in headers holds a line break, which an HTTP header cannot carry",
         )
 
+    def test_several_authorization_headers_in_headers_are_refused_without_quoting_them(self) -> None:
+        # Review of c3's fixes (Codex 1): `headers` can hold one per case of the name, and httpx sends each; only the
+        # first was checked and redacted, so h11 quoted the second whole for its NUL ("Illegal header value").
+        headers = {"authorization": "Bearer sentinel-first", "Authorization": "Bearer sentinel" + chr(0) + "tail"}
+
+        with self.assertRaises(ValueError) as caught:
+            AutoBrowserClient("http://auto-browser.test", headers=headers)
+
+        self.assertEqual(
+            str(caught.exception), "headers holds more than one Authorization header, and httpx sends each; keep one"
+        )
+
+    def test_a_token_replaces_every_authorization_header_given_in_headers(self) -> None:
+        # Review of c3's fixes (Codex 1): one whose name differed in case from "Authorization" was sent beside the
+        # token's, its credentials not left out of the errors.
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "api-token"
+            token_file.write_text(TOKEN + "\n", encoding="utf-8")
+            for options in ({"token": TOKEN}, {"token_file": token_file}):
+                with self.subTest(given=next(iter(options))):
+                    sent: list[list[str]] = []
+
+                    def answer(request: httpx.Request) -> httpx.Response:
+                        sent.append(request.headers.get_list("Authorization"))
+                        return httpx.Response(200, json={"ok": True})
+
+                    client = AutoBrowserClient(
+                        "http://auto-browser.test",
+                        headers={"authorization": "Bearer sentinel-lower", "AUTHORIZATION": "Bearer sentinel-upper"},
+                        **options,
+                    )
+                    client._sync_client = httpx.Client(
+                        base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(answer)
+                    )
+                    client.health()
+
+                    self.assertEqual(sent, [[f"Bearer {TOKEN}"]])
+
     def test_a_token_file_holding_one_is_refused_naming_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "api-token"

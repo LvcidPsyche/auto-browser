@@ -84,10 +84,14 @@ def _refuse_unsendable(token: str, source: str) -> None:
 
 
 def _header_credentials(headers: Mapping[str, str]) -> str | None:
-    """The credentials of an Authorization header in ``headers`` (the part after its scheme), which httpx sends as it
-    sends the token's: refused as a token is when httpx cannot send them (review of c3)."""
-    for name, value in headers.items():
-        if name.lower() == "authorization" and isinstance(value, str):
+    """The credentials of the Authorization header in ``headers`` (the part after its scheme), which httpx sends as it
+    sends the token's: refused as a token is when httpx cannot send them (review of c3). ``headers`` can hold one per
+    case of the name, and httpx sends each, so more than one is refused (review of c3's fixes)."""
+    values = [value for name, value in headers.items() if name.lower() == "authorization"]
+    if len(values) > 1:
+        raise ValueError("headers holds more than one Authorization header, and httpx sends each; keep one")
+    for value in values:
+        if isinstance(value, str):
             _refuse_unsendable(value, "the Authorization header in headers")
             scheme, _, credentials = value.strip().partition(" ")
             return credentials.strip() or scheme or None
@@ -135,21 +139,24 @@ class AutoBrowserClient:
         operator_id: sent as X-Operator-Id. A controller with REQUIRE_OPERATOR_ID=true
                      needs it unless the token is a named credential. For a renamed
                      OPERATOR_ID_HEADER, pass the header in ``headers`` instead.
-        headers:     extra headers sent with every request.
+        headers:     extra headers sent with every request. A token (``token`` or ``token_file``)
+                     replaces any Authorization header here; without one, at most one may be given.
         """
         self.base_url = base_url.rstrip("/")
         self._headers: dict[str, str] = dict(headers or {})
-        credentials = _header_credentials(self._headers)
         token = token.strip() if token else None
         if token:
             _refuse_unsendable(token, "token")
         if not token and token_file is not None:
             token = _read_token_file(token_file)
+        if token:
+            # The token's alone (review of c3's fixes): one given in ``headers`` whose name differed in case from
+            # "Authorization" was sent beside it.
+            self._headers = {name: value for name, value in self._headers.items() if name.lower() != "authorization"}
+            self._headers["Authorization"] = f"Bearer {token}"
         # An error's detail never shows it, nor the base URL's secrets (R5C-20), nor an Authorization header's
         # credentials given in ``headers`` in its place (review of c3).
-        self._token = token or credentials
-        if token:
-            self._headers["Authorization"] = f"Bearer {token}"
+        self._token = token or _header_credentials(self._headers)
         if operator_id:
             self._headers["X-Operator-Id"] = operator_id
         self._sync_client: httpx.Client | None = None
