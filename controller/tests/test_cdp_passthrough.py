@@ -118,6 +118,16 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["event_listener_types"], ["click"])
         self.assertEqual(result["assets"], {"src": "https://cdn.example.com/hero.png"})
 
+    async def test_the_element_read_blanks_a_password_fields_value_as_a_raw_dom_read_does(self) -> None:
+        # Review of c5: GET /sessions/{id}/cdp/element read DOM.getAttributes itself, past the raw route's blanking.
+        responses = dict(self._READ_RESPONSES)
+        responses["DOM.getAttributes"] = {"attributes": ["type", "Password", "id", "pw", "value", "sentinel-password"]}
+        responses["Runtime.evaluate"] = [{"result": {"value": []}}, {"result": {"value": {}}}]  # listeners, assets
+
+        result = await CDPPassthrough(_FakeCDPSession(responses)).get_element_intelligence("#pw")
+
+        self.assertEqual(result["attributes"], {"type": "Password", "id": "pw", "value": ""})
+
     async def test_page_controlled_attributes_and_listener_names_are_capped(self) -> None:
         huge = "x" * 1_000_000
         pairs = ["data-big", huge, "href", "https://e.example/" + huge, "srcset", huge, huge, "v"]

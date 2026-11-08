@@ -262,6 +262,8 @@ class CDPPassthrough:
 
             # Gather data in parallel conceptually (sequential here for clarity)
             attrs_raw = await self._cdp.send("DOM.getAttributes", {"nodeId": node_id})
+            # As a raw DOM read is (NAV-31, review of c5): a password field's value attribute is blanked.
+            _blank_typed_passwords(attrs_raw)
             attrs = _capped_attributes(attrs_raw["attributes"])
 
             box_model = await self._cdp.send("DOM.getBoxModel", {"nodeId": node_id})

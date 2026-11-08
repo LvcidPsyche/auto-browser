@@ -153,7 +153,8 @@ All notable changes to auto-browser are documented here.
   only its own parameters, by name and type; any other gets 422 with the reason. `DOM.getDocument` with
   `"pierce": true` returned each input's user-agent shadow text, which is what was typed into it, so a password
   typed into a page came back in plain text; a `DOM.*` read now blanks that text and the `value` attribute of any
-  element whose `type` attribute is `password`. `docs/deployment.md` says what is still returned: what was typed
+  element whose `type` attribute is `password`, and `GET /sessions/{id}/cdp/element`, which reads an element's
+  attributes itself, blanks that `value` attribute too. `docs/deployment.md` says what is still returned: what was typed
   into a field of any other type.
 
 ### Fixed
