@@ -95,11 +95,12 @@ All notable changes to auto-browser are documented here.
   action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
 - **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so
   a CSV export of customers gave the agent every email address and SSN in it, while console messages and network
-  bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by its type, as a network body is (JSON by
-  its members' names, form data by its fields, anything else as plain text), off the event loop; the result's new
-  `pii_scrub` says whether the scrub ran and how many redactions it made, and a read that redacted something is
-  audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The file at the download's artifact
-  URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not scrubbed" to "Scrubbed".
+  bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the type its file name gives, as a
+  network body is by its content type (a `.json` or `.js` file by its members' names, anything else as plain text),
+  off the event loop; the result's new `pii_scrub` says whether the scrub ran and how many redactions it made, and a
+  read that redacted something is audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The
+  file at the download's artifact URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not
+  scrubbed" to "Scrubbed".
 - **The audit log is documented as not scrubbed.** The PII scrubber's module description listed "audit metadata:
   sensitive fields masked before writing to audit log" among its layers, but nothing masks an audit event: its
   details are stored as written (a navigated URL keeps its query). It now says what `PII_SCRUB_AUDIT_REPORT` does,
@@ -214,7 +215,9 @@ All notable changes to auto-browser are documented here.
   snapshots), so a tesseract that hung held the session until it exited. A run is now stopped after
   `OCR_TIMEOUT_SECONDS` (new, default 20; a value at or below 0 stops startup), logged as a warning naming the
   setting, and counted as a failed OCR run (`ocr_extraction_failed`): a screenshot to be redacted then goes out
-  unscrubbed, saying so, or is withheld under `PII_SCRUB_SCREENSHOT_STRICT`. `.env.example` lists the setting.
+  unscrubbed, saying so, or is withheld under `PII_SCRUB_SCREENSHOT_STRICT`. `.env.example` lists the setting. One
+  launch is still unbounded: the `tesseract --version` that pytesseract runs before the first OCR of each controller
+  process, and again until one succeeds, has no timeout, so a tesseract that hangs on it still holds that session.
 - **An element's accessible name in an observation is capped at 200 characters.** The accessibility outline kept each
   node's name whole, and decoded the whole quoted name first, so a page that gave an element a megabyte `aria-label`
   put that megabyte into every observation and action snapshot that listed it or found it focused. A name is now cut
@@ -229,6 +232,8 @@ All notable changes to auto-browser are documented here.
   tab. An action's before snapshot now counts the session's tabs (`tab_count`), its verification reports
   `tabs_changed` when the observation after it lists another number, which verifies a click or a key press, and its
   result carries `new_tab` (the tab's `index` and how to move to it) when it opened one that is not the active tab.
+  Tabs are counted, not told apart: an action that opens one tab and closes another leaves the count, and so its
+  verification, as they were, and `new_tab` names only the newest of several.
 - **A download's record no longer names the file's path on the server, and its URL works for any file name.** Every
   download record (the session's list, an observation's `recent_downloads`, `downloads.jsonl`) carried `path`, a
   saved file's absolute path on the controller's disk. It is gone: `browser.read_download` finds the file by its name

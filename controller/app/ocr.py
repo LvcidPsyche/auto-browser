@@ -78,7 +78,8 @@ class OCRExtractor:
             with Image.open(image_path) as image:
                 width, height = image.size
                 # Bounded (ACT-27): a tesseract that never finished held this worker thread, and the read that awaited
-                # it under the session lock, for ever.
+                # it under the session lock, for ever. Not the `tesseract --version` pytesseract runs first, once per
+                # process until it succeeds (get_tesseract_version), which has no timeout (review of c4).
                 data = pytesseract.image_to_data(
                     image,
                     lang=self.language,

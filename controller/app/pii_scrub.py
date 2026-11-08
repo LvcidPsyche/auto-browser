@@ -6,7 +6,8 @@ Layers applied across the session lifecycle:
   2. Screenshot redact — black pixel boxes drawn over OCR-detected PII regions
   3. Network payloads  — request/response bodies scrubbed before storage
   4. Console logs      — scrubbed before returning to caller
-  5. Downloads         — text read with read_download, scrubbed by its type before returning to caller
+  5. Downloads         — text read with read_download, scrubbed by the type its file name gives before
+                         returning to caller
   6. Audit reports     — with PII_SCRUB_AUDIT_REPORT, a scrub that redacted something writes a pii_redaction
                          event (its layer, hit count and pattern names, never the values), and a screenshot
                          redaction that failed writes one marked failed. Audit events themselves are stored
@@ -741,8 +742,8 @@ class PiiScrubber:
         return scrub_network_body(body, content_type, self.replacement, self.enabled_patterns)
 
     def download_text(self, text: str, content_type: str = "") -> ScrubResult:
-        """Scrub a download read as text, by its type as a network body is: JSON by its members' names, form data by
-        its fields, anything else as plain text."""
+        """Scrub a download read as text by the type its file name gives (``content_type``), as a network body is by
+        its content type: a ``.json`` or ``.js`` file by its members' names, anything else as plain text."""
         if not self.enabled:
             return ScrubResult(text=text)
         return _scrub_typed_text(text, content_type.lower(), self.replacement, self.enabled_patterns)
