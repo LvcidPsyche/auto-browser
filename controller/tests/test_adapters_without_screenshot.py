@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from app.config import Settings
-from app.providers.base import CLIResult
+from app.providers.base import PAGE_DATA_NOTICE, CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
@@ -111,6 +111,13 @@ class AdaptersWithoutScreenshotTests(unittest.IsolatedAsyncioTestCase):
                     for image_marker in ('"image"', "inlineData", "input_image", "image_url"):
                         self.assertNotIn(image_marker, body)
                     self.assertIn("Choose exactly one next browser action", body)
+
+    async def test_every_api_request_says_the_observations_page_strings_are_data(self) -> None:
+        # NAV-12, review of c5: the Gemini API request has no system prompt, and it went without the sentence.
+        for name, adapter, _can_send_images in _api_adapters():
+            with self.subTest(adapter=name):
+                payload = await self._request_payload(adapter, dict(_BASE_OBSERVATION))
+                self.assertIn(PAGE_DATA_NOTICE, json.dumps(payload, ensure_ascii=False))
 
     async def test_a_real_screenshot_is_still_sent(self) -> None:
         observation = {**_BASE_OBSERVATION, "screenshot_path": str(self.screenshot)}

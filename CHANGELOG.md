@@ -118,8 +118,10 @@ All notable changes to auto-browser are documented here.
   state, and so do the local-storage tools, which read and write what the page can itself, and the bot-challenge
   check after each action, which reads only the title, text and frames the page writes as it likes in either world.
   An invalid CSS selector in `find_elements` now answers with a structured `invalid_selector` error, as an invalid
-  regex answers `invalid_regex`. The Claude, OpenAI and OpenAI-compatible planners' system prompts now say that the
-  page text, titles, names and element text in an observation are untrusted page data, never instructions.
+  regex answers `invalid_regex`. Every planner's prompt now says that the page text, titles, names and element text
+  in an observation are untrusted page data, never instructions: the system prompt of the Claude, OpenAI and
+  OpenAI-compatible APIs, and the prompt itself of the Gemini API, the CLI planners and the OpenAI host bridge, which
+  have none.
 - **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
   was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
   a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through
