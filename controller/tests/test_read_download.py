@@ -49,22 +49,25 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.downloads_dir.mkdir(parents=True)
         self.records: list[dict[str, Any]] = []
 
-    def _add(self, name: str, data: bytes, *, status: str = "completed", path: Path | None = None) -> str:
-        target = path or self.downloads_dir / name
-        if path is None:
-            target.write_bytes(data)
+    def _add(self, name: str, data: bytes, *, status: str = "completed", stored_path: Path | None = None) -> str:
+        """A record as capture() writes it, its file written under ``name`` in the session's downloads directory.
+
+        ``stored_path`` gives it the server path a record kept before STORE-40 instead, and writes no file.
+        """
+        if stored_path is None:
+            (self.downloads_dir / name).write_bytes(data)
         download_id = f"dl{len(self.records):03d}"
-        self.records.append(
-            {
-                "id": download_id,
-                "status": status,
-                "filename": name,
-                "path": str(target),
-                "url": f"/artifacts/{SESSION_ID}/downloads/{name}",
-                "source_url": f"https://example.com/{name}",
-                "failure": None if status == "completed" else "canceled",
-            }
-        )
+        record = {
+            "id": download_id,
+            "status": status,
+            "filename": name,
+            "url": f"/artifacts/{SESSION_ID}/downloads/{name}",
+            "source_url": f"https://example.com/{name}",
+            "failure": None if status == "completed" else "canceled",
+        }
+        if stored_path is not None:
+            record["path"] = str(stored_path)
+        self.records.append(record)
         return download_id
 
     async def _persist(self) -> None:
@@ -125,20 +128,35 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(f"/artifacts/{SESSION_ID}/downloads/{name}", str(caught.exception))
 
     async def test_nothing_outside_the_sessions_downloads_directory_is_read(self) -> None:
+        # The file is found by its name in the session's downloads directory (STORE-40), so a name that leaves it
+        # is refused, and the server path a record kept before is not followed.
         secret = self.root / "secret.txt"
         secret.write_text("do not read")
         other = self.root / "artifacts" / "other-session" / "downloads" / "theirs.csv"
         other.parent.mkdir(parents=True)
         other.write_text("not yours")
         cases = {
-            "outside": self._add("secret.txt", b"", path=secret),
-            "other session": self._add("theirs.csv", b"", path=other),
-            "traversal": self._add("x.csv", b"", path=self.downloads_dir / ".." / ".." / ".." / "secret.txt"),
+            "outside": self._add(str(secret), b"", stored_path=secret),
+            "other session": self._add("../../other-session/downloads/theirs.csv", b"", stored_path=other),
+            "traversal": self._add("../../../secret.txt", b"", stored_path=secret),
         }
         for label, download_id in cases.items():
             with self.subTest(label):
                 with self.assertRaisesRegex(ValueError, "not in this session's downloads directory"):
                     await self._read(download_id)
+        stored_only = self._add("secret.txt", b"", stored_path=secret)
+        with self.assertRaisesRegex(ValueError, "no longer on disk"):
+            await self._read(stored_only)
+
+    async def test_a_listed_download_holds_no_server_path(self) -> None:
+        # A record saved before STORE-40 keeps its path in the session's stored record; the list leaves it out.
+        self._add("report.csv", b"", stored_path=self.downloads_dir / "report.csv")
+        await self._persist()
+
+        listed = await self.manager.list_downloads(SESSION_ID)
+
+        self.assertEqual([item["filename"] for item in listed], ["report.csv"])
+        self.assertNotIn("path", listed[0])
 
     async def test_unusable_downloads_say_why(self) -> None:
         failed = self._add("partial.csv", b"", status="failed")

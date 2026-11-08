@@ -173,7 +173,7 @@ class BrowserDownloadCaptureTests(unittest.IsolatedAsyncioTestCase):
         downloads = await self.manager.list_downloads(self.session.id)
         self.assertEqual(len(downloads), 1)
         self.assertEqual(downloads[0]["status"], "completed")
-        self.assertTrue(Path(downloads[0]["path"]).is_file())
+        self.assertTrue((self.session.artifact_dir / "downloads" / downloads[0]["filename"]).is_file())
         self.assertEqual(downloads[0]["filename"], "report.csv")
         self.assertEqual(downloads[0]["url"], "/artifacts/session-1/downloads/report.csv")
         self.manager._persist_session.assert_awaited_once()

@@ -213,6 +213,13 @@ All notable changes to auto-browser are documented here.
   tab. An action's before snapshot now counts the session's tabs (`tab_count`), its verification reports
   `tabs_changed` when the observation after it lists another number, which verifies a click or a key press, and its
   result carries `new_tab` (the tab's `index` and how to move to it) when it opened one that is not the active tab.
+- **A download's record no longer names the file's path on the server, and its URL works for any file name.** Every
+  download record (the session's list, an observation's `recent_downloads`, `downloads.jsonl`) carried `path`, a
+  saved file's absolute path on the controller's disk. It is gone: `browser.read_download` finds the file by its name
+  in the session's downloads directory, and listing a stopped session's downloads leaves it out of records saved
+  before. A file name holding `#` or `%` gave a `url` that named another path or none (`#` starts a fragment); the
+  name is now quoted in it. A save that failed was recorded as `download_save_failed` with nothing logged; it is now
+  logged as a warning naming the session.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,

@@ -614,7 +614,8 @@ class BrowserDiagnosticsService:
             record = await self.manager.session_store.get(session_id)
         except KeyError:
             raise SessionNotFoundError(session_id) from None
-        return list(record.downloads)
+        # A download saved before STORE-40 kept its file's server path, which the list leaves out.
+        return [{key: value for key, value in item.items() if key != "path"} for item in record.downloads]
 
     async def read_download_text(self, session_id: str, download_id: str | None = None) -> dict[str, Any]:
         """A captured download's contents as text.
@@ -626,7 +627,8 @@ class BrowserDiagnosticsService:
         downloads = await self.list_downloads(session_id)
         record = self._select_download(session_id, downloads, download_id)
         downloads_dir = (Path(self.manager.settings.artifact_root) / session_id / "downloads").resolve()
-        path = Path(str(record.get("path") or "")).resolve()
+        # Found by its name: a record names no server path (STORE-40).
+        path = (downloads_dir / str(record.get("filename") or "")).resolve()
         if not path.is_relative_to(downloads_dir):
             logger.warning("refusing to read download %s: %s is outside %s", record.get("id"), path, downloads_dir)
             raise ValueError(f"Download {record.get('id')} is not in this session's downloads directory.")
