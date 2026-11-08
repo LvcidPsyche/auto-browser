@@ -406,6 +406,12 @@ All notable changes to auto-browser are documented here.
   every pixel got the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of
   a pixel's R, G and B now goes one up or one down by a hash of the pixel's place on the canvas and the session's
   seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle.
+- **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** They ran
+  the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran, or
+  Git's `bin\bash.exe` wrapper, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a
+  `usr\bin` folder (Git's or MSYS2's), the first on PATH or else the one beside `git`, or the bash
+  `AUTO_BROWSER_TEST_BASH` names (`controller/tests/_bash.py`), and skip with that reason when there is none; on
+  other systems, the bash on PATH as before.
 
 ### Changed
 

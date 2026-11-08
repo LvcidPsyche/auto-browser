@@ -26,27 +26,11 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+from tests._bash import BASH  # one resolution of bash for every script test (R5C-27); others import it from here
+
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
 TOKEN = "tok3n-" + "Q" * 37
-
-
-def _find_bash() -> str | None:
-    """bash to run the scripts with. On Windows, Git for Windows' bash (the one the
-    scripts are run with there), not System32's bash.exe, which is WSL's."""
-    if os.name != "nt":
-        return shutil.which("bash")
-    git = shutil.which("git")
-    if git:
-        # git.exe lives in Git\cmd or Git\mingw64\bin depending on the PATH entry.
-        for root in Path(git).parents:
-            for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
-                if candidate.is_file():
-                    return str(candidate)
-    return None
-
-
-BASH = _find_bash()
 
 # A token-bearing header on a command line: in a script, -H/--header with a
 # Bearer value built from a variable, or such a header string assigned for later use.
