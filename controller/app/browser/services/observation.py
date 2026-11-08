@@ -114,10 +114,12 @@ def _write_through_temporary(path: str, data: bytes) -> None:
 def _publish(screenshot: dict[str, str]) -> dict[str, str]:
     """A staged screenshot (``capture_session_screenshot(staged=True)``) moved onto its published name with os.replace
     once its redaction is done, or left as it was (ACT-33). A capture's caller then makes it the session's
-    last_screenshot (review of c4)."""
-    published = screenshot.pop("published_path", None)
+    last_screenshot (review of c4). Its marker goes only once it is moved, so a caller's _discard still finds a hidden
+    file whose move failed (review of c4)."""
+    published = screenshot.get("published_path")
     if published:
         os.replace(screenshot["path"], published)
+        del screenshot["published_path"]
         screenshot["path"] = published
     return screenshot
 
@@ -348,10 +350,10 @@ class BrowserObservationService:
         try:
             ocr = await self._extract_ocr_if_needed(session, screenshot, summary)
             await self._scrub_screenshot_if_needed(session, screenshot, ocr)
+            session.last_screenshot = _publish(screenshot)
         except BaseException:
             _discard(screenshot)
             raise
-        session.last_screenshot = _publish(screenshot)
         tabs = await self.manager.tabs.summaries(session)
         return {
             "session": await self.manager._session_summary(session),
@@ -449,10 +451,10 @@ class BrowserObservationService:
         try:
             ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
             await self._scrub_screenshot_if_needed(session, screenshot, ocr)
+            session.last_screenshot = _publish(screenshot)
         except BaseException:
             _discard(screenshot)
             raise
-        session.last_screenshot = _publish(screenshot)
         return session.last_screenshot
 
     async def redacted_copy(self, session: "BrowserSession", screenshot: dict[str, str], label: str) -> dict[str, str]:
@@ -471,10 +473,10 @@ class BrowserObservationService:
             await _in_thread_writing(copy["path"], shutil.copyfile, screenshot["path"], copy["path"])
             ocr = await self.manager.ocr.extract_from_image(copy["path"])
             await self._scrub_screenshot_if_needed(session, copy, ocr)
+            return _publish(copy)
         except BaseException:
             _discard(copy)
             raise
-        return _publish(copy)
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
         read = start_read(self.manager, session)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -256,6 +257,28 @@ async def test_a_cancel_while_a_thread_writes_the_hidden_file_leaves_none_behind
         release.set()
         for _ in range(100):
             await asyncio.sleep(0.01)
+
+    assert list(session.artifact_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("read", ["capture", "observe"])
+async def test_a_publish_that_fails_leaves_no_hidden_file(tmp_path: Path, read: str) -> None:
+    # Review of c4 (Codex 8): _publish dropped the hidden file's marker before moving it, and nothing discarded it when
+    # the move failed (its directory's permissions changed, say), so the hidden file stayed.
+    service, session, _ = _service(tmp_path)
+    replace = os.replace
+
+    def refusing_the_published_name(source: str, destination: str) -> None:
+        if not Path(destination).name.startswith("."):
+            raise PermissionError(13, "Permission denied")
+        replace(source, destination)
+
+    reads = {
+        "capture": lambda: service.capture_screenshot(session.id),
+        "observe": lambda: service.observation_payload(session, preset="normal"),
+    }
+    with patch.object(observation.os, "replace", refusing_the_published_name), pytest.raises(PermissionError):
+        await reads[read]()
 
     assert list(session.artifact_dir.iterdir()) == []
 
