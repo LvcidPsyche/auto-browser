@@ -519,8 +519,12 @@ class BrowserObservationService:
             # Cut off (cancelled, or failed) while the file was written: nothing checked it.
             if isinstance(exc, Exception):
                 # Failed, so its write has ended, with whatever part of the image it wrote (a full disk): that part
-                # goes, as nobody gets a screenshot to discard (review of c4b).
-                Path(written["path"]).unlink(missing_ok=True)
+                # goes, as nobody gets a screenshot to discard (review of c4b). A delete that fails is logged, so the
+                # capture's error, or the refusal of a page that moved, is still what is raised (review of c5).
+                try:
+                    Path(written["path"]).unlink(missing_ok=True)
+                except OSError as error:
+                    logger.warning("could not delete the part a failed capture wrote, %s: %s", written["path"], error)
                 read.refuse_raised()
             else:
                 _delete_when_done(capture, written["path"])

@@ -26,6 +26,7 @@ from PIL import Image
 
 from app.artifacts import SessionArtifactService
 from app.browser.page_provenance import PageProvenance
+from app.browser.page_read import MOVED_DETAIL
 from app.browser.services import observation
 from app.browser.services.diagnostics import checked_screenshot
 from app.browser.services.observation import BrowserObservationService
@@ -411,3 +412,32 @@ async def test_a_capture_whose_write_fails_leaves_no_file(tmp_path: Path, staged
         await service.capture_screenshot(session.id)
 
     assert list(session.artifact_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["page stayed", "page moved"])
+async def test_a_failed_captures_part_that_cannot_be_deleted_leaves_its_error_or_the_refusal_raised(
+    tmp_path: Path, moved: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review of c5 (GLM): the part was deleted before read.refuse_raised(), so a delete that failed (a file another
+    # process holds open on Windows) raised its own error in place of the capture's, and a page that moved meanwhile
+    # was not refused.
+    service, session, _ = _service(tmp_path)
+    unlink = Path.unlink
+
+    def partly(path: Path, data: bytes) -> int:
+        with open(path, "wb") as handle:
+            handle.write(data[: len(data) // 2])
+        service.manager._page_refused.return_value = moved
+        raise OSError(28, "No space left on device")
+
+    def held_open(path: Path, missing_ok: bool = False) -> None:
+        if path.parent == session.artifact_dir:
+            raise PermissionError(13, "The file is being used by another process")
+        unlink(path, missing_ok=missing_ok)
+
+    with patch.object(Path, "write_bytes", partly), patch.object(Path, "unlink", held_open):
+        with pytest.raises(OSError) as caught:
+            await service.capture_screenshot(session.id)
+
+    assert str(caught.value) == (MOVED_DETAIL if moved else "[Errno 28] No space left on device")
+    assert "could not delete the part a failed capture wrote" in caplog.text
