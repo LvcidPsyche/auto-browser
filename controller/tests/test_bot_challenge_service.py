@@ -68,6 +68,15 @@ class BotChallengeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(long_path["url"].endswith(AB_TRUNCATED_MARK))
         self.assertEqual(no_host["url"], "data:text/html,<p>hi</p>")
 
+    async def test_an_ipv6_host_keeps_its_brackets_and_port_0_is_kept(self) -> None:
+        # Review of c5: urlsplit's hostname drops an IPv6 address's brackets, and a falsy port 0 was dropped.
+        ipv6 = await self._check("https://u:p@[2001:DB8::1]:8443/login?code=x", "Just a moment...", "")
+        port_zero = await self._check("http://example.com:0/wait", "Just a moment...", "")
+
+        assert ipv6 is not None and port_zero is not None
+        self.assertEqual(ipv6["url"], "https://[2001:db8::1]:8443/login")
+        self.assertEqual(port_zero["url"], "http://example.com:0/wait")
+
     async def test_a_matched_frame_path_is_capped_like_a_url(self) -> None:
         result = await self._check(
             "https://example.com/", "Home", "", [frame("https://www.google.com/recaptcha/api2/" + "p" * 1_000_000)]

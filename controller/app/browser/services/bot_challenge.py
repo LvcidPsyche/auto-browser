@@ -102,9 +102,12 @@ def _origin_and_path(src: str) -> str:
     try:
         parts = urlsplit(src)
         host = parts.hostname or ""
-        port = f":{parts.port}" if parts.port else ""
+        port = f":{parts.port}" if parts.port is not None else ""
     except ValueError:
         return ""
+    if ":" in host:
+        # An IPv6 address: urlsplit's hostname drops its brackets, which the address needs beside a port.
+        host = f"[{host}]"
     authority = f"//{host}{port}" if parts.netloc else ""
     return cap_url(f"{parts.scheme}:{authority}{parts.path}")
 
