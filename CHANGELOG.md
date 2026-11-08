@@ -239,6 +239,12 @@ All notable changes to auto-browser are documented here.
   failed with the parser's error, which quoted the file (another operator's too); it now fails with "memory profile
   '<name>' cannot be read", and the file stays for its operator to fix or remove. A delete now waits for a save in
   progress, as saves wait for each other, so a save's write no longer brings back a profile a delete just removed.
+- **An audit event written to SQLite now survives a power loss once committed.** With `STATE_DB_PATH` set, audit
+  events go to SQLite, whose connections ran WAL with `synchronous=NORMAL`, under which the last commits can roll back
+  after a power loss or an OS crash. The audit store's connections now run `synchronous=FULL`, a sync of the WAL per
+  event; approvals and harness traces keep `NORMAL`. A database whose journal mode stays out of WAL was logged at
+  debug level; it is now a warning. A connection whose configuration raised was left open, holding its file; it is
+  now closed before the error goes on.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,
