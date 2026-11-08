@@ -183,7 +183,8 @@ def register(registry, gateway):
                 "Read a downloaded file as text (CSV, JSON, TXT, HTML, ...), by download_id "
                 "from browser.list_downloads or, if omitted, the latest completed download. "
                 "Paged like browser.get_html. Binary files (PDF, XLSX, images) are refused "
-                "with their artifact URL."
+                "with their artifact URL. With PII scrubbing on, the text is scrubbed; pii_scrub "
+                "says whether it was and how many redactions were made."
             ),
             input_model=ReadDownloadInput,
             handler=gateway._read_download,

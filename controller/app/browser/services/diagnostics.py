@@ -646,6 +646,7 @@ class BrowserDiagnosticsService:
         text, lossy = _decode_text(data, content_type)
         if text is None:
             raise ValueError(f"Download {described} is binary, not text; fetch it from {record.get('url')}.")
+        text, scrub = await self._scrubbed_download(session_id, text, content_type)
         return {
             "download_id": record.get("id"),
             "filename": record.get("filename"),
@@ -654,8 +655,27 @@ class BrowserDiagnosticsService:
             "content_type": content_type,
             "size_bytes": size,
             "lossy": lossy,
+            "pii_scrub": scrub,
             "text": text,
         }
+
+    async def _scrubbed_download(
+        self, session_id: str, text: str, content_type: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        """A download's text, PII-scrubbed under PII_SCRUB_ENABLED (STORE-41), and what the scrub did."""
+        if not self.pii_scrubber.enabled:
+            return text, {"applied": False, "redactions": 0}
+        # Off the event loop, as the console's scrub is: the text is up to DOWNLOAD_READ_MAX_BYTES a page chose.
+        scrubbed = await asyncio.to_thread(self.pii_scrubber.download_text, text, content_type or "")
+        if scrubbed.hits and self.pii_scrubber.audit_report:
+            await self.manager.audit.append(
+                event_type="pii_redaction",
+                status="ok",
+                action="download_scrub",
+                session_id=session_id,
+                details=self.pii_scrubber.build_audit_report(session_id, "download", scrubbed.hits),
+            )
+        return scrubbed.text, {"applied": True, "redactions": len(scrubbed.hits)}
 
     @staticmethod
     def _select_download(session_id: str, downloads: list[dict[str, Any]], download_id: str | None) -> dict[str, Any]:

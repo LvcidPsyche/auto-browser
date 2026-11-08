@@ -16,12 +16,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.action_errors import SessionNotFoundError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import McpToolCallRequest, SessionRecord
+from app.pii_scrub import PiiScrubber
 from app.tool_gateway import McpToolGateway
 
 SESSION_ID = "sess-dl"
@@ -173,6 +174,38 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
                 await self._read(big)
         with self.assertRaisesRegex(ValueError, f"No download nope in session {SESSION_ID}.*{failed}"):
             await self._read("nope")
+
+    async def test_pii_in_a_download_is_scrubbed_counted_and_audited(self) -> None:
+        # STORE-41: the text came back as the file held it, while the scrubber's other text outputs were scrubbed.
+        self._add("customers.csv", b"id,email,ssn\n1,jane.doe@example.com,123-45-6789\n")
+        self.manager.audit.append = AsyncMock()
+
+        result = await self._read()
+
+        self.assertEqual(result["text"], "id,email,ssn\n1,[REDACTED],[REDACTED]\n")
+        self.assertEqual(result["pii_scrub"], {"applied": True, "redactions": 2})
+        audited = self.manager.audit.append.await_args.kwargs
+        self.assertEqual((audited["event_type"], audited["action"]), ("pii_redaction", "download_scrub"))
+        self.assertEqual((audited["details"]["layer"], audited["details"]["hit_count"]), ("download", 2))
+        self.assertEqual((self.downloads_dir / "customers.csv").read_bytes()[-12:], b"123-45-6789\n")
+
+    async def test_a_json_download_is_scrubbed_by_its_members_names_as_a_network_body_is(self) -> None:
+        # Plain text matching leaves an opaque token alone; by its type, the member's name marks it.
+        self._add("token.json", b'{"access_token": "opaque-value-1", "user": "ok"}')
+
+        result = await self._read()
+
+        self.assertEqual(json.loads(result["text"]), {"access_token": "[REDACTED]", "user": "ok"})
+        self.assertEqual(result["pii_scrub"], {"applied": True, "redactions": 1})
+
+    async def test_with_scrubbing_off_a_download_is_read_as_it_is_and_says_so(self) -> None:
+        self.manager.diagnostics.pii_scrubber = PiiScrubber(enabled=False)
+        self._add("customers.csv", b"1,jane.doe@example.com\n")
+
+        result = await self._read()
+
+        self.assertEqual(result["text"], "1,jane.doe@example.com\n")
+        self.assertEqual(result["pii_scrub"], {"applied": False, "redactions": 0})
 
     async def test_no_completed_download(self) -> None:
         self._add("partial.csv", b"", status="failed")

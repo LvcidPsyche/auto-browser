@@ -89,6 +89,13 @@ All notable changes to auto-browser are documented here.
   not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name. A screenshot that is
   not to be redacted (scrubbing off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still
   written straight to its name.
+- **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so
+  a CSV export of customers gave the agent every email address and SSN in it, while console messages and network
+  bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by its type, as a network body is (JSON by
+  its members' names, form data by its fields, anything else as plain text), off the event loop; the result's new
+  `pii_scrub` says whether the scrub ran and how many redactions it made, and a read that redacted something is
+  audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The file at the download's artifact
+  URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not scrubbed" to "Scrubbed".
 
 ### Fixed
 
