@@ -653,6 +653,13 @@ class SessionRecord(BaseModel):
     # Why the controller closed it itself (action_errors.SESSION_CLOSED_GATE_LOST); None for a close it was asked for.
     close_reason: str | None = None
 
+    @field_validator("downloads")
+    @classmethod
+    def _without_server_paths(cls, downloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """A download record saved before STORE-40 named its file's path on the server: left out wherever a stored
+        record is read (GET /sessions/{id}, the session listing, list_downloads), as a record holds none since."""
+        return [{key: value for key, value in item.items() if key != "path"} for item in downloads]
+
 
 class AgentJobRecord(BaseModel):
     id: str

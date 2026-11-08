@@ -614,8 +614,8 @@ class BrowserDiagnosticsService:
             record = await self.manager.session_store.get(session_id)
         except KeyError:
             raise SessionNotFoundError(session_id) from None
-        # A download saved before STORE-40 kept its file's server path, which the list leaves out.
-        return [{key: value for key, value in item.items() if key != "path"} for item in record.downloads]
+        # A download saved before STORE-40 kept its file's server path, which SessionRecord leaves out as it is read.
+        return list(record.downloads)
 
     async def read_download_text(self, session_id: str, download_id: str | None = None) -> dict[str, Any]:
         """A captured download's contents as text.

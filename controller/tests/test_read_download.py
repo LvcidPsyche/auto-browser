@@ -72,8 +72,10 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
         return download_id
 
     async def _persist(self) -> None:
+        # Constructed as a version before 1.17.0 wrote it, unvalidated: SessionRecord now drops a download's
+        # server path whenever a record is read or built (STORE-40), and a test's record from before must keep it.
         await self.manager.session_store.upsert(
-            SessionRecord(
+            SessionRecord.model_construct(
                 id=SESSION_ID,
                 name="downloads",
                 created_at="2026-01-01T00:00:00Z",
@@ -158,6 +160,25 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item["filename"] for item in listed], ["report.csv"])
         self.assertNotIn("path", listed[0])
+
+    async def test_a_stopped_sessions_record_holds_no_server_path(self) -> None:
+        # c4's report: the stored record of a session that saved a download before STORE-40 kept its server path, and
+        # GET /sessions/{id} and the session listing returned it, though list_downloads left it out.
+        self._add("report.csv", b"", stored_path=self.downloads_dir / "report.csv")
+        await self._persist()
+        stored = "".join(path.read_text(encoding="utf-8") for path in (self.root / "sessions").glob("*.json"))
+        self.assertIn('"path"', stored)  # the record on disk is one from before
+
+        listing = await self.manager.list_sessions()
+        returned = {
+            "GET /sessions/{id}": (await self.manager.get_session_record(SESSION_ID))["downloads"],
+            "GET /sessions": next(item for item in listing if item["id"] == SESSION_ID)["downloads"],
+            "list_downloads": await self.manager.list_downloads(SESSION_ID),
+        }
+        for where, downloads in returned.items():
+            with self.subTest(where):
+                self.assertEqual([item["filename"] for item in downloads], ["report.csv"])
+                self.assertNotIn("path", downloads[0])
 
     async def test_unusable_downloads_say_why(self) -> None:
         failed = self._add("partial.csv", b"", status="failed")

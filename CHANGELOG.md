@@ -246,10 +246,11 @@ All notable changes to auto-browser are documented here.
 - **A download's record no longer names the file's path on the server, and its URL works for any file name.** Every
   download record (the session's list, an observation's `recent_downloads`, `downloads.jsonl`) carried `path`, a
   saved file's absolute path on the controller's disk. It is gone: `browser.read_download` finds the file by its name
-  in the session's downloads directory, and listing a stopped session's downloads leaves it out of records saved
-  before. A file name holding `#` or `%` gave a `url` that named another path or none (`#` starts a fragment); the
-  name is now quoted in it. A save that failed was recorded as `download_save_failed` with nothing logged; it is now
-  logged as a warning naming the session.
+  in the session's downloads directory, and a stopped session's stored record leaves it out of the records it saved
+  before, wherever it is returned (its downloads list, `GET /sessions/{session_id}` and the session listing). A
+  `downloads.jsonl` written before keeps it on disk. A file name holding `#` or `%` gave a `url` that named another
+  path or none (`#` starts a fragment); the name is now quoted in it. A save that failed was recorded as
+  `download_save_failed` with nothing logged; it is now logged as a warning naming the session.
 - **A memory profile file that is no profile no longer breaks the others, or shows its content.**
   `browser.list_memory_profiles` failed as a whole on a file in `MEMORY_ROOT` that held a JSON list, or a
   `completed_steps` with no length (a number), listed objects that no get could load (`{}`, or steps given as a
