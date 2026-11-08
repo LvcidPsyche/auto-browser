@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 import httpx
 
 from .auth import loopback_transport, resolve_bearer_token
-from .errors import AutoBrowserToolError
+from .errors import AutoBrowserToolError, raise_for_status
 
 
 class BrowserState(TypedDict, total=False):
@@ -86,7 +86,7 @@ class AutoBrowserNode:
                 json={"name": name, "arguments": arguments},
                 headers=self._headers(),
             )
-            response.raise_for_status()
+            raise_for_status(response)
             return response.json()
 
     async def create_session(self, start_url: str | None = None) -> str:

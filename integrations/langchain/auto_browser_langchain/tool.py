@@ -8,6 +8,7 @@ from typing import Any, Optional, Type, Union
 import httpx
 
 from .auth import loopback_transport, resolve_bearer_token
+from .errors import raise_for_status
 
 try:
     from langchain_core.tools import BaseTool
@@ -88,7 +89,7 @@ class AutoBrowserTool(BaseTool):
         transport = loopback_transport(self.base_url, asynchronous=True)
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
             response = await client.post("/mcp/tools/call", json=payload, headers=headers)
-            response.raise_for_status()
+            raise_for_status(response)
             data = response.json()
         if data.get("isError"):
             content = data.get("content") or [{}]
@@ -113,5 +114,5 @@ class AutoBrowserTool(BaseTool):
         transport = loopback_transport(base_url, asynchronous=False)
         with httpx.Client(base_url=base_url, timeout=10, transport=transport) as client:
             response = client.get("/mcp/tools", headers=headers)
-            response.raise_for_status()
+            raise_for_status(response)
             return response.json()

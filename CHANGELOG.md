@@ -47,13 +47,16 @@ All notable changes to auto-browser are documented here.
   strings are redacted; a forwarded JSON-RPC error's message is redacted (a result is never rewritten); and the line a
   bridge prints on stderr for an unexpected failure is redacted as its answer is. A short secret is no longer replaced
   again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a userinfo and dropped.
-- **The Python client's errors no longer show the bearer token or a secret of the controller URL.** `AutoBrowserError`
-  quoted a server's error detail as it came, so a proxy's or gateway's detail that echoed the base URL (its password,
-  a token in its query) or the bearer token was shown whole; its `detail` and its message now leave them out as the
-  MCP bridges' answers do, any other `user@` run included, and keep the detail's shape. A token httpx cannot send in
-  a header (one holding a line break, or a character outside ASCII) failed the first request with httpx's error, which
-  quoted the whole header for a line break and named any other such character and its position; `AutoBrowserClient`
-  now refuses it with a `ValueError` naming `token` or the token file, never the token.
+- **The Python client's and the LangChain tools' errors no longer show the bearer token or a secret of the controller
+  URL.** The client's `AutoBrowserError` quoted a server's error detail as it came, so a proxy's or gateway's detail
+  that echoed the base URL (its password, a token in its query) or the bearer token was shown whole; its `detail` and
+  its message now leave them out as the MCP bridges' answers do, any other `user@` run included, and keep the detail's
+  shape. The LangChain tool, `AutoBrowserTool.list_tools` and `AutoBrowserNode` raised httpx's `HTTPStatusError` for
+  an answer that was not 2xx, whose message names the request URL whole, password, query and fragment included; it
+  now names the URL without them (the path is kept), in httpx's words otherwise. A token httpx cannot send in a header
+  (one holding a line break, or a character outside ASCII) failed the first request with httpx's error, which quoted
+  the whole header for a line break and named any other such character and its position; the client and the
+  LangChain tools now refuse it with a `ValueError` naming `token`, `bearer_token` or the token file, never the token.
 
 ### Fixed
 

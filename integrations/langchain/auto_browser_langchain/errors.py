@@ -2,6 +2,30 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
+# httpx's words for each class of status raise_for_status refuses.
+_STATUS_KINDS = {1: "Informational response", 3: "Redirect response", 4: "Client error", 5: "Server error"}
+
+
+def raise_for_status(response: httpx.Response) -> None:
+    """Raise httpx.HTTPStatusError for a response that is not 2xx, as ``response.raise_for_status()`` does and in its
+    words, but naming the request URL without its userinfo, query or fragment (R5C-20).
+
+    httpx's message names the URL whole, the password, a token in the query and the fragment included, and an agent
+    shown the error (LangGraph's ToolNode hands it the exception's text) read them.
+    """
+    if response.is_success:
+        return
+    kind = _STATUS_KINDS.get(response.status_code // 100, "Invalid status code")
+    url = response.request.url.copy_with(userinfo=b"", query=None, fragment=None)
+    raise httpx.HTTPStatusError(
+        f"{kind} '{response.status_code} {response.reason_phrase}' for url '{url}'\n"
+        f"For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{response.status_code}",
+        request=response.request,
+        response=response,
+    )
+
 
 class AutoBrowserToolError(RuntimeError):
     """A tool call the controller answered with ``isError: true``.

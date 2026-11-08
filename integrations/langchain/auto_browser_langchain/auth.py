@@ -19,6 +19,8 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
     the caller asked for a token, and a request without one would only 401.
     """
     token = (bearer_token or "").strip() or None
+    if token:
+        _refuse_unsendable(token, "bearer_token")
     if token or token_file is None:
         return token
     token_file = os.path.expanduser(token_file)  # "~/auto-browser/data/api-token", as the stdio bridge takes it
@@ -36,7 +38,23 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
         ) from exc
     if not token:
         raise ValueError(f"token_file {token_file} is empty")
+    _refuse_unsendable(token, f"token_file {token_file}")
     return token
+
+
+def _refuse_unsendable(token: str, source: str) -> None:
+    """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
+
+    h11 refuses a line break with an error that quotes the header whole, and httpx encodes a header as ASCII, so its
+    error for any other character names that character and its position; either reached an agent shown the error.
+    """
+    if "\r" in token or "\n" in token:
+        held = "a line break"
+    elif not token.isascii():
+        held = "a character outside ASCII"
+    else:
+        return
+    raise ValueError(f"{source} holds {held}, which an HTTP header cannot carry")
 
 
 # One overload per client kind (W9-12): httpx.Client takes only a BaseTransport and httpx.AsyncClient only an
