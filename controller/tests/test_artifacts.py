@@ -10,9 +10,10 @@ from app.artifacts import SessionArtifactService
 
 
 class FakePage:
-    async def screenshot(self, *, path: str, full_page: bool) -> None:
+    async def screenshot(self, *, path: str, full_page: bool, type: str) -> None:  # noqa: A002 - Playwright's name
         self.path = path
         self.full_page = full_page
+        self.type = type
         Path(path).write_bytes(b"png")
 
 
@@ -40,6 +41,7 @@ class SessionArtifactServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("-bad-label.png", screenshot["path"])
             self.assertTrue(Path(screenshot["path"]).exists())
             self.assertFalse(page.full_page)
+            self.assertEqual(page.type, "png")  # ACT-33: a staged capture's hidden name does not end in .png
             self.assertEqual(trace["trace_url"], "/artifacts/session-1/trace.zip")
             self.assertTrue(trace["trace_exists"])
             lines = (artifact_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()

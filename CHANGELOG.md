@@ -78,6 +78,17 @@ All notable changes to auto-browser are documented here.
   the token out. It refuses more than one (`headers` can hold one per case of the name, and httpx sends each), and a
   token from `token` or `token_file` now replaces every one of them, where one whose name differed in case from
   `Authorization` was sent beside the token's.
+- **A screenshot that is to be PII-redacted is no longer served before its redaction is done.** With
+  `PII_SCRUB_SCREENSHOT` on, a capture was written straight to the name `/artifacts` serves it under, and OCR and the
+  redaction then ran on that file, so the raw image was one request away for as long as OCR took; and the redacted
+  bytes were written over it in place, so a write cut short left a partly written image there. A capture, an
+  observation's screenshot, an action's before and after snapshots, a share frame and the copies the compare tool
+  redacts are now written under a hidden name beside their published one, redacted there (the redacted bytes through
+  a temporary file and `os.replace`), and only then moved onto the published name with `os.replace`; one with nothing
+  to redact, or that could not be scrubbed (which its result says), is moved there as it is. A redaction that does
+  not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name. A screenshot that is
+  not to be redacted (scrubbing off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still
+  written straight to its name.
 
 ### Fixed
 

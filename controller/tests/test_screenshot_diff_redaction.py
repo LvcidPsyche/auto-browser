@@ -53,7 +53,9 @@ def _session(manager, tmp_path: Path) -> SimpleNamespace:
 async def _capture(_session, label: str, **kwargs) -> dict:
     # white stands in for page pixels the scrubber must black out
     target = kwargs.get("target") or {"path": str(_session.artifact_dir / f"{label}.png"), "url": f"/a/{label}.png"}
-    Image.new("RGB", (200, 60), "white").save(target["path"])
+    # PNG whatever the name ends in, as Playwright writes the type it is given: a capture still to be redacted goes to
+    # a hidden name that is not .png (ACT-33).
+    Image.new("RGB", (200, 60), "white").save(target["path"], format="PNG")
     return dict(target)
 
 

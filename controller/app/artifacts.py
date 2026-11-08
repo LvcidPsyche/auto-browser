@@ -29,7 +29,9 @@ class SessionArtifactService:
         self, session: Any, label: str, *, target: dict[str, str] | None = None
     ) -> dict[str, str]:
         target = target or self.screenshot_target(session, label)
-        await session.page.screenshot(path=target["path"], full_page=False)
+        # PNG whatever the name ends in: a capture still to be redacted goes to a hidden name that is not .png (ACT-33),
+        # and Playwright reads the type from the name when none is given.
+        await session.page.screenshot(path=target["path"], full_page=False, type="png")
         return dict(target)
 
     @staticmethod

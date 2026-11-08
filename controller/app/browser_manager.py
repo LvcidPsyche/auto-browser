@@ -587,8 +587,8 @@ class BrowserManager:
     async def _light_snapshot(self, session: BrowserSession, *, label: str) -> dict[str, Any]:
         return await self.observation.light_snapshot(session, label=label)
 
-    async def _capture_screenshot(self, session: BrowserSession, label: str) -> dict[str, str]:
-        return await self.observation.capture_session_screenshot(session, label)
+    async def _capture_screenshot(self, session: BrowserSession, label: str, *, staged: bool = False) -> dict[str, str]:
+        return await self.observation.capture_session_screenshot(session, label, staged=staged)
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
 
