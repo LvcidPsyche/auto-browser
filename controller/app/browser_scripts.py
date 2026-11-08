@@ -70,29 +70,57 @@ STEALTH_INIT_SCRIPT = r"""
     };
   } catch (_) {}
 
-  // Canvas fingerprint noise
+  // Canvas fingerprint noise, on an export of a canvas that already has a 2d
+  // context only. Asking for one gives a canvas that has no context yet a 2d
+  // context, after which getContext('webgl') or ('bitmaprenderer') returned null
+  // (NAV-25); so getContext records the canvases it gave a 2d context. Both
+  // patched functions, and toString itself, read as native code through
+  // Function.prototype.toString, with the native name and length.
   try {
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
     // The pixel is read with the native getImageData, captured here. The
     // fingerprint script (STEALTH_PROFILE=light) wraps getImageData with its own
     // noise; reading through that and writing the result back would change the
     // canvas a little more on every export.
     const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-    HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
-      const ctx = this.getContext('2d');
-      if (ctx && this.width > 0 && this.height > 0) {
-        try {
-          const img = origGetImageData.call(ctx, 0, 0, 1, 1);
-          img.data[0] ^= 1;
-          ctx.putImageData(img, 0, 0);
-          const result = origToDataURL.call(this, type, quality);
-          img.data[0] ^= 1;
-          ctx.putImageData(img, 0, 0);
-          return result;
-        } catch (_) {}
-      }
-      return origToDataURL.call(this, type, quality);
+    const context2d = CanvasRenderingContext2D.prototype;
+    const getPrototypeOf = Object.getPrototypeOf;
+    const nativeToString = Function.prototype.toString;
+    const with2d = new WeakSet();
+    const nativeSources = new WeakMap();
+    // Methods, not function expressions: like the native ones, they have no prototype.
+    const patched = {
+      toString() {
+        return nativeSources.has(this) ? nativeSources.get(this) : nativeToString.call(this);
+      },
+      getContext(contextId) {
+        const ctx = origGetContext.apply(this, arguments);
+        if (ctx !== null && getPrototypeOf(ctx) === context2d) with2d.add(this);
+        return ctx;
+      },
+      toDataURL() {
+        if (with2d.has(this) && this.width > 0 && this.height > 0) {
+          try {
+            const ctx = origGetContext.call(this, '2d');
+            const img = origGetImageData.call(ctx, 0, 0, 1, 1);
+            img.data[0] ^= 1;
+            ctx.putImageData(img, 0, 0);
+            const result = origToDataURL.apply(this, arguments);
+            img.data[0] ^= 1;
+            ctx.putImageData(img, 0, 0);
+            return result;
+          } catch (_) {}
+        }
+        return origToDataURL.apply(this, arguments);
+      },
     };
+    nativeSources.set(patched.toString, nativeToString.call(nativeToString));
+    nativeSources.set(patched.getContext, nativeToString.call(origGetContext));
+    nativeSources.set(patched.toDataURL, nativeToString.call(origToDataURL));
+    Function.prototype.toString = patched.toString;
+    HTMLCanvasElement.prototype.getContext = patched.getContext;
+    HTMLCanvasElement.prototype.toDataURL = patched.toDataURL;
   } catch (_) {}
 
   // WebGL vendor / renderer — realistic Intel values

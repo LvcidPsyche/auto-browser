@@ -32,9 +32,44 @@ BASE_PATCHES = """() => ({
   hardwareConcurrency: navigator.hardwareConcurrency,
   deviceMemory: navigator.deviceMemory,
   colorDepth: screen.colorDepth,
-  toDataURLPatched: !HTMLCanvasElement.prototype.toDataURL.toString().includes('[native code]'),
   glGetParameterPatched: !WebGLRenderingContext.prototype.getParameter.toString().includes('[native code]'),
 })"""
+
+# One pixel drawn, exported and read back from the PNG: the export noise flips the low bit of its red channel. The
+# patched toDataURL reads as native code (NAV-25), so this is how a page tells it is patched.
+EXPORTED_PIXEL = """async () => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 1, 1);
+  const image = new Image();
+  image.src = canvas.toDataURL();
+  await image.decode();
+  const copy = document.createElement('canvas');
+  copy.width = 1; copy.height = 1;
+  const copyContext = copy.getContext('2d');
+  copyContext.drawImage(image, 0, 0);
+  return Array.from(copyContext.getImageData(0, 0, 1, 1).data);
+}"""
+EXPORT_NOISED_PIXEL = [101, 100, 100, 255]
+
+# A canvas exported before anything asked for its context: whether it can still take each kind of context.
+CONTEXT_AFTER_EXPORT = """() => Object.fromEntries(['webgl', 'bitmaprenderer'].map((kind) => {
+  const canvas = document.createElement('canvas');
+  canvas.toDataURL();
+  return [kind, Boolean(canvas.getContext(kind))];
+}))"""
+
+# What the canvas patches show of themselves, read the ways a detection script reads a function's source.
+CANVAS_PATCH_SOURCES = """() => [
+  HTMLCanvasElement.prototype.toDataURL.toString(),
+  Function.prototype.toString.call(HTMLCanvasElement.prototype.getContext),
+  Function.prototype.toString.toString(),
+  HTMLCanvasElement.prototype.toDataURL.length,
+  HTMLCanvasElement.prototype.getContext.length,
+  'prototype' in HTMLCanvasElement.prototype.toDataURL,
+]"""
 
 NOTIFICATIONS_QUERY = """async () => {
   const result = await navigator.permissions.query({ name: 'notifications' });
@@ -50,18 +85,22 @@ async def _launch(playwright):
 def test_apply_stealth_patches_a_real_page() -> None:
     from playwright.async_api import async_playwright
 
-    async def run() -> tuple[dict, dict]:
+    async def run() -> tuple[dict, dict, list[int]]:
         async with async_playwright() as playwright:
             browser = await _launch(playwright)
             try:
                 page = await browser.new_page()
                 await apply_stealth(page)
                 await page.goto(BLANK)
-                return await page.evaluate(BASE_PATCHES), await page.evaluate(NOTIFICATIONS_QUERY)
+                return (
+                    await page.evaluate(BASE_PATCHES),
+                    await page.evaluate(NOTIFICATIONS_QUERY),
+                    await page.evaluate(EXPORTED_PIXEL),
+                )
             finally:
                 await browser.close()
 
-    patches, notifications = asyncio.run(run())
+    patches, notifications, exported = asyncio.run(run())
 
     assert patches["webdriver"] is None, patches
     assert patches["chromeRuntime"] is True, patches
@@ -70,9 +109,49 @@ def test_apply_stealth_patches_a_real_page() -> None:
     assert patches["hardwareConcurrency"] == 8, patches
     assert patches["deviceMemory"] == 8, patches
     assert patches["colorDepth"] == 24, patches
-    assert patches["toDataURLPatched"] is True, patches
+    assert exported == EXPORT_NOISED_PIXEL
     assert patches["glGetParameterPatched"] is True, patches
     assert notifications["plainObject"] is True, notifications
+
+
+async def _native_and_stealthy(script: str) -> tuple[object, object]:
+    """`script`'s answer on a page without the base stealth script, then on one with it, in one browser."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await _launch(playwright)
+        try:
+            native = await browser.new_page()
+            await native.goto(BLANK)
+            stealthy = await browser.new_page()
+            await apply_stealth(stealthy)
+            await stealthy.goto(BLANK)
+            return await native.evaluate(script), await stealthy.evaluate(script)
+        finally:
+            await browser.close()
+
+
+@requires_chromium
+def test_exporting_a_canvas_leaves_it_free_to_take_any_context() -> None:
+    """NAV-25: toDataURL asked for the canvas's 2d context to add its noise, which gives a canvas that has no context
+    yet a 2d one, so a later getContext('webgl') or getContext('bitmaprenderer') on it returned null."""
+    native, stealthy = asyncio.run(_native_and_stealthy(CONTEXT_AFTER_EXPORT))
+
+    assert native["bitmaprenderer"] is True, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_the_canvas_patches_read_as_native_code() -> None:
+    """NAV-25: the patched toDataURL showed its source to any script that called toString on it."""
+    native, stealthy = asyncio.run(_native_and_stealthy(CANVAS_PATCH_SOURCES))
+
+    assert native[:3] == [
+        "function toDataURL() { [native code] }",
+        "function getContext() { [native code] }",
+        "function toString() { [native code] }",
+    ], native
+    assert stealthy == native
 
 
 # A locator wait on an element that never appears fails after the default timeout.

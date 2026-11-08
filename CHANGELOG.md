@@ -361,6 +361,14 @@ All notable changes to auto-browser are documented here.
   so it asked for the base path alone. The query now goes as the parameters of every request, beside a request's own
   (one of the same name replaces it), as the MCP bridges send the query of their URL, written as httpx writes
   parameters (a space as `+`, a key with no value as `key=`); the fragment is never sent.
+- **With `STEALTH_ENABLED`, exporting a canvas no longer stops it taking a WebGL context, and the canvas patches
+  read as native code.** The stealth script's `toDataURL` asked the canvas for its 2d context to add its noise, which
+  gives a canvas that has no context yet a 2d one, so a page that exported a fresh canvas and then asked it for
+  `getContext('webgl')` or `getContext('bitmaprenderer')` got `null`. The noise now goes only on a canvas the page
+  gave a 2d context, which a wrapped `getContext` records; any other canvas is exported as it is. The patched
+  `toDataURL` and `getContext`, and the `Function.prototype.toString` that masks them, now read as native code
+  (`function toDataURL() { [native code] }`) with the native name and length; the script's WebGL `getParameter` and
+  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source.
 
 ### Changed
 
