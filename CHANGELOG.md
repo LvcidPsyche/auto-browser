@@ -232,6 +232,13 @@ All notable changes to auto-browser are documented here.
   before. A file name holding `#` or `%` gave a `url` that named another path or none (`#` starts a fragment); the
   name is now quoted in it. A save that failed was recorded as `download_save_failed` with nothing logged; it is now
   logged as a warning naming the session.
+- **A memory profile file that is no profile no longer breaks the others, or shows its content.**
+  `browser.list_memory_profiles` failed as a whole on a file in `MEMORY_ROOT` that held a JSON list, or a
+  `completed_steps` that was not a list, and skipped one that did not parse without saying so; each is now skipped
+  and logged as a warning naming the file. Getting, saving or deleting a profile whose file is not a valid profile
+  failed with the parser's error, which quoted the file (another operator's too); it now fails with "memory profile
+  '<name>' cannot be read", and the file stays for its operator to fix or remove. A delete now waits for a save in
+  progress, as saves wait for each other, so a save's write no longer brings back a profile a delete just removed.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,

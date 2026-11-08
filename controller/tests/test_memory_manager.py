@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,3 +117,53 @@ class MemoryProfileNameCollisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleting_a_colliding_name_leaves_the_other_profile(self) -> None:
         self.assertFalse(await self.manager.delete("github_com"))
         self.assertIsNotNone(await self.manager.get("github.com"))
+
+
+class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
+    """STORE-36: a file that is no profile broke the whole listing, and failed get, save and delete with an error that
+    quoted the file; a delete did not wait for a save of the same profile."""
+
+    async def asyncSetUp(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.root = Path(tempdir.name)
+        self.manager = MemoryManager(self.root)
+        await self.manager.startup()
+        await self.manager.save("kept")
+
+    async def test_a_listing_skips_files_that_are_no_profile_and_says_so(self) -> None:
+        (self.root / "a_list.json").write_text("[1, 2]", encoding="utf-8")
+        (self.root / "broken.json").write_text("{not json", encoding="utf-8")
+
+        with self.assertLogs("app.memory_manager", level="WARNING") as logs:
+            profiles = await self.manager.list()
+
+        self.assertEqual([profile["name"] for profile in profiles], ["kept"])
+        logged = "\n".join(logs.output)
+        self.assertIn("a_list.json", logged)
+        self.assertIn("broken.json", logged)
+
+    async def test_an_unreadable_profile_is_refused_by_name_without_its_content(self) -> None:
+        (self.root / "broken.json").write_text('{"name": "broken", "notes": "SECRET-NOTE"', encoding="utf-8")
+        calls = {
+            "get": self.manager.get,
+            "delete": self.manager.delete,
+            "save": lambda name: self.manager.save(name, notes=["n"]),
+        }
+
+        for label, call in calls.items():
+            with self.subTest(label):
+                with self.assertRaisesRegex(ValueError, "memory profile 'broken' cannot be read") as caught:
+                    await call("broken")
+                self.assertNotIn("SECRET-NOTE", str(caught.exception))
+        self.assertTrue((self.root / "broken.json").exists())
+
+    async def test_a_delete_waits_for_a_save_in_progress(self) -> None:
+        async with self.manager._lock:
+            deleting = asyncio.ensure_future(self.manager.delete("kept"))
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(deleting), 0.5)
+            self.assertTrue((self.root / "kept.json").exists())
+
+        self.assertTrue(await deleting)
+        self.assertFalse((self.root / "kept.json").exists())
