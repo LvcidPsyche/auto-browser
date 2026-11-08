@@ -2,10 +2,11 @@
 
 On Windows the first bash on PATH can be WSL's launcher (%LOCALAPPDATA%\\Microsoft\\WindowsApps\\bash.exe, or
 System32's), which fails before it runs anything of this checkout, or Git's bin\\bash.exe, a wrapper that puts /usr/bin
-ahead of a test's stubs on PATH. There a test uses only a bash.exe in a usr\\bin folder (Git's or MSYS2's), the first on
-PATH or else the one beside git, or the bash AUTO_BROWSER_TEST_BASH names; with none, it skips and says why. Elsewhere
-it is the bash on PATH. A test that puts stubs on PATH puts BASH_DIR after them, so the script finds the tools beside
-its bash (awk, sed, mktemp) when that folder is not on PATH, and the test's stubs first.
+ahead of a test's stubs on PATH. There a test uses only a bash.exe in a usr\\bin folder (Git's or MSYS2's): the first
+on PATH, past any other bash ahead of it, or else the one beside git, or the bash AUTO_BROWSER_TEST_BASH names; with
+none, it skips and says why. Elsewhere it is the bash on PATH. A test that puts stubs on PATH puts BASH_DIR after them,
+so the script finds the tools beside its bash (awk, sed, mktemp) when that folder is not on PATH, and the test's stubs
+first.
 """
 
 from __future__ import annotations
@@ -25,12 +26,24 @@ def _in_usr_bin(path: str) -> bool:
     return [part.lower() for part in Path(path).parts][-3:-1] == ["usr", "bin"]
 
 
+def _usr_bin_bash_on_path() -> str | None:
+    """The first bash.exe in a usr\\bin folder on PATH: only the first bash on PATH was looked at, so WSL's launcher
+    ahead of MSYS2's, with no git on PATH, left the script tests skipped (review of c5)."""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(folder) / "bash.exe"
+        if folder and _in_usr_bin(str(candidate)) and candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def find_bash() -> str | None:
     named = os.environ.get(BASH_VARIABLE)
     if named:
         return named
-    on_path = shutil.which("bash")
-    if os.name != "nt" or (on_path and _in_usr_bin(on_path)):
+    if os.name != "nt":
+        return shutil.which("bash")
+    on_path = _usr_bin_bash_on_path()
+    if on_path:
         return on_path
     git = shutil.which("git")
     if git:
