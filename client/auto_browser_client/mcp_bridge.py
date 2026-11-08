@@ -59,14 +59,18 @@ class _NoRedirects(HTTPRedirectHandler):
 
 
 def _opener(proxies: dict[str, str] | None = None) -> OpenerDirector:
-    """An opener for http:// and https:// only that never follows a redirect, using ``proxies`` as ProxyHandler takes
-    them (None: the environment's, read now).
+    """An opener for http:// and https:// only that never follows a redirect, using the http and https entries of
+    ``proxies`` as ProxyHandler takes them (None: the environment's, read now).
 
     urllib's build_opener adds its file:, data: and ftp: handlers too, which answer such a URL (or a request an
     environment proxy of that scheme takes) from a local file, the URL itself or an FTP server, as if a controller had;
-    here any other scheme meets UnknownHandler's URLError (R5C-28).
+    here any other scheme meets UnknownHandler's URLError (R5C-28). ProxyHandler turns a request of any scheme it
+    holds a proxy for into an http one to that proxy, before UnknownHandler is reached: with ftp_proxy set, an ftp://
+    URL went to that proxy, token included, and its answer was taken as the controller's (c4).
     """
-    handlers = [ProxyHandler(proxies), UnknownHandler(), HTTPHandler(), HTTPDefaultErrorHandler(), _NoRedirects()]
+    proxies = urllib.request.getproxies() if proxies is None else proxies
+    kept = {scheme: proxy for scheme, proxy in proxies.items() if scheme in ("http", "https")}
+    handlers = [ProxyHandler(kept), UnknownHandler(), HTTPHandler(), HTTPDefaultErrorHandler(), _NoRedirects()]
     https = getattr(urllib.request, "HTTPSHandler", None)  # absent from a Python built without ssl
     if https is not None:
         handlers.append(https())
@@ -267,8 +271,7 @@ def _goes_direct(request: Request) -> bool:
     control character, U+0000 to U+0020 or U+007F) or cannot encode (one outside ASCII) only once a connection is
     chosen, and a fragment holding one, which urllib puts into a proxied request line (R5C-28). Each reason is the
     bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
-    (``request.host`` None) is not direct and falls through to urllib's own error, raised before any proxy is used
-    (W10-14).
+    (``request.host`` None), which ``urlopen`` refuses before asking, is not direct (W10-14).
     """
     if request.host is None:
         return False
@@ -328,11 +331,19 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     environment names, read for each request. ``_goes_direct`` decides, from the host http.client connects to, and
     refuses a host another reading finds local.
 
+    A request that is not http:// or https:// with a host is refused first, so nothing is sent (W15-3, c4): urllib
+    reads a scheme-less userinfo's user name as the scheme (sentinel:x@host/mcp), answers a data: or file: URL from
+    the URL or the local file as if a controller had, sends a URL of any scheme an environment proxy names (ftp_proxy)
+    to that proxy, and leaves a URL without a host to fail later. Its type is lowercased; its host is "" for
+    http:///mcp and None for http:mcp.
+
     ``_goes_direct`` checks the path, query and fragment (R5C-28); a host or userinfo http.client cannot send is
     refused once it fails to encode, before any byte goes out (review of c3): urllib puts the URL whole into the
     request line an environment proxy gets, which goes as ASCII, and the host it decoded, userinfo included, into the
     Host header, which goes as latin-1, and the UnicodeEncodeError named the character and its position.
     """
+    if request.type not in ("http", "https") or not request.host:
+        raise InvalidControllerURL("it is not an http:// or https:// URL with a host")
     opener = _DIRECT if _goes_direct(request) else _opener()
     authority = (request.host or "", urlsplit(request.full_url).netloc)  # as urllib decoded it, and as written
     try:
@@ -476,12 +487,6 @@ class HttpMcpClient:
                 "urllib cannot read it as an http:// or https:// URL (for example, no scheme, a malformed bracket or "
                 "a character it refuses)"
             ) from exc
-        # Before any opener is chosen, so nothing is sent (W15-3). urllib reads a scheme-less userinfo's user name as
-        # the scheme (sentinel:x@host/mcp), answers a data: or file: URL from the URL or the local file as if a
-        # controller had, and leaves a URL without a host to fail later. Its type is lowercased; its host is "" for
-        # http:///mcp and None for http:mcp.
-        if request.type not in ("http", "https") or not request.host:
-            raise InvalidControllerURL("it is not an http:// or https:// URL with a host")
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read()

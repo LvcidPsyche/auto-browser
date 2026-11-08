@@ -711,9 +711,10 @@ def test_r5c_28_a_userinfo_the_host_header_cannot_carry_is_refused_without_a_pro
 
 @pytest.mark.parametrize("scheme", ["file", "data", "ftp"])
 def test_r5c_28_the_bridges_openers_answer_no_file_data_or_ftp_url(tmp_path: Path, scheme: str) -> None:
-    # W15-3 refuses such a base URL before any opener is chosen; the openers themselves kept urllib's default
-    # handlers, which answer a file: or data: URL from the local file or the URL itself, as if a controller had, and
-    # an ftp: one from an FTP server (here none listens, so urllib's FTP handler failed with its own error).
+    # urlopen refuses such a URL before any opener is chosen (W15-3 refused it in HttpMcpClient only); the openers
+    # themselves kept urllib's default handlers, which answer a file: or data: URL from the local file or the URL
+    # itself, as if a controller had, and an ftp: one from an FTP server (here none listens, so urllib's FTP handler
+    # failed with its own error).
     import auto_browser_client.mcp_bridge as bridge
 
     result_file = tmp_path / "result.json"
@@ -724,8 +725,32 @@ def test_r5c_28_the_bridges_openers_answer_no_file_data_or_ftp_url(tmp_path: Pat
         "ftp": "ftp://127.0.0.1:9/result.json",
     }[scheme]
 
-    with pytest.raises(URLError, match=f"unknown url type: {scheme}"):
+    with pytest.raises(bridge.InvalidControllerURL, match="it is not an http:// or https:// URL with a host"):
         bridge.urlopen(Request(url), timeout=5)
+    for opener in (bridge._DIRECT, bridge._opener()):
+        with pytest.raises(URLError, match=f"unknown url type: {scheme}"):
+            opener.open(Request(url), timeout=5)
+
+
+def test_r5c_28_a_url_of_a_scheme_an_environment_proxy_names_never_goes_to_that_proxy(
+    recording_proxy, monkeypatch
+) -> None:
+    # Found by the orchestrator (c4): with ftp_proxy set, urllib's ProxyHandler turned an ftp:// request into an http
+    # one to that proxy before UnknownHandler was reached, so the proxied opener sent it there, bearer token included,
+    # and urlopen returned the proxy's answer as the controller's.
+    import auto_browser_client.mcp_bridge as bridge
+
+    monkeypatch.setenv("ftp_proxy", f"http://127.0.0.1:{recording_proxy.server_port}")
+
+    def request() -> Request:  # a fresh one each time: a proxied open rewrites the request it is given
+        return Request("ftp://controller.example/mcp", headers={"Authorization": f"Bearer {MARKER}"})
+
+    with pytest.raises(bridge.InvalidControllerURL, match="it is not an http:// or https:// URL with a host"):
+        bridge.urlopen(request(), timeout=5)
+    # The proxied opener takes only the environment's http and https proxies.
+    with pytest.raises(URLError, match="unknown url type: ftp"):
+        bridge._opener().open(request(), timeout=5)
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

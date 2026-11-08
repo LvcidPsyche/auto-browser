@@ -230,7 +230,11 @@ All notable changes to auto-browser are documented here.
   request line an environment proxy gets, outside latin-1 in the `Host` header), which they answered as that failure,
   naming the character and its position. The bridges' openers now handle only `http://` and `https://`:
   urllib's default handlers, which they kept, answer a `file:`, `data:` or `ftp:` request from a local file, the URL
-  itself or an FTP server, and an environment proxy of such a scheme turns a request into one.
+  itself or an FTP server, and an environment proxy of such a scheme turns a request into one. Nor do they take an
+  environment proxy for another scheme any more: with `ftp_proxy` set, urllib sent an `ftp://` URL to that proxy as
+  an HTTP request, bearer token included, and took its answer as the controller's. The bridges' `urlopen` itself now
+  refuses a URL that is not `http://` or `https://` with a host, as an invalid controller URL, before an opener is
+  chosen, as their own requests have been refused since 1.16.0.
 
 ### Changed
 
