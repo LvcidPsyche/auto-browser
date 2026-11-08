@@ -96,6 +96,11 @@ All notable changes to auto-browser are documented here.
   `pii_scrub` says whether the scrub ran and how many redactions it made, and a read that redacted something is
   audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The file at the download's artifact
   URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not scrubbed" to "Scrubbed".
+- **The audit log is documented as not scrubbed.** The PII scrubber's module description listed "audit metadata:
+  sensitive fields masked before writing to audit log" among its layers, but nothing masks an audit event: its
+  details are stored as written (a navigated URL keeps its query). It now says what `PII_SCRUB_AUDIT_REPORT` does,
+  which is to add `pii_redaction` events (a scrub's layer, hit count and pattern names, never the values), and
+  `docs/deployment.md` lists the audit log under "Not scrubbed".
 
 ### Fixed
 

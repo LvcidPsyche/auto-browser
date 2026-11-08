@@ -7,7 +7,10 @@ Layers applied across the session lifecycle:
   3. Network payloads  — request/response bodies scrubbed before storage
   4. Console logs      — scrubbed before returning to caller
   5. Downloads         — text read with read_download, scrubbed by its type before returning to caller
-  6. Audit metadata    — sensitive fields masked before writing to audit log
+  6. Audit reports     — with PII_SCRUB_AUDIT_REPORT, a scrub that redacted something writes a pii_redaction
+                         event (its layer, hit count and pattern names, never the values), and a screenshot
+                         redaction that failed writes one marked failed. Audit events themselves are stored
+                         as written, not scrubbed (docs/deployment.md, "Not scrubbed").
 
 Patterns covered:
   Email addresses, US/intl phone numbers, SSNs, credit card numbers,
