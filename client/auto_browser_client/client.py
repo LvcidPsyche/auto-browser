@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .mcp_bridge import _is_loopback_host
+from .mcp_bridge import _is_loopback_host, _redacted_value
 
 
 def _seg(value: str) -> str:
@@ -59,7 +59,24 @@ def _read_token_file(path: str | os.PathLike[str]) -> str:
         ) from exc
     if not token:
         raise ValueError(f"token_file {path} is empty")
+    _refuse_unsendable(token, f"token_file {path}")
     return token
+
+
+def _refuse_unsendable(token: str, source: str) -> None:
+    """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
+
+    h11 refuses a line break with an error that quotes the header whole, and httpx encodes a header as ASCII, so its
+    error for any other character names that character and its position; raised from the first request, either
+    reached whatever showed the error to an agent.
+    """
+    if "\r" in token or "\n" in token:
+        held = "a line break"
+    elif not token.isascii():
+        held = "a character outside ASCII"
+    else:
+        return
+    raise ValueError(f"{source} holds {held}, which an HTTP header cannot carry")
 
 
 class AutoBrowserError(Exception):
@@ -100,8 +117,12 @@ class AutoBrowserClient:
         self.base_url = base_url.rstrip("/")
         self._headers: dict[str, str] = dict(headers or {})
         token = token.strip() if token else None
+        if token:
+            _refuse_unsendable(token, "token")
         if not token and token_file is not None:
             token = _read_token_file(token_file)
+        # An error's detail never shows it, nor the base URL's secrets (R5C-20).
+        self._token = token
         if token:
             self._headers["Authorization"] = f"Bearer {token}"
         if operator_id:
@@ -167,8 +188,7 @@ class AutoBrowserClient:
             self._async_client = self._new_async_client()
         return self._async_client
 
-    @staticmethod
-    def _raise(r: httpx.Response) -> None:
+    def _raise(self, r: httpx.Response) -> None:
         if r.status_code >= 400:
             try:
                 detail = r.json()
@@ -181,7 +201,9 @@ class AutoBrowserClient:
                     # of a streaming endpoint are expected to read the body first
                     # (see stream_events), but fall back cleanly if one doesn't.
                     detail = f"<unreadable response body, status {r.status_code}>"
-            raise AutoBrowserError(r.status_code, detail)
+            # A proxy's or a gateway's detail can quote the URL or the token: kept from the error as the MCP bridges
+            # keep them from an answer, its shape kept (R5C-20).
+            raise AutoBrowserError(r.status_code, _redacted_value(detail, self.base_url, self._token))
 
     def _get(self, path: str, **params) -> Any:
         r = self._client().get(path, params=params)
