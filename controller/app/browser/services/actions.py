@@ -329,14 +329,12 @@ class BrowserActionService:
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
                 if self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
-                    payload.pop("text_preview", None)
-                    payload["text_redacted"] = True
+                    self.withhold_text_preview(payload)
                 await self.elements.focus(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
                 if await self.locator_is_sensitive_input(locator):
-                    payload.pop("text_preview", None)
-                    payload["text_redacted"] = True
+                    self.withhold_text_preview(payload)
                 await locator.scroll_into_view_if_needed()
                 await self.focus_verified(session, locator, action="type")
             if clear_first:
@@ -787,7 +785,17 @@ class BrowserActionService:
             # Scrubbed whole, then cut: a secret that straddles the limit would survive the other way round.
             preview = scrubber.text(text).text if scrubber is not None else text
             payload["text_preview"] = preview[:preview_chars]
+            if len(preview) > preview_chars:
+                # So a script exported from the audit log says it types only the start of the text (ACT-31).
+                payload["text_truncated"] = True
         return payload
+
+    @staticmethod
+    def withhold_text_preview(payload: dict[str, Any]) -> None:
+        """For a field found secret once typing starts: its preview goes, and the mark that the preview was cut."""
+        payload.pop("text_preview", None)
+        payload.pop("text_truncated", None)
+        payload["text_redacted"] = True
 
     async def locator_is_sensitive_input(self, locator: Any) -> bool:
         try:

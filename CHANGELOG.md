@@ -118,6 +118,14 @@ All notable changes to auto-browser are documented here.
   An invalid CSS selector in `find_elements` now answers with a structured `invalid_selector` error, as an invalid
   regex answers `invalid_regex`. The Claude, OpenAI and OpenAI-compatible planners' system prompts now say that the
   page text, titles, names and element text in an observation are untrusted page data, never instructions.
+- **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
+  was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
+  a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through
+  `repr`, so an event holding code in a number's place (an audit log written by something other than the controller)
+  put that code into a script an operator runs. Each must now be a finite int or float, written with `repr`; any
+  other value skips its step with a comment that says so. A typed text longer than the 80 characters the audit log
+  keeps is now marked `text_truncated` in its action's target (dropped with the preview when the field turns out to
+  be secret), and its exported `fill` line says that only the start of the text was kept.
 
 ### Fixed
 

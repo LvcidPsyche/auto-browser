@@ -204,6 +204,17 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
 
+    async def test_a_long_text_typed_into_a_password_field_leaves_no_trace_of_its_preview(self) -> None:
+        # The preview of a field found secret only when typing starts goes, and so does the mark that it was cut.
+        self.session.page.locators["#password"] = FakeLocator("#password", attributes={"type": "password"})
+
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            result = await self.manager.type("session-1", selector="#password", text="s" * 100)
+
+        self.assertTrue(result["target"]["text_redacted"])
+        self.assertNotIn("text_preview", result["target"])
+        self.assertNotIn("text_truncated", result["target"])
+
     async def test_an_upload_of_a_missing_file_fails_before_asking_for_approval(self) -> None:
         # execute_action asked the operator to approve the upload first, so the
         # approval was for an upload that could only fail once granted.

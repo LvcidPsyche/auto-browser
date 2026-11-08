@@ -112,6 +112,18 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
         )
         self.assertEqual(visible["text_preview"], "playwright")
 
+    def test_text_target_payload_says_when_the_preview_is_cut(self) -> None:
+        # ACT-31: the exported script typed the preview as if it were the whole text.
+        def payload(text: str) -> dict:
+            return BrowserActionService.text_target_payload(
+                {"selector": "#note"}, text, clear_first=True, sensitive=False, preview_chars=80
+            )
+
+        cut, whole = payload("x" * 81), payload("x" * 80)
+
+        self.assertEqual((cut["text_preview"], cut.get("text_truncated")), ("x" * 80, True))
+        self.assertNotIn("text_truncated", whole)
+
 
 class FakeDownload:
     def __init__(self, suggested_filename: str, url: str, content: str = "downloaded") -> None:

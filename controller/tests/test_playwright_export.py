@@ -79,6 +79,37 @@ class PlaywrightExportHelperTests(unittest.TestCase):
             "# text was marked sensitive and redacted\n",
         )
 
+    def test_a_number_field_holding_anything_but_a_number_is_never_written_into_the_script(self) -> None:
+        """ACT-31: x, y, the scroll amounts and wait_ms went into the script as they were, unlike every string (written
+        with repr), so a target holding code where a number belongs wrote that code into a script an operator runs."""
+        code = "1); __import__('os').system('id'); ("
+        cases = [
+            ("click", {"mode": "coordinates", "x": code, "y": 20}, "numeric coordinates"),
+            ("hover", {"mode": "coordinates", "x": 30, "y": code}, "numeric coordinates"),
+            ("click", {"mode": "coordinates", "x": float("inf"), "y": 20}, "numeric coordinates"),
+            ("scroll", {"delta_x": code, "delta_y": 30}, "numeric scroll amounts"),
+            ("scroll", {"delta_x": 2, "delta_y": float("nan")}, "numeric scroll amounts"),
+            ("wait", {"wait_ms": code}, "numeric wait time"),
+            ("wait", {"wait_ms": True}, "numeric wait time"),
+        ]
+
+        for action, target, missing in cases:
+            with self.subTest(action=action, target=target):
+                self.assertEqual(
+                    _action_to_code(action, {"target": target}),
+                    f"# skipped {action}: the audit event has no {missing}\n",
+                )
+
+    def test_a_typed_text_cut_to_its_preview_says_so(self) -> None:
+        """ACT-31: the audit log keeps only the start of a long text, which the script typed as if it were all."""
+        target = {"selector": "#note", "text_preview": "draft", "text_truncated": True, "clear_first": False}
+
+        self.assertEqual(
+            _action_to_code("type", {"target": target}),
+            "page.locator('#note').first.fill('draft')  # the audit log kept only the start of the text typed: "
+            "complete it\n",
+        )
+
     def test_build_script_includes_header_and_skips_duplicate_start_navigation(self) -> None:
         script = build_script(
             "session-123",

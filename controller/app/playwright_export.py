@@ -19,6 +19,7 @@ Unsupported/skipped: observe, screenshot, approval management, tab switches.
 
 from __future__ import annotations
 
+import math
 import textwrap
 from datetime import datetime, timezone
 from typing import Any
@@ -92,6 +93,16 @@ def _skipped(action: str, missing: str) -> str:
     return f"# skipped {action}: the audit event has no {missing}\n"
 
 
+def _number(value: Any) -> int | float | None:
+    """``value`` if it is a finite int or float (written with repr, as strings are), else None.
+
+    Anything else in a number's place would be written into the script as code (ACT-31).
+    """
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    return value
+
+
 def _locator(target: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
     """The locator expression for a selector target, with the notes that belong on every line using it."""
     selector = target.get("selector")
@@ -125,11 +136,11 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
 
     if action in {"click", "hover"}:
         if target.get("mode") == "coordinates":
-            x, y = target.get("x"), target.get("y")
+            x, y = _number(target.get("x")), _number(target.get("y"))
             if x is None or y is None:
-                return _skipped(action, "coordinates")
+                return _skipped(action, "numeric coordinates")
             call = "mouse.click" if action == "click" else "mouse.move"
-            return f"page.{call}({x}, {y})\n"
+            return f"page.{call}({x!r}, {y!r})\n"
         located = _locator(target)
         if located is None:
             return _skipped(action, "selector")
@@ -148,6 +159,8 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
         else:
             text = target.get("text_preview", "")
             fill_notes = notes
+            if target.get("text_truncated"):
+                fill_notes = (*notes, "the audit log kept only the start of the text typed: complete it")
         lines = ""
         if target.get("clear_first", True):
             lines += _line(f"{loc}.clear()", *notes)
@@ -160,10 +173,16 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
         return f"page.keyboard.press({key!r})\n"
 
     if action == "scroll":
-        return f"page.mouse.wheel({target.get('delta_x', 0)}, {target.get('delta_y', 0)})\n"
+        delta_x, delta_y = _number(target.get("delta_x", 0)), _number(target.get("delta_y", 0))
+        if delta_x is None or delta_y is None:
+            return _skipped(action, "numeric scroll amounts")
+        return f"page.mouse.wheel({delta_x!r}, {delta_y!r})\n"
 
     if action == "wait":
-        return f"page.wait_for_timeout({target.get('wait_ms', 1000)})\n"
+        wait_ms = _number(target.get("wait_ms", 1000))
+        if wait_ms is None:
+            return _skipped(action, "numeric wait time")
+        return f"page.wait_for_timeout({wait_ms!r})\n"
 
     if action == "reload":
         return "page.reload()\n"
