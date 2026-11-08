@@ -90,6 +90,10 @@ _USERINFO_RUN = re.compile(r"""(?:(?<![^\s'"@])|(?<=//))[^\s'"/@]*@""")
 # A query value this long or longer is redacted on its own too, as a server's detail can quote one without its key; a
 # shorter one (a page number, a flag) would cut words out of every answer (R5C-20).
 _SHORTEST_REDACTED_QUERY_VALUE = 8
+# How deep _redacted_value walks a server's JSON. JSON parses deeper than Python's recursion limit lets a walk go, and
+# the walk's RecursionError ended the bridge with no answer (review of c4); a value deeper than this is replaced.
+_REDACTED_DEPTH_MAX = 100
+_TOO_DEEP = "[redacted: nested too deep]"
 
 
 class InvalidControllerURL(InvalidURL):
@@ -186,15 +190,21 @@ def _basic_credentials(userinfo: str) -> str:
     return base64.b64encode(f"{user}:{password}".encode("utf-8", "surrogatepass")).decode("ascii")
 
 
-def _redacted_value(value: Any, url: str | tuple[str, ...], token: str | None = None) -> Any:
+def _redacted_value(value: Any, url: str | tuple[str, ...], token: str | None = None, *, _depth: int = 0) -> Any:
     """``value``, a server's error detail as JSON parsed it, with each string in it (keys too) through ``_redacted``
-    and each number that is one of the secrets replaced, its shape kept (R5C-20)."""
+    and each number that is one of the secrets replaced, its shape kept (R5C-20). A list or an object more than
+    _REDACTED_DEPTH_MAX deep is replaced by _TOO_DEEP, not walked."""
     if isinstance(value, str):
         return _redacted(value, url, token)
+    if isinstance(value, (dict, list)) and _depth >= _REDACTED_DEPTH_MAX:
+        return _TOO_DEEP
     if isinstance(value, dict):
-        return {_redacted(str(key), url, token): _redacted_value(item, url, token) for key, item in value.items()}
+        return {
+            _redacted(str(key), url, token): _redacted_value(item, url, token, _depth=_depth + 1)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_redacted_value(item, url, token) for item in value]
+        return [_redacted_value(item, url, token, _depth=_depth + 1) for item in value]
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value if _redacted(str(value), url, token) == str(value) else "[redacted]"
     return value

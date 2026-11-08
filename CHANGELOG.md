@@ -48,8 +48,10 @@ All notable changes to auto-browser are documented here.
   each query value of 8 or more characters, in each of those forms; a structured detail is shown as JSON after its
   strings are redacted; a forwarded JSON-RPC error's message and its data are redacted, the data keeping its shape (a
   result is never rewritten); and the line a bridge prints on stderr for an unexpected failure is redacted as its
-  answer is. A short secret is no longer replaced again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`)
-  is no longer read as a userinfo and dropped.
+  answer is. A list or an object nested more than 100 deep in a detail or the data is replaced by `[redacted: nested
+  too deep]`, not walked, since a walk that deep ran out of stack and ended the bridge with no answer. A short secret
+  is no longer replaced again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a
+  userinfo and dropped.
 - **The Python client's and the LangChain tools' errors no longer show the bearer token or a secret of the controller
   URL.** The client's `AutoBrowserError` quoted a server's error detail as it came, so a proxy's or gateway's detail
   that echoed the base URL (its password, a token in its query) or the bearer token was shown whole; its `detail` and
