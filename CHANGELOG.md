@@ -66,8 +66,9 @@ All notable changes to auto-browser are documented here.
   httpx writes it again for the parameters it now goes as (a space as `+`), in the client's each of its `name=value`
   pairs alone too (a request's own parameter replaces one of the same name, so the query is then not sent whole), and
   so do the `Authorization: Basic` credentials httpx sends for the URL's user name and password (their base64); the
-  MCP bridges, which share the client's redaction, send no such header. httpx itself still logs every request at INFO on its `httpx` logger, naming
-  the URL as sent (userinfo, query and fragment included) and the server's reason phrase: the packages do not own that
+  MCP bridges, which share the client's redaction, send no such header. httpx itself still logs every request at INFO
+  on its `httpx` logger, naming the URL as sent (userinfo, query and fragment included) and the server's reason
+  phrase: the packages do not own that
   logger, and a filter added at import would change the logging of everything else in the process, so they leave it
   alone, and their READMEs now say to keep a secret in the token, not in the base URL. A tool's own error (`isError`),
   which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the controller sent it, as the MCP
