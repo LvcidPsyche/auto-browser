@@ -1076,6 +1076,28 @@ def test_r5c_20_a_forwarded_json_rpc_errors_message_is_shown_without_secrets_and
     assert _reply_through_the_bridge(base_url, recording_proxy) == result
 
 
+def test_r5c_20_a_forwarded_json_rpc_errors_data_is_shown_without_secrets(recording_proxy) -> None:
+    # c4: only the message was redacted, and a proxy or gateway can quote the URL or the token in the data too, which
+    # an agent reads as well. Its shape is kept, a number that is not a secret too.
+    base_url = "http://controller.invalid/mcp?key=sentinel-0123"
+    data = {"upstream": base_url, "auth": f"Bearer {MARKER}", "tried": ["sentinel-0123", 2], "n": 7}
+    error = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "upstream refused", "data": data}}
+    recording_proxy.answer = (200, json.dumps(error).encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge(base_url, recording_proxy)
+
+    assert reply["error"] == {
+        "code": -32001,
+        "message": "upstream refused",
+        "data": {
+            "upstream": "http://controller.invalid/mcp?[redacted]",
+            "auth": "Bearer [redacted]",
+            "tried": ["[redacted]", 2],
+            "n": 7,
+        },
+    }
+
+
 def test_r5c_20_the_unexpected_failure_on_stderr_never_shows_the_urls_secrets_or_the_token(monkeypatch) -> None:
     # The answer went through _shown; the line the bridge printed on stderr showed the error's text as it came.
     import auto_browser_client.mcp_bridge as bridge

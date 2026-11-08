@@ -628,20 +628,25 @@ class StdioMcpBridge:
             # they carried no id, so the client never saw a response to its
             # request and hung without learning why.
             return self._jsonrpc_error(request_id, -32000, self._http_error_message(response))
-        body = self._with_error_message_shown(response.body)
+        body = self._with_error_shown(response.body)
         if method == "initialize":
             return self._without_resource_subscribe(body)
         return body
 
-    def _with_error_message_shown(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``body``, a JSON-RPC answer forwarded to the agent, with its error's message shown as the bridges' own
-        answers are (R5C-20): a proxy, an MCP gateway or the controller can quote the URL or the token there.
-        Everything else, and a result, goes as it came."""
+    def _with_error_shown(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``body``, a JSON-RPC answer forwarded to the agent, with its error's message and data shown as the bridges'
+        own answers are (R5C-20; the data since c4): a proxy, an MCP gateway or the controller can quote the URL or
+        the token in either. The data keeps its shape (``_redacted_value``). Everything else, and a result, goes as
+        it came."""
         error = body.get("error")
-        message = error.get("message") if isinstance(error, dict) else None
-        if not isinstance(message, str) or self._shown(message) == message:
+        if not isinstance(error, dict):
             return body
-        return {**body, "error": {**error, "message": self._shown(message)}}
+        shown = dict(error)
+        if isinstance(error.get("message"), str):
+            shown["message"] = self._shown(error["message"])
+        if "data" in error:
+            shown["data"] = _redacted_value(error["data"], *self._secrets())
+        return body if shown == error else {**body, "error": shown}
 
     @staticmethod
     def _without_resource_subscribe(body: dict[str, Any]) -> dict[str, Any]:
