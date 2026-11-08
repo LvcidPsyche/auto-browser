@@ -226,15 +226,20 @@ All notable changes to auto-browser are documented here.
   http.client's error. It is now refused before anything is sent, with a fixed reason, as a path or query holding a
   space or a control character has been since 1.16.0; such a fragment is refused for a loopback controller too, which
   urllib reached directly without sending the fragment, so a URL like that which worked must drop or percent-encode
-  it. The bridges also refuse a host or userinfo holding a character http.client cannot send (outside ASCII in the
-  request line an environment proxy gets, outside latin-1 in the `Host` header), which they answered as that failure,
-  naming the character and its position. The bridges' openers now handle only `http://` and `https://`:
-  urllib's default handlers, which they kept, answer a `file:`, `data:` or `ftp:` request from a local file, the URL
-  itself or an FTP server, and an environment proxy of such a scheme turns a request into one. Nor do they take an
-  environment proxy for another scheme any more: with `ftp_proxy` set, urllib sent an `ftp://` URL to that proxy as
-  an HTTP request, bearer token included, and took its answer as the controller's. The bridges' `urlopen` itself now
-  refuses a URL that is not `http://` or `https://` with a host, as an invalid controller URL, before an opener is
-  chosen, as their own requests have been refused since 1.16.0.
+  it. Both also refuse a host or userinfo holding a character http.client cannot send (outside ASCII in the request
+  line an environment proxy gets, outside latin-1 in the `Host` header), which the bridges answered as that failure,
+  naming the character and its position, and agent_eval failed on with http.client's error. The bridges' openers now
+  handle only `http://` and `https://`: urllib's default handlers, which they kept, answer a `file:`, `data:` or
+  `ftp:` request from a local file, the URL itself or an FTP server, and an environment proxy of such a scheme turns a
+  request into one. Nor do they take an environment proxy for another scheme any more: with `ftp_proxy` set, urllib
+  sent an `ftp://` URL to that proxy as an HTTP request, bearer token included, and took its answer as the
+  controller's. The bridges' `urlopen` itself now refuses a URL that is not `http://` or `https://` with a host, as an
+  invalid controller URL, before an opener is chosen, as their own requests have been refused since 1.16.0. agent_eval
+  built openers of its own with urllib's `build_opener`, which kept all of those handlers and that proxy (its
+  `--execute` sent an `ftp://` base URL's requests, token included, to an `ftp_proxy`); it now opens through the
+  bridges' `urlopen`, so it follows each of these rules, and a base URL that is not `http://` or `https://` with a
+  host (`localhost:8000`), which failed with urllib's "unknown url type" error, is refused as an invalid controller
+  URL too.
 
 ### Changed
 

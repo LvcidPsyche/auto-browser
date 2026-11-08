@@ -88,9 +88,9 @@ class AgentEvalProxyTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return server
 
-    def _post_raw(self, base_url: str) -> subprocess.CompletedProcess:
+    def _post_raw(self, base_url: str, proxy_variable: str = "http_proxy") -> subprocess.CompletedProcess:
         proxy_url = f"http://127.0.0.1:{self.proxy.server_port}"
-        env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
+        env = {proxy_variable: proxy_url, proxy_variable.upper(): proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
         for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
             if name in os.environ:
                 env[name] = os.environ[name]
@@ -271,15 +271,44 @@ class AgentEvalProxyTests(unittest.TestCase):
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
         self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
-    def test_w10_14_a_host_less_base_url_fails_with_urllibs_own_error(self) -> None:
-        # The bridges refuse a host-less URL before _goes_direct since W15-3, so only agent_eval still reaches its
-        # request.host-None branch: urllib's own error, not a TypeError from "//" + None, with nothing sent.
-        result = self._post_raw("localhost:8000")
+    def test_w10_14_a_host_less_base_url_is_refused_as_an_invalid_controller_url(self) -> None:
+        # agent_eval opens through the bridges' urlopen (c4), which refuses a URL that is not http:// or https:// with
+        # a host before any opener is chosen; urllib's own "unknown url type" error, not a TypeError from "//" + None,
+        # was the answer before. Nothing is sent.
+        for base_url in ("localhost:8000", "http:8000"):
+            with self.subTest(base_url=base_url):
+                result = self._post_raw(base_url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "app.mcp_stdio.InvalidControllerURL: it is not an http:// or https:// URL with a host",
+                    result.stderr,
+                )
+                self.assertNotIn("TypeError", result.stderr)
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
+
+    def test_r5c_28_a_url_of_a_scheme_an_environment_proxy_names_never_goes_to_that_proxy(self) -> None:
+        # c4: agent_eval built its own openers with urllib's build_opener, whose ProxyHandler turned an ftp:// request
+        # into an http one to the ftp_proxy, bearer token included, and took its answer as the controller's.
+        result = self._post_raw("ftp://controller.invalid:8000", proxy_variable="ftp_proxy")
+
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unknown url type", result.stderr)
-        self.assertNotIn("TypeError", result.stderr)
+        self.assertIn(
+            "app.mcp_stdio.InvalidControllerURL: it is not an http:// or https:// URL with a host", result.stderr
+        )
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
-        self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
+
+    def test_r5c_28_a_host_a_proxy_cannot_get_is_refused_as_an_invalid_controller_url(self) -> None:
+        # c3 left agent_eval failing with http.client's UnicodeEncodeError for a host outside ASCII behind a proxy,
+        # where the bridges answer it as an invalid controller URL; it opens through their urlopen now (c4).
+        result = self._post_raw("http://contr" + chr(0xF4) + "leur.invalid:8000")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "app.mcp_stdio.InvalidControllerURL: its host or userinfo holds a character http.client cannot send",
+            result.stderr,
+        )
+        self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
 
     def test_w15_8_an_empty_host_is_refused(self) -> None:
         # Codex R01: no reading finds a local host in an empty one, so the Authorization header went to the proxy.
