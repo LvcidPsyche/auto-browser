@@ -137,6 +137,10 @@ All notable changes to auto-browser are documented here.
   and whichever finished last replaced the profile the other had just been given. Saves of one name now run one at
   a time, from the owner check until the files are in place, so the second sees the first's owner and is refused.
   An import with `overwrite` still checks the owner outside that lock.
+- **The scripts refuse a controller address with an empty bracketed host.** 1.16.0's check refused a base URL whose
+  host is empty (`http://:8000/`) but passed one whose host is an empty pair of brackets, `http://[]:8000/`,
+  `http://[]/` or `http://[/`, and left it to curl, which refuses the first two and reads the third as a glob. The
+  scripts now refuse all three before curl runs, as a host that is not a plain host name or address.
 - **The raw CDP route checks what it is sent, and a DOM read no longer returns a typed password.**
   `POST /sessions/{id}/cdp/raw` took its `method` and `params` as they came: a `method` that was a list raised a
   `TypeError` in the allowlist check (a 500), and `params` went to the browser whatever their names and types. A

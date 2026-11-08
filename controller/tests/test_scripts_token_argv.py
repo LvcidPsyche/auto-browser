@@ -380,6 +380,10 @@ UNPLAIN_BASE_URLS = (
     "http://[::ffff:127.0.0.2]:{port}/",
     "http://[::ffff:7f00:2]:{port}/",
     "http://[0:0:0:0:0:ffff:7f00:2]:{port}/",
+    # R5C-24: an empty bracketed host, left to curl, which refuses the first two and globs the third.
+    "http://[]:{port}/",
+    "http://[]/",
+    "http://[/",
 )
 PLAIN_HOST_MESSAGE = (
     "write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as a plain host name or address, such "
