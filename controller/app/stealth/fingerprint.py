@@ -106,19 +106,39 @@ class FingerprintConfig:
         window.chrome.app = window.chrome.app || {{}};
     }}
 
-    // 3. Canvas fingerprint noise — add deterministic per-pixel noise.
+    // 3. Canvas fingerprint noise: a shift of one up or down on each of a
+    // pixel's R, G and B (alpha is left alone), from a hash of the pixel's place
+    // on the canvas and the session's seed, so a pixel reads the same in any
+    // rectangle. It came from the seed and the byte index, a multiple of 4 at
+    // every red byte: every pixel got the same shift, on red only (NAV-24).
     // Patched once on the prototype: getContext('2d') returns the same context
     // every time, so wrapping the instance there stacked another layer of noise
     // (and another stack frame) on every call.
     const _noise_seed = {noise_seed};
+    const _seed_hash = Math.imul(_noise_seed, 0xC2B2AE3D);
     const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
         const imageData = _origGetImageData.apply(this, args);
         const data = imageData.data;
-        for (let i = 0; i < data.length; i += 4) {{
-            // Add ±1 noise based on pixel index + seed
-            const noise = ((_noise_seed ^ i) & 1) ? 1 : -1;
-            data[i] = Math.max(0, Math.min(255, data[i] + noise));
+        const width = imageData.width;
+        const height = imageData.height;
+        // The read's top left corner: a negative width or height reads to the left of or above (sx, sy).
+        const left = (args[0] | 0) + Math.min(args[2] | 0, 0);
+        const top = (args[1] | 0) + Math.min(args[3] | 0, 0);
+        let i = 0;
+        for (let row = 0; row < height; row++) {{
+            const rowHash = Math.imul(top + row, 0x85EBCA77) ^ _seed_hash;
+            for (let column = 0; column < width; column++, i += 4) {{
+                // MurmurHash3's finaliser over the place and the seed; bits 0, 1 and 2 pick R's, G's and B's shift.
+                let h = Math.imul(left + column, 0x9E3779B1) ^ rowHash;
+                h = Math.imul(h ^ (h >>> 16), 0x85EBCA6B);
+                h = Math.imul(h ^ (h >>> 13), 0xC2B2AE35);
+                h ^= h >>> 16;
+                // A Uint8ClampedArray: a shift past 0 or 255 stops there.
+                data[i] += (h & 1) * 2 - 1;
+                data[i + 1] += (h & 2) - 1;
+                data[i + 2] += ((h >>> 1) & 2) - 1;
+            }}
         }}
         return imageData;
     }};

@@ -369,6 +369,11 @@ All notable changes to auto-browser are documented here.
   `toDataURL` and `getContext`, and the `Function.prototype.toString` that masks them, now read as native code
   (`function toDataURL() { [native code] }`) with the native name and length; the script's WebGL `getParameter` and
   permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source.
+- **With `STEALTH_PROFILE=light`, a canvas read is noised per pixel and per colour channel.** The noise
+  `getImageData` adds came from the session's seed and the byte index, which is a multiple of 4 at every red byte, so
+  every pixel got the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of
+  a pixel's R, G and B now goes one up or one down by a hash of the pixel's place on the canvas and the session's
+  seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle.
 
 ### Changed
 

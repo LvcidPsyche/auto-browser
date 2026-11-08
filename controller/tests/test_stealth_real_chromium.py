@@ -250,13 +250,70 @@ READ_AFTER_TO_DATA_URL = """(calls) => {
 }"""
 
 
-def _expected_noised_pixels(config: FingerprintConfig) -> list[int]:
-    """What one pass of the noise makes of a 2x2 block of rgb(100, 100, 100)."""
-    pixels = []
-    for index in range(0, 16, 4):
-        noise = 1 if (config.canvas_noise_seed ^ index) & 1 else -1
-        pixels += [100 + noise, 100, 100, 255]
-    return pixels
+def _noised_once(pixels: list[int]) -> bool:
+    """Whether a read of rgb(100, 100, 100) is as one pass of the noise leaves it: R, G and B one off, alpha kept."""
+    colours = [value for index, value in enumerate(pixels) if index % 4 != 3]
+    return all(abs(value - 100) == 1 for value in colours) and pixels[3::4] == [255] * (len(pixels) // 4)
+
+
+# An 8x8 canvas of one colour read whole, then some of its pixels read again: one alone, a 2x2 block, and the same
+# block from its far corner (a negative width and height read up and to the left).
+READ_PIXELS_SEVERAL_WAYS = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8; canvas.height = 8;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 8, 8);
+  const read = (...rect) => Array.from(ctx.getImageData(...rect).data);
+  return { whole: read(0, 0, 8, 8), single: read(5, 3, 1, 1), block: read(4, 2, 2, 2), flipped: read(6, 4, -2, -2) };
+}"""
+OTHER_SESSION_ID = "another-canvas-noise-session"
+
+
+async def _read_on_fingerprinted_pages(script: str, *configs: FingerprintConfig) -> list:
+    """`script`'s answer on a page with each config's fingerprint script, one context each."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await _launch(playwright)
+        try:
+            seen = []
+            for config in configs:
+                context = await browser.new_context()
+                await context.add_init_script(config.init_script())
+                page = await context.new_page()
+                await page.goto(BLANK)
+                seen.append(await page.evaluate(script))
+                await context.close()
+            return seen
+        finally:
+            await browser.close()
+
+
+@requires_chromium
+def test_canvas_noise_differs_by_pixel_channel_and_seed_and_holds_for_a_pixel_however_it_is_read() -> None:
+    """NAV-24: the noise came from the seed and the byte index, a multiple of 4 at every red byte, so every pixel got
+    the same shift and only red changed: two possible outputs in all. Each of R, G and B now gets its own one-off shift
+    from a hash of the pixel's place on the canvas and the seed, so a pixel reads the same in any rectangle."""
+    config, other = FingerprintConfig(CANVAS_SESSION_ID, "light"), FingerprintConfig(OTHER_SESSION_ID, "light")
+    assert config.canvas_noise_seed != other.canvas_noise_seed
+
+    seen, seen_other = asyncio.run(_read_on_fingerprinted_pages(READ_PIXELS_SEVERAL_WAYS, config, other))
+
+    whole = seen["whole"]
+    assert _noised_once(whole), whole
+    shifts = [tuple(whole[index + channel] - 100 for index in range(0, len(whole), 4)) for channel in range(3)]
+    assert all(set(channel) == {-1, 1} for channel in shifts), shifts
+    assert len(set(shifts)) == 3, shifts
+
+    def pixel(x: int, y: int) -> list[int]:
+        start = (y * 8 + x) * 4
+        return whole[start : start + 4]
+
+    assert seen["single"] == pixel(5, 3)
+    assert seen["block"] == pixel(4, 2) + pixel(5, 2) + pixel(4, 3) + pixel(5, 3)
+    assert seen["flipped"] == seen["block"]
+    assert seen_other["whole"] != whole
 
 
 @requires_chromium
@@ -283,11 +340,10 @@ def test_canvas_noise_is_applied_once_however_often_getcontext_is_called() -> No
                 await browser.close()
 
     seen = asyncio.run(run())
-    expected = _expected_noised_pixels(config)
 
-    assert seen["after 1 call"] == expected
-    assert seen["after 1000 calls"] == expected
-    assert seen["after 25000 calls"] == expected
+    assert _noised_once(seen["after 1 call"]), seen
+    assert seen["after 1000 calls"] == seen["after 1 call"]
+    assert seen["after 25000 calls"] == seen["after 1 call"]
 
 
 @requires_chromium
@@ -346,4 +402,4 @@ def test_both_stealth_scripts_on_one_page_do_not_fight() -> None:
     assert patches["pluginCount"] == 3, patches
     assert patches["hardwareConcurrency"] == 8, patches
     # toDataURL must leave the canvas as it found it: one noise pass on read, no more.
-    assert canvas_after_exports == _expected_noised_pixels(config)
+    assert _noised_once(canvas_after_exports), canvas_after_exports
