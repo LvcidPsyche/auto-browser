@@ -124,6 +124,39 @@ class AuthProfileOwnershipTests(unittest.TestCase):
         state = json.loads((self.root / "profiles" / "shop" / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["cookies"], [{"value": "alice"}])
 
+    def test_saves_of_names_one_folder_holds_wait_for_each_other(self) -> None:
+        """Review of c5: the lock was keyed by the name as given, while Windows and macOS find "Shop", "shop" and (on
+        Windows) "shop." in one folder, so a save of one passed the owner check while a save of another was writing."""
+
+        async def scenario() -> list[bool]:
+            first_writing, first_may_write = asyncio.Event(), asyncio.Event()
+
+            async def write_storage_state(context: str, destination: Path) -> dict:
+                if context == "Shop":
+                    first_writing.set()
+                    await first_may_write.wait()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text("{}", encoding="utf-8")
+                return {"path": str(destination), "encrypted": False}
+
+            self.service.manager.auth_state.write_storage_state = write_storage_state
+
+            async def save(name: str) -> dict:
+                session = StubSession()
+                session.context = name
+                return await self.service.save_for_session(session, name)
+
+            first = asyncio.ensure_future(save("Shop"))
+            await first_writing.wait()
+            others = [asyncio.ensure_future(save(name)) for name in ("shop", "SHOP.")]
+            await asyncio.wait(others, timeout=0.5)
+            finished_while_the_first_wrote = [other.done() for other in others]
+            first_may_write.set()
+            await asyncio.gather(first, *others, return_exceptions=True)
+            return finished_while_the_first_wrote
+
+        self.assertEqual(asyncio.run(scenario()), [False, False])
+
     def test_a_proven_identity_is_stamped_as_the_owner(self) -> None:
         self.as_operator("alice")
         self.save("shared-login")

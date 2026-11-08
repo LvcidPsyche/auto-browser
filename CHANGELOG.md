@@ -138,8 +138,9 @@ All notable changes to auto-browser are documented here.
 - **Two operators saving one new auth profile name at once are no longer both told it worked.** A save checked the
   profile's owner before writing the browser state and put its files in place after, holding only its own
   session's lock, so a second operator's save of a name the first was still saving passed the check (no owner yet),
-  and whichever finished last replaced the profile the other had just been given. Saves of one name now run one at
-  a time, from the owner check until the files are in place, so the second sees the first's owner and is refused.
+  and whichever finished last replaced the profile the other had just been given. Saves of one name, or of names
+  that differ only in case or a trailing dot (one folder on Windows, and in case on macOS), now run one at a time,
+  from the owner check until the files are in place, so the second sees the first's owner and is refused.
   An import with `overwrite` still checks the owner outside that lock.
 - **The scripts refuse a controller address with an empty bracketed host.** 1.16.0's check refused a base URL whose
   host is empty (`http://:8000/`) but passed one whose host is an empty pair of brackets, `http://[]:8000/`,

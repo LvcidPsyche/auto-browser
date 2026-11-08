@@ -352,8 +352,9 @@ class BrowserAuthProfileService:
         normalized = self.normalize_name(profile_name)
         # One save of a name at a time, from its owner check until its files are in place (ACT-22): a save held only
         # its own session's lock, so a second operator's save of a name the first was saving passed the check (no
-        # owner yet) and one replaced the profile the other had just been given.
-        async with self._save_lock(normalized):
+        # owner yet) and one replaced the profile the other had just been given. Keyed as the filesystem compares
+        # names: Windows and macOS find "Shop", "shop" and (Windows) "shop." in one folder (review of c5).
+        async with self._save_lock(normalized.rstrip(".").casefold()):
             return await self._save_for_session(session, normalized, metadata)
 
     async def _save_for_session(
