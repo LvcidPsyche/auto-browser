@@ -958,6 +958,43 @@ def test_r5c_23_a_notification_gets_no_answer_when_the_controller_cannot_be_reac
     assert "sentinel" not in stderr.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("status", "said"),
+    [
+        (401, "Auto Browser controller returned HTTP 401: refused [redacted]"),
+        (503, "Empty or non-JSON response from Auto Browser MCP endpoint (503)"),
+        (202, None),
+    ],
+)
+def test_r5c_23_a_notification_the_controller_answers_with_an_http_error_is_reported_on_stderr(
+    status: int, said: str | None
+) -> None:
+    # c3's "not done": a notification the controller answered with an HTTP error (a 401 for a bad token, a 5xx) was
+    # dropped without a word, where one the controller never got is reported on stderr (R5C-23). It still gets no
+    # answer; one the controller accepted (202) prints nothing.
+    import app.mcp_stdio as bridge
+
+    controller = _serve()
+    body = json.dumps({"detail": "refused sentinel-0123"}).encode() if status == 401 else b""
+    controller.answer = (status, body)  # type: ignore[attr-defined]
+    stderr = io.StringIO()
+    try:
+        client = bridge.HttpMcpClient(base_url=f"http://127.0.0.1:{controller.server_port}/mcp?key=sentinel-0123")
+        reply = bridge.StdioMcpBridge(client=client, stderr=stderr)._handle_line(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        )
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert reply is None
+    if said is None:
+        assert stderr.getvalue() == ""
+    else:
+        assert stderr.getvalue().startswith(f"stdio bridge: {said}")
+    assert "sentinel" not in stderr.getvalue()
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]

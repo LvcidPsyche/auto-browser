@@ -219,7 +219,9 @@ All notable changes to auto-browser are documented here.
   `id`, such as `notifications/initialized`) sent while the controller was unreachable, with an invalid controller
   URL, or meeting an unexpected bridge failure got an error answer with `"id": null`, which a notification must never
   get and which matches no request the client sent. It now gets none, as when the controller answers it, and the
-  error goes to the bridge's stderr.
+  error goes to the bridge's stderr. A notification the controller refused with an HTTP error (a `401` for a bad
+  token, a `5xx`), which was dropped without a word, is now reported on stderr the same way, redacted as an answer
+  is; it still gets no answer.
 - **The MCP bridges and `scripts/agent_eval.py` refuse a controller URL http.client cannot send, as an invalid one.**
   A base URL whose path or query holds a character outside ASCII, or whose fragment holds a space, a control character
   or a character outside ASCII (urllib puts the fragment into the request line it sends an environment proxy), failed

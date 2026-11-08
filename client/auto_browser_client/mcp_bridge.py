@@ -621,6 +621,10 @@ class StdioMcpBridge:
                     self.protocol_version = version.strip()
 
         if payload.get("id") is None:
+            # A notification gets no answer, but one the controller refused (a 401 for a bad token, a 5xx) is said on
+            # stderr as _failed says one it never got (R5C-23), redacted as an answer is (c4).
+            if not 200 <= response.status_code < 300:
+                return self._failed(request_id, self._http_error_message(response))
             return None
         if not isinstance(response.body, dict) or "jsonrpc" not in response.body:
             # The HTTP layer's own errors (401 bad token, 400 missing operator
