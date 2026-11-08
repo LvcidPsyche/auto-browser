@@ -6,12 +6,12 @@ import os
 import secrets
 import shutil
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ... import events as _events
 from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
+from ...artifacts import in_thread_writing
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
 from ...pii_scrub import pii_words
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
@@ -137,8 +137,9 @@ def _discard_finished(capture: asyncio.Future) -> None:
 
 
 def _delete_when_done(capture: asyncio.Future, path: str) -> None:
-    """A capture, or a thread writing a staged file, whose read was cancelled: nothing checked what it writes, so the
-    file goes once it is written."""
+    """A capture whose read was cancelled: nothing checked what it writes, so the file goes once the capture is done. A
+    capture that is cancelled itself (a shutdown) ends before its write does, which then removes the file itself
+    (artifacts.in_thread_writing)."""
 
     def delete(finished: asyncio.Future) -> None:
         if not finished.cancelled() and finished.exception() is not None:
@@ -149,17 +150,6 @@ def _delete_when_done(capture: asyncio.Future, path: str) -> None:
         delete(capture)
     else:
         capture.add_done_callback(delete)
-
-
-async def _in_thread_writing(path: str, function: Callable[..., Any], *args: Any) -> Any:
-    """``function(*args)``, which writes ``path``, in a worker thread. A cancel does not stop the thread, so on one the
-    file goes once the thread is done: deleted at the cancel, it was written again after it (review of c4)."""
-    work = asyncio.ensure_future(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(work)
-    except asyncio.CancelledError:
-        _delete_when_done(work, path)
-        raise
 
 
 class BrowserObservationService:
@@ -473,7 +463,7 @@ class BrowserObservationService:
         # Staged, as a capture to be redacted is (ACT-33).
         copy = {**target, "path": _staging_path(target["path"]), "published_path": target["path"]}
         try:
-            await _in_thread_writing(copy["path"], shutil.copyfile, screenshot["path"], copy["path"])
+            await in_thread_writing(copy["path"], shutil.copyfile, screenshot["path"], copy["path"])
             ocr = await self.manager.ocr.extract_from_image(copy["path"])
             await self._scrub_screenshot_if_needed(session, copy, ocr)
             return _publish(copy)
@@ -520,8 +510,8 @@ class BrowserObservationService:
         read = start_read(self.manager, session)
         target = self.manager.artifacts.screenshot_target(session, label)
         written = {**target, "path": _staging_path(target["path"])} if staged else target
-        # A task, shielded from the read's cancellation: Playwright writes the image in a thread once it
-        # arrives, and cancelling the await does not stop that write.
+        # A task, shielded from the read's cancellation: the image is written in a worker thread once it arrives
+        # (artifacts.capture_screenshot), and cancelling the await does not stop that write.
         capture = asyncio.ensure_future(self.manager.artifacts.capture_screenshot(session, label, target=written))
         try:
             screenshot = await asyncio.shield(capture)
@@ -641,7 +631,7 @@ class BrowserObservationService:
             scrubbed_bytes, hits = await asyncio.to_thread(pii_scrubber.screenshot, raw_bytes, blocks)
             if hits:
                 # Not over the capture in place, which a write cut short left partly written (ACT-33).
-                await _in_thread_writing(
+                await in_thread_writing(
                     screenshot["path"], _write_through_temporary, screenshot["path"], scrubbed_bytes
                 )
         except Exception as exc:

@@ -89,10 +89,10 @@ All notable changes to auto-browser are documented here.
   a temporary file and `os.replace`), and only then moved onto the published name with `os.replace`; one with nothing
   to redact, or that could not be scrubbed (which its result says), is moved there as it is. A redaction that does
   not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name, and its hidden file
-  goes too, after any write to it a worker thread had begun, which a cancel does not stop. A staged screenshot
-  becomes the one that vision targeting (`take_screenshot=false`) and the compare tool reuse only once it is
-  published; until then they reuse the one before it. A screenshot that is not to be redacted (scrubbing off, or an
-  action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
+  goes too, after any write to it a worker thread had begun, which a cancel (a shutdown's too) does not stop. A
+  staged screenshot becomes the one that vision targeting (`take_screenshot=false`) and the compare tool reuse only
+  once it is published; until then they reuse the one before it. A screenshot that is not to be redacted (scrubbing
+  off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
 - **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so
   a CSV export of customers gave the agent every email address and SSN in it, while console messages and network
   bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the type its file name gives, as a
@@ -226,6 +226,12 @@ All notable changes to auto-browser are documented here.
   every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
   together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of
   the session's lock; it now waits for both, as the observation's other paired reads do, then raises the error.
+- **A screenshot capture cut off by a shutdown no longer leaves its image behind.** A capture whose read was
+  cancelled has its file removed once the capture ends, since nothing checked what it shows; but a shutdown cancels
+  the capture itself, which then ended before Playwright's write of the file (in a thread of Playwright's own) did,
+  so the image was written after its removal and stayed in the session's artifact directory. The controller now
+  writes the image Playwright returns, in a worker thread that removes the file itself when it ends after its
+  capture was cancelled.
 - **A click or key press that opens a tab is verified by it, and its result names the tab.** Observations and actions
   stay on the active tab, which a tab a page opens does not become, so a click on a link that opened a new tab changed
   nothing the action's verification compared and could read `verified: false`: an agent that retried opened a second

@@ -10,11 +10,12 @@ from app.artifacts import SessionArtifactService
 
 
 class FakePage:
-    async def screenshot(self, *, path: str, full_page: bool, type: str) -> None:  # noqa: A002 - Playwright's name
+    async def screenshot(self, *, full_page: bool, type: str, path: str | None = None) -> bytes:  # noqa: A002
+        # Playwright's names. The capture takes the bytes and writes them itself (review of c4b), so no path is given.
         self.path = path
         self.full_page = full_page
         self.type = type
-        Path(path).write_bytes(b"png")
+        return b"png"
 
 
 class SessionArtifactServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -39,7 +40,8 @@ class SessionArtifactServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue((artifact_dir / "downloads").is_dir())
             self.assertIn("-bad-label.png", screenshot["path"])
-            self.assertTrue(Path(screenshot["path"]).exists())
+            self.assertEqual(Path(screenshot["path"]).read_bytes(), b"png")
+            self.assertIsNone(page.path)
             self.assertFalse(page.full_page)
             self.assertEqual(page.type, "png")  # ACT-33: a staged capture's hidden name does not end in .png
             self.assertEqual(trace["trace_url"], "/artifacts/session-1/trace.zip")

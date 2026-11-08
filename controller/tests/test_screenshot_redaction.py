@@ -10,12 +10,15 @@ published name with os.replace; one with nothing to redact, or that could not be
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import os
 import shutil
 import threading
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -47,12 +50,15 @@ class _Page:
         self.release = asyncio.Event()
         self.release.set()
 
-    async def screenshot(self, *, path: str, full_page: bool, type: str = "png") -> bytes:  # noqa: A002
-        # Playwright's names; a hidden name does not end in .png, so the type is given, not read from it.
+    async def screenshot(self, *, full_page: bool, type: str = "png", path: str | None = None) -> bytes:  # noqa: A002
+        # As Playwright's does: the bytes are returned, and written to ``path`` when one is given, in an executor
+        # thread (its async_writefile). The type is given: a hidden name does not end in .png.
         assert type == "png"
         await self.release.wait()
-        Path(path).write_bytes(_png())
-        return b""
+        data = _png()
+        if path is not None:
+            await asyncio.get_running_loop().run_in_executor(None, Path(path).write_bytes, data)
+        return data
 
     async def title(self) -> str:
         return "Example"
@@ -314,3 +320,76 @@ async def test_a_capture_cancelled_while_written_leaves_no_hidden_file(tmp_path:
         await asyncio.sleep(0.01)
 
     assert list(session.artifact_dir.iterdir()) == []
+
+
+def _held(function: Callable[..., Any], started: threading.Event, release: threading.Event) -> Callable[..., Any]:
+    """``function``, held in its worker thread until ``release`` before it runs."""
+
+    def run(*args: Any) -> Any:
+        started.set()
+        release.wait(5)
+        return function(*args)
+
+    return run
+
+
+def _shut_down_during(read: Callable[[], Awaitable[Any]], started: threading.Event, release: threading.Event) -> None:
+    """``read()`` cancelled while a worker thread it began is held, then its event loop ended as a shutdown ends one:
+    asyncio.run cancels every task left, then waits for the executor's threads (released meanwhile)."""
+
+    async def main() -> None:
+        task = asyncio.ensure_future(read())
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        threading.Timer(0.2, release.set).start()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("step", ["redacted bytes", "compare copy"])
+def test_a_shutdown_while_a_thread_writes_the_hidden_file_leaves_none_behind(tmp_path: Path, step: str) -> None:
+    # Review of c4b (Codex 2): the hidden file went once the task awaiting the thread ended, and a shutdown cancels that
+    # task while the thread still writes, so the file was deleted, then written.
+    started, release = threading.Event(), threading.Event()
+    raw = tmp_path / "raw.png"
+    raw.write_bytes(_png())
+    services: list[tuple[BrowserObservationService, SimpleNamespace]] = []
+
+    def read() -> Awaitable[Any]:
+        service, session, _ = _service(tmp_path)
+        services.append((service, session))
+        if step == "redacted bytes":
+            return service.capture_screenshot(session.id)
+        return service.redacted_copy(session, {"path": str(raw), "url": "/artifacts/session-1/raw.png"}, "diff-a")
+
+    if step == "redacted bytes":
+        held = patch.object(
+            observation, "_write_through_temporary", _held(observation._write_through_temporary, started, release)
+        )
+    else:
+        held = patch.object(observation.shutil, "copyfile", _held(shutil.copyfile, started, release))
+    with held:
+        _shut_down_during(read, started, release)
+
+    assert list(services[0][1].artifact_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("staged", [True, False], ids=["staged", "not staged"])
+def test_a_shutdown_while_a_capture_is_written_leaves_no_file(tmp_path: Path, staged: bool) -> None:
+    # Review of c4b (Codex 2, the capture): Playwright wrote the image in an executor thread of its own, which nothing
+    # here could follow, so a shutdown that cancelled the capture deleted its file before that thread wrote it.
+    started, release = threading.Event(), threading.Event()
+    sessions: list[SimpleNamespace] = []
+
+    def read() -> Awaitable[Any]:
+        service, session, _ = _service(tmp_path)
+        service.manager.pii_scrubber = PiiScrubber(screenshot_enabled=staged, audit_report=False)
+        sessions.append(session)
+        return service.capture_screenshot(session.id)
+
+    with patch.object(Path, "write_bytes", _held(Path.write_bytes, started, release)):
+        _shut_down_during(read, started, release)
+
+    assert list(sessions[0].artifact_dir.iterdir()) == []
