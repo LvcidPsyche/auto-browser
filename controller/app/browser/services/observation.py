@@ -535,8 +535,9 @@ class BrowserObservationService:
         # it runs alongside the ARIA snapshot rather than after it: this is paid
         # before and after every action, and each round trip costs more when the
         # browser is a remote node. It runs in the controller's isolated world,
-        # which holds the focused element's id.
-        summary, accessibility_outline = await asyncio.gather(
+        # which holds the focused element's id. Settled together (ACT-29): plain gather raised the first error at
+        # once and left the other read running against the page after the caller let go of the session lock.
+        summary, accessibility_outline = await _gather_settled(
             self.manager.element_ids.evaluate(page, PAGE_SUMMARY_SCRIPT, text_limit),
             self.accessibility_outline(page),
         )

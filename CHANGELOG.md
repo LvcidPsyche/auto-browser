@@ -193,6 +193,10 @@ All notable changes to auto-browser are documented here.
   its contract) got the old one's result, and one retention removed got its directory back, holding only
   `drift.json`. The result is now written only while the directory still holds the candidate that was checked;
   otherwise it is returned with a note saying `drift.json` was not written.
+- **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that
+  every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
+  together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of
+  the session's lock; it now waits for both, as the observation's other paired reads do, then raises the error.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,
