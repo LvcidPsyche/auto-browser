@@ -175,9 +175,14 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("SECRET-NOTE", str(caught.exception))
         self.assertTrue((self.root / "broken.json").exists())
 
-    async def test_a_cancelled_save_finishes_its_write_before_a_delete_runs(self) -> None:
-        # Review of c4 (Codex 5): a save cancelled during its write let go of the lock while the write went on in its
-        # thread, so a delete ran first and the write then brought the profile back.
+    @staticmethod
+    async def _cancel(task: asyncio.Future, times: int) -> None:
+        # Each cancel lands before the next one is sent.
+        for _ in range(times):
+            task.cancel()
+            await asyncio.sleep(0.05)
+
+    async def _a_cancelled_save_finishes_its_write_before_a_delete_runs(self, cancels: int) -> None:
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         write = memory_manager.atomic_write_text
 
@@ -192,7 +197,7 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(memory_manager, "atomic_write_text", paused):
             saving = asyncio.ensure_future(self.manager.save("kept", notes=["more"]))
             self.assertTrue(await asyncio.to_thread(started.wait, 5))
-            saving.cancel()
+            await self._cancel(saving, cancels)
             deleting = asyncio.ensure_future(self.manager.delete("kept"))
             await asyncio.sleep(0.2)
             release.set()
@@ -203,9 +208,7 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse((self.root / "kept.json").exists())
 
-    async def test_a_cancelled_delete_finishes_its_unlink_before_a_save_runs(self) -> None:
-        # The other way round: the delete let go of the lock, a save read the profile and wrote it, and the unlink then
-        # removed what the save had just written.
+    async def _a_cancelled_delete_finishes_its_unlink_before_a_save_runs(self, cancels: int) -> None:
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         unlink = Path.unlink
 
@@ -222,7 +225,7 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(Path, "unlink", paused):
             deleting = asyncio.ensure_future(self.manager.delete("kept"))
             self.assertTrue(await asyncio.to_thread(started.wait, 5))
-            deleting.cancel()
+            await self._cancel(deleting, cancels)
             saving = asyncio.ensure_future(self.manager.save("kept", notes=["after"]))
             await asyncio.sleep(0.2)
             release.set()
@@ -233,6 +236,23 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(profile.notes, ["after"])
         self.assertTrue((self.root / "kept.json").exists())
+
+    async def test_a_cancelled_save_finishes_its_write_before_a_delete_runs(self) -> None:
+        # Review of c4 (Codex 5): a save cancelled during its write let go of the lock while the write went on in its
+        # thread, so a delete ran first and the write then brought the profile back.
+        await self._a_cancelled_save_finishes_its_write_before_a_delete_runs(cancels=1)
+
+    async def test_a_cancelled_delete_finishes_its_unlink_before_a_save_runs(self) -> None:
+        # The other way round: the delete let go of the lock, a save read the profile and wrote it, and the unlink then
+        # removed what the save had just written.
+        await self._a_cancelled_delete_finishes_its_unlink_before_a_save_runs(cancels=1)
+
+    async def test_a_save_cancelled_twice_finishes_its_write_before_a_delete_runs(self) -> None:
+        # Review of c4b (Codex 1): the second cancel ended the wait for the thread that the first one began.
+        await self._a_cancelled_save_finishes_its_write_before_a_delete_runs(cancels=2)
+
+    async def test_a_delete_cancelled_twice_finishes_its_unlink_before_a_save_runs(self) -> None:
+        await self._a_cancelled_delete_finishes_its_unlink_before_a_save_runs(cancels=2)
 
     async def test_a_delete_waits_for_a_save_in_progress(self) -> None:
         async with self.manager._lock:
