@@ -20,9 +20,10 @@ All notable changes to auto-browser are documented here.
   package below them, however new: a build on 2026-11-06 took pydantic-core 2.50.4, uploaded the day before. The
   file is uv's universal resolution of both files for Python 3.11 and later, with its command and cutoff in its
   header. The host tests and the devcontainer install under it too, and CI's host tests hold what it does not pin,
-  the build backend of the editable install, to releases at least 72 hours old. The dependency audits, CI's and
-  `scripts/release_audit.py`'s, read the file as it is, so they check the versions the image installs, where they
-  resolved the top-level pins afresh. A requirements file moved to a release the file pins at another fails CI's
+  the build backend of the editable install, to releases at least 72 hours old. The dependency audits read the
+  file as it is, where they resolved the top-level pins afresh: CI's, on Linux and Python 3.11 as the image is,
+  checks the versions the image installs, and `scripts/release_audit.py`'s the versions the file gives the platform
+  and Python it runs on. A requirements file moved to a release the file pins at another fails CI's
   install until the file is generated again. The client and LangChain tests still take the newest release of each
   package, as those libraries' users do, but only one at least 72 hours old, their build backends included.
   Dependabot holds version updates three days, as its configuration now says. (R5C-14)

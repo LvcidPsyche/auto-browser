@@ -81,8 +81,9 @@ def main() -> int:
     _run([PYTHON, "scripts/fixture_eval.py"])
 
     print("Running Python dependency audit...")
-    # The tree controller/constraints.txt pins, as the image installs it, read as it is (R5C-14): a resolve would audit
-    # other versions, and first installs pip, wheel and setuptools unpinned.
+    # The tree controller/constraints.txt pins, read as it is (R5C-14): a resolve would audit other versions, and first
+    # installs pip, wheel and setuptools unpinned. pip-audit takes the lines whose markers match this host's platform
+    # and Python; CI's dependency-audit job reads the file on Linux and Python 3.11, as the image is.
     _run([PYTHON, "-m", "pip_audit", "-r", "controller/constraints.txt", "--disable-pip", "--no-deps"])
 
     print("Running browser-node production dependency audit...")
