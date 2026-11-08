@@ -94,6 +94,17 @@ def test_a_new_tab_alone_does_not_verify_typing_or_a_scroll(action: str) -> None
     assert verification["verified"] is False
 
 
+@pytest.mark.parametrize("action", ["wait", "reload"])
+def test_a_wait_or_a_reload_reports_nothing_verified(action: str) -> None:
+    # ACT-30: both read verified: true whatever the page did. A wait has nothing to verify, and a reload of a page
+    # that did not change leaves nothing to compare; the signals are still reported.
+    unchanged = BrowserActionService.action_verification(action, {}, PAGE, PAGE)
+    changed = BrowserActionService.action_verification(action, {}, PAGE, {**PAGE, "text_excerpt": "new"})
+
+    assert unchanged == {"verified": None, "signals": [], "target_seen_after": None}
+    assert changed == {"verified": None, "signals": ["text_excerpt_changed"], "target_seen_after": None}
+
+
 async def test_the_action_snapshot_counts_the_sessions_tabs(tmp_path: Path) -> None:
     manager = BrowserManager(_settings(tmp_path))
     manager.settings.pii_scrub_action_screenshots = False

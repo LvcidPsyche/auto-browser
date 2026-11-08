@@ -277,6 +277,11 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
+- **A `wait` or `reload` action now reports `verified: null` in its verification, not `true`.** Both read `true`
+  whatever the page did: a wait has nothing to verify, and a reload of a page that did not change leaves nothing to
+  compare. Its `signals` still say what changed. A caller that tests `verified` for truth now reads both as not
+  verified; the agent loop's no-progress check, which acts on `false` and otherwise compares the page before and
+  after, judges them as before.
 - **`MESH_TIMESTAMP_WINDOW` is now bounded: more than 0, and at most 250 seconds.** Any other value stops startup
   with "MESH_TIMESTAMP_WINDOW must be more than 0 and at most 250 seconds", as an unparseable one already did, with
   the mesh off too. The window had no limit, and a nonce is kept for up to two windows, so at the default request

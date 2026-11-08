@@ -1173,7 +1173,7 @@ class BrowserActionService:
         if delivery is not None:
             signals.append(f"upload_{delivery['outcome']}")
 
-        verified = bool(signals)
+        verified: bool | None = bool(signals)
         if action_name == "navigate":
             verified = "url_changed" in signals or "title_changed" in signals
         elif action_name in {"go_back", "go_forward"}:
@@ -1203,7 +1203,9 @@ class BrowserActionService:
                 {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)
             )
         elif action_name in {"wait", "reload"}:
-            verified = True
+            # Neither is verified either way (ACT-30): a wait has nothing to verify, and a reload of a page that did
+            # not change leaves nothing to compare. They read true before, whatever the page did.
+            verified = None
         elif action_name == "upload":
             # By element_id, whether the registered input holds the file; by selector, Playwright's word.
             verified = delivery is None or delivery["outcome"] == "confirmed"
