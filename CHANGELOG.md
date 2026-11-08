@@ -131,6 +131,12 @@ All notable changes to auto-browser are documented here.
   password, its query and fragment (which can carry an OAuth code or a token) and all of its length. It is now cut
   as the frames the report lists already were, to scheme, host, port and path, and capped like a URL; an address
   with no host (`data:`, `about:`) keeps its scheme and path.
+- **Two operators saving one new auth profile name at once are no longer both told it worked.** A save checked the
+  profile's owner before writing the browser state and put its files in place after, holding only its own
+  session's lock, so a second operator's save of a name the first was still saving passed the check (no owner yet),
+  and whichever finished last replaced the profile the other had just been given. Saves of one name now run one at
+  a time, from the owner check until the files are in place, so the second sees the first's owner and is refused.
+  An import with `overwrite` still checks the owner outside that lock.
 
 ### Fixed
 

@@ -85,6 +85,45 @@ class AuthProfileOwnershipTests(unittest.TestCase):
         metadata_path = self.root / "profiles" / profile_name / "profile.json"
         return json.loads(metadata_path.read_text(encoding="utf-8")).get("owner")
 
+    def test_two_operators_saving_one_new_name_at_once_cannot_both_have_it(self) -> None:
+        """ACT-22: a save checked the owner before its slow writes and put its files in place after them, holding only
+        its own session's lock, so bob's save of a name alice was saving passed the check (no owner yet) and alice's
+        then replaced the profile bob had just been given: each was told its save worked, and bob's login was gone."""
+
+        async def scenario() -> list:
+            alice_writing, alice_may_write = asyncio.Event(), asyncio.Event()
+
+            async def write_storage_state(context: str, destination: Path) -> dict:
+                if context == "alice":
+                    alice_writing.set()
+                    await alice_may_write.wait()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(json.dumps({"cookies": [{"value": context}]}), encoding="utf-8")
+                return {"path": str(destination), "encrypted": False}
+
+            self.service.manager.auth_state.write_storage_state = write_storage_state
+
+            async def save_as(operator_id: str) -> dict:
+                set_current_operator(operator_id, source="token")  # this task's own context
+                session = StubSession()
+                session.context = operator_id
+                return await self.service.save_for_session(session, "shop")
+
+            alice = asyncio.ensure_future(save_as("alice"))
+            await alice_writing.wait()
+            bob = asyncio.ensure_future(save_as("bob"))
+            await asyncio.wait({bob}, timeout=0.5)  # as far as bob's save gets while alice's is writing
+            alice_may_write.set()
+            return await asyncio.gather(alice, bob, return_exceptions=True)
+
+        alice_saved, bob_saved = asyncio.run(scenario())
+
+        self.assertEqual(alice_saved["profile_name"], "shop")
+        self.assertIsInstance(bob_saved, PermissionError)
+        self.assertEqual(self.owner_recorded("shop"), "alice")
+        state = json.loads((self.root / "profiles" / "shop" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["cookies"], [{"value": "alice"}])
+
     def test_a_proven_identity_is_stamped_as_the_owner(self) -> None:
         self.as_operator("alice")
         self.save("shared-login")
