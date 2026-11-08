@@ -378,38 +378,63 @@ def closed_port():
         yield probe.getsockname()[1]
 
 
+# How often the echo server's accept() wakes to see whether its test is over, and how long it waits on a connection it
+# accepted (R5C-31).
+_ECHO_POLL_SECONDS = 0.1
+_ECHO_READ_SECONDS = 10.0
+
+
+def _echo_request_line(connection: socket.socket) -> None:
+    with connection.makefile("rb") as stream:
+        request_line = stream.readline()
+        length = 0
+        while (header := stream.readline()) not in (b"\r\n", b""):
+            name, _, value = header.partition(b":")
+            if name.strip().lower() == b"content-length":
+                length = int(value)
+        # Read the body first: on Windows a socket closed with unread data resets.
+        stream.read(length)
+    connection.sendall(request_line.rstrip(b"\r\n") + b"\r\nContent-Length: 0\r\n\r\n")
+
+
 @pytest.fixture
 def request_line_echo():
     """A raw TCP server on 127.0.0.1 that answers each request with its own request line as the status line.
 
     http.client then raises BadStatusLine quoting that line, the URL's query included, which is not a URLError, so
-    the bridge answers with its unexpected-failure message (W15-1)."""
+    the bridge answers with its unexpected-failure message (W15-1). Its accept() and its reads are bounded, and its
+    worker is stopped and joined when the test ends (R5C-31): closing the listener from another thread does not
+    reliably wake a thread blocked in accept(), and a connection's reads had no bound."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
+    listener.settimeout(_ECHO_POLL_SECONDS)
+    stop = threading.Event()
 
     def answer() -> None:
-        while True:
+        while not stop.is_set():
             try:
                 connection, _ = listener.accept()
+            except TimeoutError:
+                continue
             except OSError:
                 return
-            with connection, connection.makefile("rb") as stream:
-                request_line = stream.readline()
-                length = 0
-                while (header := stream.readline()) not in (b"\r\n", b""):
-                    name, _, value = header.partition(b":")
-                    if name.strip().lower() == b"content-length":
-                        length = int(value)
-                # Read the body first: on Windows a socket closed with unread data resets.
-                stream.read(length)
-                connection.sendall(request_line.rstrip(b"\r\n") + b"\r\nContent-Length: 0\r\n\r\n")
+            with connection:
+                connection.settimeout(_ECHO_READ_SECONDS)
+                try:
+                    _echo_request_line(connection)
+                except OSError:  # a read that timed out, or a connection reset
+                    continue
 
-    threading.Thread(target=answer, daemon=True).start()
+    worker = threading.Thread(target=answer, daemon=True)
+    worker.start()
     try:
         yield listener.getsockname()[1]
     finally:
+        stop.set()
+        worker.join(_ECHO_READ_SECONDS + _ECHO_POLL_SECONDS + 5)
         listener.close()
+        assert not worker.is_alive(), "the request line echo server's worker did not stop"
 
 
 # Of test_w13_1's base URLs, the one answered with urllib's URLError, the answer that no controller is reachable;
