@@ -184,6 +184,153 @@ def test_an_export_that_throws_is_made_once_and_leaves_the_canvas_as_it_was() ->
     assert stealthy == native
 
 
+# Shared by the exports below: a 1x1 canvas holding rgb(100, 100, 100), a red of 200 drawn at its one pixel, and the
+# pixel an exported URL holds, read back from the PNG.
+EXPORT_HELPERS = """
+  const newCanvas = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgb(100, 100, 100)';
+    ctx.fillRect(0, 0, 1, 1);
+    return { canvas, ctx };
+  };
+  const drawRed200 = (ctx) => { ctx.fillStyle = 'rgb(200, 100, 100)'; ctx.fillRect(0, 0, 1, 1); };
+  const pixelOf = (ctx) => Array.from(ctx.getImageData(0, 0, 1, 1).data);
+  const exportedPixel = async (url) => {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const copy = document.createElement('canvas');
+    copy.width = 1; copy.height = 1;
+    const copyContext = copy.getContext('2d');
+    copyContext.drawImage(image, 0, 0);
+    return Array.from(copyContext.getImageData(0, 0, 1, 1).data);
+  };
+"""
+
+# A type whose toString draws at (0, 0) and then throws: the page's error, and what it drew is kept.
+EXPORT_TYPE_DRAWS_THEN_THROWS = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  let error = null;
+  try {
+    canvas.toDataURL({ toString() { drawRed200(ctx); throw new Error('bad type'); } });
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, pixel: pixelOf(ctx) };
+}"""
+)
+
+# A type whose toString draws at (0, 0) and returns a type: what it drew is kept, and the export shows it.
+EXPORT_TYPE_DRAWS_THEN_ANSWERS = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  const url = canvas.toDataURL({ toString() { drawRed200(ctx); return 'image/png'; } });
+  return { pixel: pixelOf(ctx), exported: await exportedPixel(url) };
+}"""
+)
+
+# A type that is a Symbol: a TypeError, as for any DOMString, and the canvas as it was.
+EXPORT_SYMBOL_TYPE = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  let error = null;
+  try {
+    canvas.toDataURL(Symbol('type'));
+  } catch (e) {
+    error = e.name;
+  }
+  return { error, pixel: pixelOf(ctx) };
+}"""
+)
+
+# A canvas with width and height accessors of its own that throw, which the native export never reads.
+EXPORT_WITH_OWN_THROWING_SIZE = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas } = newCanvas();
+  for (const name of ['width', 'height']) {
+    Object.defineProperty(canvas, name, { get() { throw new Error('own ' + name); } });
+  }
+  let error = null;
+  let exported = null;
+  try {
+    exported = await exportedPixel(canvas.toDataURL());
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, exported };
+}"""
+)
+
+# Not a canvas the patch gave a 2d context: the native's brand check comes before it converts the type.
+EXPORT_ON_A_NON_CANVAS = """() => {
+  let calls = 0;
+  let error = null;
+  try {
+    HTMLCanvasElement.prototype.toDataURL.call({}, { toString() { calls += 1; return 'image/png'; } });
+  } catch (e) {
+    error = e.name;
+  }
+  return { error, calls };
+}"""
+
+
+@requires_chromium
+def test_a_type_that_draws_then_throws_leaves_what_it_drew_and_the_pages_error() -> None:
+    """Review of c5 (Codex): the type's toString ran inside the native export, after the pixel was noised, and the
+    finally then put the old pixel back over what the page had drawn. The type is converted before the canvas is
+    touched now, so no page code runs between the change and its undoing."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_DRAWS_THEN_THROWS))
+
+    assert native == {"error": "bad type", "pixel": [200, 100, 100, 255]}, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_a_type_that_draws_then_answers_leaves_what_it_drew_and_the_export_shows_it() -> None:
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_DRAWS_THEN_ANSWERS))
+
+    assert native == {"pixel": [200, 100, 100, 255], "exported": [200, 100, 100, 255]}, native
+    # The export is noised as any other is, and the canvas is not.
+    assert stealthy == {"pixel": [200, 100, 100, 255], "exported": [201, 100, 100, 255]}, stealthy
+
+
+@requires_chromium
+def test_a_symbol_type_is_a_type_error_and_leaves_the_canvas_alone() -> None:
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_SYMBOL_TYPE))
+
+    assert native == {"error": "TypeError", "pixel": [100, 100, 100, 255]}, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_an_own_size_accessor_that_throws_does_not_stop_the_export() -> None:
+    """Review of c5 (Codex): the patch read this.width and this.height, which a page's own accessor can make throw
+    where the native export, which reads neither, does not. They are read through the prototype's getters now."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_WITH_OWN_THROWING_SIZE))
+
+    assert native == {"error": None, "exported": [100, 100, 100, 255]}, native
+    assert stealthy == {"error": None, "exported": [101, 100, 100, 255]}, stealthy
+
+
+@requires_chromium
+def test_an_export_on_a_non_canvas_is_refused_before_its_type_is_read() -> None:
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_ON_A_NON_CANVAS))
+
+    assert native == {"error": "TypeError", "calls": 0}, native
+    assert stealthy == native
+
+
 # A locator wait on an element that never appears fails after the default timeout.
 SESSION_TIMEOUT_MS = 700
 

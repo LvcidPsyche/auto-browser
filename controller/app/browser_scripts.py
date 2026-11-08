@@ -84,8 +84,13 @@ STEALTH_INIT_SCRIPT = r"""
     // noise; reading through that and writing the result back would change the
     // canvas a little more on every export.
     const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-    // And written back with the native putImageData, which a page cannot make throw or watch.
+    // And written back with the native putImageData. Capturing the methods fixes which functions the export calls: a
+    // page that replaces getImageData, putImageData or toDataURL afterwards does not change what it runs.
     const origPutImageData = CanvasRenderingContext2D.prototype.putImageData;
+    // The size is read through the prototype's getters: a canvas's own width accessor can throw where the native
+    // export, which reads no property of the canvas, does not.
+    const widthOf = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width').get;
+    const heightOf = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'height').get;
     const context2d = CanvasRenderingContext2D.prototype;
     const getPrototypeOf = Object.getPrototypeOf;
     const nativeToString = Function.prototype.toString;
@@ -102,9 +107,18 @@ STEALTH_INIT_SCRIPT = r"""
         return ctx;
       },
       toDataURL() {
+        // A receiver that is not a canvas given a 2d context goes straight to the native, whose brand check comes
+        // before it converts any argument.
+        if (!with2d.has(this)) return origToDataURL.apply(this, arguments);
+        // The arguments are converted before the canvas is changed, so no page code runs between the noise and its
+        // removal (a type's toString can draw, resize or throw), and the pixel is read after what it did. A template
+        // literal converts as the native's DOMString does, once, and throws a TypeError for a Symbol; an absent type
+        // stays absent; the quality is `any`, which the native does not convert.
+        const type = arguments[0] === undefined ? undefined : `${arguments[0]}`;
+        const quality = arguments[1];
         let ctx = null;
         let img = null;
-        if (with2d.has(this) && this.width > 0 && this.height > 0) {
+        if (widthOf.call(this) > 0 && heightOf.call(this) > 0) {
           try {
             ctx = origGetContext.call(this, '2d');
             img = origGetImageData.call(ctx, 0, 0, 1, 1);
@@ -114,11 +128,10 @@ STEALTH_INIT_SCRIPT = r"""
             img = null;
           }
         }
-        if (img === null) return origToDataURL.apply(this, arguments);
-        // Exported once, and the pixel put back whether that returns or throws (a type whose toString throws):
-        // a second export from a catch read the page's arguments again, with the noise left on the canvas.
+        if (img === null) return origToDataURL.call(this, type, quality);
+        // Exported once, and the pixel put back whether that returns or throws.
         try {
-          return origToDataURL.apply(this, arguments);
+          return origToDataURL.call(this, type, quality);
         } finally {
           img.data[0] ^= 1;
           origPutImageData.call(ctx, img, 0, 0);
