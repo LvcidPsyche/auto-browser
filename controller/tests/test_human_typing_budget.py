@@ -120,7 +120,7 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
             await self._type_past_the_deadline("\n\nx"), [("press", "Enter"), ("press", "Enter"), ("insert", "x")]
         )
 
-    async def test_a_keystroke_the_page_never_answers_is_a_retryable_error_not_a_hang(self) -> None:
+    async def test_a_keystroke_the_page_never_answers_is_an_error_not_to_retry_not_a_hang(self) -> None:
         async def never(*_args) -> None:
             await asyncio.Event().wait()
 
