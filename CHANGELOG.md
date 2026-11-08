@@ -199,6 +199,10 @@ All notable changes to auto-browser are documented here.
   `OCR_TIMEOUT_SECONDS` (new, default 20; a value at or below 0 stops startup), logged as a warning naming the
   setting, and counted as a failed OCR run (`ocr_extraction_failed`): a screenshot to be redacted then goes out
   unscrubbed, saying so, or is withheld under `PII_SCRUB_SCREENSHOT_STRICT`. `.env.example` lists the setting.
+- **An element's accessible name in an observation is capped at 200 characters.** The accessibility outline kept each
+  node's name whole, and decoded the whole quoted name first, so a page that gave an element a megabyte `aria-label`
+  put that megabyte into every observation and action snapshot that listed it or found it focused. A name is now cut
+  to 200 characters, as an element's text is, and only as much of it as gives those is decoded.
 - **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that
   every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
   together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of

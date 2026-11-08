@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import patch
 
 from playwright.async_api import Page
 
@@ -159,6 +160,38 @@ def test_past_the_node_limit_counts_focus_and_depth_are_unchanged() -> None:
         assert capped["role_counts"] == full["role_counts"], limit
         assert capped["focused"] == full["focused"], limit
         assert capped["nodes"] == full["nodes"][:limit], limit
+
+
+def test_a_long_name_is_capped_and_only_a_bounded_part_of_it_is_decoded() -> None:
+    # ACT-38: a page can name an element with a megabyte of text (an aria-label), and the outline decoded the whole
+    # name with json.loads and kept it whole in the node, and again as the focused node.
+    from app.browser import aria_outline
+
+    cap = aria_outline.ACCESSIBILITY_NAME_MAX
+    decoded: list[int] = []
+    loads = json.loads
+
+    def recording(text: str, *args: object, **kwargs: object) -> object:
+        decoded.append(len(text))
+        return loads(text, *args, **kwargs)
+
+    with patch.object(aria_outline.json, "loads", recording):
+        outline = outline_from_aria_snapshot(f'- button "{"n" * 1_000_000}" [active] [ref=e1]\n')
+
+    (node,) = outline["nodes"]
+    assert node["name"] == "n" * cap
+    assert outline["focused"]["name"] == "n" * cap
+    assert max(decoded) <= cap * 12 + 2, max(decoded)
+
+
+def test_a_long_name_cut_inside_an_escape_still_decodes() -> None:
+    # The bounded part ends wherever its length says, here inside a é: what the cut split is dropped, not
+    # shown as escaped text.
+    from app.browser.aria_outline import ACCESSIBILITY_NAME_MAX
+
+    outline = outline_from_aria_snapshot('- button "x' + "\\u00e9" * 1000 + '" [ref=e1]\n')
+
+    assert outline["nodes"][0]["name"] == "x" + chr(0xE9) * (ACCESSIBILITY_NAME_MAX - 1)
 
 
 def test_unknown_lines_are_ignored() -> None:
