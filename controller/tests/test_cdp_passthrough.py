@@ -44,6 +44,17 @@ class _FakeCDPSession:
         return value
 
 
+def _input(node_id: int, kind: str, typed: str, *, value_attribute: str | None = None) -> dict:
+    """An <input> as DOM.getDocument with `pierce` returns it: what was typed is its user-agent shadow root's text."""
+    attributes = ["type", kind, "id", f"field-{node_id}"]
+    if value_attribute is not None:
+        attributes += ["value", value_attribute]
+    text = {"nodeId": node_id + 3, "nodeType": 3, "nodeName": "#text", "nodeValue": typed}
+    editor = {"nodeId": node_id + 2, "nodeType": 1, "nodeName": "DIV", "nodeValue": "", "children": [text]}
+    root = {"nodeId": node_id + 1, "nodeType": 11, "shadowRootType": "user-agent", "children": [editor]}
+    return {"nodeId": node_id, "nodeType": 1, "nodeName": "INPUT", "attributes": attributes, "shadowRoots": [root]}
+
+
 class _FakeContext:
     def __init__(self, session: _FakeCDPSession) -> None:
         self.session = session
@@ -345,6 +356,72 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         for blocked in ("Runtime.evaluate", "Network.getCookies"):
             with self.assertRaisesRegex(ValueError, "not in the allowed list"):
                 await passthrough.raw_cdp_command(blocked, {"expression": "document.cookie"})
+
+    async def test_a_raw_command_takes_only_its_own_parameters_by_name_and_type(self) -> None:
+        # NAV-31: params went to the browser as the caller wrote them.
+        fake = _FakeCDPSession({"DOM.getDocument": {"root": {"nodeId": 1}}})
+        passthrough = CDPPassthrough(fake)
+        refused = [
+            ("DOM.getDocument", {"depth": 1, "other": 1}),
+            ("DOM.getDocument", {"depth": "1"}),
+            ("DOM.getDocument", {"depth": True}),
+            ("DOM.getDocument", {"pierce": 1}),
+            ("DOM.getDocument", {"depth": {"nested": {"deeper": 1}}}),
+            ("Performance.getMetrics", {"timestamp": 1}),
+        ]
+
+        for method, params in refused:
+            with self.subTest(method=method, params=params), self.assertRaises(cdp_passthrough.CDPParamsError):
+                await passthrough.raw_cdp_command(method, params)
+        self.assertEqual(fake.calls, [])
+
+        await passthrough.raw_cdp_command("DOM.getDocument", {"depth": -1, "pierce": True})
+        self.assertEqual(fake.calls, [("DOM.getDocument", {"depth": -1, "pierce": True})])
+
+    async def test_a_dom_read_blanks_what_a_password_field_holds_and_nothing_else(self) -> None:
+        """NAV-31: with `pierce`, DOM.getDocument returns each input's user-agent shadow root, whose text is what was
+        typed into it: for a password field, the password (the shape below is what Chromium returns)."""
+        document = {
+            "root": {
+                "nodeId": 1,
+                "nodeName": "#document",
+                "children": [
+                    _input(10, "password", "hunter2", value_attribute="prefilled-secret"),
+                    _input(20, " PassWord ", "hunter3"),
+                    _input(30, "text", "visible-text", value_attribute="visible-default"),
+                    {
+                        "nodeId": 40,
+                        "nodeName": "DIV",
+                        "attributes": ["id", "host"],
+                        "shadowRoots": [
+                            {"nodeId": 41, "shadowRootType": "open", "children": [_input(50, "password", "hunter4")]}
+                        ],
+                    },
+                ],
+            }
+        }
+        attributes = {"attributes": ["type", "password", "value", "prefilled-secret"]}
+        passthrough = CDPPassthrough(_FakeCDPSession({"DOM.getDocument": document, "DOM.getAttributes": attributes}))
+
+        read = json.dumps(await passthrough.raw_cdp_command("DOM.getDocument", {"depth": -1, "pierce": True}))
+        read_attributes = await passthrough.raw_cdp_command("DOM.getAttributes", {"nodeId": 10})
+
+        for secret in ("hunter2", "hunter3", "hunter4", "prefilled-secret"):
+            self.assertNotIn(secret, read)
+        self.assertIn('"nodeValue": "visible-text"', read)
+        self.assertIn('"value", "visible-default"', read)
+        self.assertEqual(read_attributes, {"attributes": ["type", "password", "value", ""]})
+
+    async def test_a_password_field_deep_in_the_tree_is_blanked_without_running_out_of_stack(self) -> None:
+        leaf = _input(1, "password", "hunter2")
+        tree: dict = leaf
+        for node_id in range(2, 5_002):
+            tree = {"nodeId": node_id, "nodeName": "DIV", "children": [tree]}
+        passthrough = CDPPassthrough(_FakeCDPSession({"DOM.getDocument": {"root": tree}}))
+
+        await passthrough.raw_cdp_command("DOM.getDocument", {"depth": -1, "pierce": True})
+
+        self.assertEqual(leaf["shadowRoots"][0]["children"][0]["children"][0]["nodeValue"], "")
 
     async def test_from_page_builds_passthrough_from_new_cdp_session(self) -> None:
         fake_session = _FakeCDPSession({"DOM.getDocument": {"root": {"nodeId": 1}}})

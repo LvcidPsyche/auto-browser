@@ -1007,7 +1007,9 @@ it moved during the call. When they cannot attach to the active tab they answer 
 the tab they were attached to before. A session another call keeps for more than 10 seconds gets 409. A
 command the page does not answer within 10 seconds gets 504 and lets go of the session, and so does an
 attach to the active tab, or a detach from the tab before it, that the browser does not finish within 10
-seconds.
+seconds. `POST /sessions/{id}/cdp/raw` answers 422 to a `method` that is not a string or `params` that
+are not an object (left out or `null` is none), and each allowed command takes only its own parameters,
+by name and type (`_ALLOWED_CDP_PARAMS` in `app/cdp/passthrough.py`): any other answers 422 and says why.
 
 ### What a refused page still does
 
@@ -1111,7 +1113,7 @@ For evidence that survives a compromised controller host, keep a head hash from 
 **Not scrubbed**
 
 - **Page content, by design**: `get_html`, `find_elements`, the DOM outline and element text in an observation, cookies and storage, a downloaded file fetched from its artifact URL, and the output of `eval_js`.
-- **Raw CDP**: `raw_cdp_command` returns what the browser returns. `DOM.getDocument` with `{"depth": -1, "pierce": true}` includes a password typed into a page, read from the input's user-agent shadow text. The accessibility tree masks password values (`•••`), but the raw DOM does not. Treat anything an agent types into a page as readable by every caller allowed to use raw CDP.
+- **Raw CDP**: `raw_cdp_command` returns what the browser returns, but for what a password field holds. `DOM.getDocument` with `{"depth": -1, "pierce": true}` returns each input's user-agent shadow text, which is what was typed into it; in a `DOM.*` read the passthrough blanks that text, and the `value` attribute, of any element whose `type` attribute is `password`. The accessibility tree masks password values itself (`•••`). A field of any other type keeps what was typed into it, a one-time code or a secret typed into a text field included, and a copy a page's own script makes of a password (into another field, an attribute or text) is page content like any other. Treat anything an agent types into a field that is not `type="password"` as readable by every caller allowed to use raw CDP.
 - **The last console messages inside an observation** (`console_messages` in an `observe` result), and page errors. Use `get_console_messages` for the scrubbed view. (The URLs in request failures are scrubbed: see the network inspector entry above.)
 - **The page's own URL** (`url` in every observation, and in the prompts of the built-in agent loop), which keeps, for example, an OAuth implicit grant's `#access_token=...`.
 - **The audit log**: events are stored as their callers write them, so an event's details keep what the action carried (a navigated URL with its query, for example). `PII_SCRUB_AUDIT_REPORT` only adds `pii_redaction` events: one for a scrub that redacted something, with its layer, hit count and pattern names, never the values, and one marked `failed` for a screenshot redaction that failed.

@@ -137,6 +137,15 @@ All notable changes to auto-browser are documented here.
   and whichever finished last replaced the profile the other had just been given. Saves of one name now run one at
   a time, from the owner check until the files are in place, so the second sees the first's owner and is refused.
   An import with `overwrite` still checks the owner outside that lock.
+- **The raw CDP route checks what it is sent, and a DOM read no longer returns a typed password.**
+  `POST /sessions/{id}/cdp/raw` took its `method` and `params` as they came: a `method` that was a list raised a
+  `TypeError` in the allowlist check (a 500), and `params` went to the browser whatever their names and types. A
+  `method` that is not a string, or `params` that are not an object, now get 422, and each allowed command takes
+  only its own parameters, by name and type; any other gets 422 with the reason. `DOM.getDocument` with
+  `"pierce": true` returned each input's user-agent shadow text, which is what was typed into it, so a password
+  typed into a page came back in plain text; a `DOM.*` read now blanks that text and the `value` attribute of any
+  element whose `type` attribute is `password`. `docs/deployment.md` says what is still returned: what was typed
+  into a field of any other type.
 
 ### Fixed
 
