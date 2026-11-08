@@ -58,6 +58,9 @@ def _read_token_file(path: str | os.PathLike[str]) -> str:
             f"cannot read token_file {path}: {exc.strerror}. Run as the user that owns the auto-browser "
             "folder's data/, or read the token with: docker compose exec -T controller cat /data/api-token"
         ) from exc
+    except UnicodeDecodeError:
+        # Not the decode error, whose text names one of the token's bytes and its position (review of c3's fixes).
+        raise ValueError(f"token_file {path} is not UTF-8 text") from None
     if not token:
         raise ValueError(f"token_file {path} is empty")
     _refuse_unsendable(token, f"token_file {path}")

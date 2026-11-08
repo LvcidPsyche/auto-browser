@@ -287,6 +287,20 @@ class UnsendableTokenTests(unittest.TestCase):
         self.assertIn(f"token_file {path} holds a line break", str(caught.exception))
         self.assertNotIn("sentinel", str(caught.exception))
 
+    def test_a_token_file_that_is_not_utf_8_is_refused_without_its_bytes(self) -> None:
+        # Review of c3's fixes (Codex 5): the UnicodeDecodeError named one of the token's bytes and its position
+        # ("can't decode byte 0x80 in position 15"), as the MCP bridges' answer did before c3.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api-token"
+            path.write_bytes(b"sentinel-prefix" + bytes([0x80]) + b"sentinel-tail")
+            with self.assertRaises(ValueError) as caught:
+                AutoBrowserClient("http://auto-browser.test", token_file=path)
+
+        self.assertEqual(str(caught.exception), f"token_file {path} is not UTF-8 text")
+        self.assertNotIsInstance(caught.exception, UnicodeDecodeError)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertTrue(caught.exception.__suppress_context__)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,9 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
             f"cannot read token_file {token_file}: {exc.strerror}. Run as the user that owns the auto-browser "
             "folder's data/, or read the token with: docker compose exec -T controller cat /data/api-token"
         ) from exc
+    except UnicodeDecodeError:
+        # Not the decode error, whose text names one of the token's bytes and its position (review of c3's fixes).
+        raise ValueError(f"token_file {token_file} is not UTF-8 text") from None
     if not token:
         raise ValueError(f"token_file {token_file} is empty")
     _refuse_unsendable(token, f"token_file {token_file}")

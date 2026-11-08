@@ -70,7 +70,9 @@ All notable changes to auto-browser are documented here.
   holding a line break or another control character but a tab, or a character outside ASCII) failed the first
   request with httpx's error, which quoted the whole header for a line break, a NUL, a vertical tab or a form feed,
   and named a character outside ASCII and its position; the client and the LangChain tools now refuse it with a
-  `ValueError` naming `token`, `bearer_token` or the token file, never the token. The client refuses an
+  `ValueError` naming `token`, `bearer_token` or the token file, never the token; a token file that is not UTF-8
+  text, whose `UnicodeDecodeError` named one of its bytes and its position, now raises a `ValueError` naming the file
+  and saying so, as the MCP bridges' answer does. The client refuses an
   `Authorization` header given in `headers` the same way, and leaves its credentials out of its errors as it leaves
   the token out. It refuses more than one (`headers` can hold one per case of the name, and httpx sends each), and a
   token from `token` or `token_file` now replaces every one of them, where one whose name differed in case from
