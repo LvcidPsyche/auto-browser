@@ -283,6 +283,21 @@ async def test_a_publish_that_fails_leaves_no_hidden_file(tmp_path: Path, read: 
     assert list(session.artifact_dir.iterdir()) == []
 
 
+async def test_an_observations_ocr_names_the_published_image(tmp_path: Path) -> None:
+    # Review of c4 (Codex 9): the OCR result named the hidden file OCR read, which is gone once it is published.
+    service, session, _ = _service(tmp_path)
+    original_ocr = service.manager.ocr.extract_from_image
+
+    async def naming_its_image(path: str) -> dict:
+        return {**await original_ocr(path), "image_path": path}  # as OCRExtractor's result does
+
+    service.manager.ocr.extract_from_image = naming_its_image
+
+    observed = await service.observation_payload(session, preset="normal")
+
+    assert observed["ocr"]["image_path"] == observed["screenshot_path"]
+
+
 async def test_a_capture_cancelled_while_written_leaves_no_hidden_file(tmp_path: Path) -> None:
     # capture_session_screenshot deletes what a cancelled capture writes once it is written (_delete_when_done):
     # for a staged capture that is the hidden name, not the published one.

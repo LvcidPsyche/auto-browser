@@ -363,7 +363,7 @@ class BrowserObservationService:
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
             "accessibility_outline": summary["accessibility_outline"],
-            "ocr": await asyncio.to_thread(self._ocr_for_caller, ocr),
+            "ocr": await asyncio.to_thread(self._ocr_for_caller, ocr, screenshot["path"]),
             "interactables": interactables,
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
@@ -378,16 +378,19 @@ class BrowserObservationService:
             "preset": preset,
         }
 
-    def _ocr_for_caller(self, ocr: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _ocr_for_caller(self, ocr: dict[str, Any] | None, image_path: str) -> dict[str, Any] | None:
         """The OCR result as observe returns it.
 
         `redaction_blocks` is the screenshot redaction's own input: every word with its box, including the
         words that redaction blacks out, so the caller never gets it. The text the caller does get goes
-        through the PII scrubber, since the pixels it came from are redacted too.
+        through the PII scrubber, since the pixels it came from are redacted too. Its `image_path` is the
+        screenshot's published one: OCR read it under its hidden name, gone once it is published (review of c4).
         """
         if not ocr:
             return ocr
         returned = {key: value for key, value in ocr.items() if key != "redaction_blocks"}
+        if "image_path" in returned:
+            returned["image_path"] = image_path
         scrubber = self.manager.pii_scrubber
         if not scrubber.enabled:
             return returned
