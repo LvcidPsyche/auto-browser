@@ -1135,6 +1135,15 @@ def test_r5c_20_each_secret_is_replaced_once_and_a_paths_at_sign_is_kept() -> No
     )
 
 
+def test_r5c_20_a_query_value_of_8_characters_is_redacted_and_one_of_7_is_kept() -> None:
+    # c3 left the boundary unpinned: every query value the other tests use is longer than 8 characters.
+    from app.mcp_stdio import _redacted
+
+    assert _redacted("short seven77, long eight888", "http://h/mcp?short=seven77&long=eight888") == (
+        "short seven77, long [redacted]"
+    )
+
+
 def test_r5c_20_the_basic_credentials_httpx_sends_for_the_userinfo_are_redacted() -> None:
     # Review of c3's fixes (Codex 2): the client SDK shares this redaction, and httpx sends a base URL's userinfo as
     # "Authorization: Basic" and the base64 of user:password, each percent-decoded; a server echoing that header showed

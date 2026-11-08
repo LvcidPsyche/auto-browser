@@ -221,6 +221,14 @@ class RedactionCopyTests(unittest.TestCase):
                 self.assertNotIn("sentinel", _redacted(text, url, token))
 
 
+class ShortestRedactedQueryValueTests(unittest.TestCase):
+    def test_a_query_value_of_8_characters_is_redacted_and_one_of_7_is_kept(self) -> None:
+        # c3 left the boundary unpinned: every query value the other tests use is longer than 8 characters.
+        url = "http://h/mcp?short=seven77&long=eight888"
+
+        self.assertEqual(_redacted("short seven77, long eight888", url, None), "short seven77, long [redacted]")
+
+
 class UnsendableTokenTests(unittest.IsolatedAsyncioTestCase):
     def test_a_token_holding_a_line_break_or_a_character_outside_ascii_is_refused_without_naming_it(self) -> None:
         for token, held in (
