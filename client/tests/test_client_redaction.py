@@ -8,6 +8,7 @@ cannot put in a header failed the first request with httpx's error, which quoted
 
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -94,6 +95,29 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("sentinel", str(caught.exception))
         self.assertIn("GET /?[redacted]/sessions/s/events", str(caught.exception))
+
+    def test_a_transport_error_echoing_the_basic_credentials_of_the_userinfo_is_raised_without_them(self) -> None:
+        # Review of c3's fixes (Codex 2): httpx sends a base URL's userinfo as "Authorization: Basic" and the base64 of
+        # user:password, each percent-decoded, and a server echoing that header showed the credentials in that form.
+        def echo_the_header(request: httpx.Request) -> httpx.Response:
+            header = request.headers["Authorization"]
+            raise httpx.RemoteProtocolError(
+                f"illegal status line: bytearray(b'Authorization: {header}')", request=request
+            )
+
+        for base_url, credentials in (
+            ("http://alice:sentinel-pass@auto-browser.test:8000/", b"alice:sentinel-pass"),
+            ("http://al%69ce:sentinel%2Dpass%20word@auto-browser.test:8000/", b"alice:sentinel-pass word"),
+        ):
+            with self.subTest(base_url=base_url):
+                client = AutoBrowserClient(base_url)
+                client._sync_client = httpx.Client(
+                    base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(echo_the_header)
+                )
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    client.create_session(name="s")
+                self.assertNotIn(base64.b64encode(credentials).decode(), str(caught.exception))
+                self.assertIn("Authorization: Basic [redacted]", str(caught.exception))
 
     def test_an_error_that_quotes_neither_is_raised_as_it_came(self) -> None:
         error = httpx.ConnectError("[Errno 111] Connection refused")

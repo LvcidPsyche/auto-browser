@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections.abc import Iterator
@@ -51,7 +52,8 @@ def _redacted(text: str, url: str, token: str | None) -> str:
 def _secrets_of(url: str, token: str | None) -> set[str]:
     """``url``'s userinfo, password, query, fragment and each query value of _SHORTEST_REDACTED_QUERY_VALUE or more
     characters, as written and percent-decoded (a query's ``+`` as a space too), and ``token``, each also as
-    ``repr()`` and ``json.dumps()`` write it. Cut as a string, so a malformed URL is handled too."""
+    ``repr()`` and ``json.dumps()`` write it, and the Basic credentials httpx sends for the userinfo. Cut as a string,
+    so a malformed URL is handled too."""
     url = url.strip()
     _, slashes, rest = url.partition("//")
     if not slashes:
@@ -62,13 +64,25 @@ def _secrets_of(url: str, token: str | None) -> set[str]:
     values = [item.partition("=")[2] if "=" in item else item for item in query.split("&")]
     in_query = {query, *(value for value in values if len(value) >= _SHORTEST_REDACTED_QUERY_VALUE)}
     written = {userinfo, userinfo.partition(":")[2], url.partition("#")[2], *in_query}
-    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or ""}
+    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or "", _basic_credentials(userinfo)}
     quoted = {
         form[1:-1]
         for value in forms
         for form in (repr(value), json.dumps(value), json.dumps(value, ensure_ascii=False))
     }
     return {secret for secret in forms | quoted if secret}
+
+
+def _basic_credentials(userinfo: str) -> str:
+    """What httpx sends for ``userinfo`` after ``Authorization: Basic``: the base64 of its user name and password, each
+    percent-decoded, joined by a colon, as UTF-8; "" when both are empty, as httpx then sends none. An echo of that
+    header showed the URL's credentials (review of c3's fixes). A lone surrogate, which httpx cannot encode (so it
+    sends no header), is encoded anyway rather than failing the redaction."""
+    user, _, password = userinfo.partition(":")
+    user, password = unquote(user), unquote(password)
+    if not user and not password:
+        return ""
+    return base64.b64encode(f"{user}:{password}".encode("utf-8", "surrogatepass")).decode("ascii")
 
 
 def raise_for_status(response: httpx.Response) -> None:

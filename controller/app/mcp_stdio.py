@@ -10,6 +10,7 @@ edit here must be mirrored to the other copy.
 from __future__ import annotations
 
 import argparse
+import base64
 import ipaddress
 import json
 import os
@@ -142,7 +143,8 @@ def _secrets_of(url: str, token: str | None) -> set[str]:
     strips, would otherwise end the query and match no text. Its userinfo, password, query and fragment, and each
     query value of _SHORTEST_REDACTED_QUERY_VALUE or more characters (R5C-20), are found with string operations, so a
     malformed URL is handled, and count as written and percent-decoded (a query's ``+`` as a space too); each of
-    those, and ``token``, counts as ``repr()`` and ``json.dumps()`` write it too (R5C-20).
+    those, and ``token``, counts as ``repr()`` and ``json.dumps()`` write it too (R5C-20). The userinfo counts as
+    the Basic credentials httpx sends for it too (``_basic_credentials``).
     """
     url = unwrap(url)
     userinfo = _split_userinfo(url)[1]
@@ -150,13 +152,28 @@ def _secrets_of(url: str, token: str | None) -> set[str]:
     values = [item.partition("=")[2] if "=" in item else item for item in query.split("&")]
     in_query = {query, *(value for value in values if len(value) >= _SHORTEST_REDACTED_QUERY_VALUE)}
     written = {userinfo, userinfo.partition(":")[2], url.partition("#")[2], *in_query}
-    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or ""}
+    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or "", _basic_credentials(userinfo)}
     quoted = {
         form[1:-1]
         for value in forms
         for form in (repr(value), json.dumps(value), json.dumps(value, ensure_ascii=False))
     }
     return {secret for secret in forms | quoted if secret}
+
+
+def _basic_credentials(userinfo: str) -> str:
+    """What httpx sends for ``userinfo`` after ``Authorization: Basic``: the base64 of its user name and password, each
+    percent-decoded, joined by a colon, as UTF-8; "" when both are empty, as httpx then sends none.
+
+    The client SDK shares this redaction, and an echo of that header showed the URL's credentials (review of c3's
+    fixes); the bridges send no Basic header, so for them it only redacts more. A lone surrogate, which httpx cannot
+    encode (so it sends no header), is encoded anyway rather than failing the redaction.
+    """
+    user, _, password = userinfo.partition(":")
+    user, password = unquote(user), unquote(password)
+    if not user and not password:
+        return ""
+    return base64.b64encode(f"{user}:{password}".encode("utf-8", "surrogatepass")).decode("ascii")
 
 
 def _redacted_value(value: Any, url: str, token: str | None = None) -> Any:

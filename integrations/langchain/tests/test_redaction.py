@@ -8,6 +8,8 @@ character outside ASCII and its position.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import importlib.util
 import tempfile
 import unittest
@@ -130,6 +132,31 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
         self._assert_raised_without_secrets(caught.exception)
 
     @respx.mock
+    async def test_a_transport_error_echoing_the_basic_credentials_of_the_userinfo_never_shows_them(self) -> None:
+        # Review of c3's fixes (Codex 2): httpx sends a base URL's userinfo as "Authorization: Basic" and the base64 of
+        # user:password, each percent-decoded, and a server echoing that header showed the credentials in that form.
+        def echo_the_header(request: httpx.Request) -> httpx.Response:
+            header = request.headers["Authorization"]
+            raise httpx.RemoteProtocolError(
+                f"illegal status line: bytearray(b'Authorization: {header}')", request=request
+            )
+
+        respx.route(host="auto-browser.test").mock(side_effect=echo_the_header)
+        url = "http://al%69ce:sentinel%2Dpass%20word@auto-browser.test:8000/"
+        basic = base64.b64encode(b"alice:sentinel-pass word").decode()
+        calls = (
+            ("tool", lambda: AutoBrowserTool(base_url=url)._arun("browser.observe", {})),
+            ("node", lambda: AutoBrowserNode(base_url=url).call_tool("browser.observe", {})),
+            ("list_tools", lambda: asyncio.to_thread(AutoBrowserTool.list_tools, base_url=url)),
+        )
+        for caller, call in calls:
+            with self.subTest(caller=caller):
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    await call()
+                self.assertNotIn(basic, str(caught.exception))
+                self.assertIn("Authorization: Basic [redacted]", str(caught.exception))
+
+    @respx.mock
     async def test_a_status_lines_reason_phrase_never_shows_them_either(self) -> None:
         respx.route(host="auto-browser.test").mock(
             return_value=httpx.Response(401, extensions={"reason_phrase": b"bad key sentinel-key"})
@@ -159,6 +186,11 @@ class RedactionCopyTests(unittest.TestCase):
             ("{'upstream': 'key=sentinel\\\\tail'}", "http://h/mcp?key=sentinel%5Ctail"),
             ('detail {"key": "sentinel tail \\u00e9"}', "http://h/mcp?key=sentinel+tail+%C3%A9"),
             ("see http://controller.example/a@b/mcp and bob@host", "http://controller.example/a@b/mcp"),
+            # Review of c3's fixes (Codex 2): the Basic credentials httpx sends for the userinfo.
+            (
+                "Authorization: Basic " + base64.b64encode(b"alice:sentinel pass").decode(),
+                "http://alice:sentinel%20pass@h/mcp",
+            ),
         )
         for text, url in cases:
             with self.subTest(text=text, url=url):

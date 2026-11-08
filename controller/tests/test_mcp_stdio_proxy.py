@@ -11,6 +11,7 @@ urllib reads the proxy variables when an opener is built, which for the old modu
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -1084,6 +1085,19 @@ def test_r5c_20_each_secret_is_replaced_once_and_a_paths_at_sign_is_kept() -> No
     )
     assert _without_userinfo("via http://alice:sentinel@proxy.invalid/x and 'bob@host'") == (
         "via http://proxy.invalid/x and 'host'"
+    )
+
+
+def test_r5c_20_the_basic_credentials_httpx_sends_for_the_userinfo_are_redacted() -> None:
+    # Review of c3's fixes (Codex 2): the client SDK shares this redaction, and httpx sends a base URL's userinfo as
+    # "Authorization: Basic" and the base64 of user:password, each percent-decoded; a server echoing that header showed
+    # the credentials. The bridges send no Basic header, so for them it only redacts more.
+    from app.mcp_stdio import _redacted
+
+    basic = base64.b64encode(b"alice:sentinel pass").decode()
+
+    assert _redacted(f"illegal status line: Authorization: Basic {basic}", "http://alice:sentinel%20pass@h/mcp") == (
+        "illegal status line: Authorization: Basic [redacted]"
     )
 
 
