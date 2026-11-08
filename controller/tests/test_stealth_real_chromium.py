@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.browser_manager import BrowserManager
 from app.browser_scripts import apply_stealth
 from app.stealth.fingerprint import FingerprintConfig
@@ -320,6 +322,18 @@ READ_WITH_COORDINATE_OBJECTS = """() => {
   return { objects, numbers: Array.from(ctx.getImageData(5, 3, 1, 1).data), calls };
 }"""
 
+# A canvas of one grey read as float16 values, and the kind of array they came in.
+READ_FLOAT16 = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2; canvas.height = 2;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(128, 128, 128)';
+  ctx.fillRect(0, 0, 2, 2);
+  const image = ctx.getImageData(0, 0, 2, 2, { pixelFormat: 'rgba-float16' });
+  return { kind: Object.prototype.toString.call(image.data), values: Array.from(image.data) };
+}"""
+GREY_128_AS_FLOAT16 = 0.501953125
+
 
 async def _read_on_fingerprinted_pages(script: str, *configs: FingerprintConfig) -> list:
     """`script`'s answer on a page with each config's fingerprint script, one context each."""
@@ -377,6 +391,17 @@ def test_the_noise_reads_each_coordinate_once_as_the_native_read_does() -> None:
     assert seen["calls"] == [1, 1, 1, 1], seen
     assert seen["objects"] == seen["numbers"], seen
     assert _noised_once(seen["numbers"]), seen
+
+
+@requires_chromium
+def test_a_read_of_float_values_is_left_as_it_is() -> None:
+    """Review of c5 (Codex): the noise shifted each channel by one, a step in a read of bytes; in a read of float16
+    values (pixelFormat "rgba-float16") that is the whole 0-1 range, and grey read as -0.5 or 1.5."""
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_FLOAT16, FingerprintConfig("s", "light")))
+
+    if seen["kind"] != "[object Float16Array]":
+        pytest.skip(f"this Chromium reads no float16 pixels: {seen['kind']}")
+    assert seen["values"] == [GREY_128_AS_FLOAT16, GREY_128_AS_FLOAT16, GREY_128_AS_FLOAT16, 1] * 4, seen
 
 
 @requires_chromium

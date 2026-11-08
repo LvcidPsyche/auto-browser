@@ -411,7 +411,9 @@ All notable changes to auto-browser are documented here.
   `getImageData` adds came from the session's seed and the byte index, which is a multiple of 4 at every red byte, so
   every pixel got the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of
   a pixel's R, G and B now goes one up or one down by a hash of the pixel's place on the canvas and the session's
-  seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle.
+  seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle. A read
+  of float values (`getImageData` with `pixelFormat: "rgba-float16"`) is now left as it is: a shift of one there is
+  the whole 0-1 range, so a grey of 0.5 read as -0.5 or 1.5.
 - **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** They ran
   the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran, or
   Git's `bin\bash.exe` wrapper, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a

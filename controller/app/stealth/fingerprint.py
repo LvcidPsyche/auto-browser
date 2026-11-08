@@ -117,6 +117,8 @@ class FingerprintConfig:
     const _noise_seed = {noise_seed};
     const _seed_hash = Math.imul(_noise_seed, 0xC2B2AE3D);
     const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    const _getPrototypeOf = Object.getPrototypeOf;
+    const _bytesPrototype = Uint8ClampedArray.prototype;
     CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
         if (args.length >= 4) {{
             // Each coordinate read once, as a number, and passed on as that number: read again below once the native
@@ -125,6 +127,9 @@ class FingerprintConfig:
         }}
         const imageData = _origGetImageData.apply(this, args);
         const data = imageData.data;
+        // Bytes only: a read of float values (pixelFormat "rgba-float16") is left as it is, as a shift of one there
+        // is the whole 0-1 range (review of c5).
+        if (_getPrototypeOf(data) !== _bytesPrototype) return imageData;
         const width = imageData.width;
         const height = imageData.height;
         // The read's top left corner: a negative width or height reads to the left of or above (sx, sy).
