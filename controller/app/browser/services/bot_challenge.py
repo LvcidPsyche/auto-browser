@@ -95,14 +95,18 @@ def _split(url: str) -> tuple[str, str]:
 
 
 def _origin_and_path(src: str) -> str:
-    """scheme://host[:port]/path of a frame address: no credentials, query or fragment, which can carry tokens."""
+    """scheme://host[:port]/path of an address: no credentials, query or fragment, which can carry tokens.
+
+    An address with no host part (data:, about:) keeps its scheme and path as they are written.
+    """
     try:
         parts = urlsplit(src)
         host = parts.hostname or ""
         port = f":{parts.port}" if parts.port else ""
     except ValueError:
         return ""
-    return cap_url(f"{parts.scheme}://{host}{port}{parts.path}")
+    authority = f"//{host}{port}" if parts.netloc else ""
+    return cap_url(f"{parts.scheme}:{authority}{parts.path}")
 
 
 def _frame_signal(src: str) -> str | None:
@@ -171,7 +175,8 @@ class BrowserBotChallengeService:
         return {
             "bot_challenge_detected": True,
             "signal": signal,
-            "url": session.page.url,
+            # As a frame's is (D3a-10): the page's query, fragment and credentials can carry tokens.
+            "url": _origin_and_path(session.page.url),
             "title": cap_title(title),
             "iframes": matched_frames[:10],
         }

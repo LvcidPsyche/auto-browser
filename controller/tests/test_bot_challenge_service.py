@@ -50,6 +50,24 @@ class BotChallengeServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(secret, str(result))
 
+    async def test_the_page_address_is_reported_as_its_origin_and_path_capped_like_a_frames(self) -> None:
+        # D3a-10: the page's own URL went into the report whole, its credentials, query and length with it.
+        secret = "oauth-code-123"
+        result = await self._check(
+            "https://user:pw@example.com:8443/login?code=" + secret + "&pad=" + "q" * 1_000_000 + "#frag",
+            "Just a moment...",
+            "",
+        )
+        long_path = await self._check("https://example.com/" + "p" * 1_000_000, "Just a moment...", "")
+        no_host = await self._check("data:text/html,<p>hi</p>", "Just a moment...", "")
+
+        assert result is not None and long_path is not None and no_host is not None
+        self.assertEqual(result["url"], "https://example.com:8443/login")
+        self.assertNotIn(secret, str(result))
+        self.assertEqual(len(long_path["url"]), AB_HREF_MAX)
+        self.assertTrue(long_path["url"].endswith(AB_TRUNCATED_MARK))
+        self.assertEqual(no_host["url"], "data:text/html,<p>hi</p>")
+
     async def test_a_matched_frame_path_is_capped_like_a_url(self) -> None:
         result = await self._check(
             "https://example.com/", "Home", "", [frame("https://www.google.com/recaptcha/api2/" + "p" * 1_000_000)]

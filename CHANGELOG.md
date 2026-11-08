@@ -126,6 +126,11 @@ All notable changes to auto-browser are documented here.
   other value skips its step with a comment that says so. A typed text longer than the 80 characters the audit log
   keeps is now marked `text_truncated` in its action's target (dropped with the preview when the field turns out to
   be secret), and its exported `fill` line says that only the start of the text was kept.
+- **A bot challenge's report names the page by its origin and path only.** The `captcha_detected` error's details,
+  and the warning a navigation logs when it lands on a challenge, gave the page's URL whole: its user name and
+  password, its query and fragment (which can carry an OAuth code or a token) and all of its length. It is now cut
+  as the frames the report lists already were, to scheme, host, port and path, and capped like a URL; an address
+  with no host (`data:`, `about:`) keeps its scheme and path.
 
 ### Fixed
 
