@@ -115,6 +115,12 @@ _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   autocomplete: el.getAttribute('autocomplete') || '',
 })"""
 
+# What an action's result says of a tab the action opened (NAV-08): a page's new tab does not become the active one.
+NEW_TAB_MESSAGE = (
+    "The action opened this tab. Observations and actions stay on the active tab until browser.activate_tab (REST: "
+    "POST /sessions/{session_id}/tabs/activate) moves to this index."
+)
+
 
 # Actions that are in ActionName but that nothing executes, with why.
 _NOT_EXECUTABLE = {
@@ -147,6 +153,15 @@ def is_one_time_code_field(attributes: Mapping[str, Any]) -> bool:
         str(attributes.get(key) or "") for key in ("name", "id", "placeholder", "aria-label", "autocomplete")
     )
     return not _NOT_A_ONE_TIME_CODE.search(described)
+
+
+def _tab_count(snapshot: dict[str, Any]) -> int | None:
+    """How many tabs a snapshot saw: an action snapshot counts them, an observation lists them; None if neither."""
+    count = snapshot.get("tab_count")
+    if isinstance(count, int):
+        return count
+    tabs = snapshot.get("tabs")
+    return len(tabs) if isinstance(tabs, list) else None
 
 
 class BrowserActionService:
@@ -1136,6 +1151,10 @@ class BrowserActionService:
         if before_accessibility != after_accessibility:
             signals.append("accessibility_focus_changed")
 
+        before_tabs, after_tabs = _tab_count(before), _tab_count(after)
+        if before_tabs is not None and after_tabs is not None and before_tabs != after_tabs:
+            signals.append("tabs_changed")
+
         interacted_element = target.get("element_id")
         selector = target.get("selector")
         interactables = after.get("interactables") or []
@@ -1173,7 +1192,7 @@ class BrowserActionService:
                     "accessibility_focus_changed",
                 }
                 & set(signals)
-            )
+            ) or (action_name != "scroll" and "tabs_changed" in signals)
         elif action_name == "hover":
             verified = (
                 bool({"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals))
@@ -1194,6 +1213,17 @@ class BrowserActionService:
             "signals": signals,
             "target_seen_after": target_seen_after,
         }
+
+    @staticmethod
+    def new_tab(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
+        """The tab an action opened, for its result (NAV-08): the newest, which the tab list puts last.
+
+        Only while it is not the active tab, as NEW_TAB_MESSAGE says it is not.
+        """
+        before_tabs, tabs = _tab_count(before), after.get("tabs")
+        if before_tabs is None or not isinstance(tabs, list) or len(tabs) <= before_tabs or tabs[-1].get("active"):
+            return None
+        return {"index": tabs[-1]["index"], "message": NEW_TAB_MESSAGE}
 
     @staticmethod
     def resolve_target(

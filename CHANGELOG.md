@@ -207,6 +207,12 @@ All notable changes to auto-browser are documented here.
   every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
   together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of
   the session's lock; it now waits for both, as the observation's other paired reads do, then raises the error.
+- **A click or key press that opens a tab is verified by it, and its result names the tab.** Observations and actions
+  stay on the active tab, which a tab a page opens does not become, so a click on a link that opened a new tab changed
+  nothing the action's verification compared and could read `verified: false`: an agent that retried opened a second
+  tab. An action's before snapshot now counts the session's tabs (`tab_count`), its verification reports
+  `tabs_changed` when the observation after it lists another number, which verifies a click or a key press, and its
+  result carries `new_tab` (the tab's `index` and how to move to it) when it opened one that is not the active tab.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,

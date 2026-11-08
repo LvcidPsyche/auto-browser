@@ -798,6 +798,10 @@ class BrowserManager:
     ) -> dict[str, Any]:
         return BrowserActionService.action_verification(action_name, target, before, after)
 
+    @staticmethod
+    def _new_tab(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
+        return BrowserActionService.new_tab(before, after)
+
     # ── URL policy ───────────────────────────────────────────────────────────
 
     def _assert_url_allowed(self, url: str) -> None:

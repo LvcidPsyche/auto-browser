@@ -483,6 +483,9 @@ class BrowserObservationService:
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
             "accessibility_outline": summary["accessibility_outline"],
+            # Counted, not listed (a tab's title costs a round trip): what the action's verification compares with
+            # the tabs the observation after it lists (NAV-08).
+            "tab_count": len(self.manager.tabs.pages(session)),
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
             **_scrub_disclosure(screenshot),
