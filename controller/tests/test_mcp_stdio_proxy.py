@@ -1231,6 +1231,23 @@ def test_a_stdin_line_too_deep_to_parse_is_answered_as_invalid_json() -> None:
     }
 
 
+def test_a_number_too_long_to_parse_is_answered_as_invalid_json_and_the_bridge_goes_on() -> None:
+    # CPython refuses an int of more than 4300 digits with a plain ValueError (not a JSONDecodeError), as a bare
+    # number and as an id, and that ended the bridge with no answer.
+    import app.mcp_stdio as bridge
+
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    stdout = io.StringIO()
+    digits = "9" * 5000
+    lines = digits + "\n" + '{"jsonrpc": "2.0", "id": ' + digits + ', "method": "ping"}\n' + "[" * 9 + "\n"
+
+    proxy.run(stdin=io.StringIO(lines), stdout=stdout)
+
+    replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert replies == [{"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON payload"}}] * 3
+
+
 def test_r5c_20_the_unexpected_failure_on_stderr_never_shows_the_urls_secrets_or_the_token(monkeypatch) -> None:
     # The answer went through _shown; the line the bridge printed on stderr showed the error's text as it came.
     import app.mcp_stdio as bridge

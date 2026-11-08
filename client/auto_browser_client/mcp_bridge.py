@@ -571,8 +571,9 @@ class StdioMcpBridge:
     def _handle_line(self, line: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(line)
-        except (json.JSONDecodeError, RecursionError):
-            # RecursionError: a line nested too deep for json to parse.
+        except (ValueError, RecursionError):
+            # ValueError covers JSONDecodeError and an int of more than 4300 digits; RecursionError, a line
+            # nested too deep for json to parse.
             return self._jsonrpc_error(None, -32700, "Invalid JSON payload")
 
         if isinstance(payload, list):
