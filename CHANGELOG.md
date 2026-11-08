@@ -130,6 +130,12 @@ All notable changes to auto-browser are documented here.
   unverifiable), and a drift check failed with that error or reported the candidate degraded. The prune now renames
   the candidate to a hidden name before it removes it there, under the staging lock that those reads now hold too, so
   a read finds the whole candidate or none; a removal cut short leaves the hidden name, which the next start removes.
+- **A drift check no longer writes its result beside another candidate, or brings back a removed one.**
+  `harness.check_drift` and `harness.check_all_drifts` read a candidate, waited for the verifier, then wrote
+  `drift.json` into whatever the candidate's directory held by then: a candidate re-staged meanwhile (a later run of
+  its contract) got the old one's result, and one retention removed got its directory back, holding only
+  `drift.json`. The result is now written only while the directory still holds the candidate that was checked;
+  otherwise it is returned with a note saying `drift.json` was not written.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,

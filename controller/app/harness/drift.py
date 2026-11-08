@@ -50,7 +50,8 @@ class SkillDriftMonitor:
         self.registry = registry
         self.verifier = verifier or ProgrammaticVerifier()
         # HarnessService passes its store's staging lock, held while a candidate is read so that retention (in a worker
-        # thread) never removes it half way through the read; never across the verifier.
+        # thread) never removes it half way through the read, and while its result is written back; never across the
+        # verifier.
         self.lock = lock if lock is not None else threading.Lock()
 
     async def check_candidate(self, skill_id: str) -> DriftCheckResult:
@@ -61,6 +62,7 @@ class SkillDriftMonitor:
                 return DriftCheckResult(skill_id=skill_id, status="missing", notes=["candidate not found"])
 
             candidate_dir = self.registry.candidate_dir(candidate.skill_id)
+            checked = _candidate_json(candidate_dir)
             try:
                 contract = TaskContract.model_validate_json(_read_artifact(candidate_dir, "contract.json"))
                 trace = TraceEnvelope.read_json(_artifact_path(candidate_dir, "trace.json"))
@@ -113,7 +115,15 @@ class SkillDriftMonitor:
             verification=verification,
             notes=notes,
         )
-        _write_result(candidate_dir, result)
+        with self.lock:
+            if _candidate_json(candidate_dir) == checked:
+                _write_result(candidate_dir, result)
+            else:
+                # Re-staged (a later run of its contract) or removed (retention) while the verifier ran: the result is
+                # the old candidate's, so it is returned, not written beside another candidate or into a new directory.
+                result.notes.append(
+                    "the candidate was re-staged or removed while it was checked: drift.json was not written"
+                )
         return result
 
     async def check_all(self) -> list[DriftCheckResult]:
@@ -214,8 +224,16 @@ def _read_artifact(candidate_dir: Path, name: str) -> str:
     return _artifact_path(candidate_dir, name).read_text(encoding="utf-8")
 
 
+def _candidate_json(candidate_dir: Path) -> bytes | None:
+    """candidate.json as it is on disk now (None once it is gone), which says which candidate the directory holds."""
+    try:
+        return (candidate_dir / "candidate.json").read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def _write_result(candidate_dir: Path, result: DriftCheckResult) -> Path:
-    candidate_dir.mkdir(parents=True, exist_ok=True)
+    # Into the directory the candidate was read from, never a new one (a candidate removed meanwhile stays removed).
     target = candidate_dir / "drift.json"
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")

@@ -600,6 +600,62 @@ class RetentionReadTests(_Base):
         self.assertFalse(directory.exists())
 
 
+class _HeldDriftVerifier:
+    """A drift check's verifier that waits until the test lets it answer."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def verify(self, contract, trace) -> VerificationResult:
+        self.entered.set()
+        await self.release.wait()
+        return VerificationResult(passed=True, confidence=1.0, backend="held")
+
+
+class DriftCheckGapTests(_Base):
+    """c2's "not done": a drift check read the candidate, awaited the verifier, then wrote drift.json into whatever its
+    directory held by then: a candidate re-staged meanwhile got the old one's result, and one removed got its
+    directory back, holding only drift.json."""
+
+    async def _held_check(self, service: HarnessService, skill_id: str) -> tuple[asyncio.Task, _HeldDriftVerifier]:
+        held = _HeldDriftVerifier()
+        service.drift_monitor.verifier = held
+        check = asyncio.create_task(service.check_drift(skill_id))
+        await asyncio.wait_for(held.entered.wait(), 5)
+        return check, held
+
+    async def test_a_drift_result_is_not_written_beside_a_candidate_restaged_while_it_was_checked(self) -> None:
+        service = HarnessService(self.root)
+        first = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        directory = Path(first.candidate.files["candidate.json"]).parent
+        check, held = await self._held_check(service, first.candidate.skill_id)
+        second = await service.start_convergence(
+            _contract(max_attempts=1), mock_final_observation={**DONE, "text": "done again"}
+        )
+        held.release.set()
+        result = await asyncio.wait_for(check, 10)
+
+        self.assertNotEqual(second.candidate.trace_hash, first.candidate.trace_hash)
+        self.assertEqual(result["trace_hash"], first.candidate.trace_hash)
+        self.assertFalse((directory / "drift.json").exists(), "the first candidate's result sits beside the second")
+        self.assertTrue(any("drift.json was not written" in note for note in result["notes"]), result["notes"])
+
+    async def test_a_drift_check_does_not_recreate_a_candidate_retention_removed_while_it_was_checked(self) -> None:
+        service = HarnessService(self.root)
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        directory = Path(record.candidate.files["candidate.json"]).parent
+        check, held = await self._held_check(service, record.candidate.skill_id)
+        for path in [*directory.iterdir(), directory]:
+            _age(path, 40)
+        self.assertEqual(await asyncio.to_thread(service.store.prune, 30), 1)
+        held.release.set()
+        result = await asyncio.wait_for(check, 10)
+
+        self.assertFalse(directory.exists(), "the drift check recreated the removed candidate's directory")
+        self.assertTrue(any("drift.json was not written" in note for note in result["notes"]), result["notes"])
+
+
 def _age(path: Path, days: float) -> None:
     old = time.time() - days * 86400
     os.utime(path, (old, old))
