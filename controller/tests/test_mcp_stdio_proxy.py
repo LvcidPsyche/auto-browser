@@ -617,10 +617,60 @@ def test_r5c_28_a_url_http_client_cannot_send_is_refused_as_an_invalid_controlle
     assert controller.seen == []  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("scheme", ["file", "data"])
-def test_r5c_28_the_bridges_openers_answer_no_file_or_data_url(tmp_path: Path, scheme: str) -> None:
+_HOST_OR_USERINFO = "its host or userinfo holds a character http.client cannot send"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://contr" + chr(0xF4) + "leur.invalid/mcp?key=sentinel",
+        "http://sentinel" + chr(0x43A) + "@controller.invalid/mcp",
+    ],
+    ids=["host_outside_ascii", "userinfo_outside_latin_1"],
+)
+def test_r5c_28_a_host_or_userinfo_a_proxy_cannot_get_is_refused_as_an_invalid_controller_url(
+    recording_proxy, base_url: str
+) -> None:
+    # Review of c3 (Codex 7): the path, query and fragment were checked, but urllib puts the URL whole, host and
+    # userinfo too, into the request line it sends an environment proxy, which http.client encodes as ASCII, and the
+    # answer was "Unexpected stdio bridge failure: 'ascii' codec can't encode character ... in position 12", one
+    # character of the URL and where it is.
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert INVALID in message
+    assert _HOST_OR_USERINFO in message
+    assert "Unexpected stdio bridge failure" not in message
+    assert "sentinel" not in message
+    assert "position" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+def test_r5c_28_a_userinfo_the_host_header_cannot_carry_is_refused_without_a_proxy(monkeypatch) -> None:
+    # Review of c3: without a proxy urllib sends the host it decoded, userinfo included, as the Host header, which
+    # http.client encodes as latin-1; a percent-encoded character outside it failed as above, naming that character.
+    import app.mcp_stdio as bridge
+
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("no_proxy", "*")  # and no proxy from the Windows registry either
+    client = bridge.HttpMcpClient(base_url="http://sentinel%D0%BA@controller.invalid/mcp")
+    reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    assert reply is not None
+    message = reply["error"]["message"]
+
+    assert INVALID in message
+    assert _HOST_OR_USERINFO in message
+    assert "sentinel" not in message
+    assert "position" not in message
+
+
+@pytest.mark.parametrize("scheme", ["file", "data", "ftp"])
+def test_r5c_28_the_bridges_openers_answer_no_file_data_or_ftp_url(tmp_path: Path, scheme: str) -> None:
     # W15-3 refuses such a base URL before any opener is chosen; the openers themselves kept urllib's default
-    # handlers, which answer a file: or data: URL from the local file or the URL itself, as if a controller had.
+    # handlers, which answer a file: or data: URL from the local file or the URL itself, as if a controller had, and
+    # an ftp: one from an FTP server (here none listens, so urllib's FTP handler failed with its own error).
     import app.mcp_stdio as bridge
 
     result_file = tmp_path / "result.json"
@@ -628,6 +678,7 @@ def test_r5c_28_the_bridges_openers_answer_no_file_or_data_url(tmp_path: Path, s
     url = {
         "file": "file://localhost" + result_file.as_uri().removeprefix("file://"),
         "data": "data:application/json," + _A_RESULT,
+        "ftp": "ftp://127.0.0.1:9/result.json",
     }[scheme]
 
     with pytest.raises(URLError, match=f"unknown url type: {scheme}"):

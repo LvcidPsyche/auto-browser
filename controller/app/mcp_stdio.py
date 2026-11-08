@@ -304,10 +304,23 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
     environment names, read for each request. ``_goes_direct`` decides, from the host http.client connects to, and
     refuses a host another reading finds local.
+
+    ``_goes_direct`` checks the path, query and fragment (R5C-28); a host or userinfo http.client cannot send is
+    refused once it fails to encode, before any byte goes out (review of c3): urllib puts the URL whole into the
+    request line an environment proxy gets, which goes as ASCII, and the host it decoded, userinfo included, into the
+    Host header, which goes as latin-1, and the UnicodeEncodeError named the character and its position.
     """
-    if _goes_direct(request):
-        return _DIRECT.open(request, *args, **kwargs)
-    return _opener().open(request, *args, **kwargs)
+    opener = _DIRECT if _goes_direct(request) else _opener()
+    authority = (request.host or "", urlsplit(request.full_url).netloc)  # as urllib decoded it, and as written
+    try:
+        return opener.open(request, *args, **kwargs)
+    except UnicodeEncodeError as exc:
+        if not any(part and part in exc.object for part in authority):
+            raise
+        raise InvalidControllerURL(
+            "its host or userinfo holds a character http.client cannot send (outside ASCII through a proxy, outside "
+            "latin-1 in the Host header); write the host in its IDNA (xn--) form and leave any userinfo out"
+        ) from exc
 
 
 # Where a token given as an argument comes from, as the reason it went unsent names it (W15-7).

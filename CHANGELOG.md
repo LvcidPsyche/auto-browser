@@ -213,7 +213,11 @@ All notable changes to auto-browser are documented here.
   or a character outside ASCII (urllib puts the fragment into the request line it sends an environment proxy), failed
   only once a connection was chosen, and the bridges answered it as an unexpected bridge failure quoting
   http.client's error. It is now refused before anything is sent, with a fixed reason, as a path or query holding a
-  space or a control character has been since 1.16.0. The bridges' openers now handle only `http://` and `https://`:
+  space or a control character has been since 1.16.0; such a fragment is refused for a loopback controller too, which
+  urllib reached directly without sending the fragment, so a URL like that which worked must drop or percent-encode
+  it. The bridges also refuse a host or userinfo holding a character http.client cannot send (outside ASCII in the
+  request line an environment proxy gets, outside latin-1 in the `Host` header), which they answered as that failure,
+  naming the character and its position. The bridges' openers now handle only `http://` and `https://`:
   urllib's default handlers, which they kept, answer a `file:`, `data:` or `ftp:` request from a local file, the URL
   itself or an FTP server, and an environment proxy of such a scheme turns a request into one.
 
