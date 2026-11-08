@@ -378,23 +378,44 @@ def closed_port():
         yield probe.getsockname()[1]
 
 
-# How often the echo server's accept() wakes to see whether its test is over, and how long it waits on a connection it
-# accepted (R5C-31).
+# How often the echo server's accept() and reads wake to see whether its test is over, and how long it reads a
+# connection it accepted (R5C-31).
 _ECHO_POLL_SECONDS = 0.1
 _ECHO_READ_SECONDS = 10.0
 
 
-def _echo_request_line(connection: socket.socket) -> None:
-    with connection.makefile("rb") as stream:
-        request_line = stream.readline()
-        length = 0
-        while (header := stream.readline()) not in (b"\r\n", b""):
-            name, _, value = header.partition(b":")
-            if name.strip().lower() == b"content-length":
-                length = int(value)
-        # Read the body first: on Windows a socket closed with unread data resets.
-        stream.read(length)
-    connection.sendall(request_line.rstrip(b"\r\n") + b"\r\nContent-Length: 0\r\n\r\n")
+def _echo_request_line(connection: socket.socket, stop: threading.Event) -> None:
+    """Answer one request with its own request line as the status line, once its headers and body are read.
+
+    The reads end when the test is over or after _ECHO_READ_SECONDS, however the client sends: a read's timeout alone
+    bounded only a client gone quiet, so one sending a header line now and then kept the worker reading after its
+    test (review of c3)."""
+    deadline = time.monotonic() + _ECHO_READ_SECONDS
+    connection.settimeout(_ECHO_POLL_SECONDS)
+    received = b""
+    while True:
+        head, ended, body = received.partition(b"\r\n\r\n")
+        # The body is read too: on Windows a socket closed with unread data resets.
+        if ended and len(body) >= _content_length(head):
+            break
+        if stop.is_set() or time.monotonic() > deadline:
+            return
+        try:
+            chunk = connection.recv(65536)
+        except TimeoutError:
+            continue
+        if not chunk:
+            return
+        received += chunk
+    connection.sendall(head.split(b"\r\n", 1)[0] + b"\r\nContent-Length: 0\r\n\r\n")
+
+
+def _content_length(head: bytes) -> int:
+    for header in head.split(b"\r\n")[1:]:
+        name, _, value = header.partition(b":")
+        if name.strip().lower() == b"content-length":
+            return int(value)
+    return 0
 
 
 @pytest.fixture
@@ -402,9 +423,10 @@ def request_line_echo():
     """A raw TCP server on 127.0.0.1 that answers each request with its own request line as the status line.
 
     http.client then raises BadStatusLine quoting that line, the URL's query included, which is not a URLError, so
-    the bridge answers with its unexpected-failure message (W15-1). Its accept() and its reads are bounded, and its
-    worker is stopped and joined when the test ends (R5C-31): closing the listener from another thread does not
-    reliably wake a thread blocked in accept(), and a connection's reads had no bound."""
+    the bridge answers with its unexpected-failure message (W15-1). Its accept() and its reads wake to see whether the
+    test is over, a connection's reads are bounded, and its worker is stopped and joined when the test ends (R5C-31):
+    closing the listener from another thread does not reliably wake a thread blocked in accept(), and a connection's
+    reads had no bound."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -420,10 +442,9 @@ def request_line_echo():
             except OSError:
                 return
             with connection:
-                connection.settimeout(_ECHO_READ_SECONDS)
                 try:
-                    _echo_request_line(connection)
-                except OSError:  # a read that timed out, or a connection reset
+                    _echo_request_line(connection, stop)
+                except OSError:  # a connection reset
                     continue
 
     worker = threading.Thread(target=answer, daemon=True)
@@ -435,6 +456,27 @@ def request_line_echo():
         worker.join(_ECHO_READ_SECONDS + _ECHO_POLL_SECONDS + 5)
         listener.close()
         assert not worker.is_alive(), "the request line echo server's worker did not stop"
+
+
+def test_r5c_31_the_echo_servers_worker_stops_while_a_client_is_still_sending(request_line_echo: int) -> None:
+    # Review of c3 (Codex 8): a read timed out only when the client went quiet, so a client sending a header line
+    # every 100 ms kept the worker reading after its test, and the teardown failed 15 s later with the worker alive.
+    # The teardown is the assertion: it joins the worker and fails while the worker lives.
+    client = socket.create_connection(("127.0.0.1", request_line_echo))
+
+    def drip() -> None:
+        deadline = time.monotonic() + 30
+        with client:
+            try:
+                client.sendall(b"POST /mcp HTTP/1.1\r\n")
+                while time.monotonic() < deadline:
+                    client.sendall(b"X-Drip: 1\r\n")
+                    time.sleep(0.1)
+            except OSError:  # the server closed the connection: its worker stopped reading
+                return
+
+    threading.Thread(target=drip, daemon=True).start()
+    time.sleep(0.3)  # the worker is reading the drip's header lines when the test ends
 
 
 # Of test_w13_1's base URLs, the one answered with urllib's URLError, the answer that no controller is reachable;
