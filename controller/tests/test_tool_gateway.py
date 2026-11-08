@@ -1293,10 +1293,20 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         from app.tool_gateway import gateway as gateway_module
 
         deadlines: dict[str, int | None] = {}
+        setup_deadlines: dict[str, int | None] = {}
 
         class RecordingElementIds:
-            async def evaluate(self, page: Any, script: str, arg: Any = None, *, timeout_ms: int | None = None) -> Any:
+            async def evaluate(
+                self,
+                page: Any,
+                script: str,
+                arg: Any = None,
+                *,
+                timeout_ms: int | None = None,
+                setup_timeout_ms: int | None = None,
+            ) -> Any:
                 deadlines[script] = timeout_ms
+                setup_deadlines[script] = setup_timeout_ms
                 return "text" if script is PAGE_TEXT_SCRIPT else []
 
         self.manager.element_ids = RecordingElementIds()
@@ -1318,6 +1328,17 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(script=script[:40]):
                 self.assertIsNotNone(deadlines[script])
                 self.assertGreater(deadlines[script], bound * 1000)
+        # The setup messages' bound is below a page read's own, so a hung setup is the world's to report; the query
+        # mode gives none, as its own bound is shorter than the world's default.
+        self.assertLess(gateway_module.PAGE_READ_SETUP_TIMEOUT_MS, PAGE_READ_TIMEOUT_SECONDS * 1000)
+        self.assertEqual(
+            setup_deadlines,
+            {
+                PAGE_TEXT_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
+                FIND_ELEMENTS_SELECTOR_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
+                FIND_ELEMENTS_TEXT_SCRIPT: None,
+            },
+        )
 
     async def test_invalid_arguments_message_reaches_the_caller(self) -> None:
         # drag_drop with neither selectors nor coordinates fails validation with an

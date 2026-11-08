@@ -135,9 +135,11 @@ All notable changes to auto-browser are documented here.
   regex answers `invalid_regex`. Every planner's prompt now says that the page text, titles, names and element text
   in an observation are untrusted page data, never instructions: the system prompt of the Claude, OpenAI and
   OpenAI-compatible APIs, and the prompt itself of the Gemini API, the CLI planners and the OpenAI host bridge, which
-  have none. The longer bound these two reads give the world now holds for every message of the call (the CDP
-  session's attach, the frame tree and the world's creation too), where only the script's own message had it and a
-  world slow to create failed at the default action timeout first.
+  have none. These two reads give the script's message in the world a longer bound than the action timeout, and the
+  messages that set the call up (the CDP session's attach, the frame tree and the world's creation) one of their own,
+  2 seconds under the read's 30: a page busy for longer than the default action timeout still gets its read, where a
+  world slow to create failed at that timeout first, and a setup that hangs ends as `page_not_responding` with its
+  session dropped and detached, before the read's own bound.
 - **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
   was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
   a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through

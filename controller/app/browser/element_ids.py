@@ -106,11 +106,27 @@ class ElementIds:
             world = self._worlds[page] = PageWorld(self._settings)
         return world
 
-    async def evaluate(self, page: "Page", script: str, arg: Any = None, *, timeout_ms: int | None = None) -> Any:
+    async def evaluate(
+        self,
+        page: "Page",
+        script: str,
+        arg: Any = None,
+        *,
+        timeout_ms: int | None = None,
+        setup_timeout_ms: int | None = None,
+    ) -> Any:
         """Run an observation script, ``(arg, elementIds) => ...``, in the page's isolated world; ``timeout_ms``
-        replaces the world's own deadline (ACTION_TIMEOUT_MS) for a script whose caller bounds it itself."""
+        replaces the world's own deadline (ACTION_TIMEOUT_MS) for a script whose caller bounds it itself, and
+        ``setup_timeout_ms`` for the messages that set the call up (``PageWorld.call``)."""
         world = self._world(page)
-        result = await world.call(page, observation_declaration(script), arg, effect=READ, timeout_ms=timeout_ms)
+        result = await world.call(
+            page,
+            observation_declaration(script),
+            arg,
+            effect=READ,
+            timeout_ms=timeout_ms,
+            setup_timeout_ms=setup_timeout_ms,
+        )
         world.remember(result["issued"], result["tag"])
         return result["value"]
 

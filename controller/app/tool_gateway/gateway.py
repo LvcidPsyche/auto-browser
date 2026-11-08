@@ -132,6 +132,12 @@ FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
 # as not answering before that timeout does (NAV-12, review of c5).
 WORLD_PAD_SECONDS = 5.0
 PAGE_READ_WORLD_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000)
+# The world's setup messages (the session's attach, the frame tree, the world's creation) are bounded below a page
+# read's own timeout, not past it as its script is: a page busy for longer than ACTION_TIMEOUT_MS still gets its read,
+# and a setup that hangs ends as page_not_responding, its session dropped and detached, before bounded() gives up with
+# a generic error and leaves that session for the next read (review of c6).
+WORLD_SETUP_MARGIN_SECONDS = 2.0
+PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
 
 # How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
 # answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.
@@ -1087,7 +1093,10 @@ class McpToolGateway:
                 # a page that replaced the innerText getter gave this its own text.
                 content = await bounded(
                     self.manager.element_ids.evaluate(
-                        session.page, PAGE_TEXT_SCRIPT, timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS
+                        session.page,
+                        PAGE_TEXT_SCRIPT,
+                        timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
+                        setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
                     )
                 )
                 kind = "text"
@@ -1150,6 +1159,7 @@ class McpToolGateway:
                 FIND_ELEMENTS_SELECTOR_SCRIPT,
                 [payload.selector, payload.limit],
                 timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
+                setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
             )
         )
         if isinstance(elements, dict) and "__invalid_selector" in elements:

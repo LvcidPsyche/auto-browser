@@ -15,5 +15,13 @@ from typing import Any
 
 
 class FakePageElementIds:
-    async def evaluate(self, page: Any, script: str, arg: Any = None, *, timeout_ms: int | None = None) -> Any:
+    async def evaluate(
+        self,
+        page: Any,
+        script: str,
+        arg: Any = None,
+        *,
+        timeout_ms: int | None = None,
+        setup_timeout_ms: int | None = None,
+    ) -> Any:
         return await page.evaluate(script, arg)
