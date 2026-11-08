@@ -297,6 +297,29 @@ READ_PIXELS_SEVERAL_WAYS = """() => {
 }"""
 OTHER_SESSION_ID = "another-canvas-noise-session"
 
+# A pixel read with coordinates that are objects, each answering its number once and throwing after, as a value read
+# twice would; then the same pixel read with numbers.
+READ_WITH_COORDINATE_OBJECTS = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8; canvas.height = 8;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 8, 8);
+  const calls = [0, 0, 0, 0];
+  const once = (index, value) => ({ valueOf() {
+    calls[index] += 1;
+    if (calls[index] > 1) throw new Error('read twice');
+    return value;
+  } });
+  let objects;
+  try {
+    objects = Array.from(ctx.getImageData(once(0, 5), once(1, 3), once(2, 1), once(3, 1)).data);
+  } catch (e) {
+    objects = e.message;
+  }
+  return { objects, numbers: Array.from(ctx.getImageData(5, 3, 1, 1).data), calls };
+}"""
+
 
 async def _read_on_fingerprinted_pages(script: str, *configs: FingerprintConfig) -> list:
     """`script`'s answer on a page with each config's fingerprint script, one context each."""
@@ -342,6 +365,18 @@ def test_canvas_noise_differs_by_pixel_channel_and_seed_and_holds_for_a_pixel_ho
     assert seen["block"] == pixel(4, 2) + pixel(5, 2) + pixel(4, 3) + pixel(5, 3)
     assert seen["flipped"] == seen["block"]
     assert seen_other["whole"] != whole
+
+
+@requires_chromium
+def test_the_noise_reads_each_coordinate_once_as_the_native_read_does() -> None:
+    """Review of c5 (Codex): the noise read the coordinates again after the native getImageData had, so a coordinate
+    object's valueOf ran twice: one that answers once failed the read, and one that answers differently could put the
+    noise at another place."""
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_WITH_COORDINATE_OBJECTS, FingerprintConfig("s", "light")))
+
+    assert seen["calls"] == [1, 1, 1, 1], seen
+    assert seen["objects"] == seen["numbers"], seen
+    assert _noised_once(seen["numbers"]), seen
 
 
 @requires_chromium

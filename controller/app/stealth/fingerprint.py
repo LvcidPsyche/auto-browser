@@ -118,6 +118,11 @@ class FingerprintConfig:
     const _seed_hash = Math.imul(_noise_seed, 0xC2B2AE3D);
     const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
+        if (args.length >= 4) {{
+            // Each coordinate read once, as a number, and passed on as that number: read again below once the native
+            // call had read it, an object's valueOf ran twice, and could answer differently or throw (review of c5).
+            args = [+args[0], +args[1], +args[2], +args[3], ...args.slice(4)];
+        }}
         const imageData = _origGetImageData.apply(this, args);
         const data = imageData.data;
         const width = imageData.width;
