@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from app import memory_manager
 from app.memory_manager import MemoryManager, MemoryProfile
 
 
@@ -157,6 +160,65 @@ class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
                     await call("broken")
                 self.assertNotIn("SECRET-NOTE", str(caught.exception))
         self.assertTrue((self.root / "broken.json").exists())
+
+    async def test_a_cancelled_save_finishes_its_write_before_a_delete_runs(self) -> None:
+        # Review of c4 (Codex 5): a save cancelled during its write let go of the lock while the write went on in its
+        # thread, so a delete ran first and the write then brought the profile back.
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        write = memory_manager.atomic_write_text
+
+        def paused(*args: object) -> None:
+            started.set()
+            release.wait(5)
+            try:
+                write(*args)
+            finally:
+                finished.set()
+
+        with patch.object(memory_manager, "atomic_write_text", paused):
+            saving = asyncio.ensure_future(self.manager.save("kept", notes=["more"]))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            saving.cancel()
+            deleting = asyncio.ensure_future(self.manager.delete("kept"))
+            await asyncio.sleep(0.2)
+            release.set()
+            self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+            with self.assertRaises(asyncio.CancelledError):
+                await saving
+            self.assertTrue(await deleting)
+
+        self.assertFalse((self.root / "kept.json").exists())
+
+    async def test_a_cancelled_delete_finishes_its_unlink_before_a_save_runs(self) -> None:
+        # The other way round: the delete let go of the lock, a save read the profile and wrote it, and the unlink then
+        # removed what the save had just written.
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        unlink = Path.unlink
+
+        def paused(path: Path, *args: object, **kwargs: object) -> None:
+            if path.name != "kept.json":
+                return unlink(path, *args, **kwargs)
+            started.set()
+            release.wait(5)
+            try:
+                return unlink(path, *args, **kwargs)
+            finally:
+                finished.set()
+
+        with patch.object(Path, "unlink", paused):
+            deleting = asyncio.ensure_future(self.manager.delete("kept"))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            deleting.cancel()
+            saving = asyncio.ensure_future(self.manager.save("kept", notes=["after"]))
+            await asyncio.sleep(0.2)
+            release.set()
+            self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+            with self.assertRaises(asyncio.CancelledError):
+                await deleting
+            profile = await saving
+
+        self.assertEqual(profile.notes, ["after"])
+        self.assertTrue((self.root / "kept.json").exists())
 
     async def test_a_delete_waits_for_a_save_in_progress(self) -> None:
         async with self.manager._lock:

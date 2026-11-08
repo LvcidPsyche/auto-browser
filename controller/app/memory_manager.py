@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,18 @@ from .session_ownership import may_use, verified_operator
 from .utils import atomic_write_text, utc_now
 
 logger = logging.getLogger(__name__)
+
+
+async def _to_the_end(function: Callable[..., Any], *args: Any) -> Any:
+    """``function(*args)`` in a worker thread, awaited to its end even when cancelled, so the lock its caller holds is
+    released only once the write or unlink has landed: released at the cancel, a delete or save that took the lock
+    next was undone by the thread finishing after it (review of c4)."""
+    work = asyncio.ensure_future(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        await asyncio.wait({work})
+        raise
 
 
 class MemoryProfile(BaseModel):
@@ -119,7 +132,7 @@ class MemoryManager:
                 )
 
             path = self._profile_path(name)
-            await asyncio.to_thread(atomic_write_text, path, profile.model_dump_json(indent=2))
+            await _to_the_end(atomic_write_text, path, profile.model_dump_json(indent=2))
             logger.info("memory profile saved: %s", name)
             return profile
 
@@ -164,7 +177,7 @@ class MemoryManager:
             if profile is None:
                 return False
             self._require_access(name, profile)
-            await asyncio.to_thread(self._profile_path(name).unlink)
+            await _to_the_end(self._profile_path(name).unlink)
             return True
 
     @staticmethod

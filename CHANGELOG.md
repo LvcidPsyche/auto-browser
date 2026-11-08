@@ -242,7 +242,9 @@ All notable changes to auto-browser are documented here.
   and logged as a warning naming the file. Getting, saving or deleting a profile whose file is not a valid profile
   failed with the parser's error, which quoted the file (another operator's too); it now fails with "memory profile
   '<name>' cannot be read", and the file stays for its operator to fix or remove. A delete now waits for a save in
-  progress, as saves wait for each other, so a save's write no longer brings back a profile a delete just removed.
+  progress, as saves wait for each other, so a save's write no longer brings back a profile a delete just removed,
+  nor a delete's unlink removes one a save just wrote; a cancelled save or delete holds the others off until its
+  write or unlink has landed.
 - **An audit event written to SQLite now survives a power loss once committed.** With `STATE_DB_PATH` set, audit
   events go to SQLite, whose connections ran WAL with `synchronous=NORMAL`, under which the last commits can roll back
   after a power loss or an OS crash. The audit store's connections now run `synchronous=FULL`, a sync of the WAL per
