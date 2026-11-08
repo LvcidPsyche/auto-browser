@@ -431,9 +431,9 @@ All notable changes to auto-browser are documented here.
   `type` whose `toString` throws now throws before any export is made and leaves the canvas as it was: the noise
   stayed on its first pixel, and the export was made a second time. The `type` is converted once before the canvas is
   touched, so what its `toString` draws is kept (the export shows it), where the restored pixel erased it; a Symbol
-  `type` is a `TypeError` and leaves the canvas alone; a canvas with a `width` or `height` accessor of its own that
-  throws is still exported, as the native export reads neither; and a receiver that is not a canvas is refused before
-  anything is converted.
+  `type` is the native's `TypeError` and leaves the canvas alone; a canvas with a `width` or `height` accessor of its
+  own that throws is still exported, as the native export reads neither; and a receiver that is not a canvas is
+  refused before anything is converted.
 - **With `STEALTH_PROFILE=light`, a canvas read is noised per pixel and per colour channel.** The noise
   `getImageData` adds came from the session's seed and the byte index, which is a multiple of 4 at every red byte, so
   every pixel got the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of

@@ -243,12 +243,37 @@ EXPORT_SYMBOL_TYPE = (
     + """
   const { canvas, ctx } = newCanvas();
   let error = null;
+  let message = null;
   try {
     canvas.toDataURL(Symbol('type'));
   } catch (e) {
     error = e.name;
+    message = e.message;
   }
-  return { error, pixel: pixelOf(ctx) };
+  return { error, message, pixel: pixelOf(ctx) };
+}"""
+)
+
+# A quality that is an object: `any` in the native's signature, so it is only read if it is a number, and its valueOf
+# never runs.
+EXPORT_QUALITY_OBJECT = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas } = newCanvas();
+  let calls = 0;
+  const url = canvas.toDataURL('image/jpeg', { valueOf() { calls += 1; return 0.5; } });
+  return { calls, jpeg: url.startsWith('data:image/jpeg') };
+}"""
+)
+
+# A type whose toString empties the canvas: the size the export goes by is the one after the conversion.
+EXPORT_TYPE_EMPTIES_THE_CANVAS = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas } = newCanvas();
+  return canvas.toDataURL({ toString() { canvas.width = 0; return 'image/png'; } });
 }"""
 )
 
@@ -306,10 +331,30 @@ def test_a_type_that_draws_then_answers_leaves_what_it_drew_and_the_export_shows
 
 
 @requires_chromium
-def test_a_symbol_type_is_a_type_error_and_leaves_the_canvas_alone() -> None:
+def test_a_symbol_type_is_the_natives_type_error_and_leaves_the_canvas_alone() -> None:
+    """The error's message is compared as well as its name: a page can read either."""
     native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_SYMBOL_TYPE))
 
-    assert native == {"error": "TypeError", "pixel": [100, 100, 100, 255]}, native
+    assert (native["error"], native["pixel"]) == ("TypeError", [100, 100, 100, 255]), native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_a_quality_object_is_passed_on_without_calling_its_value_of() -> None:
+    """Review of c6: the quality is `any`, which the native reads only if it is a number; converting it would run the
+    page's valueOf, where the native does not."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_QUALITY_OBJECT))
+
+    assert native == {"calls": 0, "jpeg": True}, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_a_type_that_empties_the_canvas_exports_what_the_native_exports() -> None:
+    """Review of c6: the type's toString runs first, so the size is read after it, as the native export goes by it."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_EMPTIES_THE_CANVAS))
+
+    assert native == "data:,", native
     assert stealthy == native
 
 
