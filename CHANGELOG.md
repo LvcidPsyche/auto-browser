@@ -64,8 +64,11 @@ All notable changes to auto-browser are documented here.
   answer is. A list or an object nested more than 100 deep in a detail or the data is replaced by `[redacted: nested
   too deep]`, not walked, since a walk that deep ran out of stack and ended the bridge with no answer. A response body
   nested too deep for Python's `json` to parse (`RecursionError`) is answered as an unreadable one is, with its HTTP
-  status, not as an unexpected bridge failure. A short secret is no longer replaced again inside an earlier
-  `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a userinfo and dropped.
+  status, not as an unexpected bridge failure. An answer `json` parsed but cannot write back (on Python 3.14 the two
+  limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is the part too deep,
+  and a line from the client too deep to parse with `-32700`, where the `RecursionError` ended the bridge with no
+  answer. A short secret is no longer replaced again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is
+  no longer read as a userinfo and dropped.
 - **The Python client's and the LangChain tools' errors no longer show the bearer token or a secret of the controller
   URL.** The client's `AutoBrowserError` quoted a server's error detail as it came, so a proxy's or gateway's detail
   that echoed the base URL (its password, a token in its query) or the bearer token was shown whole; its `detail` and

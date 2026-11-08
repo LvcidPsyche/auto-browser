@@ -1163,6 +1163,74 @@ def test_a_body_too_deep_for_any_python_to_parse_is_answered_as_an_unreadable_on
     assert reply["error"]["message"] == "Empty or non-JSON response from Auto Browser MCP endpoint (200)"
 
 
+def test_an_answer_nested_too_deep_to_encode_is_answered_as_an_error_and_the_bridge_goes_on(monkeypatch) -> None:
+    # A body json.loads parsed can still be too deep for json.dumps (on Python 3.14 the two have different limits), and
+    # the RecursionError out of run() ended the bridge with no answer. No Python from 3.11 to 3.14 can encode this.
+    import app.mcp_stdio as bridge
+
+    nested: list = []
+    for _ in range(1_000_000):
+        nested = [nested]
+    answers = [
+        {"jsonrpc": "2.0", "id": 7, "result": nested},
+        {"jsonrpc": "2.0", "id": 8, "result": {"ok": True}},
+    ]
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    monkeypatch.setattr(proxy, "_handle_line", lambda _line: answers.pop(0))
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("first\nsecond\n"), stdout=stdout)
+
+    first, second = (json.loads(line) for line in stdout.getvalue().splitlines())
+    assert first == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32000,
+            "message": "The controller's answer is nested too deep for the stdio bridge to send.",
+        },
+    }
+    assert second == {"jsonrpc": "2.0", "id": 8, "result": {"ok": True}}
+
+
+def test_a_request_id_too_deep_to_encode_is_answered_with_a_null_id(monkeypatch) -> None:
+    # The error for that request cannot carry the id either: JSON-RPC's null id says the request's could not be read.
+    import app.mcp_stdio as bridge
+
+    nested: list = []
+    for _ in range(1_000_000):
+        nested = [nested]
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    monkeypatch.setattr(proxy, "_handle_line", lambda _line: {"jsonrpc": "2.0", "id": nested, "result": {}})
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("line\n"), stdout=stdout)
+
+    reply = json.loads(stdout.getvalue())
+    assert reply["id"] is None
+    assert reply["error"]["code"] == -32000
+
+
+def test_a_stdin_line_too_deep_to_parse_is_answered_as_invalid_json() -> None:
+    # json.loads raises RecursionError on this on every supported Python, which ended the bridge with no answer.
+    import app.mcp_stdio as bridge
+
+    depth = 1_000_000
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("[" * depth + "]" * depth + "\n"), stdout=stdout)
+
+    assert json.loads(stdout.getvalue()) == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32700, "message": "Invalid JSON payload"},
+    }
+
+
 def test_r5c_20_the_unexpected_failure_on_stderr_never_shows_the_urls_secrets_or_the_token(monkeypatch) -> None:
     # The answer went through _shown; the line the bridge printed on stderr showed the error's text as it came.
     import app.mcp_stdio as bridge

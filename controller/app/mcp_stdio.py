@@ -545,16 +545,34 @@ class StdioMcpBridge:
                     continue
                 response = self._handle_line(line)
                 if response is not None:
-                    output_stream.write(json.dumps(response, ensure_ascii=False) + "\n")
+                    output_stream.write(self._encoded(response) + "\n")
                     output_stream.flush()
         finally:
             self.client.delete_session(session_id=self.session_id)
         return 0
 
+    def _encoded(self, response: dict[str, Any]) -> str:
+        """``response`` as the line the client reads. A body ``json.loads`` parsed can be too deep for ``json.dumps``
+        to write (their limits differ on Python 3.14); that request gets an error, with a null id if the id itself is
+        the part too deep to write, and the bridge goes on."""
+        try:
+            return json.dumps(response, ensure_ascii=False)
+        except RecursionError:
+            request_id = response.get("id")
+            return json.dumps(
+                self._jsonrpc_error(
+                    request_id if isinstance(request_id, (str, int, float)) else None,
+                    -32000,
+                    "The controller's answer is nested too deep for the stdio bridge to send.",
+                ),
+                ensure_ascii=False,
+            )
+
     def _handle_line(self, line: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError: a line nested too deep for json to parse.
             return self._jsonrpc_error(None, -32700, "Invalid JSON payload")
 
         if isinstance(payload, list):
