@@ -222,6 +222,25 @@ class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.body_calls, 1, name)
             self.assertEqual(inspector.entries()[0]["response_body"], expected, name)
 
+    async def test_a_request_body_is_capped_by_its_utf8_bytes_not_its_characters(self) -> None:
+        # ACT-35: the cap counted characters, so a body of multibyte text up to four times the cap was kept.
+        inspector = NetworkInspector("session-7", body_max_bytes=10)
+        cases = {"at-the-cap": ("é" * 5, "é" * 5), "over-the-cap": ("é" * 6, None)}
+        for name, (body, expected) in cases.items():
+            request = FakeRequest(url=f"https://example.com/{name}", method="POST", post_data=body)
+            entry = await _record(inspector, request)
+            self.assertEqual(entry["request_body"], expected, name)
+
+    async def test_a_streaming_response_body_is_never_read(self) -> None:
+        # ACT-35: response.body() waits for the end of a response, which an event stream or a multipart replace
+        # stream may never reach; "text/event-stream" passed as text.
+        inspector = NetworkInspector("session-8", body_max_bytes=100)
+        for content_type in ("text/event-stream; charset=utf-8", "multipart/x-mixed-replace; boundary=frame"):
+            request = FakeRequest(url="https://example.com/stream")
+            response = FakeResponse(request, headers={"content-type": content_type}, body=b"data: x\n\n")
+            await _record(inspector, request, response)
+            self.assertEqual(response.body_calls, 0, content_type)
+
 
 SIGNUP_URL = "https://x.test/signup?email=ops%40example.com"
 SIGNUP_URL_SCRUBBED = "https://x.test/signup?email=%5BREDACTED%5D"

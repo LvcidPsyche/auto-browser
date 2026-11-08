@@ -245,6 +245,13 @@ All notable changes to auto-browser are documented here.
   event; approvals and harness traces keep `NORMAL`. A database whose journal mode stays out of WAL was logged at
   debug level; it is now a warning. A connection whose configuration raised was left open, holding its file; it is
   now closed before the error goes on.
+- **The network inspector caps a request body by its bytes, and never reads a streaming response.** A request body
+  was kept when its characters, not its UTF-8 bytes, fit `NETWORK_INSPECTOR_BODY_MAX_BYTES`, so one of multibyte
+  text was kept at up to four times the cap; it is now measured in bytes, as a response body is. A
+  `text/event-stream` response counted as text and its body was read, and Playwright's `response.body()` waits for
+  the end of a response, which an event stream need not reach, so the read stayed pending for as long as the page
+  kept the stream open. A response of either streaming type, `text/event-stream` or `multipart/x-mixed-replace`, is
+  now never read; its entry keeps no body.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
   when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
   `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,
