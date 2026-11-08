@@ -117,9 +117,13 @@ class FingerprintConfig:
     const _noise_seed = {noise_seed};
     const _seed_hash = Math.imul(_noise_seed, 0xC2B2AE3D);
     const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    // The prototype's own getter for canvas, called on the receiver first: it throws the same "Illegal invocation"
+    // for a receiver that is not a 2d context, and runs no page code, where the coordinates below can (review of c5).
+    const _canvasOf = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'canvas').get;
     const _getPrototypeOf = Object.getPrototypeOf;
     const _bytesPrototype = Uint8ClampedArray.prototype;
     CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
+        _canvasOf.call(this);
         if (args.length >= 4) {{
             // Each coordinate read once, as a number, and passed on as that number: read again below once the native
             // call had read it, an object's valueOf ran twice, and could answer differently or throw (review of c5).

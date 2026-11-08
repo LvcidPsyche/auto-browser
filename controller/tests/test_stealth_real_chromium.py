@@ -540,6 +540,41 @@ def test_the_noise_reads_each_coordinate_once_as_the_native_read_does() -> None:
     assert _noised_once(seen["numbers"]), seen
 
 
+# getImageData called on something that is not a 2d context, with a coordinate that throws if it is converted: the
+# native refuses the receiver first, converting nothing. Then on a real context, where the page's own error comes out.
+READ_ON_A_NON_CONTEXT = """() => {
+  const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+  const attempt = (receiver) => {
+    let calls = 0;
+    const coordinate = { valueOf() { calls += 1; throw new Error('coerced'); } };
+    try {
+      getImageData.call(receiver, coordinate, 0, 1, 1);
+      return { error: null, calls };
+    } catch (e) {
+      return { error: e.name === 'TypeError' ? 'TypeError' : e.message, calls };
+    }
+  };
+  const real = document.createElement('canvas').getContext('2d');
+  return { nonContext: attempt({}), noReceiver: attempt(undefined), context: attempt(real) };
+}"""
+
+
+@requires_chromium
+def test_the_read_refuses_a_receiver_that_is_not_a_context_before_it_converts_a_coordinate() -> None:
+    """Review of c5 (Codex): the wrapper converted its coordinates before the native call checked its receiver, so
+    getImageData.call({}, {valueOf() { throw ... }}, 0, 1, 1) threw the page's error where the native throws a
+    TypeError and calls no valueOf."""
+    native, _stealthy = asyncio.run(_native_and_stealthy(READ_ON_A_NON_CONTEXT))
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_ON_A_NON_CONTEXT, FingerprintConfig("s", "light")))
+
+    assert native == {
+        "nonContext": {"error": "TypeError", "calls": 0},
+        "noReceiver": {"error": "TypeError", "calls": 0},
+        "context": {"error": "coerced", "calls": 1},
+    }, native
+    assert seen == native
+
+
 @requires_chromium
 def test_a_read_of_float_values_is_left_as_it_is() -> None:
     """Review of c5 (Codex): the noise shifted each channel by one, a step in a read of bytes; in a read of float16
