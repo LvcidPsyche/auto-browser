@@ -6,6 +6,7 @@ import os
 import secrets
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -134,17 +135,29 @@ def _discard_finished(capture: asyncio.Future) -> None:
 
 
 def _delete_when_done(capture: asyncio.Future, path: str) -> None:
-    """A capture whose read was cancelled: nothing checked what it writes, so the file goes once it is written."""
+    """A capture, or a thread writing a staged file, whose read was cancelled: nothing checked what it writes, so the
+    file goes once it is written."""
 
     def delete(finished: asyncio.Future) -> None:
         if not finished.cancelled() and finished.exception() is not None:
-            logger.debug("a cancelled read's screenshot capture failed: %s", type(finished.exception()).__name__)
+            logger.debug("a cancelled read's screenshot write failed: %s", type(finished.exception()).__name__)
         Path(path).unlink(missing_ok=True)
 
     if capture.done():
         delete(capture)
     else:
         capture.add_done_callback(delete)
+
+
+async def _in_thread_writing(path: str, function: Callable[..., Any], *args: Any) -> Any:
+    """``function(*args)``, which writes ``path``, in a worker thread. A cancel does not stop the thread, so on one the
+    file goes once the thread is done: deleted at the cancel, it was written again after it (review of c4)."""
+    work = asyncio.ensure_future(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        _delete_when_done(work, path)
+        raise
 
 
 class BrowserObservationService:
@@ -455,7 +468,7 @@ class BrowserObservationService:
         # Staged, as a capture to be redacted is (ACT-33).
         copy = {**target, "path": _staging_path(target["path"]), "published_path": target["path"]}
         try:
-            await asyncio.to_thread(shutil.copyfile, screenshot["path"], copy["path"])
+            await _in_thread_writing(copy["path"], shutil.copyfile, screenshot["path"], copy["path"])
             ocr = await self.manager.ocr.extract_from_image(copy["path"])
             await self._scrub_screenshot_if_needed(session, copy, ocr)
         except BaseException:
@@ -623,7 +636,9 @@ class BrowserObservationService:
             scrubbed_bytes, hits = await asyncio.to_thread(pii_scrubber.screenshot, raw_bytes, blocks)
             if hits:
                 # Not over the capture in place, which a write cut short left partly written (ACT-33).
-                await asyncio.to_thread(_write_through_temporary, screenshot["path"], scrubbed_bytes)
+                await _in_thread_writing(
+                    screenshot["path"], _write_through_temporary, screenshot["path"], scrubbed_bytes
+                )
         except Exception as exc:
             # The file on disk is still the unredacted capture. Say so in the
             # result, the way the OCR-unavailable path does, and audit a failure,

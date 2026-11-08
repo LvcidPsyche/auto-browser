@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import shutil
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +22,7 @@ from PIL import Image
 
 from app.artifacts import SessionArtifactService
 from app.browser.page_provenance import PageProvenance
+from app.browser.services import observation
 from app.browser.services.diagnostics import checked_screenshot
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
@@ -219,6 +222,42 @@ async def test_the_sessions_last_screenshot_is_never_one_still_being_redacted(tm
     release_ocr.set()
     latest = await task
     assert checked_screenshot(session)["path"] == latest["screenshot_path"]
+
+
+@pytest.mark.parametrize("step", ["redacted bytes", "compare copy"])
+async def test_a_cancel_while_a_thread_writes_the_hidden_file_leaves_none_behind(tmp_path: Path, step: str) -> None:
+    # Review of c4 (Codex 4): the hidden file was deleted when the cancel came, and the worker thread writing it, which
+    # a cancel does not stop, wrote it again afterwards.
+    service, session, _ = _service(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    raw = tmp_path / "raw.png"
+    raw.write_bytes(_png())
+
+    def paused(function):
+        def run(*args):
+            started.set()
+            release.wait(5)
+            return function(*args)
+
+        return run
+
+    if step == "redacted bytes":
+        patcher = patch.object(observation, "_write_through_temporary", paused(observation._write_through_temporary))
+        read = service.capture_screenshot(session.id)
+    else:
+        patcher = patch.object(observation.shutil, "copyfile", paused(shutil.copyfile))
+        read = service.redacted_copy(session, {"path": str(raw), "url": "/artifacts/session-1/raw.png"}, "diff-a")
+    with patcher:
+        task = asyncio.ensure_future(read)
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+
+    assert list(session.artifact_dir.iterdir()) == []
 
 
 async def test_a_capture_cancelled_while_written_leaves_no_hidden_file(tmp_path: Path) -> None:
