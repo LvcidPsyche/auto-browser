@@ -157,6 +157,24 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Authorization: Basic [redacted]", str(caught.exception))
 
     @respx.mock
+    async def test_a_transport_error_echoing_the_url_as_httpx_sends_it_never_shows_its_secrets(self) -> None:
+        # Review of c3's fixes (Codex 3): httpx percent-encodes a space or a character outside ASCII in the query before
+        # sending it, and the request line it sent held none of the URL's secrets as they were configured.
+        respx.route(host="auto-browser.test").mock(side_effect=_echoing_the_request_line)
+        for query in ("key=sentinel value", "key=sentinel" + chr(0xE9) + "value"):
+            url = f"http://auto-browser.test:8000/?{query}"
+            calls = (
+                ("tool", lambda: AutoBrowserTool(base_url=url)._arun("browser.observe", {})),
+                ("node", lambda: AutoBrowserNode(base_url=url).call_tool("browser.observe", {})),
+                ("list_tools", lambda: asyncio.to_thread(AutoBrowserTool.list_tools, base_url=url)),
+            )
+            for caller, call in calls:
+                with self.subTest(query=query, caller=caller):
+                    with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                        await call()
+                    self._assert_raised_without_secrets(caught.exception)
+
+    @respx.mock
     async def test_a_status_lines_reason_phrase_never_shows_them_either(self) -> None:
         respx.route(host="auto-browser.test").mock(
             return_value=httpx.Response(401, extensions={"reason_phrase": b"bad key sentinel-key"})
@@ -190,6 +208,11 @@ class RedactionCopyTests(unittest.TestCase):
             (
                 "Authorization: Basic " + base64.b64encode(b"alice:sentinel pass").decode(),
                 "http://alice:sentinel%20pass@h/mcp",
+            ),
+            # Review of c3's fixes (Codex 3): the URL as configured and as httpx sends it, each form's secrets counted.
+            (
+                "POST /mcp?key=sentinel%20value HTTP/1.1",
+                ("http://h/mcp?key=sentinel value", "http://h/mcp?key=sentinel%20value"),
             ),
         )
         for text, url in cases:

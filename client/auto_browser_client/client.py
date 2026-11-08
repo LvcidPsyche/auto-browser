@@ -98,6 +98,17 @@ def _header_credentials(headers: Mapping[str, str]) -> str | None:
     return None
 
 
+def _as_sent(base_url: str) -> tuple[str, ...]:
+    """``base_url`` as configured and as httpx sends it, whose secrets an error leaves out (review of c3's fixes):
+    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, so an echo of the
+    request quotes a form the configured text does not hold. Only the first when httpx cannot read it (a lone
+    surrogate fails its encoding), as this runs while another error is shown."""
+    try:
+        return (base_url, str(httpx.URL(base_url)))
+    except (httpx.InvalidURL, UnicodeError):
+        return (base_url,)
+
+
 def _with_text(error: Exception, text: str) -> Exception:
     """``error`` again, of its type and with its attributes (an httpx error's request), its text ``text``."""
     shown = type(error).__new__(type(error))
@@ -229,7 +240,7 @@ class AutoBrowserClient:
             yield
         except (httpx.HTTPError, httpx.InvalidURL) as error:
             text = str(error)
-            shown = _redacted(text, self.base_url, self._token)
+            shown = _redacted(text, _as_sent(self.base_url), self._token)
             if shown == text:
                 raise
             raise _with_text(error, shown) from None
@@ -249,7 +260,7 @@ class AutoBrowserClient:
                     detail = f"<unreadable response body, status {r.status_code}>"
             # A proxy's or a gateway's detail can quote the URL or the token: kept from the error as the MCP bridges
             # keep them from an answer, its shape kept (R5C-20).
-            raise AutoBrowserError(r.status_code, _redacted_value(detail, self.base_url, self._token))
+            raise AutoBrowserError(r.status_code, _redacted_value(detail, _as_sent(self.base_url), self._token))
 
     def _get(self, path: str, **params) -> Any:
         with self._errors_shown():

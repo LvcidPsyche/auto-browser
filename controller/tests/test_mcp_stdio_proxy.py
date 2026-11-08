@@ -1101,6 +1101,18 @@ def test_r5c_20_the_basic_credentials_httpx_sends_for_the_userinfo_are_redacted(
     )
 
 
+def test_r5c_20_each_form_of_the_url_given_counts_its_secrets() -> None:
+    # Review of c3's fixes (Codex 3): the client SDK gives its base URL as configured and as httpx sends it, which
+    # percent-encodes a space or a character outside ASCII in the query, so a server quoting the request line it got
+    # quoted a form the configured text does not hold.
+    from app.mcp_stdio import _redacted, _redacted_value
+
+    forms = ("http://h/mcp?key=sentinel value", "http://h/mcp?key=sentinel%20value")
+
+    assert _redacted("POST /mcp?key=sentinel%20value HTTP/1.1", forms) == "POST /mcp?[redacted] HTTP/1.1"
+    assert _redacted_value({"input": "sentinel%20value"}, forms) == {"input": "[redacted]"}
+
+
 def test_w15_1_the_unexpected_failure_answer_never_shows_the_urls_query(
     recording_proxy, request_line_echo: int
 ) -> None:

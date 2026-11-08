@@ -31,7 +31,7 @@ def errors_shown(base_url: str, token: str | None) -> Iterator[None]:
         yield
     except (httpx.HTTPError, httpx.InvalidURL) as error:
         text = str(error)
-        shown = _redacted(text, base_url, token)
+        shown = _redacted(text, _as_sent(base_url), token)
         if shown == text:
             raise
         copy = type(error).__new__(type(error))
@@ -40,20 +40,33 @@ def errors_shown(base_url: str, token: str | None) -> Iterator[None]:
         raise copy.with_traceback(error.__traceback__) from None
 
 
-def _redacted(text: str, url: str, token: str | None) -> str:
+def _as_sent(base_url: str) -> tuple[str, ...]:
+    """``base_url`` as configured and as httpx sends it, whose secrets an error leaves out (review of c3's fixes):
+    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, so an echo of the
+    request quotes a form the configured text does not hold. Only the first when httpx cannot read it (a lone
+    surrogate fails its encoding), as this runs while another error is shown."""
+    try:
+        return (base_url, str(httpx.URL(base_url)))
+    except (httpx.InvalidURL, UnicodeError):
+        return (base_url,)
+
+
+def _redacted(text: str, url: str | tuple[str, ...], token: str | None) -> str:
     """``text`` with ``url``'s secrets and ``token`` replaced with ``[redacted]`` in one pass, longest first, and any
-    other userinfo run dropped, as the MCP bridges' answers show a text."""
+    other userinfo run dropped, as the MCP bridges' answers show a text. ``url`` can be several forms of one URL."""
     secrets = sorted(_secrets_of(url, token), key=lambda secret: (-len(secret), secret))
     if secrets:
         text = re.compile("|".join(map(re.escape, secrets))).sub("[redacted]", text)
     return _USERINFO_RUN.sub("", text)
 
 
-def _secrets_of(url: str, token: str | None) -> set[str]:
+def _secrets_of(url: str | tuple[str, ...], token: str | None) -> set[str]:
     """``url``'s userinfo, password, query, fragment and each query value of _SHORTEST_REDACTED_QUERY_VALUE or more
     characters, as written and percent-decoded (a query's ``+`` as a space too), and ``token``, each also as
-    ``repr()`` and ``json.dumps()`` write it, and the Basic credentials httpx sends for the userinfo. Cut as a string,
-    so a malformed URL is handled too."""
+    ``repr()`` and ``json.dumps()`` write it, and the Basic credentials httpx sends for the userinfo; for each form of
+    the URL when given several. Cut as a string, so a malformed URL is handled too."""
+    if not isinstance(url, str):
+        return set().union(*(_secrets_of(form, token) for form in url))
     url = url.strip()
     _, slashes, rest = url.partition("//")
     if not slashes:

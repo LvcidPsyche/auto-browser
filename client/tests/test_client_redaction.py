@@ -119,6 +119,15 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(base64.b64encode(credentials).decode(), str(caught.exception))
                 self.assertIn("Authorization: Basic [redacted]", str(caught.exception))
 
+    def test_a_transport_error_echoing_the_url_as_httpx_sends_it_is_raised_without_its_secrets(self) -> None:
+        # Review of c3's fixes (Codex 3): httpx percent-encodes a space or a character outside ASCII in the query before
+        # sending it, and the request line it sent held none of the URL's secrets as they were configured.
+        for query in ("key=sentinel value", "key=sentinel" + chr(0xE9) + "value"):
+            with self.subTest(query=query):
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    _failing(ECHOES[0], f"http://auto-browser.test:8000/?{query}").create_session(name="s")
+                self._assert_raised_without_secrets(caught.exception)
+
     def test_an_error_that_quotes_neither_is_raised_as_it_came(self) -> None:
         error = httpx.ConnectError("[Errno 111] Connection refused")
         client = AutoBrowserClient(BASE_URL, token=TOKEN)
@@ -171,6 +180,19 @@ class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):
             client.health()
 
         self._assert_raised_without_secrets(caught.exception, {"detail": "bad token [redacted]"})
+
+    def test_a_detail_quoting_the_url_as_httpx_sends_it_is_raised_without_its_secrets(self) -> None:
+        # Review of c3's fixes (Codex 3): a server quotes the request line as it got it, percent-encoded by httpx.
+        response = httpx.Response(502, json={"detail": "no route for POST /?key=sentinel%20value/sessions"})
+        client = AutoBrowserClient("http://auto-browser.test:8000/?key=sentinel value", token=TOKEN)
+        client._sync_client = httpx.Client(
+            base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
+        )
+
+        with self.assertRaises(AutoBrowserError) as caught:
+            client.create_session(name="s")
+
+        self._assert_raised_without_secrets(caught.exception, {"detail": "no route for POST /?[redacted]/sessions"})
 
     async def test_the_async_calls_raise_the_detail_without_them_too(self) -> None:
         client = _answering(httpx.Response(502, json={"detail": f"refused {TOKEN}"}))

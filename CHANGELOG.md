@@ -58,9 +58,10 @@ All notable changes to auto-browser are documented here.
   now names the URL without them (the path is kept), in httpx's words otherwise, and leaves them out of the server's
   reason phrase too. httpx's own errors (a connection or protocol failure), which both let through, are now raised
   with them left out as well, their type and request kept: the one for an answer httpx cannot read quotes what the
-  server sent, which can echo the request line or a header. The `Authorization: Basic` credentials httpx sends for
-  the URL's user name and password (their base64) count among its secrets too, in those errors and in a server's
-  detail; the MCP bridges, which share the client's redaction, send no such header. A tool's own error (`isError`),
+  server sent, which can echo the request line or a header. The URL's secrets count there, and in a server's detail,
+  as httpx sends them too, percent-encoded where the URL held a space or a character outside ASCII, and so do the
+  `Authorization: Basic` credentials httpx sends for the URL's user name and password (their base64); the MCP
+  bridges, which share the client's redaction, send no such header. A tool's own error (`isError`),
   which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the controller sent it, as the MCP
   bridges pass on a tool call's result. A token httpx cannot send in a header (one holding a line break or another
   control character but a tab, or a character outside ASCII) failed the first request with httpx's error, which

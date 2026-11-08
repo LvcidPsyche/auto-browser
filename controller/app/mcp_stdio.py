@@ -124,11 +124,13 @@ def _display_url(url: str) -> str:
     return _without_userinfo((before + after).split("#", 1)[0].split("?", 1)[0])
 
 
-def _redacted(text: str, url: str, token: str | None = None) -> str:
+def _redacted(text: str, url: str | tuple[str, ...], token: str | None = None) -> str:
     """``text`` with ``url``'s secrets and ``token`` replaced with ``[redacted]``, and any userinfo run dropped (W14-1).
 
     The secrets (``_secrets_of``) are replaced in one pass, longest first (R5C-20), so a short one is never replaced
     again inside a ``[redacted]`` already written; then ``_without_userinfo`` drops any other ``user:password@``.
+    ``url`` can be several forms of one URL, whose secrets all count (the client SDK gives its base URL as configured
+    and as httpx sends it).
     """
     secrets = sorted(_secrets_of(url, token), key=lambda secret: (-len(secret), secret))
     if secrets:
@@ -136,7 +138,7 @@ def _redacted(text: str, url: str, token: str | None = None) -> str:
     return _without_userinfo(text)
 
 
-def _secrets_of(url: str, token: str | None) -> set[str]:
+def _secrets_of(url: str | tuple[str, ...], token: str | None) -> set[str]:
     """What an answer must not show of ``url`` and ``token``, in each form a text can quote it in.
 
     The URL is read first as urllib's Request reads it (W15-6): a CR left on it by a CRLF .env file, which urllib
@@ -144,8 +146,12 @@ def _secrets_of(url: str, token: str | None) -> set[str]:
     query value of _SHORTEST_REDACTED_QUERY_VALUE or more characters (R5C-20), are found with string operations, so a
     malformed URL is handled, and count as written and percent-decoded (a query's ``+`` as a space too); each of
     those, and ``token``, counts as ``repr()`` and ``json.dumps()`` write it too (R5C-20). The userinfo counts as
-    the Basic credentials httpx sends for it too (``_basic_credentials``).
+    the Basic credentials httpx sends for it too (``_basic_credentials``). Several forms of one URL count each: httpx
+    percent-encodes a space or a character outside ASCII in the query it sends, which a server then quotes (review of
+    c3's fixes).
     """
+    if not isinstance(url, str):
+        return set().union(*(_secrets_of(form, token) for form in url))
     url = unwrap(url)
     userinfo = _split_userinfo(url)[1]
     query = url.partition("?")[2].partition("#")[0]
@@ -176,7 +182,7 @@ def _basic_credentials(userinfo: str) -> str:
     return base64.b64encode(f"{user}:{password}".encode("utf-8", "surrogatepass")).decode("ascii")
 
 
-def _redacted_value(value: Any, url: str, token: str | None = None) -> Any:
+def _redacted_value(value: Any, url: str | tuple[str, ...], token: str | None = None) -> Any:
     """``value``, a server's error detail as JSON parsed it, with each string in it (keys too) through ``_redacted``
     and each number that is one of the secrets replaced, its shape kept (R5C-20)."""
     if isinstance(value, str):
