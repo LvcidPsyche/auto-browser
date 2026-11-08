@@ -398,6 +398,10 @@ All notable changes to auto-browser are documented here.
   seconds one address holds at most about 1,000 nonces at the default limit, one peer's share of the cache, and that
   only when it stamps its envelopes about a window ahead of this node's clock; one whose clock agrees holds about
   half as many. `docs/mesh.md` and `.env.example` say so.
+- **A `typing_timeout` is no longer retryable.** It stops typing part way, and its message already said that part of
+  the text may have been entered and to check the field first, but it carried `retryable: true`, so a client that
+  retries on that flag could type the part already entered a second time. It now carries `retryable: false`; the
+  code, the status (504) and the message are unchanged.
 
 ## [1.16.0] — 2026-11-06
 

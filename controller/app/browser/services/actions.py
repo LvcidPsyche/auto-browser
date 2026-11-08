@@ -1017,7 +1017,8 @@ class BrowserActionService:
             code="typing_timeout",
             action="type",
             status_code=504,
-            retryable=True,
+            # Not retryable (D3a-7): typing the text again could enter the part already in the field twice.
+            retryable=False,
         )
 
     @classmethod
