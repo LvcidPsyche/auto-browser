@@ -100,6 +100,16 @@ class PlaywrightExportHelperTests(unittest.TestCase):
                     f"# skipped {action}: the audit event has no {missing}\n",
                 )
 
+    def test_an_integer_too_large_for_a_float_is_written_as_it_is(self) -> None:
+        # Review of c5: math.isfinite turned it into a float first, and its OverflowError ended the whole export.
+        huge = 10**400
+
+        self.assertEqual(_action_to_code("wait", {"target": {"wait_ms": huge}}), f"page.wait_for_timeout({huge})\n")
+        self.assertEqual(
+            _action_to_code("click", {"target": {"mode": "coordinates", "x": huge, "y": 2}}),
+            f"page.mouse.click({huge}, 2)\n",
+        )
+
     def test_a_typed_text_cut_to_its_preview_says_so(self) -> None:
         """ACT-31: the audit log keeps only the start of a long text, which the script typed as if it were all."""
         target = {"selector": "#note", "text_preview": "draft", "text_truncated": True, "clear_first": False}

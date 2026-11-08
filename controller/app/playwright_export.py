@@ -94,13 +94,14 @@ def _skipped(action: str, missing: str) -> str:
 
 
 def _number(value: Any) -> int | float | None:
-    """``value`` if it is a finite int or float (written with repr, as strings are), else None.
+    """``value`` if it is an int or a finite float (written with repr, as strings are), else None.
 
-    Anything else in a number's place would be written into the script as code (ACT-31).
+    Anything else in a number's place would be written into the script as code (ACT-31). An int of any size is
+    finite and is written as it is: math.isfinite would make it a float first, which overflows past about 1e308.
     """
-    if type(value) not in (int, float) or not math.isfinite(value):
-        return None
-    return value
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return value
+    return None
 
 
 def _locator(target: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
