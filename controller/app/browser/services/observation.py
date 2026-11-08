@@ -112,7 +112,8 @@ def _write_through_temporary(path: str, data: bytes) -> None:
 
 def _publish(screenshot: dict[str, str]) -> dict[str, str]:
     """A staged screenshot (``capture_session_screenshot(staged=True)``) moved onto its published name with os.replace
-    once its redaction is done, or left as it was (ACT-33). The dict is the one the session's last_screenshot holds."""
+    once its redaction is done, or left as it was (ACT-33). A capture's caller then makes it the session's
+    last_screenshot (review of c4)."""
     published = screenshot.pop("published_path", None)
     if published:
         os.replace(screenshot["path"], published)
@@ -337,7 +338,7 @@ class BrowserObservationService:
         except BaseException:
             _discard(screenshot)
             raise
-        _publish(screenshot)
+        session.last_screenshot = _publish(screenshot)
         tabs = await self.manager.tabs.summaries(session)
         return {
             "session": await self.manager._session_summary(session),
@@ -438,7 +439,8 @@ class BrowserObservationService:
         except BaseException:
             _discard(screenshot)
             raise
-        return _publish(screenshot)
+        session.last_screenshot = _publish(screenshot)
+        return session.last_screenshot
 
     async def redacted_copy(self, session: "BrowserSession", screenshot: dict[str, str], label: str) -> dict[str, str]:
         """A PII-redacted copy of a screenshot already on disk, for reading it without trusting how it was taken.
@@ -514,10 +516,13 @@ class BrowserObservationService:
             raise
         read.check(screenshot["path"])
         if staged:
+            # Not the session's last screenshot yet, which vision reads unlocked: its caller makes it that once it
+            # is redacted and published (review of c4).
             screenshot["published_path"] = target["path"]
-        # The screenshot tools that reuse an earlier one (compare, vision) take this one, which
-        # was checked, rather than whatever PNG is newest in the artifact directory.
-        session.last_screenshot = screenshot
+        else:
+            # The screenshot tools that reuse an earlier one (compare, vision) take this one, which
+            # was checked, rather than whatever PNG is newest in the artifact directory.
+            session.last_screenshot = screenshot
         return screenshot
 
     def trace_payload(self, session: "BrowserSession") -> dict[str, Any]:

@@ -20,6 +20,7 @@ from PIL import Image
 
 from app.artifacts import SessionArtifactService
 from app.browser.page_provenance import PageProvenance
+from app.browser.services.diagnostics import checked_screenshot
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from app.pii_scrub import PiiScrubber
@@ -190,6 +191,34 @@ async def test_the_redacted_bytes_are_never_written_over_the_capture_in_place(tm
 
     assert "screenshot_pii_scrub" not in result
     assert Path(result["screenshot_path"]).read_bytes() != _png()
+
+
+@pytest.mark.parametrize("read", ["capture", "observe"])
+async def test_the_sessions_last_screenshot_is_never_one_still_being_redacted(tmp_path: Path, read: str) -> None:
+    # Review of c4 (Codex 1): a capture became session.last_screenshot as soon as it was written, under its hidden
+    # name, so a vision call that reuses the last screenshot (take_screenshot=false) read the raw image while OCR ran.
+    service, session, _ = _service(tmp_path)
+    earlier = await service.capture_screenshot(session.id)
+    ocr_started, release_ocr = asyncio.Event(), asyncio.Event()
+    original_ocr = service.manager.ocr.extract_from_image
+
+    async def paused(path: str) -> dict:
+        ocr_started.set()
+        await release_ocr.wait()
+        return await original_ocr(path)
+
+    service.manager.ocr.extract_from_image = paused
+    reads = {
+        "capture": lambda: service.capture_screenshot(session.id),
+        "observe": lambda: service.observation_payload(session, preset="normal"),
+    }
+    task = asyncio.create_task(reads[read]())
+    await asyncio.wait_for(ocr_started.wait(), 5)
+
+    assert checked_screenshot(session)["path"] == earlier["screenshot_path"]
+    release_ocr.set()
+    latest = await task
+    assert checked_screenshot(session)["path"] == latest["screenshot_path"]
 
 
 async def test_a_capture_cancelled_while_written_leaves_no_hidden_file(tmp_path: Path) -> None:

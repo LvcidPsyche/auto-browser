@@ -88,9 +88,10 @@ All notable changes to auto-browser are documented here.
   redacts are now written under a hidden name beside their published one, redacted there (the redacted bytes through
   a temporary file and `os.replace`), and only then moved onto the published name with `os.replace`; one with nothing
   to redact, or that could not be scrubbed (which its result says), is moved there as it is. A redaction that does
-  not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name. A screenshot that is
-  not to be redacted (scrubbing off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still
-  written straight to its name.
+  not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name. A staged screenshot
+  becomes the one that vision targeting (`take_screenshot=false`) and the compare tool reuse only once it is
+  published; until then they reuse the one before it. A screenshot that is not to be redacted (scrubbing off, or an
+  action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
 - **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so
   a CSV export of customers gave the agent every email address and SSN in it, while console messages and network
   bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by its type, as a network body is (JSON by
