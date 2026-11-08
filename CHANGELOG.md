@@ -19,11 +19,13 @@ All notable changes to auto-browser are documented here.
   `requirements-dev.txt` pin only the packages the controller names, so every build took the newest release of each
   package below them, however new: a build on 2026-11-06 took pydantic-core 2.50.4, uploaded the day before. The
   file is uv's universal resolution of both files for Python 3.11 and later, with its command and cutoff in its
-  header; the host tests and the devcontainer install under it too, and the dependency audit reads it, so the audit
-  checks the versions the image installs. A requirements file moved to a release the file pins at another fails
-  CI's install until the file is generated again. The client and LangChain tests still take the newest release of
-  each package, as those libraries' users do, but only one at least 72 hours old. Dependabot holds version updates
-  three days, as its configuration now says. (R5C-14)
+  header. The host tests and the devcontainer install under it too, and CI's host tests hold what it does not pin,
+  the build backend of the editable install, to releases at least 72 hours old. The dependency audits, CI's and
+  `scripts/release_audit.py`'s, read the file as it is, so they check the versions the image installs, where they
+  resolved the top-level pins afresh. A requirements file moved to a release the file pins at another fails CI's
+  install until the file is generated again. The client and LangChain tests still take the newest release of each
+  package, as those libraries' users do, but only one at least 72 hours old, their build backends included.
+  Dependabot holds version updates three days, as its configuration now says. (R5C-14)
 - **A restricted witness receipt now withholds secrets at any depth, and in its metadata and approval reason too.** A
   receipt in restricted evidence mode (a confidential session, or a sensitive, high-risk or auth-material action)
   blanked five top-level target keys (`text`, `text_preview`, `file_path`, `password`, `totp_secret`) and what a

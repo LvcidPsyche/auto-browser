@@ -65,8 +65,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install host test dependencies
-        # controller/constraints.txt pins the whole tree, as the image installs it (R5C-14).
-        run: python -m pip install -e ./controller[dev] -c controller/constraints.txt
+        # controller/constraints.txt pins the whole tree, as the image installs it, and uv's --exclude-newer holds what
+        # the file does not pin: the build backend the editable install builds with (R5C-14).
+        run: |
+          python -m pip install uv==0.13.7
+          uv pip install --system --exclude-newer "$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
+            -e ./controller[dev] -c controller/constraints.txt
       # The real-Chromium tests (page text, element naming, overlays, TOTP, the
       # dashboard) skip when no browser is installed, and until now none was, so
       # they never ran in CI. One leg is enough: they test the page, not Python.
@@ -156,8 +160,9 @@ jobs:
       - name: Install Python audit tool
         run: python -m pip install pip-audit -c controller/constraints.txt
       - name: Audit the pinned Python dependencies
-        # The tree constraints.txt pins, as the image and the host tests install it, not a fresh resolve (R5C-14).
-        run: python -m pip_audit -r controller/constraints.txt
+        # The tree constraints.txt pins, as the image installs it, read as it is (R5C-14): a resolve would audit other
+        # versions, and first installs pip, wheel and setuptools unpinned.
+        run: python -m pip_audit -r controller/constraints.txt --disable-pip --no-deps
       - name: Install browser-node dependencies from lockfile
         run: npm ci --omit=dev --no-audit --no-fund
         working-directory: browser-node
