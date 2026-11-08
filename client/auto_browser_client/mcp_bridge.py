@@ -382,7 +382,12 @@ class HttpMcpClient:
         try:
             with open(self.token_file, encoding="utf-8") as handle:
                 token = handle.read().strip()
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError:
+            # Not the decode error's text, which names one of the token's bytes and its position, as R5C-30's encode
+            # error named a character (review of c3).
+            self.token_file_problem = f"the token file {self.token_file} is not UTF-8 text, so no token was sent"
+            return None
+        except OSError as exc:
             self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
             return None
         self.last_token = token or None

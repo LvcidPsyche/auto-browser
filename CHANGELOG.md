@@ -32,11 +32,13 @@ All notable changes to auto-browser are documented here.
   receipt of a confidential session, like a human takeover's receipt there, is restricted. The approval store still
   keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the comment. A
   hosted Witness service and an exported bundle receive the receipt as recorded.
-- **The MCP bridges no longer show the agent a character of a token they cannot send.** A bearer token holding a
-  character outside latin-1 (from `--bearer-token`, `AUTO_BROWSER_BEARER_TOKEN` or the token file), which an HTTP
-  header cannot carry, was answered as an unexpected bridge failure quoting http.client's encoding error, which names
-  that character and its position in the token. Such a token is now not sent, as one holding a line break has not been
-  since 1.16.0, and a `401`'s answer says which source holds it; a token inside latin-1 is still sent.
+- **The MCP bridges no longer show the agent a character or a byte of a token they cannot send.** A bearer token
+  holding a character outside latin-1 (from `--bearer-token`, `AUTO_BROWSER_BEARER_TOKEN` or the token file), which an
+  HTTP header cannot carry, was answered as an unexpected bridge failure quoting http.client's encoding error, which
+  names that character and its position in the token. Such a token is now not sent, as one holding a line break has
+  not been since 1.16.0, and a `401`'s answer says which source holds it; a token inside latin-1 is still sent. A
+  token file that is not UTF-8 text is now named as such in a `401`'s answer, which quoted the decode error, naming
+  one of the token's bytes and its position.
 - **The MCP bridges' answers no longer show the bearer token, a query value, or a secret of the URL quoted another
   way.** 1.16.0's answers replaced the base URL's userinfo, password, query and fragment, each whole, as written or
   percent-decoded. A server's error detail that quoted the token, a query value alone (`bad key ...`, or FastAPI's

@@ -797,6 +797,22 @@ def test_r5c_30_a_token_inside_latin_1_is_still_sent() -> None:
     assert seen == [("/mcp", f"Bearer {token}")]
 
 
+def test_r5c_30_a_token_file_that_is_not_utf_8_is_answered_without_its_bytes(tmp_path: Path) -> None:
+    # Review of c3 (Codex 6): the 401's answer quoted the decode error, which names one of the token's bytes and its
+    # position ("can't decode byte 0x80 in position 9"), as R5C-30's encode error named a character.
+    token_file = tmp_path / "api-token"
+    token_file.write_bytes(b"sentinelA" + bytes([0x80]) + b"sentinelB\n")
+
+    reply, seen = _answer_with_a_401(token_file=str(token_file))
+    message = reply["error"]["message"]
+
+    assert "HTTP 401" in message
+    assert f"the token file {token_file} is not UTF-8 text, so no token was sent" in message
+    assert "0x80" not in message
+    assert "position" not in message
+    assert seen == [("/mcp", None)]
+
+
 @pytest.mark.parametrize(
     ("base_url", "said"),
     [
