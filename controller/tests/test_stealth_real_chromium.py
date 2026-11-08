@@ -575,6 +575,48 @@ def test_the_read_refuses_a_receiver_that_is_not_a_context_before_it_converts_a_
     assert seen == native
 
 
+# getImageData with a coordinate its [EnforceRange] refuses (not finite, or past a long's range): the native throws at
+# that coordinate and converts nothing after it, so the later coordinate's valueOf, which throws, never runs. Then valid
+# coordinates, each converted once, in order.
+READ_WITH_A_REFUSED_COORDINATE = """() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const attempt = (args) => {
+    let later = 0;
+    const thrower = { valueOf() { later += 1; throw new Error('read past the refused coordinate'); } };
+    try {
+      ctx.getImageData(...args.map((arg) => (arg === 'later' ? thrower : arg)));
+      return { error: null, later };
+    } catch (e) {
+      return { error: e.name, message: e.message, later };
+    }
+  };
+  const calls = [];
+  const once = (index, value) => ({ valueOf() { calls.push(index); return value; } });
+  const valid = ctx.getImageData(once(0, 0), once(1, 0), once(2, 1), once(3, 1)).data.length;
+  return {
+    nan: attempt([NaN, 'later', 1, 1]),
+    tooLarge: attempt([2 ** 31, 'later', 1, 1]),
+    tooSmall: attempt([-(2 ** 31) - 1, 'later', 1, 1]),
+    infinity: attempt([Infinity, 'later', 1, 1]),
+    secondCoordinate: attempt([0, NaN, 'later', 1]),
+    valid: { length: valid, calls },
+  };
+}"""
+
+
+@requires_chromium
+def test_the_read_converts_its_coordinates_one_at_a_time_and_stops_at_the_one_the_native_refuses() -> None:
+    """Review of c6: the wrapper converted all four coordinates before the native call, so after a non-finite or
+    out-of-range one the later ones' valueOf still ran, and could replace the native's TypeError with the page's."""
+    native, _stealthy = asyncio.run(_native_and_stealthy(READ_WITH_A_REFUSED_COORDINATE))
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_WITH_A_REFUSED_COORDINATE, FingerprintConfig("s", "light")))
+
+    refused = {name: case for name, case in native.items() if name != "valid"}
+    assert all(case["error"] == "TypeError" and case["later"] == 0 for case in refused.values()), native
+    assert native["valid"] == {"length": 4, "calls": [0, 1, 2, 3]}, native
+    assert seen == native
+
+
 @requires_chromium
 def test_a_read_of_float_values_is_left_as_it_is() -> None:
     """Review of c5 (Codex): the noise shifted each channel by one, a step in a read of bytes; in a read of float16

@@ -122,12 +122,21 @@ class FingerprintConfig:
     const _canvasOf = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'canvas').get;
     const _getPrototypeOf = Object.getPrototypeOf;
     const _bytesPrototype = Uint8ClampedArray.prototype;
+    const _LONG_MIN = -2147483648;
+    const _LONG_MAX = 2147483647;
     CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
         _canvasOf.call(this);
         if (args.length >= 4) {{
             // Each coordinate read once, as a number, and passed on as that number: read again below once the native
             // call had read it, an object's valueOf ran twice, and could answer differently or throw (review of c5).
-            args = [+args[0], +args[1], +args[2], +args[3], ...args.slice(4)];
+            // One at a time: at the first the native's [EnforceRange] refuses (not finite, or out of a long's range
+            // when truncated) the native is called at once, with the numbers so far and the rest as they stand, so it
+            // throws at that coordinate and converts nothing after it, as it does alone (review of c6).
+            for (let index = 0; index < 4; index++) {{
+                args[index] = +args[index];
+                const truncated = Math.trunc(args[index]);
+                if (!(truncated >= _LONG_MIN && truncated <= _LONG_MAX)) return _origGetImageData.apply(this, args);
+            }}
         }}
         const imageData = _origGetImageData.apply(this, args);
         const data = imageData.data;
