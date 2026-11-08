@@ -7,6 +7,10 @@ updates:
       day: monday
       time: "09:00"
     open-pull-requests-limit: 5
+    # The project's 72-hour rule: no version update is proposed for a release under three days old. That is
+    # Dependabot's default, stated here so a change of default cannot undo it. Security updates are not held.
+    cooldown:
+      default-days: 3
     # One PR per week for minor/patch bumps: same-file pins conflict as soon as
     # one PR merges, forcing rebase+CI cycles for every remaining PR. Majors
     # stay individual so they get reviewed on their own.
@@ -33,6 +37,8 @@ updates:
       day: monday
       time: "09:15"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3 # the 72-hour rule, as the pip entry says
     groups:
       npm-minor-patch:
         update-types:
@@ -50,6 +56,8 @@ updates:
       day: monday
       time: "09:30"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3 # the 72-hour rule, as the pip entry says
     groups:
       actions-minor-patch:
         update-types:

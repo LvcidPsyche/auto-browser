@@ -12,7 +12,8 @@ make test            # same suite in Docker
 make release-audit   # launch-prep audit; run before any release PR
 ```
 
-- Use a virtualenv for the host suite (`python -m pip install -e ./controller[dev]`) and point
+- Use a virtualenv for the host suite
+  (`python -m pip install -e ./controller[dev] -c controller/constraints.txt`) and point
   `AUTO_BROWSER_PYTHON_BIN` at it if several interpreters exist. The controller's FastAPI floor
   conflicts with other projects' pins, so don't share a global interpreter.
 - `make test-local` runs from `controller/` on purpose: pydantic-settings reads `.env` from the
@@ -31,6 +32,11 @@ make release-audit   # launch-prep audit; run before any release PR
   lists them). A release bumps all of them together with `python scripts/bump_version.py X.Y.Z`.
 - **Playwright pin parity:** the controller (pip) and `browser-node` (npm) Playwright versions must
   be identical (`scripts/check_playwright_pins.py`).
+- **Pinned dependency tree:** `controller/constraints.txt` pins every package `controller/requirements.txt` and
+  `requirements-dev.txt` pull in, at releases at least 72 hours old; the image and the host tests install under it.
+  When either file changes (a Dependabot bump, a Playwright bump, a new package), generate it again from
+  `controller/` with the command in its header and a cutoff 72 hours before then: a bump it contradicts fails CI's
+  install, and a new package it lacks goes in unpinned.
 - **Child-environment wraps:** `controller/app/process_hardening.py` confines two children by replacing a private
   name in a dependency. At every pytesseract bump, re-check that `pytesseract.pytesseract` still passes its
   module-level `environ` as `env=` in the two launches that read it, `subprocess_args` and `get_tesseract_version`,
