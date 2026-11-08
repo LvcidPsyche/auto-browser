@@ -401,8 +401,9 @@ class HarnessRunStore:
                     if newest >= cutoff:
                         continue
                     if staged:
-                        doomed = directory.with_name(f".tmp-{uuid.uuid4().hex[:12]}")
-                        os.replace(directory, doomed)
+                        hidden = directory.with_name(f".tmp-{uuid.uuid4().hex[:12]}")
+                        os.replace(directory, hidden)
+                        doomed = hidden  # once renamed: a failed rename is logged for the candidate it left
                 shutil.rmtree(doomed)
                 removed += 1
             except OSError as exc:

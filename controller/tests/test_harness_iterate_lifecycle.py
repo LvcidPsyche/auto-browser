@@ -1206,6 +1206,33 @@ class RetentionTests(_Base):
         self.assertTrue(any("unreadable" in line for line in logs.output), logs.output)
         self.assertEqual([path for path in aged if path.exists()], [])
 
+    async def test_a_candidate_that_cannot_be_set_aside_is_the_one_its_warning_names(self) -> None:
+        # Since c3's A6 the prune renames an aged candidate to a hidden `.tmp-` name, then removes it there; it took
+        # that name for its warning before the rename ran, so a rename that failed (a file held open on Windows) was
+        # logged for a path that never existed, not for the candidate it left in place.
+        from app.harness import iterate
+
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        directory = Path(record.candidate.files["candidate.json"]).parent
+        for path in [*directory.iterdir(), directory]:
+            _age(path, 40)
+        real_replace = os.replace
+
+        def replace(src, dst, *args, **kwargs):
+            if Path(src).resolve() == directory.resolve():
+                raise PermissionError(13, "The process cannot access the file", str(src))
+            return real_replace(src, dst, *args, **kwargs)
+
+        with patch.object(iterate.os, "replace", replace), self.assertLogs("app.harness.iterate", "WARNING") as logs:
+            self.assertEqual(service.store.prune(30), 0)
+
+        # The path the warning names (its first argument), not the error's text, which names the rename's own paths.
+        warnings = [entry for entry in logs.records if "could not remove" in entry.getMessage()]
+        self.assertEqual(len(warnings), 1, logs.output)
+        self.assertEqual(Path(warnings[0].args[0]).resolve(), directory.resolve())
+        self.assertEqual(service.get_candidate(record.candidate.skill_id)["skill_id"], record.candidate.skill_id)
+
     async def test_the_per_operator_cap_refuses_a_run_past_it_and_counts_each_operator_apart(self) -> None:
         service = HarnessService(self.root, max_runs_per_operator=2)
         token = set_current_operator("alice", source="token")
