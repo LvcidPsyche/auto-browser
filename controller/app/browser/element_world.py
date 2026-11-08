@@ -9,11 +9,12 @@ frame's document changes, and with a new, empty one after.
 
 Every call is two CDP messages on a session the controller opens for the page.
 Each message has its own deadline (``ACTION_TIMEOUT_MS``, plus the script's own
-wait for a script that waits): a bound per message, not a deadline for a whole
-action. A renderer that crashed leaves the session open with nothing answering,
-and a call with no deadline hung the request; now it fails with
-``page_not_responding``. A session that timed out is detached and dropped, one
-that went away is dropped, and the next call opens a new one.
+wait for a script that waits; or the caller's, which every message of its call
+uses, the session's attach and the world's creation too): a bound per message,
+not a deadline for a whole action. A renderer that crashed leaves the session
+open with nothing answering, and a call with no deadline hung the request; now
+it fails with ``page_not_responding``. A session that timed out is detached and
+dropped, one that went away is dropped, and the next call opens a new one.
 """
 
 from __future__ import annotations
@@ -235,12 +236,14 @@ class PageWorld:
             return await self._call(page, declaration, args, timeout_ms)
 
     async def _call(self, page: "Page", declaration: str, args: tuple[Any, ...], timeout_ms: int) -> Any:
-        cdp, frame_id = await self._session(page)
+        cdp, frame_id = await self._session(page, timeout_ms)
         # Asked for on every call rather than cached: Chromium answers with the
         # same world until the frame's document changes and a new one after, and
         # a cached context could outlive its document (the back/forward cache)
         # and answer for a page that is no longer shown.
-        world = await self._send(cdp, "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": WORLD_NAME})
+        world = await self._send(
+            cdp, "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": WORLD_NAME}, timeout_ms
+        )
         try:
             reply = await self._send(
                 cdp,
@@ -263,23 +266,23 @@ class PageWorld:
             raise PlaywrightError(_script_error(reply["exceptionDetails"]))
         return (reply.get("result") or {}).get("value")
 
-    async def _session(self, page: "Page") -> tuple["CDPSession", str]:
+    async def _session(self, page: "Page", timeout_ms: int) -> tuple["CDPSession", str]:
         if self._cdp is not None and self._frame_id is not None:
             return self._cdp, self._frame_id
         async with self._lock:
             if self._cdp is None:
-                self._cdp = await self._attach(page)
+                self._cdp = await self._attach(page, timeout_ms)
             if self._frame_id is None:
-                tree = await self._send(self._cdp, "Page.getFrameTree")
+                tree = await self._send(self._cdp, "Page.getFrameTree", None, timeout_ms)
                 self._frame_id = tree["frameTree"]["frame"]["id"]
             return self._cdp, self._frame_id
 
-    async def _attach(self, page: "Page") -> "CDPSession":
+    async def _attach(self, page: "Page", timeout_ms: int) -> "CDPSession":
         attaching = asyncio.ensure_future(page.context.new_cdp_session(page))
         _LATE_ATTACHES.add(attaching)
         attaching.add_done_callback(_LATE_ATTACHES.discard)
         try:
-            return await self._within(asyncio.shield(attaching), "a CDP session", self.timeout_ms)
+            return await self._within(asyncio.shield(attaching), "a CDP session", timeout_ms)
         except BaseException:
             # Timed out or cancelled: the attach can still complete, and its session is then detached, not left open.
             attaching.add_done_callback(_detach_when_attached)
