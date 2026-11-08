@@ -9,11 +9,13 @@ root); and the strict parse of CapEff/CapBnd (exit 70 on anything but 16 hex dig
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from tests._bash import path_after
 from tests.test_scripts_token_argv import BASH, _bash_path
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "entrypoint.sh"
@@ -74,6 +76,8 @@ def run_entrypoint(
             ],
             capture_output=True,
             text=True,
+            # The bare bash above, and the stubs' #!/usr/bin/env bash, find this bash (review of c5).
+            env={**os.environ, "PATH": path_after()},
             timeout=60,
         )
         return result.returncode, result.stdout + result.stderr

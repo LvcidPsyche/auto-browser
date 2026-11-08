@@ -421,7 +421,8 @@ All notable changes to auto-browser are documented here.
   Git's `bin\bash.exe` wrapper, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a
   `usr\bin` folder (Git's or MSYS2's), the first on PATH or else the one beside `git`, or the bash
   `AUTO_BROWSER_TEST_BASH` names (`controller/tests/_bash.py`), and skip with that reason when there is none; on
-  other systems, the bash on PATH as before.
+  other systems, the bash on PATH as before. On Windows what a script runs by name (`bash`, a stub's
+  `#!/usr/bin/env bash`, and the tools beside bash, such as `rm`) is found beside that bash, after the test's stubs.
 
 ### Changed
 

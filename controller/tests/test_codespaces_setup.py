@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._bash import BASH, BASH_DIR, NO_BASH_REASON
+from tests._bash import BASH, NO_BASH_REASON, path_after
 
 SETUP = Path(__file__).resolve().parents[2] / ".devcontainer" / "setup.sh"
 HOST_SCRIPT = SETUP.with_name("allow-forwarded-host.sh")
@@ -24,11 +24,6 @@ pytestmark = [
     pytest.mark.skipif(not SETUP.is_file(), reason=".devcontainer/ is not shipped in the controller image"),
     pytest.mark.skipif(BASH is None, reason=NO_BASH_REASON),
 ]
-
-
-def _path_after(stubs: Path) -> str:
-    """PATH with the test's stubs first, then the folder of the bash under test (tests/_bash.py)."""
-    return os.pathsep.join([str(stubs), BASH_DIR, os.environ["PATH"]])
 
 
 CODESPACE = "fluffy-space-123"
@@ -64,7 +59,7 @@ def _run(
         (work / ".env").write_text(env_text, encoding="utf-8", newline="\n")
     if env_bytes is not None:
         (work / ".env").write_bytes(env_bytes)
-    env = {"PATH": _path_after(stubs), "HOME": str(tmp_path)}
+    env = {"PATH": path_after(stubs), "HOME": str(tmp_path)}
     if codespace is not None:
         env["CODESPACE_NAME"] = codespace
     if domain is not None:
@@ -232,7 +227,7 @@ def test_a_failed_edit_leaves_env_alone_and_removes_the_copy(tmp_path: Path) -> 
     awk = stubs / "awk"
     awk.write_text("#!/bin/sh\ncat > /dev/null\nexit 2\n", encoding="utf-8", newline="\n")
     awk.chmod(0o755)
-    env = {"PATH": _path_after(stubs), "HOME": str(tmp_path), "CODESPACE_NAME": CODESPACE}
+    env = {"PATH": path_after(stubs), "HOME": str(tmp_path), "CODESPACE_NAME": CODESPACE}
 
     result = subprocess.run(  # noqa: S603 - fixed argv, scratch copy
         [BASH, HOST_SCRIPT.name], cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60

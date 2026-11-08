@@ -26,7 +26,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 
-from tests._bash import BASH  # one resolution of bash for every script test (R5C-27); others import it from here
+from tests._bash import BASH, path_after  # one resolution of bash for every script test (R5C-27)
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -89,6 +89,7 @@ class BearerCurlTests(unittest.TestCase):
             )
             curl.chmod(0o755)
             env = {key: value for key, value in os.environ.items() if key != "API_BEARER_TOKEN"}
+            env["PATH"] = path_after()  # the stub's #!/usr/bin/env bash finds this bash (review of c5)
             if token is not None:
                 env["API_BEARER_TOKEN"] = token
             script = (
