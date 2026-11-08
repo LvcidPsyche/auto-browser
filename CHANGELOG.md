@@ -427,8 +427,8 @@ All notable changes to auto-browser are documented here.
   gave a 2d context, which a wrapped `getContext` records; any other canvas is exported as it is. The patched
   `toDataURL` and `getContext`, and the `Function.prototype.toString` that masks them, now read as native code
   (`function toDataURL() { [native code] }`) with the native name and length; the script's WebGL `getParameter` and
-  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source. An
-  export that throws (a `type` whose `toString` throws) is now made once and leaves the canvas as it was: the noise
+  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source. A
+  `type` whose `toString` throws now throws before any export is made and leaves the canvas as it was: the noise
   stayed on its first pixel, and the export was made a second time. The `type` is converted once before the canvas is
   touched, so what its `toString` draws is kept (the export shows it), where the restored pixel erased it; a Symbol
   `type` is a `TypeError` and leaves the canvas alone; a canvas with a `width` or `height` accessor of its own that

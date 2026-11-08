@@ -110,10 +110,10 @@ STEALTH_INIT_SCRIPT = r"""
         // A receiver that is not a canvas given a 2d context goes straight to the native, whose brand check comes
         // before it converts any argument.
         if (!with2d.has(this)) return origToDataURL.apply(this, arguments);
-        // The arguments are converted before the canvas is changed, so no page code runs between the noise and its
-        // removal (a type's toString can draw, resize or throw), and the pixel is read after what it did. A template
-        // literal converts as the native's DOMString does, once, and throws a TypeError for a Symbol; an absent type
-        // stays absent; the quality is `any`, which the native does not convert.
+        // The arguments are converted before the canvas is changed, so no argument conversion runs between the noise
+        // and its removal (a type's toString can draw, resize or throw), and the pixel is read after what it did. A
+        // template literal converts as the native's DOMString does, once, and throws a TypeError for a Symbol; an
+        // absent type stays absent; the quality is `any`, which the native does not convert.
         const type = arguments[0] === undefined ? undefined : `${arguments[0]}`;
         const quality = arguments[1];
         let ctx = null;
