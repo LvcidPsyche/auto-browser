@@ -101,6 +101,24 @@ def _header_credentials(headers: Mapping[str, str]) -> str | None:
     return None
 
 
+def _refuse_userinfo_with(base_url: str, what: str | None) -> None:
+    """Raise ValueError, naming the parts and never their values, when ``base_url`` holds a user name or password and
+    ``what`` (a token, or an Authorization header) is given too: httpx sends the URL's user name and password as Basic
+    credentials, which replace that header, so the controller got no token and nothing said so (c4's report). A URL
+    httpx cannot read is left to the first request, whose error goes out redacted."""
+    if what is None:
+        return
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return
+    if url.username or url.password:
+        raise ValueError(
+            "base_url holds a user name or password, which httpx would send as Basic credentials in place of the "
+            f"{what}: give the {what} or the URL's user name and password, not both"
+        )
+
+
 def _as_sent(base_url: str) -> tuple[str, ...]:
     """``base_url`` as configured and as httpx sends it, whose secrets an error leaves out (review of c3's fixes):
     httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, so an echo of the
@@ -161,6 +179,10 @@ class AutoBrowserClient:
         token = token.strip() if token else None
         if token:
             _refuse_unsendable(token, "token")
+        if token or token_file is not None:
+            _refuse_userinfo_with(base_url, "token")
+        elif any(name.lower() == "authorization" for name in self._headers):
+            _refuse_userinfo_with(base_url, "Authorization header in headers")
         if not token and token_file is not None:
             token = _read_token_file(token_file)
         if token:

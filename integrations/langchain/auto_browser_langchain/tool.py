@@ -7,7 +7,7 @@ from typing import Any, Optional, Type, Union
 
 import httpx
 
-from .auth import loopback_transport, resolve_bearer_token
+from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token
 from .errors import errors_shown, raise_for_status
 
 try:
@@ -69,6 +69,11 @@ class AutoBrowserTool(BaseTool):
     operator_id: Optional[str] = None
     timeout: float = 60.0
 
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # After pydantic's own checks, not as a validator: a validator's error shows the input, URL and token included.
+        refuse_userinfo_with_token(self.base_url, self.bearer_token, self.token_file)
+
     def _run(self, action: str, arguments: dict[str, Any] | None = None) -> str:
         import asyncio
 
@@ -106,6 +111,7 @@ class AutoBrowserTool(BaseTool):
         operator_id: str | None = None,
         token_file: str | os.PathLike[str] | None = None,
     ) -> list[dict]:
+        refuse_userinfo_with_token(base_url, bearer_token, token_file)
         headers: dict[str, str] = {}
         bearer_token = resolve_bearer_token(bearer_token, token_file)
         if bearer_token:

@@ -139,6 +139,57 @@ class ClientConstructionTests(unittest.TestCase):
         self.assertIsNone(client._sync_client)
 
 
+class UserinfoWithTokenTests(unittest.TestCase):
+    """c4's report: httpx sends a base URL's user name and password as Basic credentials, which replace the token's
+    Authorization header, so the controller got no token and the caller was not told."""
+
+    URLS = (
+        "http://alice:sentinel-pass@auto-browser.test",
+        "http://alice@auto-browser.test",
+        "http://:sentinel-pass@auto-browser.test",
+    )
+
+    def test_a_base_url_user_name_or_password_with_a_token_is_refused_without_their_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "api-token"
+            token_file.write_text("sentinel-from-file\n", encoding="utf-8")
+            given = (
+                ("token", {"token": "sentinel-token"}),
+                ("token", {"token_file": token_file}),
+                ("Authorization header in headers", {"headers": {"Authorization": "Bearer sentinel-header"}}),
+            )
+            for url in self.URLS:
+                for what, options in given:
+                    with self.subTest(url=url, given=next(iter(options))):
+                        with self.assertRaises(ValueError) as caught:
+                            AutoBrowserClient(url, **options)
+                        self.assertEqual(
+                            str(caught.exception),
+                            "base_url holds a user name or password, which httpx would send as Basic credentials in "
+                            f"place of the {what}: give the {what} or the URL's user name and password, not both",
+                        )
+
+    def test_without_a_token_the_user_name_and_password_still_go_as_basic_credentials(self) -> None:
+        client, requests = _make_client(_ok, base_url=self.URLS[0])
+
+        client.health()
+
+        self.assertEqual(requests[0].headers["Authorization"], "Basic YWxpY2U6c2VudGluZWwtcGFzcw==")
+
+    def test_a_token_with_a_base_url_without_userinfo_is_sent(self) -> None:
+        client, requests = _make_client(_ok, token="sekret", base_url="http://@auto-browser.test")
+
+        client.health()
+
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
+
+    def test_a_base_url_httpx_cannot_read_is_left_to_the_first_request(self) -> None:
+        client = AutoBrowserClient("http://[::1", token="sekret")
+
+        with self.assertRaises(httpx.InvalidURL):
+            client.health()
+
+
 class ClientErrorTests(unittest.TestCase):
     def test_http_error_raises_with_status_and_json_detail(self) -> None:
         client, _ = _make_client(lambda _r: httpx.Response(404, json={"detail": "Not found"}))

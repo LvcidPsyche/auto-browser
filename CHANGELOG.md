@@ -335,6 +335,13 @@ All notable changes to auto-browser are documented here.
   bridges' `urlopen`, so it follows each of these rules, and a base URL that is not `http://` or `https://` with a
   host (`localhost:8000`), which failed with urllib's "unknown url type" error, is refused as an invalid controller
   URL too.
+- **The Python client and the LangChain tools no longer send a base URL's user name and password in place of the
+  token.** Given a token, a base URL holding a user name or a password (`http://user:pass@host`) made httpx send them
+  as `Authorization: Basic` credentials, which replaced the token's header, so the controller got no token and the
+  caller was not told. `AutoBrowserClient` (with `token`, `token_file` or an `Authorization` header in `headers`),
+  `AutoBrowserTool` and `AutoBrowserTool.list_tools` (with `bearer_token` or `token_file`) and `AutoBrowserNode` now
+  refuse that combination when built, with a `ValueError` that names the parts, never their values. Without a token,
+  the user name and password still go as Basic credentials.
 
 ### Changed
 

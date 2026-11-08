@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 import httpx
 
-from .auth import loopback_transport, resolve_bearer_token
+from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token
 from .errors import AutoBrowserToolError, errors_shown, raise_for_status
 
 
@@ -62,6 +62,7 @@ class AutoBrowserNode:
         operator_id: str | None = None,
         token_file: str | os.PathLike[str] | None = None,
     ):
+        refuse_userinfo_with_token(base_url, bearer_token, token_file)
         self.base_url = base_url.rstrip("/")
         self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout = timeout

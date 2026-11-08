@@ -28,7 +28,9 @@ protocol failure), leave out the token and the base URL's userinfo, query and
 fragment. httpx itself logs every request at INFO on its `httpx` logger, naming the
 URL as sent (userinfo, query and fragment included) and the server's reason phrase,
 and this package does not filter that logger: keep a secret in `token` or
-`token_file`, not in the base URL.
+`token_file`, not in the base URL. A base URL holding a user name or password is
+refused with a token (`ValueError`), since httpx would send them as Basic credentials
+in place of it; without a token they go as Basic credentials.
 
 A controller with `REQUIRE_OPERATOR_ID=true` rejects requests that don't name an
 operator. A named credential (`API_BEARER_TOKENS`) names one through the token;

@@ -196,6 +196,46 @@ class AutoBrowserToolListToolsTests(unittest.TestCase):
         self.assertNotIn("authorization", {k.lower() for k in route.calls[1].request.headers})
 
 
+class UserinfoWithTokenTests(unittest.TestCase):
+    """c4's report: httpx sends a base URL's user name and password as Basic credentials, which replace the token's
+    Authorization header, so the controller got no token and the caller was not told."""
+
+    URL = "http://alice:sentinel-pass@auto-browser.test"
+    REFUSAL = (
+        "base_url holds a user name or password, which httpx would send as Basic credentials in place of the token: "
+        "give the token or the URL's user name and password, not both"
+    )
+
+    def test_a_base_url_user_name_or_password_with_a_token_is_refused_without_their_values(self) -> None:
+        cases = {
+            "tool": lambda url, **given: AutoBrowserTool(base_url=url, **given),
+            "node": lambda url, **given: AutoBrowserNode(base_url=url, **given),
+            "list_tools": lambda url, **given: AutoBrowserTool.list_tools(base_url=url, **given),
+        }
+        for url in (self.URL, "http://alice@auto-browser.test", "http://:sentinel-pass@auto-browser.test"):
+            for given in ({"bearer_token": "sentinel-token"}, {"token_file": "sentinel-missing-file"}):
+                for name, build in cases.items():
+                    with self.subTest(url=url, given=next(iter(given)), entry=name):
+                        with self.assertRaises(ValueError) as caught:
+                            build(url, **given)
+                        self.assertEqual(str(caught.exception), self.REFUSAL)
+
+    @respx.mock
+    def test_without_a_token_the_user_name_and_password_still_go_as_basic_credentials(self) -> None:
+        route = respx.get(f"{BASE_URL}/mcp/tools").mock(return_value=httpx.Response(200, json=[]))
+
+        AutoBrowserTool.list_tools(base_url=self.URL)
+        AutoBrowserTool(base_url=self.URL)
+        AutoBrowserNode(base_url=self.URL)
+
+        self.assertEqual(route.calls[0].request.headers["Authorization"], "Basic YWxpY2U6c2VudGluZWwtcGFzcw==")
+
+    def test_a_base_url_httpx_cannot_read_is_left_to_the_first_request(self) -> None:
+        with self.assertRaises(httpx.InvalidURL):
+            AutoBrowserTool.list_tools(base_url="http://[::1", bearer_token="s3cret")
+        AutoBrowserNode(base_url="http://[::1", bearer_token="s3cret")
+
+
 class AutoBrowserNodeTests(unittest.TestCase):
     def test_base_url_trailing_slash_is_stripped(self) -> None:
         self.assertEqual(AutoBrowserNode(base_url=f"{BASE_URL}/").base_url, BASE_URL)

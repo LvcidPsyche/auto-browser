@@ -21,12 +21,15 @@ from auto_browser_client import AutoBrowserClient
 from auto_browser_client.client import AutoBrowserError
 
 TOKEN = "sentinel-token-0123456789"
-BASE_URL = "http://alice:sentinel-pass@auto-browser.test:8000/?key=sentinel-key-0123"
+# A token client's base URL holds no user name or password, which it refuses with a token (c4's report);
+# USERINFO_URL's is a client's with none.
+BASE_URL = "http://auto-browser.test:8000/?key=sentinel-key-0123"
+USERINFO_URL = "http://alice:sentinel-pass@auto-browser.test:8000/?key=sentinel-key-0123"
 SHOWN_URL = "http://auto-browser.test:8000/?[redacted]"
 
 
-def _answering(response: httpx.Response, **options: Any) -> AutoBrowserClient:
-    client = AutoBrowserClient(BASE_URL, **(options or {"token": TOKEN}))
+def _answering(response: httpx.Response, base_url: str = BASE_URL, **options: Any) -> AutoBrowserClient:
+    client = AutoBrowserClient(base_url, **(options or {"token": TOKEN}))
     client._sync_client = httpx.Client(
         base_url=client.base_url, headers=client._headers, transport=httpx.MockTransport(lambda _request: response)
     )
@@ -168,6 +171,15 @@ class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(AutoBrowserError) as caught:
                     _answering(response).health()
                 self._assert_raised_without_secrets(caught.exception, shown)
+
+    def test_a_detail_echoing_a_url_with_a_user_name_and_password_is_raised_without_them(self) -> None:
+        # A client with no token, which sends them as Basic credentials.
+        response = httpx.Response(502, json={"detail": f"upstream {USERINFO_URL} refused"})
+
+        with self.assertRaises(AutoBrowserError) as caught:
+            _answering(response, USERINFO_URL, token=None).health()
+
+        self._assert_raised_without_secrets(caught.exception, {"detail": f"upstream {SHOWN_URL} refused"})
 
     def test_a_detail_echoing_an_authorization_header_given_in_headers_is_raised_without_it(self) -> None:
         # Review of c3 (Codex 3): only token= and token_file= were left out, and httpx sends this header the same way.

@@ -45,6 +45,25 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
     return token
 
 
+def refuse_userinfo_with_token(base_url: str, bearer_token: str | None, token_file: object) -> None:
+    """Raise ValueError, naming the parts and never their values, when ``base_url`` holds a user name or password and
+    a token is given too (``bearer_token``, or ``token_file`` read on each call): httpx sends the URL's user name and
+    password as Basic credentials, which replace the token's Authorization header, so the controller got no token and
+    nothing said so (c4's report). A URL httpx cannot read is left to the first request, whose error goes out
+    redacted."""
+    if not (bearer_token or "").strip() and token_file is None:
+        return
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return
+    if url.username or url.password:
+        raise ValueError(
+            "base_url holds a user name or password, which httpx would send as Basic credentials in place of the "
+            "token: give the token or the URL's user name and password, not both"
+        )
+
+
 def _refuse_unsendable(token: str, source: str) -> None:
     """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
 
