@@ -95,9 +95,10 @@ All notable changes to auto-browser are documented here.
   off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
 - **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so
   a CSV export of customers gave the agent every email address and SSN in it, while console messages and network
-  bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the type its file name gives, as a
-  network body is by its content type (a `.json` or `.js` file by its members' names, anything else as plain text),
-  off the event loop; the result's new `pii_scrub` says whether the scrub ran and how many redactions it made, and a
+  bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the MIME type its file name maps to in
+  Python's built-in table, as a network body is by its content type (a JSON or JavaScript type, which on the image's
+  Python 3.11 is `.json`, `.js`, `.mjs` and `.webmanifest`, by its members' names; any other as plain text), off
+  the event loop; the result's new `pii_scrub` says whether the scrub ran and how many redactions it made, and a
   read that redacted something is audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The
   file at the download's artifact URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not
   scrubbed" to "Scrubbed".

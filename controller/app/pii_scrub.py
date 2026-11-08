@@ -742,8 +742,9 @@ class PiiScrubber:
         return scrub_network_body(body, content_type, self.replacement, self.enabled_patterns)
 
     def download_text(self, text: str, content_type: str = "") -> ScrubResult:
-        """Scrub a download read as text by the type its file name gives (``content_type``), as a network body is by
-        its content type: a ``.json`` or ``.js`` file by its members' names, anything else as plain text."""
+        """Scrub a download read as text by the MIME type its file name maps to (``content_type``), as a network body
+        is by its content type: a JSON or JavaScript type (``.json``, ``.js``, ``.mjs``, ``.webmanifest``) by its
+        members' names, any other as plain text."""
         if not self.enabled:
             return ScrubResult(text=text)
         return _scrub_typed_text(text, content_type.lower(), self.replacement, self.enabled_patterns)
