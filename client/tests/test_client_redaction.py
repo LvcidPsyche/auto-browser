@@ -180,14 +180,15 @@ class ErrorDetailTests(unittest.IsolatedAsyncioTestCase):
 
     def test_a_detail_nested_deeper_than_the_walk_or_than_json_can_parse_is_raised_without_the_token(self) -> None:
         # A body json cannot parse (RecursionError: no Python from 3.11 to 3.14 parses 1,000,000 levels) is read as
-        # text, as a proxy's HTML page is; one it parses is cut where the walk stops (_REDACTED_DEPTH_MAX).
-        for depth in (900, 1_000_000):
+        # text, as a proxy's HTML page is; one it parses is cut where the walk stops (_REDACTED_DEPTH_MAX). 105 is just
+        # over the walk's 100, and far from 3.11's limit, which the frames above json.loads count against.
+        for depth in (105, 1_000_000):
             body = '{"detail": ' + "[" * depth + f'"{TOKEN}"' + "]" * depth + "}"
             with self.subTest(depth=depth):
                 with self.assertRaises(AutoBrowserError) as caught:
                     _answering(httpx.Response(502, content=body.encode())).health()
                 self.assertEqual(caught.exception.status_code, 502)
-                if depth == 900:
+                if depth == 105:
                     self.assertIn("[redacted: nested too deep]", json.dumps(caught.exception.detail))
                 else:
                     self.assertIsInstance(caught.exception.detail, str)
