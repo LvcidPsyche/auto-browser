@@ -15,6 +15,7 @@ from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.tool_gateway import CreateSessionRequest, McpToolGateway, ToolRegistry, ToolSpec
 from app.tool_inputs import EmptyInput
+from tests._fake_element_ids import FakePageElementIds
 
 
 class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -63,6 +64,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             _partition_off_list=Mock(return_value=False),
             _page_refused=Mock(return_value=False),
             page_provenance=PageProvenance(),
+            element_ids=FakePageElementIds(),
             get_session=AsyncMock(return_value={"id": "session-1"}),
             verify_witness_chain=AsyncMock(
                 return_value={
@@ -1267,6 +1269,19 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent.get("code"), "invalid_regex")
         self.assertIn("Invalid regular expression", response.content[0].text)
         self.assertIn("Unterminated group", response.content[0].text)
+
+    async def test_find_elements_invalid_selector_surfaces_structured_error(self) -> None:
+        reason = "Failed to execute 'querySelectorAll' on 'Document': '###' is not a valid selector."
+        page = SimpleNamespace(evaluate=AsyncMock(return_value={"__invalid_selector": reason}))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.find_elements", arguments={"session_id": "session-1", "selector": "###"})
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent.get("code"), "invalid_selector")
+        self.assertIn(f"Invalid selector: {reason}", response.content[0].text)
 
     async def test_invalid_arguments_message_reaches_the_caller(self) -> None:
         # drag_drop with neither selectors nor coordinates fails validation with an

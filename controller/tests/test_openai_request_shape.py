@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 from PIL import Image
 
 from app.config import Settings
+from app.providers.base import PAGE_DATA_NOTICE
 from app.providers.openai_adapter import OpenAIAdapter
 from app.providers.openai_compatible import OPENAI_COMPATIBLE_PROFILES, OpenAICompatibleAdapter
 
@@ -102,6 +103,13 @@ class OpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
             await self._decide({"status": "incomplete", "output": [{"type": "message", "content": []}]})
         self.assertIn("incomplete", str(ctx.exception))
 
+    async def test_the_instructions_say_the_observations_page_strings_are_data(self) -> None:
+        # NAV-12: page text, titles and element names reach the planner, and nothing framed them as the page's.
+        response = {"status": "completed", "output": [{"type": "function_call", "arguments": ARGUMENTS}]}
+        _adapter, _decision, sent = await self._decide(response)
+
+        self.assertIn(PAGE_DATA_NOTICE, sent["payload"]["instructions"])
+
     def test_the_strict_schema_meets_openai_strict_rules(self) -> None:
         schema = OpenAIAdapter(Settings(_env_file=None)).strict_action_schema
         self.assertEqual(_strict_violations(schema), [])
@@ -128,6 +136,8 @@ class OpenAICompatibleAdapterTests(unittest.IsolatedAsyncioTestCase):
         payload = adapter._post_json.await_args.kwargs["payload"]
         self.assertNotIn("temperature", payload)
         self.assertEqual(payload["tools"][0]["function"]["parameters"], adapter.strict_action_schema)
+        # NAV-12: the planner is told the observation's page strings are the page's data.
+        self.assertIn(PAGE_DATA_NOTICE, payload["messages"][0]["content"])
 
 
 if __name__ == "__main__":

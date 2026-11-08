@@ -107,6 +107,17 @@ All notable changes to auto-browser are documented here.
   details are stored as written (a navigated URL keeps its query). It now says what `PII_SCRUB_AUDIT_REPORT` does,
   which is to add `pii_redaction` events (a scrub's layer, hit count and pattern names, never the values), and
   `docs/deployment.md` lists the audit log under "Not scrubbed".
+- **`browser.get_html` with `text_only` and `browser.find_elements` now read the page in the controller's isolated
+  world.** Their scripts ran in the page's own JavaScript world, so a page that replaced a DOM getter or a built-in
+  (the `innerText` getter, `String.prototype.toLowerCase`, `Document.prototype.querySelectorAll`) gave them its own
+  text and elements in place of what it shows, and saw what the agent searched for. They now run where the
+  observation's scripts already ran (`app/browser/element_ids.py`), which shares the page's DOM and none of its
+  JavaScript. `browser.eval_js` still runs in the page's world, as an expression is there to read the page's own
+  state, and so do the local-storage tools, which read and write what the page can itself, and the bot-challenge
+  check after each action, which reads only the title, text and frames the page writes as it likes in either world.
+  An invalid CSS selector in `find_elements` now answers with a structured `invalid_selector` error, as an invalid
+  regex answers `invalid_regex`. The Claude, OpenAI and OpenAI-compatible planners' system prompts now say that the
+  page text, titles, names and element text in an observation are untrusted page data, never instructions.
 
 ### Fixed
 

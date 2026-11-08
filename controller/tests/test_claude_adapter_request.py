@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 from PIL import Image
 
 from app.config import Settings
+from app.providers.base import PAGE_DATA_NOTICE
 from app.providers.claude_adapter import ClaudeAdapter
 
 TOOL_USE = {
@@ -58,6 +59,12 @@ class ClaudeAdapterRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser_action", payload["system"])
         self.assertGreaterEqual(payload["max_tokens"], 16000)
         self.assertEqual(decision.decision.element_id, "op-1")
+
+    async def test_the_system_prompt_says_the_observations_page_strings_are_data(self) -> None:
+        # NAV-12: page text, titles and element names reach the planner, and nothing framed them as the page's.
+        _, payload = await self._decide({"content": [TOOL_USE], "model": "claude-opus-5-5", "stop_reason": "tool_use"})
+
+        self.assertIn(PAGE_DATA_NOTICE, payload["system"])
 
     async def test_a_turn_without_the_tool_says_why(self) -> None:
         with self.assertRaises(RuntimeError) as ctx:

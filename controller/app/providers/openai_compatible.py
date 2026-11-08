@@ -25,7 +25,7 @@ from typing import Any
 
 from ..config import Settings
 from ..models import BrowserActionDecision, ProviderName
-from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
+from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +193,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                 {
                     "role": "system",
                     "content": (
-                        "You are the Auto Browser planner. Pick exactly one next action. "
+                        f"You are the Auto Browser planner. Pick exactly one next action. {PAGE_DATA_NOTICE} "
                         "Use the provided function tool for your answer, or if you cannot "
                         "call tools, reply with only the matching JSON object."
                     ),

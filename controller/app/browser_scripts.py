@@ -241,8 +241,9 @@ def _cap_field(field: Any) -> dict[str, Any] | None:
 def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[Mapping[str, Any]], bool]) -> Any:
     """What find_elements returns, made safe again on the Python side.
 
-    The scripts cap their strings, but they run in the page's own JS world, where a page can replace
-    String.prototype.slice and get a megabyte through; so every string is cut again here. A field's `value` is
+    The scripts cap their strings, in the controller's isolated world, where the page's own JS cannot replace
+    String.prototype.slice to get a megabyte through as it could in its own (NAV-12); every string is cut again here
+    all the same, a second bound that holds whatever world ran them. A field's `value` is
     withheld (null, `value_redacted: true`) when `is_secret_field` says its attributes (sent by the script as `field`,
     which is removed) name a password, a one-time code and the like, or when one was too long to read whole; the type
     action does not echo such values either.
@@ -492,8 +493,11 @@ _READABLE_TEXT_JS = r"""
       .trim();
 """
 
+# Run in the controller's isolated world (element_ids.evaluate), as its caller's other observation scripts are.
 PAGE_TEXT_SCRIPT = (
-    "() => {\n" + _READABLE_TEXT_JS + "  return readable(document.body ? document.body.innerText : '');\n}"
+    "(_unused, _elementIds) => {\n"
+    + _READABLE_TEXT_JS
+    + "  return readable(document.body ? document.body.innerText : '');\n}"
 )
 
 PAGE_SUMMARY_SCRIPT = _with_element_naming(
@@ -658,9 +662,10 @@ def _with_find_fields(source: str) -> str:
     return with_ab_cap(source).replace("/*__FIND_FIELDS__*/", _FIND_FIELDS_JS)
 
 
-# find_elements: text search and selector modes. Each returns page-controlled strings, so each is capped.
+# find_elements: text search and selector modes. Each returns page-controlled strings, so each is capped. Both run in
+# the controller's isolated world (element_ids.evaluate, NAV-12), which calls them as ``(arg, elementIds)``.
 FIND_ELEMENTS_TEXT_SCRIPT = _with_find_fields(
-    r"""([query, isRegex, context, limit]) => {
+    r"""([query, isRegex, context, limit], _elementIds) => {
 /*__AB_CAP__*/
 /*__FIND_FIELDS__*/
     let matcher = null;
@@ -715,10 +720,17 @@ FIND_ELEMENTS_TEXT_SCRIPT = _with_find_fields(
 )
 
 FIND_ELEMENTS_SELECTOR_SCRIPT = _with_find_fields(
-    r"""([selector, limit]) => {
+    r"""([selector, limit], _elementIds) => {
 /*__AB_CAP__*/
 /*__FIND_FIELDS__*/
-    const els = [...document.querySelectorAll(selector)].slice(0, limit);
+    let found;
+    try {
+        found = document.querySelectorAll(selector);
+    } catch (e) {
+        // Reported here, as the regex is: the world reports a script that threw as a stale element.
+        return {__invalid_selector: String((e && e.message) || e)};
+    }
+    const els = [...found].slice(0, limit);
     return els.map(el => {
         const r = el.getBoundingClientRect();
         return {

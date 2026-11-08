@@ -139,7 +139,10 @@ class BrowserBotChallengeService:
         visible_frames: list[str] = []
         try:
             # One evaluate, not three: this probe runs after every action. Bounded, under the session
-            # lock: a probe that times out is checked by the URL alone, like one that failed.
+            # lock: a probe that times out is checked by the URL alone, like one that failed. In the page's own
+            # world, not the controller's isolated one (NAV-12): it reads only the page's title, text and frames,
+            # which the page writes as it likes in either world, takes nothing of the agent's, and runs after
+            # every action, where the isolated world's extra round trip would be paid each time.
             probe = await bounded(session.page.evaluate(CHALLENGE_PROBE_SCRIPT))
             title = str(probe.get("title") or "").lower()
             body_text = str(probe.get("text") or "").lower()
