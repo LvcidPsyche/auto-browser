@@ -233,9 +233,10 @@ class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_streaming_response_body_is_never_read(self) -> None:
         # ACT-35: response.body() waits for the end of a response, which an event stream or a multipart replace
-        # stream may never reach; "text/event-stream" passed as text.
+        # stream may never reach; "text/event-stream" passed as text, and so did a multipart stream whose boundary
+        # holds a text marker (review of c4: with "boundary=frame" the test passed without the exclusion).
         inspector = NetworkInspector("session-8", body_max_bytes=100)
-        for content_type in ("text/event-stream; charset=utf-8", "multipart/x-mixed-replace; boundary=frame"):
+        for content_type in ("text/event-stream; charset=utf-8", "multipart/x-mixed-replace; boundary=textframe"):
             request = FakeRequest(url="https://example.com/stream")
             response = FakeResponse(request, headers={"content-type": content_type}, body=b"data: x\n\n")
             await _record(inspector, request, response)
