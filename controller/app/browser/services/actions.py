@@ -976,8 +976,8 @@ class BrowserActionService:
             delays_ms.append(delay_ms)
         # Scale every delay down together when the pauses alone would overrun the budget. Each keystroke is a round
         # trip to a browser node, outside the pauses, so the deadline is what bounds the total: once it passes, the
-        # rest is inserted in one call (one message however long it is, but with no key events, which is fine after
-        # the human-like pacing has already run its course).
+        # rest is inserted as plain text, with each newline, carriage return or tab in it still pressed as Enter or
+        # Tab (_insert_rest), all within one shared cutoff.
         scale = min(1.0, HUMAN_TYPING_BUDGET_SECONDS * 1000 / max(sum(delays_ms), 1))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
