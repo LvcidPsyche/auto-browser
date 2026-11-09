@@ -26,11 +26,15 @@ from fastapi.testclient import TestClient
 
 from app.action_errors import SessionNotFoundError
 from app.agent_jobs import AgentJobQueue
-from app.app_factory import build_controller_services
+from app.app_factory import build_controller_services, create_controller_app
 from app.audit import get_current_operator
 from app.browser_manager import BrowserManager, BrowserSession
 from app.cron_service import CronService
+from app.main import handle_key_not_found
+from app.middleware import http as middleware_http
+from app.middleware.http import install_controller_http_middleware
 from app.models import AgentRunRequest, BrowserActionDecision, McpToolCallRequest, OperatorIdentity
+from app.routes import _utils as routes_utils
 from app.session_ownership import acting_as, as_system
 from app.tool_gateway.gateway import McpToolGateway
 from app.utils import UTC
@@ -352,6 +356,75 @@ class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
         with acting_as(None):
             self.assertEqual([item["id"] for item in await queue.list_jobs()], [job.id])
+
+
+class _NoLifespan:
+    def __init__(self, _app) -> None:
+        pass
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_exc) -> None:
+        return None
+
+
+class ExemptRoutesNameNoSessionTests(unittest.TestCase):
+    """A route that answers without a token asks about no session: a ?session_id= on one told a caller which exist."""
+
+    OWNED = "owned-by-alice"
+    OWNERLESS = "ownerless-session"
+    UNKNOWN = "0a0a0a0a0a0a"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        settings = _settings(Path(self.tmp.name))
+        settings.api_bearer_tokens = "alice:" + "a" * 40
+        services = build_controller_services(settings, version="test")
+        application = create_controller_app(services=services, version="test", lifespan=_NoLifespan)
+        application.add_exception_handler(KeyError, handle_key_not_found)  # the controller's own, as in app.main
+        install_controller_http_middleware(
+            application, settings=settings, rate_limiter=None, metrics=SimpleNamespace(enabled=False)
+        )
+        for session_id, owner in ((self.OWNED, "alice"), (self.OWNERLESS, None)):
+            artifact_dir = Path(self.tmp.name) / session_id
+            services.manager.sessions[session_id] = BrowserSession(
+                id=session_id,
+                name=session_id,
+                created_at=datetime.now(UTC),
+                context=object(),  # type: ignore[arg-type]
+                page=FakePage(),  # type: ignore[arg-type]
+                artifact_dir=artifact_dir,
+                auth_dir=artifact_dir / "auth",
+                upload_dir=artifact_dir / "uploads",
+                takeover_url="http://127.0.0.1:6080/vnc.html",
+                trace_path=artifact_dir / "trace.zip",
+                owner=owner,
+            )
+        self.client = TestClient(application)
+
+    def test_an_exempt_route_answers_alike_for_every_session_id(self) -> None:
+        for path in ("/healthz", "/version"):
+            with self.subTest(path=path):
+                answers = {
+                    (response.status_code, response.text)
+                    for response in (
+                        self.client.get(path, params={"session_id": session_id})
+                        for session_id in (self.OWNERLESS, self.OWNED, self.UNKNOWN)
+                    )
+                }
+                self.assertEqual(len(answers), 1, answers)
+                self.assertEqual(answers.pop()[0], 200)
+
+    def test_a_route_that_needs_the_token_still_checks_the_session(self) -> None:
+        response = self.client.get(
+            f"/sessions/{self.UNKNOWN}/network/requests", headers={"Authorization": "Bearer " + "a" * 40}
+        )
+        self.assertEqual((response.status_code, response.json().get("code")), (404, "unknown_session"), response.text)
+
+    def test_the_gate_and_the_session_check_share_one_predicate(self) -> None:
+        self.assertIs(middleware_http.is_bearer_exempt_path, routes_utils.is_bearer_exempt_path)
 
 
 class RestAndArtifactOwnershipTests(unittest.TestCase):

@@ -174,6 +174,11 @@ All notable changes to auto-browser are documented here.
   while the token stays an exact comparison, and both spellings share one rate-limit bucket. With
   `REQUIRE_OPERATOR_ID` on and a token configured, a request with no valid credential and no operator header now
   answers the token's `401` instead of `400` naming the operator header. (AUTH-38)
+- **A `?session_id=` on a route that needs no token no longer tells a caller which ids exist.** Under named
+  `API_BEARER_TOKENS`, a route the token gate lets through (`/healthz`, `/readyz`, `/version`, `/dashboard`,
+  `/mesh/receive`, `/share/...`) still ran the session ownership check on a `?session_id=` it does not read, so a
+  caller without a token got a `404` for an unknown or another operator's id and the normal answer for an ownerless
+  one. Those routes no longer look a session up, and the token gate and that check read the same list. (R5C-2)
 
 ### Changed
 

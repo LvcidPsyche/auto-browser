@@ -196,6 +196,39 @@ def tokenless_loopback_allowed(settings: Any) -> bool:
     return getattr(settings, "api_allow_tokenless_loopback", False) is True
 
 
+_DOCS_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+
+
+def is_bearer_exempt_path(path: str, *, docs_are_public: bool) -> bool:
+    """Whether a path answers without the bearer token: the one list, the token gate's and the session check's."""
+    # /share/{token}/... authenticates with the signed share token instead
+    # (app/routes/share.py). POST /sessions/{id}/share, which mints one, is not
+    # under this prefix and stays behind the bearer token.
+    if path.startswith("/share/"):
+        return True
+    # /ui/{anything} only redirects to /dashboard, as /ui and /ui/ do, and serves
+    # nothing; answering 401 for old bookmarks like /ui/foo was inconsistent.
+    if path.startswith("/ui/"):
+        return True
+    # /docs, /redoc and /openapi.json serve the API schema, which is public (it is
+    # in the repo) and holds no data. A browser opening /docs cannot send the
+    # bearer token; the schema declares it, so Swagger's Authorize sends it from there.
+    # Only on a loopback deployment, where the browser is the operator's own: an
+    # exposed one answers 401 as it did before they were opened up.
+    if path in _DOCS_PATHS:
+        return docs_are_public
+    return path in {
+        "/healthz",
+        "/readyz",
+        "/mesh/receive",
+        "/version",
+        "/dashboard",
+        "/dashboard/",
+        "/ui",
+        "/ui/",
+    }
+
+
 def has_named_credentials(settings: Any) -> bool:
     """True when operators can be told apart: at least one credential proves who holds it."""
     return any(credential.verifies_identity for credential in credentials_for(settings))

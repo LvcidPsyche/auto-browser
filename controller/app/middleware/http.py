@@ -15,6 +15,7 @@ from ..auth_policy import (
     AuthPolicy,
     Credential,
     credentials_for,
+    is_bearer_exempt_path,
     is_loopback_host,
     match_credential,
     policy_for_scope,
@@ -96,7 +97,7 @@ def install_controller_http_middleware(
     docs_are_public = bind_scope == BIND_SCOPE_LOOPBACK
 
     def _is_exempt_path(path: str) -> bool:
-        return _is_bearer_token_exempt_path(path, docs_are_public=docs_are_public)
+        return is_bearer_exempt_path(path, docs_are_public=docs_are_public)
 
     def _auth_policy() -> AuthPolicy:
         return policy_for_scope(
@@ -395,9 +396,6 @@ def install_security_headers(application: FastAPI) -> None:
         return response
 
 
-_DOCS_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
-
-
 def _request_path(request: Request) -> str:
     return str(request.scope.get("path") or "")
 
@@ -409,32 +407,3 @@ def _comes_from_another_origin(request: Request) -> bool:
     origin = request.headers.get("origin")
     # Present and empty counts as present: only a request with no Origin at all is one no browser marked.
     return origin is not None and not origin_matches_host(origin, request.headers.get("host", ""))
-
-
-def _is_bearer_token_exempt_path(path: str, *, docs_are_public: bool) -> bool:
-    # /share/{token}/... authenticates with the signed share token instead
-    # (app/routes/share.py). POST /sessions/{id}/share, which mints one, is not
-    # under this prefix and stays behind the bearer token.
-    if path.startswith("/share/"):
-        return True
-    # /ui/{anything} only redirects to /dashboard, as /ui and /ui/ do, and serves
-    # nothing; answering 401 for old bookmarks like /ui/foo was inconsistent.
-    if path.startswith("/ui/"):
-        return True
-    # /docs, /redoc and /openapi.json serve the API schema, which is public (it is
-    # in the repo) and holds no data. A browser opening /docs cannot send the
-    # bearer token; the schema declares it, so Swagger's Authorize sends it from there.
-    # Only on a loopback deployment, where the browser is the operator's own: an
-    # exposed one answers 401 as it did before they were opened up.
-    if path in _DOCS_PATHS:
-        return docs_are_public
-    return path in {
-        "/healthz",
-        "/readyz",
-        "/mesh/receive",
-        "/version",
-        "/dashboard",
-        "/dashboard/",
-        "/ui",
-        "/ui/",
-    }
