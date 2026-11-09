@@ -152,7 +152,7 @@ class McpTransportTests(unittest.TestCase):
         return session.id
 
     def test_a_restored_2025_03_26_session_keeps_working_without_the_version_header(self) -> None:
-        """A client on 2025-03-26 sends no MCP-Protocol-Version header, so nothing changes for it until it initializes."""
+        """A client on 2025-03-26 sends no MCP-Protocol-Version header, so nothing changes until it initializes."""
         session_id = self._restart_with_a_session_negotiated_at("2025-03-26")
 
         response = self.client.post(
