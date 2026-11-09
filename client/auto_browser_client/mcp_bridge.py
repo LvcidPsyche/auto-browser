@@ -561,7 +561,9 @@ class StdioMcpBridge:
             request_id = response.get("id")
             return json.dumps(
                 self._jsonrpc_error(
-                    request_id if isinstance(request_id, (str, int, float)) else None,
+                    request_id
+                    if isinstance(request_id, (str, int, float)) and not isinstance(request_id, bool)
+                    else None,
                     -32000,
                     "The answer is nested too deep for the stdio bridge to send.",
                 ),

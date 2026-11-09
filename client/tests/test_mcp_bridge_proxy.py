@@ -1213,6 +1213,25 @@ def test_a_request_id_too_deep_to_encode_is_answered_with_a_null_id(monkeypatch)
     assert reply["error"]["code"] == -32000
 
 
+def test_a_boolean_request_id_is_answered_with_a_null_id_when_the_answer_cannot_be_encoded(monkeypatch) -> None:
+    # True is an int in Python, but JSON-RPC's id is a string, a number or null: the fallback must not say "id": true.
+    import auto_browser_client.mcp_bridge as bridge
+
+    nested: list = []
+    for _ in range(1_000_000):
+        nested = [nested]
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    monkeypatch.setattr(proxy, "_handle_line", lambda _line: {"jsonrpc": "2.0", "id": True, "result": nested})
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("line\n"), stdout=stdout)
+
+    reply = json.loads(stdout.getvalue())
+    assert reply["id"] is None
+    assert reply["error"]["code"] == -32000
+
+
 def test_a_stdin_line_too_deep_to_parse_is_answered_as_invalid_json() -> None:
     # json.loads raises RecursionError on this on every supported Python, which ended the bridge with no answer.
     import auto_browser_client.mcp_bridge as bridge
