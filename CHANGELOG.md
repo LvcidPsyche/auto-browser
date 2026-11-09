@@ -84,7 +84,8 @@ All notable changes to auto-browser are documented here.
 - **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
   replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
-  no usable key. `GET /crons`, `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and
+  no usable key. A backup or quarantined copy of the store from before the upgrade still holds the keys: rotate them
+  if such a copy may have been read. `GET /crons`, `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and
   `browser.create_cron_job` answered the key's first 8 characters in `webhook_key_preview`: they now answer
   `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key
   cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
@@ -169,7 +170,7 @@ All notable changes to auto-browser are documented here.
   note. (STORE-16)
 - **The cron webhook trigger no longer tells an unknown job from a wrong key.** `POST /crons/{id}/trigger` answered
   `404` for an id that does not exist and `403` for a wrong key or a job with no webhook, so anyone with the bearer
-  token could list job ids by probing them. All three now do the same work, compare against a fixed digest when there
+  token could list job ids by probing them. All three now make the same comparison, against a fixed digest when there
   is no key, and are refused with the same `403` and text (see the upgrade note). (R5C-1)
 - **A cron job no longer fires as an operator whose credential is gone.** A job stores the token-verified operator
   who created it and ran as that operator on every fire, whether or not `API_BEARER_TOKENS` still named them, and a
@@ -301,15 +302,15 @@ All notable changes to auto-browser are documented here.
   job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
   when the job's record cannot say, also for a run that finishes while its trigger is still answering. A run that is
   no longer the job's latest leaves the newer run's status alone, and a store that cannot be read or saved at that
-  moment is logged and the session is still closed. A run cut off by a controller restart keeps `queued`, as nothing
-  is left to report its end. (STORE-15)
+  moment is logged and the session is still closed. A run the controller loses before it can report the end (a crash,
+  or a run still waiting in the queue at a restart) keeps `queued`. (STORE-15)
 
 ### Changed
 
 - **Cron schedules are read in one zone, `CRON_TIMEZONE`, and a late fire still runs.** Schedules and the scheduler
   used the host's zone. `CRON_TIMEZONE` (default `UTC`, an IANA name, checked at startup) now sets it for both: see
-  the upgrade note. The scheduler also runs a fire it reaches up to five minutes late, runs a burst of missed fires
-  once, and keeps one job's scheduled fire from overlapping itself. (STORE-18)
+  the upgrade note. The scheduler also runs a fire it reaches up to five minutes late, where one more than a second
+  late used to be skipped. (STORE-18)
 - **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller
   refuses them, so a client on it was promised what the server would not do. `2025-11-25` and `2025-06-18` remain.
   (MCP-15)

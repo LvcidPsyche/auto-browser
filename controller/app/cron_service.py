@@ -69,8 +69,9 @@ except ImportError:
 
 # What an unknown id, a job with no key and a wrong key are refused with: nothing says which it was.
 WEBHOOK_KEY_REFUSED = "Invalid webhook key"
-# A fire the scheduler reaches up to five minutes late (a busy loop) still runs, a burst of missed fires runs once,
-# and one job's scheduled fire never overlaps itself.
+# A fire the scheduler reaches up to five minutes late (a busy loop) still runs, where APScheduler's own default skips
+# one more than a second late. A burst of missed fires running once and a job's fire never overlapping itself are its
+# defaults as well, set here so that the behaviour does not rest on them.
 _SCHEDULER_JOB_DEFAULTS = {"misfire_grace_time": 300, "coalesce": True, "max_instances": 1}
 # How a run's agent job can end, as AgentJobRecord.status says it. Anything else means its end was never written.
 _FINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "discarded"})

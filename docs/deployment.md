@@ -1228,12 +1228,14 @@ ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
 
 Schedules are read in the zone `CRON_TIMEZONE` names, `UTC` by default, whatever the host's own zone is: set it to an
 IANA zone name such as `America/Chicago` for a job to fire at that zone's hour. A name the zone database does not know
-stops the controller at startup, and the name is in the message. The controller image carries the zone database.
+stops the controller at startup, and the name is in the message. The controller image carries the zone database. In a
+zone with daylight saving time, a job set inside the hour the clocks skip fires an hour later by the clock, and one set
+inside the hour they repeat can fire twice.
 
 A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (on a controller with a
-token, the bearer token is needed as well, as on any route). The key is 256 random bits, answered once by the call that makes it, `POST /crons`
-or a rotation. The store keeps only its SHA-256 hash, and reads answer `webhook_key_id`, a short non-secret id derived
-from the hash that tells keys apart:
+token, the bearer token is needed as well, as on any route). The key is 256 random bits, answered once by the call that
+makes it, `POST /crons` or a rotation. The store keeps only its SHA-256 hash, and reads answer `webhook_key_id`, a short
+non-secret id derived from the hash that tells keys apart:
 
 - **Rotate** with `POST /crons/{job_id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`: a new key, answered
   once; the old key stops working at once, and a job with no webhook gets its first.

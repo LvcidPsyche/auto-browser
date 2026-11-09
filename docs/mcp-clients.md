@@ -359,9 +359,9 @@ controller serves a selection fixed at startup. `MCP_TOOL_PROFILE` picks a profi
 
 | Profile | Packs | Tools | `tools/list` size | For |
 |---|---|---|---|---|
-| `lean` | `browse` | 7 | about 12 KB | the browsing loop: observe, act, read the page, hand to a person, close |
-| `curated` (default) | `browse`, `sessions`, `tabs`, `downloads`, `auth_profiles`, `wait`, `scripting`, `vision` | 20 (21 with a vision model) | about 25 KB | a browsing agent: adds sessions with options, saved sign-ins, tabs, downloads, waits and `eval_js` |
-| `full` | every pack | 74 (75 with a vision model) | about 68 KB | everything: diagnostics, Witness, admin, the agent queue, the harness |
+| `lean` | `browse` | 7 | about 13 KB | the browsing loop: observe, act, read the page, hand to a person, close |
+| `curated` (default) | `browse`, `sessions`, `tabs`, `downloads`, `auth_profiles`, `wait`, `scripting`, `vision` | 20 (21 with a vision model) | about 29 KB | a browsing agent: adds sessions with options, saved sign-ins, tabs, downloads, waits and `eval_js` |
+| `full` | every pack | 76 (77 with a vision model) | about 79 KB | everything: diagnostics, Witness, admin, the agent queue, the harness |
 
 Sizes are the JSON `tools/list` returns, without a vision model.
 
