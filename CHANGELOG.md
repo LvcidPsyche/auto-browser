@@ -17,16 +17,16 @@ All notable changes to auto-browser are documented here.
 - **The controller image now installs its whole Python dependency tree from `controller/constraints.txt`, pinned at
   releases at least 72 hours old, and CI's Python test installs take no younger release.** `requirements.txt` and
   `requirements-dev.txt` pin only the packages the controller names, so every build took the newest release of each
-  package below them, however new: a build on 2026-11-06 took pydantic-core 2.50.4, uploaded the day before. The file
-  is uv's universal resolution of both files for Python 3.11 and later, with its command and cutoff in its header. The
-  host tests and the devcontainer install under it too, and CI's host tests hold what it does not pin, the build
-  backend of the editable install, to releases at least 72 hours old. The dependency audits read the file as it is,
-  where they resolved the top-level pins afresh: CI's, on Linux and Python 3.11 as the image is, checks the versions
-  the image installs, and `scripts/release_audit.py`'s the versions the file gives the platform and Python it runs on.
-  A requirements file moved to a release the file pins at another fails CI's install until the file is generated
-  again. The client and LangChain tests still take the newest release of each package, as those libraries' users do,
-  but only one at least 72 hours old, their build backends included. Dependabot holds version updates three days, as
-  its configuration now says. (R5C-14)
+  package below them, however new: the 1.15.0 image carried pydantic-core 2.50.4, uploaded under 72 hours before it
+  was built. The file is uv's universal resolution of both files for Python 3.11 and later, with its command and
+  cutoff in its header. The host tests and the devcontainer install under it too, and CI's host tests hold what it
+  does not pin, the build backend of the editable install, to releases at least 72 hours old. The dependency audits
+  read the file as it is, where they resolved the top-level pins afresh: CI's, on Linux and Python 3.11 as the image
+  is, checks the versions the image installs, and `scripts/release_audit.py`'s the versions the file gives the
+  platform and Python it runs on. A requirements file moved to a release the file pins at another fails CI's install
+  until the file is generated again. The client and LangChain tests still take the newest release of each package, as
+  those libraries' users do, but only one at least 72 hours old, their build backends included. Dependabot holds
+  version updates three days, as its configuration now says. (R5C-14)
 - **A restricted witness receipt now withholds secrets at any depth, and in its metadata and approval reason too.** A
   receipt in restricted evidence mode (a confidential session, or a sensitive, high-risk or auth-material action)
   blanked five top-level target keys (`text`, `text_preview`, `file_path`, `password`, `totp_secret`) and what a
@@ -41,10 +41,10 @@ All notable changes to auto-browser are documented here.
   take the evidence mode of the action it approves, as the approval describes it, so those of an action marked
   sensitive, a high-risk one or one that moves auth material are restricted as that action's own receipt is, in a
   normal session too (a field an action finds sensitive only as it runs restricts that action's own receipt, not its
-  approval's, which hold none of what it typed); and every approval receipt of a confidential session, like a human
-  takeover's receipt there, is restricted. The approval store still keeps an approval's reason and its decision's
-  comment, and the audit log a takeover's reason and the comment. A hosted Witness service and an exported bundle
-  receive the receipt as recorded.
+  approval's, whose reason can quote what the action was given: mark the action sensitive to restrict those too); and
+  every approval receipt of a confidential session, like a human takeover's receipt there, is restricted. The approval
+  store still keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the
+  comment. A hosted Witness service and an exported bundle receive the receipt as recorded.
 - **The MCP bridges no longer show the agent a character or a byte of a token they cannot send.** A bearer token
   holding a character outside latin-1 (from `--bearer-token`, `AUTO_BROWSER_BEARER_TOKEN` or the token file), which an
   HTTP header cannot carry, was answered as an unexpected bridge failure quoting http.client's encoding error, which
@@ -107,12 +107,13 @@ All notable changes to auto-browser are documented here.
   observation's screenshot, an action's before and after snapshots, a share frame and the copies the compare tool
   redacts are now written under a hidden name beside their published one, redacted there (the redacted bytes through a
   temporary file and `os.replace`), and only then moved onto the published name with `os.replace`; one with nothing to
-  redact, or that could not be scrubbed (which its result says), is moved there as it is. A redaction that does not
-  finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name, and its hidden file goes
-  too, after any write to it a worker thread had begun, which a cancel (a shutdown's too) does not stop. A staged
-  screenshot becomes the one that vision targeting (`take_screenshot=false`) and the compare tool reuse only once it
-  is published; until then they reuse the one before it. A screenshot that is not to be redacted (scrubbing off, or an
-  action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
+  redact, or that could not be scrubbed (which its result says, though a share frame's does not), is moved there as it
+  is. A redaction that does not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published
+  name, and its hidden file goes too, after any write to it a worker thread had begun, which a cancel (a shutdown's
+  too) does not stop. A staged screenshot becomes the one that vision targeting (`take_screenshot=false`) and the
+  compare tool reuse only once it is published; until then they reuse the one before it. A screenshot that is not to
+  be redacted (scrubbing off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written
+  straight to its name.
 - **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so a
   CSV export of customers gave the agent every email address and SSN in it, while console messages and network bodies
   were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the MIME type its file name maps to in Python's
@@ -267,8 +268,8 @@ All notable changes to auto-browser are documented here.
   `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal. The
   candidate is now built and signed in a worker thread, and placed once the lock is free, which the event loop no
   longer waits for, and the candidate a re-stage replaces is removed in a worker thread too; a run cancelled meanwhile
-  waits for that work, and its record names the candidate it staged. A shutdown that cancels the staging itself places
-  nothing, and the next start marks that run failed.
+  waits for that work, and its record names the candidate it staged. A shutdown that cancels the staging before the
+  candidate is placed places nothing, and the next start marks that run failed.
 - **A staged skill candidate that `HARNESS_RETENTION_DAYS` is removing no longer reads as tampered with.** The
   retention prune removed an aged candidate's files in a worker thread while `harness.get_candidate`,
   `harness.list_candidates` and the drift checks read candidates without a lock, so a read in between found some of
@@ -339,13 +340,13 @@ All notable changes to auto-browser are documented here.
   event; approvals and harness traces keep `NORMAL`. A database whose journal mode stays out of WAL was logged at
   debug level; it is now a warning. A connection whose configuration raised was left open, holding its file; it is now
   closed before the error goes on.
-- **The network inspector caps a request body by its bytes, and never reads a streaming response.** A request body was
-  kept when its characters, not its UTF-8 bytes, fit `NETWORK_INSPECTOR_BODY_MAX_BYTES`, so one of multibyte text was
-  kept at up to four times the cap; it is now measured in bytes, as a response body is. A `text/event-stream` response
-  counted as text and its body was read, and Playwright's `response.body()` waits for the end of a response, which an
-  event stream need not reach, so the read stayed pending for as long as the page kept the stream open. A response of
-  either streaming type, `text/event-stream` or `multipart/x-mixed-replace`, is now never read; its entry keeps no
-  body.
+- **The network inspector caps a request body by its bytes, and never reads a `text/event-stream` or
+  `multipart/x-mixed-replace` response.** A request body was kept when its characters, not its UTF-8 bytes, fit
+  `NETWORK_INSPECTOR_BODY_MAX_BYTES`, so one of multibyte text was kept at up to four times the cap; it is now
+  measured in bytes, as a response body is. A `text/event-stream` response counted as text and its body was read, and
+  Playwright's `response.body()` waits for the end of a response, which an event stream need not reach, so the read
+  stayed pending for as long as the page kept the stream open. A response of either streaming type,
+  `text/event-stream` or `multipart/x-mixed-replace`, is now never read; its entry keeps no body.
 - **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed when
   its session's record cannot be saved.** Once an action had taken effect and been recorded (its `actions.jsonl` line,
   audit entry and witness receipt), saving the session's record could still fail (a full disk, or Redis failing the
