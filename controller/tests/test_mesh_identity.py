@@ -145,7 +145,9 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
         self.assertEqual(self.reads, 2)
 
     def test_a_key_that_stays_empty_raises_by_the_bound(self):
-        wait, poll = self.with_a_short_bound()
+        # Long enough that a slow runner still reads twice before the bound.
+        wait = patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.5)
+        poll = patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01)
         started = time.monotonic()
         with wait, poll, self.reading_the_key_as(b""), self.assertRaises(ValueError):
             NodeIdentity(self.dir)
