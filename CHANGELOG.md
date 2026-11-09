@@ -74,8 +74,9 @@ All notable changes to auto-browser are documented here.
   is checked before the read and again after it, so one that moves onto a refused host meanwhile is refused too. A
   session whose page is allowed gets its log as before, and one whose page is refused gets it again once the page is
   navigated to an allowed URL. `GET /sessions/{id}/network-log` now answers `409` for a session another call holds
-  past the bound, as `GET /sessions/{id}/network/requests` does, where it waited without limit, and that route answers
-  `404` for a session that has gone, as for a session with no inspector, where it read the log of one being closed.
+  past the bound, as `GET /sessions/{id}/network/requests` does, where it waited without limit, and
+  `GET /sessions/{id}/network/requests` answers `404` for a session that has gone, as for one with no inspector,
+  where it read the log of a session being closed.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
   the next carries `details.count`, the refusals held back since. An alert that counts these events must add that
   field.
