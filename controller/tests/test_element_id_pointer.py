@@ -247,7 +247,7 @@ async def test_a_drag_cancelled_while_its_scroll_watch_starts_still_removes_the_
     sent: list[str] = []
 
     class World:
-        async def evaluate(self, page, script: str, arg=None):
+        async def evaluate(self, page, script: str, arg=None, **_kwargs):
             sent.append(script)
             if script == drag._WATCH_SCRIPT:
                 started.set()
