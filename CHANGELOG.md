@@ -49,9 +49,11 @@ All notable changes to auto-browser are documented here.
 - **An MCP session now has one live `GET /mcp` stream, and a stream ends with its session.** Every `GET` opened
   another stream and another subscription to every browser event for the same session, and `DELETE` or an eviction
   left them all running for a session that no longer existed. A new `GET` now ends the session's previous stream, and
-  `DELETE` or an eviction past the session caps ends it, at once rather than at its next 15-second keepalive; its
-  event queue is released however the stream ends. An open stream counts as use when eviction picks the least recently
-  used session, as a request does, so a client that only listens is not the one dropped. (MCP-11)
+  `DELETE` or an eviction past the session caps ends it, at once rather than at its next 15-second keepalive, and a
+  stopped stream sends nothing more. A stream blocked sending to a client that has stopped reading, which 1.17.0
+  could not stop either, ends when that send returns or the connection goes. Its event queue is released however the
+  stream ends. An open stream counts as use when eviction picks the least recently used session, as a request does,
+  so a client that only listens is not the one dropped. (MCP-11)
 
 ### Changed
 

@@ -199,6 +199,43 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(stream.task.done(), "a refused GET stopped the live stream")
         self.assertIn("m1", self.transport._event_streams)
 
+    async def test_a_stream_stopped_while_it_looks_up_an_owner_says_nothing_more(self) -> None:
+        """The stop was seen only in the wait, so a stream parked in the lookup went on to notify after a takeover."""
+        lookup_entered = asyncio.Event()
+        release_lookup = asyncio.Event()
+
+        async def held_lookup(session_id: str) -> tuple[bool, str | None]:
+            lookup_entered.set()
+            await release_lookup.wait()
+            return False, None
+
+        self.manager.session_owner_lookup = held_lookup
+        self.session.resource_subscriptions = ["browser://sessions"]
+        queues = self.queues()
+        old = await self.open_stream()
+        events.emit_session("no-such-browser-session", "closed")
+        await asyncio.wait_for(lookup_entered.wait(), PROMPTLY)
+
+        await self.open_stream()  # the takeover, while the old stream is parked in the lookup
+        release_lookup.set()
+
+        await old.ended()
+        self.assertEqual(old.notifications(), [])
+        self.assertEqual(self.queues(), queues + 1, "the old stream's queue is released, the successor's is not")
+
+    async def test_a_stop_between_two_notifications_of_one_event_ends_the_stream_there(self) -> None:
+        """One event can notify several URIs, and a stop can land while the first is being sent."""
+        self.session.resource_subscriptions = ["browser://sessions", "browser://s1/dom"]
+        response = await self.transport.handle_get_request(get_request("m1"))
+        body = response.body_iterator
+        self.assertEqual(await asyncio.wait_for(body.__anext__(), PROMPTLY), ": connected\n\n")
+        events.emit_session("s1", "closed")
+        self.assertIn("notifications/resources/updated", await asyncio.wait_for(body.__anext__(), PROMPTLY))
+
+        self.transport._stop_event_stream("m1")
+
+        self.assertEqual(await asyncio.wait_for(self.collect(body), PROMPTLY), [])
+
     # ── DELETE and eviction ─────────────────────────────────────────────────
 
     async def test_delete_ends_the_stream_and_releases_its_queue(self) -> None:

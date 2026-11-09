@@ -95,6 +95,8 @@ class McpHttpTransport:
         self.allowed_origins = tuple(allowed_origins or [])
         self._sessions: dict[str, McpSession] = {}
         # The stop event of each MCP session's one live GET stream. Never saved: a stream does not outlive the process.
+        # A response whose body never starts leaves its entry until the session's next GET, DELETE or eviction, holding
+        # no queue and no task.
         self._event_streams: dict[str, asyncio.Event] = {}
         self._session_store_path = Path(session_store_path).resolve() if session_store_path else None
         self.manager = manager  # BrowserManager for Resources protocol
@@ -497,6 +499,11 @@ class McpHttpTransport:
         stop: asyncio.Event,
         operator: OperatorIdentity | None = None,
     ):
+        """GET /mcp's body: a stream of update notifications until stop is set, the client goes or the body is closed.
+
+        A stopped stream says nothing more, but the stop cannot interrupt a send: a stream blocked in sending to a
+        client that has stopped reading ends when that send returns or the connection goes.
+        """
         queue = _events.subscribe_all()
         try:
             yield ": connected\n\n"
@@ -520,6 +527,9 @@ class McpHttpTransport:
                 if not await self._may_see_event(event, operator):
                     continue
                 for uri in self._updated_resource_uris(event, subscribed=session.resource_subscriptions):
+                    # Here and not only in the wait: a stop can land during the owner lookup above or the send below.
+                    if stop.is_set():
+                        break
                     message = {
                         "jsonrpc": JSONRPC_VERSION,
                         "method": "notifications/resources/updated",
