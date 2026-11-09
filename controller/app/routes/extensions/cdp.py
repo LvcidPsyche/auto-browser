@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ...browser.page_read import start_read
+from ...browser.page_read import SESSION_BUSY_DETAIL, start_read
 from ...cdp.passthrough import CDPParamsError, CDPPassthrough
 from .._utils import OFF_LIST_PAGE_DETAIL
 
@@ -63,7 +63,7 @@ async def _allowed_cdp(app, session_id: str) -> AsyncIterator[Any]:
     try:
         await asyncio.wait_for(session.lock.acquire(), timeout=CDP_TIMEOUT_SECONDS)
     except TimeoutError:
-        raise HTTPException(409, "The session is busy with another call. Try again.") from None
+        raise HTTPException(409, SESSION_BUSY_DETAIL) from None
     try:
         try:
             read = start_read(manager, session)

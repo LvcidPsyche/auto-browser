@@ -71,10 +71,11 @@ All notable changes to auto-browser are documented here.
 - **The network log of a page `ALLOWED_HOSTS` refuses is now refused, as a raw CDP read of it is.**
   `GET /sessions/{id}/network/requests` and `GET /sessions/{id}/network-log` answer `403` with the same fixed text as
   the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. The page
-  is checked before the read and again after it, so one that moves onto a refused host meanwhile is refused too. A
-  session whose page is allowed gets its log as before, and one whose page is refused gets it again once the page is
-  navigated to an allowed URL. `GET /sessions/{id}/network-log` now answers `409` for a session another call holds
-  past the bound, as `GET /sessions/{id}/network/requests` does, where it waited without limit, and
+  is checked before the read and again after it, so one that moves onto a refused host meanwhile is refused too, and
+  so is a session whose active page has closed, as any page read is. A session whose open page is allowed gets its
+  log as before, and one whose page is refused gets it again once the page is navigated to an allowed URL.
+  `GET /sessions/{id}/network-log` now answers `409` for a session another call holds past the bound, as
+  `GET /sessions/{id}/network/requests` does, where it waited without limit, and
   `GET /sessions/{id}/network/requests` answers `404` for a session that has gone, as for one with no inspector,
   where it read the log of a session being closed.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
@@ -123,7 +124,8 @@ All notable changes to auto-browser are documented here.
   that does not exist (see the upgrade note), and a refused save over such a profile, or an import that would
   overwrite one, no longer names its owner. `profile_dir` and `auth_state.path`, the profile's absolute paths on the
   controller, are no longer in the answer of `GET /auth-profiles/{name}` or `GET /auth-profiles`, and the
-  `browser.get_auth_profile` tool no longer promises them. (AUTH-31)
+  `browser.get_auth_profile` tool no longer promises them. The audit log stays operator-wide, as
+  `docs/production-hardening.md` says: an export's or a save's event there still names the profile. (AUTH-31)
 - **A page `ALLOWED_HOSTS` refuses no longer shows in the network log, on any surface.** The log holds the URL of
   every request, and a page that had moved onto a refused host had its own requests read back through
   `GET /sessions/{id}/network/requests`, `GET /sessions/{id}/network-log`, `browser.get_network_log` and the
@@ -237,8 +239,9 @@ All notable changes to auto-browser are documented here.
   refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
   seconds are only counted, and the first refusal after that writes one event whose `details.count` says how many
   were held back. An event that cannot be written opens no window: the next refusal writes one, carrying the refusal
-  it lost. Every refusal still answers `403`, `takeover_link_viewed` is written every time, and at most 1024 sources
-  are remembered: the oldest is forgotten first, with its count. See the upgrade note. (R5C-6)
+  it lost. A refusal still answers `403` (`500`, as before, when its audit write fails), `takeover_link_viewed` is
+  written every time, and at most 1024 sources are remembered: the oldest is forgotten first, with its count. See the
+  upgrade note. (R5C-6)
 - **A start that races another for the mesh or Witness key no longer trips over the other's files.** The loser of
   the race raised `FileExistsError`, which failed that start; it now loads the key the other start made, retrying
   for up to 2 seconds while the file is still being written, and the public key and `node_meta.json` are published

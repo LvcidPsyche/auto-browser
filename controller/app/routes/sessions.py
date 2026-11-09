@@ -191,7 +191,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                         details=details,
                     )
                 except BaseException:
-                    # Cancelled too: the window opens only once its event is written.
+                    # Cancelled too: the window opens only once its event is written. A store that wrote it and then
+                    # failed (or a cancelled append that lands behind this) counts one refusal twice, not one lost.
                     refusal_windows.event_not_written(source, reported=counted)
                     raise
             raise HTTPException(status_code=403, detail=TAKEOVER_LINK_REFUSED_DETAIL)

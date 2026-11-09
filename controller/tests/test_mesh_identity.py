@@ -4,7 +4,6 @@ import json
 import os
 import stat
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -145,14 +144,17 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
         self.assertEqual(self.reads, 2)
 
     def test_a_key_that_stays_empty_raises_by_the_bound(self):
-        # Long enough that a slow runner still reads twice before the bound.
-        wait = patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.5)
-        poll = patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01)
-        started = time.monotonic()
-        with wait, poll, self.reading_the_key_as(b""), self.assertRaises(ValueError):
+        # A clock that moves only when the retry sleeps: a stalled runner cannot spend the bound before the second read.
+        now = [0.0]
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        clock = patch.object(identity_module, "time", Mock(monotonic=lambda: now[0], sleep=sleep))
+        with clock, self.reading_the_key_as(b""), self.assertRaises(ValueError):
             NodeIdentity(self.dir)
-        self.assertLess(time.monotonic() - started, 5.0)
         self.assertGreater(self.reads, 1)
+        self.assertGreaterEqual(now[0], identity_module._FILE_BEING_WRITTEN_WAIT_SECONDS)
 
     def test_a_key_that_is_gone_when_read_is_retried_within_the_bound_too(self):
         wait, poll = self.with_a_short_bound()
