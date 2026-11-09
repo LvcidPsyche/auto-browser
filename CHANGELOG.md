@@ -92,6 +92,8 @@ All notable changes to auto-browser are documented here.
 - **`tools/list` now shows the governed approval arguments.** Every tool with a governed kind accepts
   `workflow_profile` and `approval_id`, but its advertised schema named neither, so a client could not find the
   approval retry flow from it. Both are now optional properties on exactly those tools. (MCP-20)
+- **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
+  candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the
   script as a Python repr, which is not a JavaScript string: a non-printable character past the BMP (U+10FFFF, say)
   was written as `\U0010ffff`, which JavaScript reads as other text, so the read looked up another key. The key is

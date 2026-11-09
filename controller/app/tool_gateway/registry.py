@@ -51,8 +51,6 @@ READ_ONLY_TOOL_NAMES = {
     "browser.list_tabs",
     "browser.pii_scrubber_status",
     "browser.readiness_check",
-    "harness.check_all_drifts",
-    "harness.check_drift",
     "harness.get_candidate",
     "harness.get_status",
     "harness.get_trace",

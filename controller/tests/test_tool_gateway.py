@@ -390,6 +390,24 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_the_harness_drift_checks_are_not_advertised_as_read_only(self) -> None:
+        # They write drift.json, as their descriptions say; a client may run a read-only tool without asking.
+        tools = {tool["name"]: tool for tool in self.full_gateway.list_tools()}
+
+        for name in ("harness.check_drift", "harness.check_all_drifts"):
+            with self.subTest(name=name):
+                self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
+                self.assertFalse(tools[name]["annotations"]["idempotentHint"])
+        for name in (
+            "harness.get_candidate",
+            "harness.get_status",
+            "harness.get_trace",
+            "harness.list_candidates",
+            "harness.list_runs",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(tools[name]["annotations"]["readOnlyHint"])
+
     async def test_tool_gateway_package_reexports_legacy_input_models(self) -> None:
         payload = CreateSessionRequest(name="reexport-check")
 
