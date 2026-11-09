@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.responses import StreamingResponse
 
 from app.mcp_transport import (
     MAX_MCP_SESSIONS,
@@ -20,6 +22,7 @@ from app.mcp_transport import (
     McpSession,
 )
 from app.models import McpToolCallContent, McpToolCallResponse
+from tests.test_mcp_resource_ownership import mcp_request
 
 
 class McpTransportTests(unittest.TestCase):
@@ -438,6 +441,110 @@ class McpTransportTests(unittest.TestCase):
         store_payload = json.loads(Path(f"{self.tempdir.name}/mcp-sessions.json").read_text(encoding="utf-8"))
         self.assertEqual(store_payload[0]["last_used_at"], self.transport._sessions[session_id].last_used_at)
 
+    def test_an_unsupported_protocol_version_header_is_refused_400(self) -> None:
+        headers = {**self._ready_headers(), MCP_PROTOCOL_HEADER: "2099-01-01"}
+
+        response = self.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 30, "method": "ping"})
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertEqual(error["data"]["requested"], "2099-01-01")
+        self.assertIn("2025-11-25", error["data"]["supported"])
+
+    def test_a_protocol_version_header_that_differs_from_the_sessions_is_refused_400(self) -> None:
+        headers = {**self._ready_headers(), MCP_PROTOCOL_HEADER: "2025-06-18"}
+
+        response = self.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 31, "method": "ping"})
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32600)
+        self.assertIn("Protocol version mismatch", error["message"])
+
+    def test_a_failing_tool_is_isError_true_on_the_wire(self) -> None:
+        self.gateway.call_tool.return_value = McpToolCallResponse(
+            content=[McpToolCallContent(text="the tool failed")], isError=True
+        )
+        headers = self._ready_headers()
+
+        response = self.client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 32,
+                "method": "tools/call",
+                "params": {"name": "browser.observe", "arguments": {}},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertNotIn("error", body)
+        self.assertIs(body["result"]["isError"], True)
+        self.assertEqual(body["result"]["content"][0]["text"], "the tool failed")
+
+    def test_ping_answers_an_empty_result(self) -> None:
+        """Before notifications/initialized too: ping is the one method allowed that early."""
+        session_id, protocol_version = self._initialize()
+
+        response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "id": 33, "method": "ping"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"jsonrpc": "2.0", "id": 33, "result": {}})
+
+    def test_params_that_are_invalid_are_refused(self) -> None:
+        headers = self._ready_headers()
+        calls = (
+            ({"jsonrpc": "2.0", "id": 34, "method": "ping", "params": ["not", "an", "object"]}, "object"),
+            ({"jsonrpc": "2.0", "id": 35, "method": "tools/call", "params": {"arguments": {}}}, "Invalid tools/call"),
+        )
+        for payload, message in calls:
+            with self.subTest(message=message):
+                response = self.client.post("/mcp", headers=headers, json=payload)
+
+                self.assertEqual(response.status_code, 200)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], -32602)
+                self.assertIn(message, error["message"])
+
+    def test_a_batch_is_refused_400(self) -> None:
+        response = self.client.post("/mcp", json=[{"jsonrpc": "2.0", "id": 36, "method": "ping"}])
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32600)
+        self.assertIn("batches", error["message"])
+
+    def test_get_without_a_session_header_is_refused_400(self) -> None:
+        response = self.client.get("/mcp")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], -32000)
+
+    def test_get_for_an_unknown_session_is_refused_404(self) -> None:
+        response = self.client.get("/mcp", headers={MCP_SESSION_HEADER: "no-such-session"})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], -32001)
+
+    def test_get_before_notifications_initialized_is_refused(self) -> None:
+        session_id, protocol_version = self._initialize()
+
+        response = self.client.get(
+            "/mcp", headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32005)
+        self.assertIn("notifications/initialized", error["message"])
+
     def test_missing_method_returns_invalid_request_error(self) -> None:
         response = self.client.post(
             "/mcp",
@@ -741,6 +848,35 @@ class McpSessionCapTests(unittest.TestCase):
         self.assertEqual(len(self.transport._sessions), MAX_MCP_SESSIONS)
         self.assertNotIn("operator-0-0", self.transport._sessions)
         self.assertIn("None-9", self.transport._sessions)
+
+
+class McpGetStreamTests(unittest.IsolatedAsyncioTestCase):
+    """The TestClient buffers the whole response, so the success case is driven here and read under a timeout."""
+
+    async def test_get_opens_an_event_stream_only_for_an_initialized_session(self) -> None:
+        transport = McpHttpTransport(
+            tool_gateway=SimpleNamespace(list_tools=lambda: []),
+            server_name="auto-browser",
+            server_version="0.2.0",
+            manager=None,
+        )
+        session = McpSession(id="m1", protocol_version="2025-11-25", client_info={}, client_capabilities={})
+        transport._sessions["m1"] = session
+
+        refused = await transport.handle_get_request(mcp_request("GET", "m1"))
+
+        self.assertNotIsInstance(refused, StreamingResponse)
+        self.assertEqual(json.loads(refused.body)["error"]["code"], -32005)
+
+        session.initialized = True
+        response = await transport.handle_get_request(mcp_request("GET", "m1"))
+
+        self.assertIsInstance(response, StreamingResponse)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-11-25")
+        self.assertEqual(await asyncio.wait_for(response.body_iterator.__anext__(), 5), ": connected\n\n")
+        await response.body_iterator.aclose()
 
 
 class McpResourceEncodingTests(unittest.IsolatedAsyncioTestCase):
