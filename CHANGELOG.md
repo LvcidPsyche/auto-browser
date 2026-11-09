@@ -56,6 +56,11 @@ All notable changes to auto-browser are documented here.
   `same-origin` or `none`. `/mesh/receive` is signed and not checked; `/mcp` keeps its own Origin check and
   `MCP_ALLOWED_ORIGINS`, so a browser MCP client on a listed origin goes on working, while `/mcp/tools/call` is
   checked like any other write. A controller with a token is not affected.
+- **Another operator's auth profile now answers as one that does not exist.** `GET /auth-profiles/{name}` on a profile
+  someone else owns answers `404` and `Not found: <name>`, byte for byte what a missing profile gets, where it
+  answered `403`, and `browser.get_auth_profile` answers as it does for a missing name instead of naming the owner.
+  A client that took `403` to mean "it exists but is not yours" must treat `404` as either. `profile_dir` is gone from
+  that answer and from `GET /auth-profiles`: use `profile_name`.
 
 ### Security
 
@@ -94,6 +99,11 @@ All notable changes to auto-browser are documented here.
 - **The session replay page links only an http(s) URL.** A page sets its own URL, and the page rendered it as a link
   whatever its scheme, so a `javascript:` or `data:` one clicked in the replay page ran on the controller's own
   origin. Any other scheme is now shown as plain text, and the link opens with `rel="noopener noreferrer"`. (AUTH-37)
+- **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
+  `GET /auth-profiles/{name}` answered `403` for a foreign profile and `404` for a missing one, and
+  `browser.get_auth_profile`'s error named the owner. Both now answer as for a profile that does not exist (see the
+  upgrade note). `profile_dir`, the profile's absolute path on the controller, is no longer in that answer or in
+  `GET /auth-profiles`. (AUTH-31)
 
 ### Fixed
 

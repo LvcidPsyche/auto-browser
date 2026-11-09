@@ -22,9 +22,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from app.audit import reset_current_operator, set_current_operator
 from app.browser.page_provenance import PageProvenance
 from app.browser.services.auth_profiles import BrowserAuthProfileService
+from app.main import handle_key_not_found
+from app.routes.auth_profiles import create_auth_profiles_router
 
 
 class StubAuthState:
@@ -265,6 +270,60 @@ class AuthProfileOwnershipTests(unittest.TestCase):
             self.service.require_access("alice-login", action="reading")
         with self.assertRaises(PermissionError):
             self.save("alice-login")
+
+    # ── Another operator's profile reads as one that does not exist (AUTH-31) ──
+
+    def get(self, profile_name: str) -> dict:
+        return asyncio.run(self.service.get(profile_name))
+
+    def test_another_operators_profile_reads_as_missing(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+
+        self.as_operator("bob")
+        with self.assertRaises(KeyError) as foreign:
+            self.get("alice-login")
+        with self.assertRaises(KeyError) as missing:
+            self.get("no-such-profile")
+
+        self.assertEqual(foreign.exception.args, ("alice-login",))
+        self.assertEqual(missing.exception.args, ("no-such-profile",))
+        # The refusal's own text named the owner, and an MCP caller read it.
+        self.assertNotIn("alice", str(foreign.exception).replace("alice-login", ""))
+
+    def test_the_owner_still_reads_their_profile(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+
+        self.assertEqual(self.get("alice-login")["profile_name"], "alice-login")
+
+    def test_a_profile_answer_names_no_directory(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+
+        self.assertNotIn("profile_dir", self.get("alice-login"))
+        self.assertNotIn("profile_dir", asyncio.run(self.service.list())[0])
+
+    def test_a_foreign_and_a_missing_profile_answer_rest_callers_byte_for_byte_alike(self) -> None:
+        self.as_operator("alice")
+        self.save("foreign-login")
+
+        api = FastAPI()
+        api.add_exception_handler(KeyError, handle_key_not_found)
+        api.include_router(
+            create_auth_profiles_router(
+                manager=SimpleNamespace(get_auth_profile=self.service.get), settings=SimpleNamespace()
+            )
+        )
+        client = TestClient(api)
+        with patch.object(self.service, "verified_operator", return_value="bob"):
+            foreign = client.get("/auth-profiles/foreign-login")
+            shutil.rmtree(self.root / "profiles" / "foreign-login")
+            missing = client.get("/auth-profiles/foreign-login")
+
+        self.assertEqual((foreign.status_code, foreign.content), (missing.status_code, missing.content))
+        self.assertEqual(foreign.status_code, 404)
+        self.assertEqual(foreign.json(), {"detail": "Not found: foreign-login"})
 
     # ── A save that fails after the state is written leaves no state behind (round 4, B6) ──
 

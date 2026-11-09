@@ -488,8 +488,12 @@ class BrowserAuthProfileService:
 
     async def get(self, profile_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
-        self.require_access(normalized, action="reading an auth profile")
-        profile_dir = self.dir(normalized, create=False)
+        try:
+            self.require_access(normalized, action="reading an auth profile")
+        except PermissionError:
+            # Another operator's profile reads as one that does not exist (over REST and MCP), and the refusal's
+            # own text named its owner.
+            raise KeyError(normalized) from None
         metadata = self.read_metadata(normalized)
         state_path = self.resolve_state_path(normalized, must_exist=False)
         profile_root_str = os.path.realpath(os.fspath(self.root()))
@@ -503,7 +507,6 @@ class BrowserAuthProfileService:
             raise KeyError(normalized)
         return {
             "profile_name": normalized,
-            "profile_dir": str(profile_dir),
             "auth_state": self.manager.auth_state.inspect(Path(state_path_str) if state_exists else None),
             "metadata": metadata,
         }
