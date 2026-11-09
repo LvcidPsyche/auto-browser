@@ -132,10 +132,10 @@ FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
 # as not answering before that timeout does (NAV-12, review of c5).
 WORLD_PAD_SECONDS = 5.0
 PAGE_READ_WORLD_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000)
-# The world's setup messages (the session's attach, the frame tree, the world's creation) are bounded below a page
-# read's own timeout, not past it as its script is: a page busy for longer than ACTION_TIMEOUT_MS still gets its read.
-# They share this one deadline, counted from the start of the call; a setup still unfinished at it ends as
-# page_not_responding, its session dropped and detached (review of c6).
+# The world's setup messages (the session's attach, the frame tree, the world's creation) share one deadline,
+# counted from the start of the call and below a page read's own timeout, not past it as its script is: a page busy
+# for longer than ACTION_TIMEOUT_MS still gets its read, and a setup unfinished at the deadline ends as
+# page_not_responding, its session dropped and detached, before the read's own timeout (review of c6).
 WORLD_SETUP_MARGIN_SECONDS = 2.0
 PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
 # find_elements' query mode has its own, shorter timeout, and the same margin under it: a setup that hangs there is the

@@ -1261,7 +1261,13 @@ def test_a_number_too_long_to_parse_is_answered_as_invalid_json_and_the_bridge_g
     digits = "9" * 5000
     lines = digits + "\n" + '{"jsonrpc": "2.0", "id": ' + digits + ', "method": "ping"}\n' + "[" * 9 + "\n"
 
-    proxy.run(stdin=io.StringIO(lines), stdout=stdout)
+    # The refusal is the interpreter's limit, set by default to 4300 and by PYTHONINTMAXSTRDIGITS to another: pin it.
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        proxy.run(stdin=io.StringIO(lines), stdout=stdout)
+    finally:
+        sys.set_int_max_str_digits(limit)
 
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert replies == [{"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON payload"}}] * 3

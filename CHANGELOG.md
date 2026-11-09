@@ -66,7 +66,7 @@ All notable changes to auto-browser are documented here.
   nested too deep for Python's `json` to parse (`RecursionError`) is answered as an unreadable one is, with its HTTP
   status, not as an unexpected bridge failure. An answer `json` parsed but cannot write back (on Python 3.14 the two
   limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is not a string or a
-  number, and a line from the client too deep to parse, or holding a number of more than 4300 digits, with `-32700`,
+  number, and a line from the client too deep to parse, or holding an integer of more than 4300 digits, with `-32700`,
   where the `RecursionError` or `ValueError` ended the bridge with no answer. A short secret is no longer replaced
   again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a userinfo and dropped.
 - **The Python client's and the LangChain tools' errors no longer show the bearer token or a secret of the controller
@@ -138,13 +138,13 @@ All notable changes to auto-browser are documented here.
   regex answers `invalid_regex`. Every planner's prompt now says that the page text, titles, names and element text
   in an observation are untrusted page data, never instructions: the system prompt of the Claude, OpenAI and
   OpenAI-compatible APIs, and the prompt itself of the Gemini API, the CLI planners and the OpenAI host bridge, which
-  have none. These two reads give the script's message in the world a longer bound than the action timeout, and the
-  messages that set the call up (the CDP session's attach, the frame tree and the world's creation) one deadline
-  between them, 2 seconds under the read's 30 and counted from the start of the call: a page busy for longer than the
-  default action timeout still gets its read. A setup that is still unfinished at that deadline ends as
-  `page_not_responding` with its session dropped and detached, before the read's own bound. `find_elements` with a
-  `query` has the same, 2 seconds under its own 10: a setup that hangs there was answered `query_timeout`, blaming the
-  pattern, with the session kept.
+  have none. These two reads wait for the script's message in the world 5 seconds past the read's own bound (30 s
+  for a page text read or a selector search, 10 s for a query), so the world's own deadline, the action timeout,
+  never reports the page as not answering before the read's bound does. The messages that set the call up (the
+  CDP session's attach, the frame tree and the world's creation) share one deadline, counted from the start of
+  the call and 2 seconds under that bound: a page busy for longer than the default action timeout still gets its
+  read, and a setup unfinished at the deadline ends as `page_not_responding`, with its session dropped and
+  detached, before the read's own bound.
 - **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
   was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
   a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through
