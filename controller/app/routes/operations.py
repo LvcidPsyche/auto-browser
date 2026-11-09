@@ -13,7 +13,7 @@ from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
-from ._utils import cron_store_errors, persona_file_errors, typed_route_errors
+from ._utils import bounded_limit, cron_store_errors, persona_file_errors, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def create_operations_router(
         operator_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return await manager.list_audit_events(
-            limit=max(1, min(limit, 500)),
+            limit=bounded_limit(limit, 500),
             session_id=session_id,
             event_type=event_type,
             operator_id=operator_id,

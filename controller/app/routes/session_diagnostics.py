@@ -14,7 +14,7 @@ from starlette.responses import StreamingResponse
 from .. import events as _events
 from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..playwright_export import export_session_script
-from ._utils import OFF_LIST_PAGE_DETAIL, is_http_link, require_safe_segment, typed_route_errors
+from ._utils import OFF_LIST_PAGE_DETAIL, bounded_limit, is_http_link, require_safe_segment, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +223,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         with typed_route_errors(logger, "audit listing failed for session %s", session_id):
             events = await manager.audit.list(
                 session_id=session_id,
-                limit=min(limit, 5000),
+                limit=bounded_limit(limit, 5000),
                 event_type=event_type or None,
             )
         return {
@@ -235,7 +235,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
     @router.get("/sessions/{session_id}/witness")
     async def get_session_witness(session_id: str, limit: int = 100) -> dict[str, Any]:
         with typed_route_errors(logger, "witness listing failed for session %s", session_id):
-            receipts = await manager.list_witness_receipts(session_id, limit=min(limit, 5000))
+            receipts = await manager.list_witness_receipts(session_id, limit=bounded_limit(limit, 5000))
         return {
             "session_id": session_id,
             "count": len(receipts),

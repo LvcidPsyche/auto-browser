@@ -182,6 +182,10 @@ All notable changes to auto-browser are documented here.
   `/mesh/receive`, `/share/...`) still ran the session ownership check on a `?session_id=` it does not read, so a
   caller without a token got a `404` for an unknown or another operator's id and the normal answer for an ownerless
   one. Those routes no longer look a session up, and the token gate and that check read the same list. (R5C-2)
+- **A `limit` of zero or less returns nothing on the audit and witness lists.** `GET /audit/events` answered one event
+  for it, and on the SQLite backend `GET /sessions/{id}/audit` with a negative `limit` returned every row, because
+  SQLite reads a negative `LIMIT` as no limit. Those routes and `/sessions/{id}/witness` now answer an empty list
+  for a limit at or below zero, and the SQLite store itself returns none for one. (AUTH-28)
 
 ### Changed
 

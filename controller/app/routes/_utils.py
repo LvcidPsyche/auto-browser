@@ -35,6 +35,11 @@ TAKEOVER_LINK_ROUTE = "/sessions/{session_id}/takeover-link"
 _HTTP_LINK_PREFIXES = ("http://", "https://")
 
 
+def bounded_limit(limit: int, maximum: int) -> int:
+    """A list's limit, at most ``maximum`` and never negative: 0 is an empty page, whichever backend serves it."""
+    return max(0, min(limit, maximum))
+
+
 def is_http_link(url: object) -> bool:
     """Whether a URL a page chose may be rendered as a clickable link: http(s) only, whatever its case or padding."""
     return isinstance(url, str) and url.strip().lower().startswith(_HTTP_LINK_PREFIXES)

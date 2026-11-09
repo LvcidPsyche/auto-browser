@@ -281,6 +281,9 @@ class SQLiteAuditStore:
         event_type: str | None,
         operator_id: str | None,
     ) -> list[AuditEvent]:
+        # SQLite reads a negative LIMIT as no limit: a bad limit returned every row, whichever route asked.
+        if limit <= 0:
+            return []
         query = "SELECT payload FROM audit_events WHERE 1=1"
         params: list[object] = []
         if session_id:

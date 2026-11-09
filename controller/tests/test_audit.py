@@ -1,10 +1,95 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.audit import AuditStore, reset_current_operator, set_current_operator
+from app.routes.operations import create_operations_router
+from app.routes.session_diagnostics import create_session_diagnostics_router
+from app.witness import ReceiptList
+
+
+class ListLimitTests(unittest.TestCase):
+    """A limit of zero or less means no events, on both backends and through the routes that take one."""
+
+    def _store(self, tempdir: str, *, sqlite: bool = True) -> AuditStore:
+        root = Path(tempdir) / "audit"
+        store = AuditStore(root, db_path=str(Path(tempdir) / "db" / "operator.db") if sqlite else None)
+        asyncio.run(store.startup())
+        for index in range(3):
+            asyncio.run(
+                store.append(event_type="browser_action", status="ok", action=f"click-{index}", session_id="s1")
+            )
+        return store
+
+    def _client(self, store: AuditStore, receipts: ReceiptList | None = None) -> tuple[TestClient, SimpleNamespace]:
+        async def list_audit_events(**kwargs: object) -> list[dict]:
+            return [event.model_dump() for event in await store.list(**kwargs)]
+
+        manager = SimpleNamespace(
+            audit=store,
+            list_audit_events=list_audit_events,
+            list_witness_receipts=AsyncMock(return_value=receipts if receipts is not None else ReceiptList()),
+        )
+        api = FastAPI()
+        api.include_router(create_operations_router(manager=manager, proxy_store=Mock(), cron_service=Mock()))
+        api.include_router(create_session_diagnostics_router(manager=manager, settings=SimpleNamespace()))
+        return TestClient(api), manager
+
+    def test_the_sqlite_store_returns_nothing_for_zero_or_a_negative_limit(self) -> None:
+        # SQLite reads a negative LIMIT as no limit: every row, whichever route asked.
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = self._store(tempdir)
+            self.assertEqual(len(asyncio.run(store.list(limit=2))), 2)  # control
+            for limit in (0, -1, -5):
+                with self.subTest(limit=limit):
+                    self.assertEqual(asyncio.run(store.list(limit=limit)), [])
+
+    def test_the_file_store_returns_nothing_for_zero_or_a_negative_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = self._store(tempdir, sqlite=False)
+            self.assertEqual(len(asyncio.run(store.list(limit=2))), 2)  # control
+            for limit in (0, -1, -5):
+                with self.subTest(limit=limit):
+                    self.assertEqual(asyncio.run(store.list(limit=limit)), [])
+
+    def test_audit_events_with_a_limit_of_zero_or_less_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            client, _manager = self._client(self._store(tempdir))
+            for limit in (0, -5):
+                with self.subTest(limit=limit):
+                    response = client.get("/audit/events", params={"limit": limit})
+                    self.assertEqual((response.status_code, response.json()), (200, []))
+            self.assertEqual(len(client.get("/audit/events", params={"limit": 2}).json()), 2)  # control
+
+    def test_a_sessions_audit_with_a_limit_of_zero_or_less_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            client, _manager = self._client(self._store(tempdir))
+            for limit in (0, -5):
+                with self.subTest(limit=limit):
+                    response = client.get("/sessions/s1/audit", params={"limit": limit})
+                    self.assertEqual(
+                        (response.status_code, response.json()), (200, {"session_id": "s1", "count": 0, "events": []})
+                    )
+            self.assertEqual(client.get("/sessions/s1/audit", params={"limit": 2}).json()["count"], 2)  # control
+
+    def test_a_sessions_witness_list_with_a_limit_of_zero_or_less_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            client, manager = self._client(self._store(tempdir), receipts=ReceiptList())
+            for limit in (0, -5):
+                with self.subTest(limit=limit):
+                    manager.list_witness_receipts.reset_mock()
+                    response = client.get("/sessions/s1/witness", params={"limit": limit})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["count"], 0)
+                    manager.list_witness_receipts.assert_awaited_once_with("s1", limit=0)
 
 
 class AuditStoreTests(unittest.IsolatedAsyncioTestCase):
