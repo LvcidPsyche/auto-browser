@@ -135,7 +135,9 @@ class NetworkInspector:
     def entries(
         self, limit: int = 100, method: str | None = None, url_contains: str | None = None
     ) -> list[dict[str, Any]]:
-        """Return captured network entries, most recent first."""
+        """Return captured network entries, most recent first. A limit at or below zero returns none."""
+        if limit <= 0:
+            return []
         items = list(self._log)
         if method:
             items = [e for e in items if e.get("method", "").upper() == method.upper()]

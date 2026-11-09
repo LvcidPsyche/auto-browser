@@ -25,6 +25,7 @@ from app.browser.page_read import REFUSED_NETWORK_LOG_DETAIL
 from app.browser_manager import BrowserManager, BrowserSession
 from app.mcp_transport import McpHttpTransport, McpSession
 from app.models import McpToolCallRequest
+from app.network_inspector import NetworkInspector
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
 from app.routes.extensions.network import network_router
 from app.routes.session_diagnostics import create_session_diagnostics_router
@@ -333,6 +334,38 @@ class BusyBeyondRestTests(_Env):
             self.session.lock.release()
 
         self.assertEqual(str(busy.exception), BUSY_DETAIL)
+
+
+class ALimitAtOrBelowZeroReturnsNothingTests(_Env):
+    """AUTH-28's rule on the network log's two routes, through the real inspector."""
+
+    PATHS = {f"/sessions/{SID}/network/requests": "requests", f"/sessions/{SID}/network-log": "entries"}
+
+    def on_a_page_with_a_real_log(self) -> None:
+        self.page.url = ALLOWED_PAGE
+        inspector = NetworkInspector(SID)
+        for index in range(7):
+            inspector._log.append({"method": "GET", "url": f"https://example.com/{index}", "resource_type": "xhr"})
+        self.session.network_inspector = inspector
+
+    async def test_a_limit_at_or_below_zero_is_an_empty_list_on_both_routes(self) -> None:
+        self.on_a_page_with_a_real_log()
+        for path, key in self.PATHS.items():
+            for limit in (0, -5):
+                with self.subTest(path=path, limit=limit):
+                    response = await self.client.get(path, params={"limit": limit})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()[key], [])
+
+    async def test_a_positive_limit_still_cuts_to_the_most_recent(self) -> None:
+        self.on_a_page_with_a_real_log()
+        for path, key in self.PATHS.items():
+            with self.subTest(path=path):
+                response = await self.client.get(path, params={"limit": 2})
+                self.assertEqual(
+                    [entry["url"] for entry in response.json()[key]],
+                    ["https://example.com/6", "https://example.com/5"],
+                )
 
 
 class GetNetworkLogToolTests(_Env):

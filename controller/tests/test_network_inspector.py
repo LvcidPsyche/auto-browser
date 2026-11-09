@@ -257,6 +257,26 @@ async def _record(inspector: NetworkInspector, request: FakeRequest, response: F
     return inspector.entries()[0]
 
 
+class NetworkInspectorLimitTests(unittest.TestCase):
+    """A negative limit sliced from the end ([:-5] kept all but five): at or below zero returns nothing (AUTH-28)."""
+
+    def setUp(self) -> None:
+        self.inspector = NetworkInspector("s1")
+        for index in range(7):
+            self.inspector._log.append({"method": "GET", "url": f"https://example.com/{index}"})
+
+    def test_a_limit_at_or_below_zero_returns_nothing(self) -> None:
+        for limit in (0, -1, -5, -100):
+            with self.subTest(limit=limit):
+                self.assertEqual(self.inspector.entries(limit=limit), [])
+
+    def test_a_positive_limit_returns_the_most_recent_first(self) -> None:
+        self.assertEqual(
+            [entry["url"] for entry in self.inspector.entries(limit=2)],
+            ["https://example.com/6", "https://example.com/5"],
+        )
+
+
 class NetworkInspectorEncodedPiiTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_url_query_is_scrubbed_in_the_stored_entry(self) -> None:
         inspector = NetworkInspector("session-url", scrubber=PiiScrubber())
