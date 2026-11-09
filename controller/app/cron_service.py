@@ -413,14 +413,17 @@ class CronService:
             await self._release_run(job_id, session_id)
             raise
 
-        # Update run metadata
-        async with self._lock:
-            jobs = self._load()
-            if job_id in jobs:
-                jobs[job_id]["last_run_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-                jobs[job_id]["last_status"] = "queued"
-                jobs[job_id]["run_count"] = jobs[job_id].get("run_count", 0) + 1
-                self._save(jobs)
+        # Update run metadata. The run is queued whatever happens here: a store that fails now does not make it untrue.
+        try:
+            async with self._lock:
+                jobs = self._load()
+                if job_id in jobs:
+                    jobs[job_id]["last_run_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                    jobs[job_id]["last_status"] = "queued"
+                    jobs[job_id]["run_count"] = jobs[job_id].get("run_count", 0) + 1
+                    self._save(jobs)
+        except (CronStoreUnreadableError, OSError) as exc:
+            logger.error("cron job %s: its run is queued, but the run's metadata could not be saved: %s", job_id, exc)
 
         return {
             "triggered": True,

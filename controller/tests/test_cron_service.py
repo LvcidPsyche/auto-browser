@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.audit import get_current_operator
-from app.cron_service import CronJobDisabledError, CronService
+from app.cron_service import CronJobDisabledError, CronService, CronStoreUnreadableError
 from app.models import OperatorIdentity
 from app.session_ownership import acting_as
 
@@ -256,6 +256,28 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.trigger_job(created["id"])
 
         self.assertEqual(service._active_runs, {})
+
+    async def test_a_store_that_fails_after_the_run_is_queued_still_answers_triggered(self) -> None:
+        for name, patch_store in (
+            ("unreadable", lambda service: patch.object(service, "_load", side_effect=CronStoreUnreadableError())),
+            ("unsaveable", lambda service: patch.object(service, "_save", side_effect=OSError("disk full"))),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                manager = MagicMock()
+                manager.create_session = AsyncMock(return_value={"id": "session-1"})
+                queue = MagicMock()
+                queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+                service = CronService(Path(tmp) / "crons.json", job_queue=queue, manager=manager)
+                created = await service.create_job(name="n", goal="g", webhook_enabled=True)
+                job = service._load()[created["id"]]
+
+                with patch_store(service), self.assertLogs("app.cron_service", level="ERROR") as logged:
+                    result = await service._run_job_now(job)
+
+                self.assertTrue(result["triggered"])
+                self.assertEqual(result["session_id"], "session-1")
+                self.assertEqual(result["queued_job"], {"id": "agent-job-1"})
+                self.assertTrue(any(created["id"] in line for line in logged.output), logged.output)
 
     async def test_cancel_during_enqueue_frees_the_slot_and_closes_the_session(self) -> None:
         started = asyncio.Event()
