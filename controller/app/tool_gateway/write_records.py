@@ -96,18 +96,19 @@ async def recorded_write(
 async def _record_beside(recording: Any, tool: str, exc: BaseException) -> None:
     """Write the record of a call that ended in ``exc``, which then goes on: its own failure is only logged.
 
-    A cancellation while it is written wins over an error being reported (logged here; its type is in the record), so
-    a cancelled job ends cancelled; one that lands while a cancellation is being recorded is absorbed, and the first
-    goes on. The writes finish behind it either way (write_record shields them).
+    A cancellation while it is written wins over an error being reported (its class is logged here, as the record
+    keeps it), so a cancelled job ends cancelled; one that lands while a cancellation is being recorded is absorbed, and
+    the first goes on. The writes finish behind it either way (write_record shields them). These logs carry no error's
+    text and no traceback: a traceback prints an exception's whole chain, and ``exc``'s text can hold a page's content.
     """
     try:
         await recording
     except asyncio.CancelledError:
         if not isinstance(exc, asyncio.CancelledError):
             logger.warning(
-                "%s was cancelled while its error was recorded; the cancellation goes on", tool, exc_info=exc
+                "%s was cancelled while its %s was recorded; the cancellation goes on", tool, type(exc).__name__
             )
             raise
         logger.warning("cancelled again while recording the interrupted %s; the record finishes behind it", tool)
-    except Exception:
-        logger.warning("could not record the failed %s", tool, exc_info=True)
+    except Exception as failure:
+        logger.warning("could not record the %s that ended in %s: %r", tool, type(exc).__name__, failure)

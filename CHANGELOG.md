@@ -38,7 +38,7 @@ All notable changes to auto-browser are documented here.
   class only, and the error goes on unchanged. A call cancelled after it reached the page is recorded with an unknown
   outcome, as a cancelled action is; one cancelled before it reached the page records nothing, as nothing ran. A
   record that cannot be written fails a change that was made, as an action's does, and is only logged beside a
-  failure's own error. (MCP-23)
+  failure's own error, whose text stays out of that log, as out of the record. (MCP-23)
 
 ### Fixed
 

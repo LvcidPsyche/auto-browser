@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from tests.test_approval_spend import SESSION, SpendBase
 # Goes in every cookie value and every storage value; neither it nor its SHA-256 may reach a record.
 CANARY = "canary-secret-value-90c1"
 CANARY_SHA256 = hashlib.sha256(CANARY.encode("utf-8")).hexdigest()
+WRITE_RECORDS_LOGGER = "app.tool_gateway.write_records"
 # The tool, its arguments, what the record's digest says of them, and the receipt's action_class.
 WRITES = (
     (
@@ -309,4 +311,100 @@ class GatewayWriteRecordTests(SpendBase):
 
         self.assertFalse(done.isError, done.content[0].text)
         events, receipts = await self.records("browser.set_local_storage")
+        self.assertEqual(([event.status for event in events], [item["status"] for item in receipts]), (["ok"], ["ok"]))
+
+    def hold_the_audit_write(self) -> tuple[asyncio.Event, asyncio.Event]:
+        """The first event is set once a record's audit write has begun, and that write goes on when the second is."""
+        recording, release = asyncio.Event(), asyncio.Event()
+        append = self.manager.audit.append
+
+        async def held_append(**kwargs: Any) -> Any:
+            recording.set()
+            await release.wait()
+            return await append(**kwargs)
+
+        self.manager.audit.append = held_append  # type: ignore[method-assign]
+        return recording, release
+
+    def assert_logged_the_class_and_no_text(self, records: list[logging.LogRecord], error_class: str) -> None:
+        # As a handler would print them: a traceback, and the __context__ chain it follows, count.
+        formatted = "\n".join(logging.Formatter().format(record) for record in records)
+        self.assertRegex(formatted, rf"\b{error_class}\b")
+        self.assertNotIn(CANARY, formatted)
+        self.assertNotIn("Traceback", formatted)
+
+    async def test_a_cancellation_while_a_failure_is_recorded_logs_its_class_and_not_its_text(self) -> None:
+        recording, release = self.hold_the_audit_write()
+        self.context.add_cookies = AsyncMock(side_effect=PlaywrightError(f"rejected: {CANARY}"))
+        payload = SetCookiesInput(
+            session_id=SESSION, cookies=[{"name": "sid", "value": CANARY, "domain": "example.com"}]
+        )
+
+        with self.assertLogs(WRITE_RECORDS_LOGGER, level="WARNING") as logs:
+            task = asyncio.ensure_future(self.gateway._set_cookies(payload))
+            await recording.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        release.set()
+        await wait_for_pending_record(self.session)
+
+        self.assert_logged_the_class_and_no_text(logs.records, "Error")
+
+    async def test_a_record_that_fails_logs_the_errors_class_and_its_own_repr_only(self) -> None:
+        # The recording's own exception is raised while the original is handled, so its __context__ is the original.
+        self.context.add_cookies = AsyncMock(side_effect=PlaywrightError(f"rejected: {CANARY}"))
+        self.manager.audit.append = AsyncMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
+        payload = SetCookiesInput(
+            session_id=SESSION, cookies=[{"name": "sid", "value": CANARY, "domain": "example.com"}]
+        )
+
+        with self.assertLogs(WRITE_RECORDS_LOGGER, level="WARNING") as logs:
+            with self.assertRaises(PlaywrightError):
+                await self.gateway._set_cookies(payload)
+
+        self.assert_logged_the_class_and_no_text(logs.records, "Error")
+        self.assertIn(repr(OSError("disk full")), logs.output[0])
+
+    async def test_a_second_cancellation_while_a_cancellation_is_recorded_is_absorbed(self) -> None:
+        reached, hang = asyncio.Event(), asyncio.Event()
+
+        async def set_viewport_size(_size: dict[str, int]) -> None:
+            reached.set()
+            await hang.wait()
+
+        self.page.set_viewport_size = set_viewport_size
+        recording, release = self.hold_the_audit_write()
+        task = asyncio.ensure_future(
+            self.gateway._set_viewport(SetViewportInput(session_id=SESSION, width=800, height=600))
+        )
+        with self.assertLogs(WRITE_RECORDS_LOGGER, level="WARNING") as logs:
+            await reached.wait()
+            task.cancel()
+            await recording.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        release.set()
+        await wait_for_pending_record(self.session)
+
+        self.assertIn("cancelled again", logs.output[0])
+        events, receipts = await self.records("browser.set_viewport")
+        self.assertEqual([event.status for event in events], ["error"])
+        self.assertEqual([item["status"] for item in receipts], ["error"])
+
+    async def test_a_cancellation_while_a_success_is_recorded_lands_ok_and_ends_cancelled(self) -> None:
+        recording, release = self.hold_the_audit_write()
+        task = asyncio.ensure_future(
+            self.gateway._set_viewport(SetViewportInput(session_id=SESSION, width=800, height=600))
+        )
+
+        await recording.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        release.set()
+        await wait_for_pending_record(self.session)
+
+        events, receipts = await self.records("browser.set_viewport")
         self.assertEqual(([event.status for event in events], [item["status"] for item in receipts]), (["ok"], ["ok"]))
