@@ -11,6 +11,7 @@ import asyncio
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -34,6 +35,8 @@ class _HoldingAudit:
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
         self.until_finished: AgentJobQueue | None = None
+        # Held further until this says so too, for a test that needs the finish callback done before enqueue returns.
+        self.also_until: Callable[[], bool] = lambda: True
         self.events: list[str] = []
         self.failing: set[str] = set()
 
@@ -46,7 +49,7 @@ class _HoldingAudit:
         self.reached.set()
         while self.until_finished is not None:
             records = await self.until_finished.store.list()
-            if records and all(record.status in TERMINAL for record in records):
+            if records and all(record.status in TERMINAL for record in records) and self.also_until():
                 return
             await asyncio.sleep(0.01)
         await self.release.wait()
@@ -114,8 +117,61 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(self.cron.trigger_job(self.job["id"]), timeout=10)
 
         self.assertTrue(result["triggered"])
+        # The finish callback records the outcome before it gives up the slot, so the release can land just after.
+        await _until(lambda: not self.cron._active_runs)
         self.assertEqual(self.cron._active_runs, {}, "the finished job's cron slot is stranded")
         self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_a_job_that_finishes_before_enqueue_returns_keeps_its_outcome_in_last_status(self) -> None:
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        self.audit.until_finished = self.queue
+        # Enqueue returns only after the finish callback has given up the slot: the "queued" write comes last.
+        self.audit.also_until = lambda: not self.cron._active_runs
+
+        result = await asyncio.wait_for(self.cron.trigger_job(self.job["id"]), timeout=10)
+
+        self.assertTrue(result["triggered"])
+        stored = self.cron._load()[self.job["id"]]
+        self.assertEqual(stored["last_status"], "completed", "the 'queued' write ran over the run's outcome")
+        self.assertEqual(stored["run_count"], 1)
+
+    async def test_last_status_says_how_a_real_run_ended(self) -> None:
+        class FailingOrchestrator:
+            async def run(self, **_kwargs):
+                raise RuntimeError("provider crashed")
+
+        self.queue.orchestrator = FailingOrchestrator()
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        self.audit.release.set()
+
+        await asyncio.wait_for(self.cron.trigger_job(self.job["id"]), timeout=5)
+        await _until(lambda: not self.cron._active_runs)
+
+        self.assertEqual(self.cron._load()[self.job["id"]]["last_status"], "failed")
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_a_cancelled_run_reads_cancelled(self) -> None:
+        running = asyncio.Event()
+
+        class Blocking:
+            async def run(self, **_kwargs):
+                running.set()
+                await asyncio.Event().wait()
+
+        self.queue.orchestrator = Blocking()
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        self.audit.release.set()
+        await asyncio.wait_for(self.cron.trigger_job(self.job["id"]), timeout=5)
+        await asyncio.wait_for(running.wait(), timeout=5)
+        [record] = await self.queue.store.list()
+
+        await self.queue.cancel_job(record.id)
+        await _until(lambda: not self.cron._active_runs)
+
+        self.assertEqual(self.cron._load()[self.job["id"]]["last_status"], "cancelled")
 
     async def test_a_cancelled_trigger_whose_job_a_worker_holds_releases_the_run_once(self) -> None:
         # Withdrawing the running job fires its finish callback, which releases the run; the trigger's own

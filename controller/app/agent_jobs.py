@@ -296,14 +296,14 @@ class AgentJobQueue:
         # solely to run this job and must close it afterwards (see CronService).
         # Deliberately in-memory: if the controller restarts, the browser
         # sessions these callbacks would close are gone with it.
-        self._on_finish: dict[str, Callable[[], Awaitable[None]]] = {}
+        self._on_finish: dict[str, Callable[[str], Awaitable[None]]] = {}
 
     async def _run_finish_callback(self, job_id: str) -> None:
         callback = self._on_finish.pop(job_id, None)
         if callback is None:
             return
         try:
-            await callback()
+            await callback(job_id)
         except Exception:
             # Never let cleanup failure escape into the worker loop — but never
             # swallow it silently either, or a leaked session looks like success.
@@ -377,14 +377,14 @@ class AgentJobQueue:
         session_id: str,
         payload: AgentRunRequest,
         *,
-        on_finish: Callable[[], Awaitable[None]] | None = None,
+        on_finish: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict:
-        """Queue a run. `on_finish` runs once the job reaches a terminal state, whatever that state is.
+        """Queue a run. `on_finish` runs once the job reaches a terminal state, whatever that state is, and is given
+        the job's id: it is registered before the job is visible to a worker, so a job that finishes at once still
+        calls it, before the caller has this call's answer.
 
-        It is registered before the job is visible to a worker, so a job that finishes at once still calls
-        it. A caller that passes one owns the session the job runs in and closes it there: if the enqueue
-        is cancelled after the job exists, the job is withdrawn too (recorded as interrupted), so none is
-        left on a closed session.
+        A caller that passes one owns the session the job runs in and closes it there: if the enqueue is cancelled
+        after the job exists, the job is withdrawn too (recorded as interrupted), so none is left on a closed session.
         """
         return await self._enqueue(session_id, "agent_run", payload, on_finish=on_finish)
 
@@ -474,7 +474,7 @@ class AgentJobQueue:
         payload: AgentStepRequest | AgentRunRequest,
         *,
         parent_job_id: str | None = None,
-        on_finish: Callable[[], Awaitable[None]] | None = None,
+        on_finish: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict:
         # Made here, so a cancellation during the write still knows which record it left behind.
         job_id = uuid4().hex[:12]

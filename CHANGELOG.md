@@ -252,6 +252,12 @@ All notable changes to auto-browser are documented here.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. (D7-6)
+- **A cron job's `last_status` now says how its last run ended.** It stayed `queued` after the run was over. The agent
+  job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
+  when the job's record cannot say, also for a run that finishes while its trigger is still answering. A run that is
+  no longer the job's latest leaves the newer run's status alone, and a store that cannot be read or saved at that
+  moment is logged and the session is still closed. A run cut off by a controller restart keeps `queued`, as nothing
+  is left to report its end. (STORE-15)
 
 ### Changed
 

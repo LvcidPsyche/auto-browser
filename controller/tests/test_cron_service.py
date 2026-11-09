@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.audit import get_current_operator
@@ -373,6 +374,159 @@ class CronQuarantineWarningTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_warning_without_a_quarantine_file(self) -> None:
         with self.assertNoLogs("app.cron_service", level="WARNING"):
             await self._start_and_stop()
+
+
+class _OutcomeQueue:
+    """Keeps a run's finish callback, and answers its agent job's record with the status a test sets."""
+
+    def __init__(self) -> None:
+        self.callback = None
+        self.status = "completed"
+        self.store = SimpleNamespace(get=AsyncMock(side_effect=self._record))
+
+    async def _record(self, _job_id: str):
+        return SimpleNamespace(status=self.status)
+
+    async def enqueue_run(self, _session_id, _request, *, on_finish=None):
+        self.callback = on_finish
+        return {"id": "agent-job-1"}
+
+
+class CronRunOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    """last_status says how the job's latest run ended, not that it was once queued."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.manager = MagicMock()
+        self.manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        self.manager.close_session = AsyncMock()
+        self.queue = _OutcomeQueue()
+        self.service = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+        self.job_id = (await self.service.create_job(name="n", goal="g", webhook_enabled=True))["id"]
+
+    def _stored(self) -> dict:
+        return self.service._load()[self.job_id]
+
+    async def test_a_finished_run_replaces_queued_with_how_it_ended(self) -> None:
+        for status in ("completed", "failed", "cancelled", "interrupted", "discarded"):
+            with self.subTest(status):
+                await self.service.trigger_job(self.job_id)
+                self.assertEqual(self._stored()["last_status"], "queued")
+
+                self.queue.status = status
+                await self.queue.callback("agent-job-1")
+
+                self.assertEqual(self._stored()["last_status"], status)
+                self.manager.close_session.assert_awaited_with("session-1")
+                self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_record_that_shows_no_end_reads_unknown_and_never_running(self) -> None:
+        # The worker could not write the job's end (a full disk), so its record still says it runs: it has ended.
+        await self.service.trigger_job(self.job_id)
+        self.queue.status = "running"
+
+        await self.queue.callback("agent-job-1")
+
+        self.assertEqual(self._stored()["last_status"], "unknown")
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_a_finish_callback_that_runs_before_the_queued_write_keeps_its_outcome(self) -> None:
+        async def finished_before_enqueue_returns(_session_id, _request, *, on_finish=None):
+            self.queue.status = "failed"
+            await on_finish("agent-job-1")
+            return {"id": "agent-job-1"}
+
+        self.queue.enqueue_run = finished_before_enqueue_returns
+
+        result = await self.service.trigger_job(self.job_id)
+
+        self.assertTrue(result["triggered"])
+        stored = self._stored()
+        self.assertEqual(stored["last_status"], "failed", "the later 'queued' write ran over the outcome")
+        self.assertEqual(stored["run_count"], 1)
+        self.assertIsNotNone(stored["last_run_at"])
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_finish_callback_blocked_behind_the_queued_write_lands_after_it(self) -> None:
+        # The callback waits for the store lock the trigger's update holds: its outcome is the one that stays.
+        await self.service.trigger_job(self.job_id)
+        await self.service._lock.acquire()
+        finish = asyncio.create_task(self.queue.callback("agent-job-1"))
+        await asyncio.sleep(0)
+        self.service._active_runs[self.job_id] = "session-1"  # still this run's while the callback waits
+        jobs = self.service._load()
+        jobs[self.job_id]["last_status"] = "queued"
+        self.service._save(jobs)
+        self.service._lock.release()
+
+        await finish
+
+        self.assertEqual(self._stored()["last_status"], "completed")
+
+    async def test_a_finish_callback_for_an_old_run_leaves_a_newer_runs_status_alone(self) -> None:
+        await self.service.trigger_job(self.job_id)
+        old_run = self.queue.callback
+        # A newer trigger took the slot: its run, not this old one, says what the job's status is.
+        self.service._active_runs[self.job_id] = "session-2"
+        jobs = self.service._load()
+        jobs[self.job_id]["last_status"] = "queued"
+        self.service._save(jobs)
+        self.queue.status = "failed"
+
+        await old_run("agent-job-1")
+
+        self.assertEqual(self._stored()["last_status"], "queued", "an old run wrote over a newer run's status")
+        self.assertEqual(self.service._active_runs, {self.job_id: "session-2"}, "the newer run's slot was freed")
+        self.manager.close_session.assert_not_awaited()
+
+    async def test_a_cron_store_that_cannot_be_read_in_the_callback_still_releases_the_run(self) -> None:
+        await self.service.trigger_job(self.job_id)
+
+        with (
+            patch.object(self.service, "_load", side_effect=CronStoreUnreadableError()),
+            self.assertLogs("app.cron_service", level="ERROR") as logged,
+        ):
+            await self.queue.callback("agent-job-1")
+
+        self.assertTrue(any(self.job_id in line for line in logged.output), logged.output)
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_cron_store_that_cannot_be_saved_in_the_callback_still_releases_the_run(self) -> None:
+        await self.service.trigger_job(self.job_id)
+
+        with (
+            patch.object(self.service, "_save", side_effect=OSError("disk full")),
+            self.assertLogs("app.cron_service", level="ERROR") as logged,
+        ):
+            await self.queue.callback("agent-job-1")
+
+        self.assertTrue(any(self.job_id in line for line in logged.output), logged.output)
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.service._active_runs, {})
+
+    async def test_an_agent_job_that_cannot_be_read_reads_unknown_and_still_releases_the_run(self) -> None:
+        for error in (OSError("disk error"), KeyError("agent-job-1"), ValueError("the record does not parse")):
+            with self.subTest(type(error).__name__):
+                self.manager.close_session.reset_mock()
+                await self.service.trigger_job(self.job_id)
+                self.queue.store.get = AsyncMock(side_effect=error)
+
+                with self.assertLogs("app.cron_service", level="ERROR") as logged:
+                    await self.queue.callback("agent-job-1")
+
+                self.assertTrue(any("agent-job-1" in line for line in logged.output), logged.output)
+                self.assertEqual(self._stored()["last_status"], "unknown")
+                self.manager.close_session.assert_awaited_once_with("session-1")
+                self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_run_whose_callback_never_comes_stays_queued(self) -> None:
+        await self.service.trigger_job(self.job_id)
+
+        self.assertEqual(self._stored()["last_status"], "queued")
+        self.assertEqual(self.service._active_runs, {self.job_id: "session-1"})
 
 
 class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):

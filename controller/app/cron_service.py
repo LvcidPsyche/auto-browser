@@ -23,7 +23,8 @@ Job schema:
     "owner":       str | null (token-verified operator who created it),
     "created_at":  ISO datetime,
     "last_run_at": ISO datetime | null,
-    "last_status": str | null,
+    "last_status": str | null ("queued", then how that run's agent job ended: "completed", "failed", "cancelled",
+                   "interrupted" or "discarded", or "unknown" when its record could not say),
     "run_count":   int,
   }
 
@@ -60,6 +61,12 @@ try:
 except ImportError:
     _APSCHEDULER_AVAILABLE = False
     logger.info("APScheduler not installed — cron scheduling disabled. Install: pip install apscheduler")
+
+
+# How a run's agent job can end, as AgentJobRecord.status says it. Anything else means its end was never written.
+_FINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "discarded"})
+# The run ended (its finish callback came), and its agent job's record cannot say how.
+RUN_OUTCOME_UNKNOWN = "unknown"
 
 
 class CronJobDisabledError(RuntimeError):
@@ -404,7 +411,7 @@ class CronService:
                 queued = await self.job_queue.enqueue_run(
                     session_id,
                     run_request,
-                    on_finish=lambda: self._release_run(job_id, session_id),
+                    on_finish=lambda agent_job_id: self._finish_run(job_id, session_id, agent_job_id),
                 )
         except BaseException:
             # Enqueue can reject (queue at capacity), and the trigger can be cancelled while it waits. The
@@ -419,7 +426,10 @@ class CronService:
                 jobs = self._load()
                 if job_id in jobs:
                     jobs[job_id]["last_run_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-                    jobs[job_id]["last_status"] = "queued"
+                    # A run no longer in the slot has finished and said how (_finish_run), or a newer run has
+                    # taken it and says what the status is: "queued" must not land over either.
+                    if self._active_runs.get(job_id) == session_id:
+                        jobs[job_id]["last_status"] = "queued"
                     jobs[job_id]["run_count"] = jobs[job_id].get("run_count", 0) + 1
                     self._save(jobs)
         except (CronStoreUnreadableError, OSError) as exc:
@@ -431,6 +441,36 @@ class CronService:
             "session_id": session_id,
             "queued_job": queued,
         }
+
+    async def _finish_run(self, job_id: str, session_id: str, agent_job_id: str) -> None:
+        """The agent job's finish callback: record how the run ended in last_status, then release its session.
+
+        It can run before enqueue_run returns. The write follows _release_run's rule: only the run that still holds the
+        slot writes, under the store lock, so an old run never writes over a newer run's status; the slot is given up
+        in the same step of the event loop as that write, so the trigger's later "queued" (written only by a run in
+        the slot) cannot land over it. A store that cannot be read or saved is logged, and the run is released anyway.
+        """
+        try:
+            status = await self._run_outcome(job_id, agent_job_id)
+            async with self._lock:
+                if self._active_runs.get(job_id) == session_id:
+                    jobs = self._load()
+                    if job_id in jobs:
+                        jobs[job_id]["last_status"] = status
+                        self._save(jobs)
+        except (CronStoreUnreadableError, OSError) as exc:
+            logger.error("cron job %s: how run %s ended could not be saved: %s", job_id, agent_job_id, exc)
+        finally:
+            await self._release_run(job_id, session_id)
+
+    async def _run_outcome(self, job_id: str, agent_job_id: str) -> str:
+        """How a finished agent job ended, from its record; RUN_OUTCOME_UNKNOWN when the record cannot say."""
+        try:
+            status = (await self.job_queue.store.get(agent_job_id)).status
+        except (KeyError, OSError, ValueError) as exc:
+            logger.error("cron job %s: the record of agent job %s could not be read: %s", job_id, agent_job_id, exc)
+            return RUN_OUTCOME_UNKNOWN
+        return status if status in _FINAL_JOB_STATUSES else RUN_OUTCOME_UNKNOWN
 
     async def _release_run(self, job_id: str, session_id: str) -> None:
         """Close the session a cron run was given, and clear the in-flight mark.
