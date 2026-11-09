@@ -118,8 +118,8 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
 
     def with_a_short_bound(self):
         return (
-            patch.object(identity_module, "_KEY_BEING_WRITTEN_WAIT_SECONDS", 0.05),
-            patch.object(identity_module, "_KEY_BEING_WRITTEN_POLL_SECONDS", 0.01),
+            patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.05),
+            patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01),
         )
 
     def test_a_key_that_is_empty_at_first_and_complete_on_a_later_read_is_loaded(self):
@@ -189,6 +189,43 @@ class NodeIdentityPublishedFilesTests(unittest.TestCase):
         self.assertIn("-----BEGIN PUBLIC KEY-----", seen["node_public.pem"][1])
         self.assertIn("-----END PUBLIC KEY-----", seen["node_public.pem"][1])
         self.assertEqual(json.loads(seen["node_meta.json"][1])["node_id"], identity.node_id)
+
+    def test_a_meta_read_refused_for_a_moment_is_retried(self):
+        # On Windows a reader that opens the file while another start's replace lands is refused for an instant.
+        NodeIdentity(self.dir)
+        meta = self.dir / "node_meta.json"
+        real_read_text = Path.read_text
+        refusals = iter([PermissionError(13, "sharing violation")])
+
+        def read_text(path, *args, **kwargs):
+            if path == meta:
+                refusal = next(refusals, None)
+                if refusal is not None:
+                    raise refusal
+            return real_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read_text):
+            identity = NodeIdentity(self.dir)
+
+        self.assertEqual(identity.node_id, json.loads(meta.read_text())["node_id"])
+
+    def test_a_meta_read_that_keeps_failing_raises_by_the_bound(self):
+        NodeIdentity(self.dir)
+        meta = self.dir / "node_meta.json"
+        real_read_text = Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if path == meta:
+                raise PermissionError(13, "sharing violation")
+            return real_read_text(path, *args, **kwargs)
+
+        with (
+            patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.05),
+            patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01),
+            patch.object(Path, "read_text", read_text),
+            self.assertRaises(PermissionError),
+        ):
+            NodeIdentity(self.dir)
 
     def test_files_already_there_are_left_as_they_are(self):
         NodeIdentity(self.dir)

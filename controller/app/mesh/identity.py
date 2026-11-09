@@ -16,7 +16,9 @@ import logging
 import os
 import stat
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -41,10 +43,12 @@ _KEY_FILE_MODE = 0o600
 _IDENTITY_DIR_MODE = 0o700
 _GROUP_OR_WORLD_BITS = 0o077
 _POSIX = os.name == "posix"
-# A start can find the key file of a start that has created it and not finished writing it: how long it retries the
-# load, and how often. Far longer than that moment, and short, as a key that stays unusable still fails the start.
-_KEY_BEING_WRITTEN_WAIT_SECONDS = 2.0
-_KEY_BEING_WRITTEN_POLL_SECONDS = 0.05
+# A start can find an identity file that another start is still writing: how long it retries the read, and how often.
+# Far longer than that moment, and short, as a file that stays unusable still fails the start.
+_FILE_BEING_WRITTEN_WAIT_SECONDS = 2.0
+_FILE_BEING_WRITTEN_POLL_SECONDS = 0.05
+
+_T = TypeVar("_T")
 
 
 def _mode_bits(path: Path) -> int:
@@ -106,6 +110,24 @@ def _tighten_a_loose_key(path: Path) -> None:
     )
 
 
+def _read_while_another_start_writes(read: Callable[[], _T]) -> _T:
+    """``read``, retried for a short bound: another start may be writing the file it reads.
+
+    A start can find the private key empty or part-written (_write_private_file creates it, then fills it), by either
+    way in (the file was already there, or the exclusive create lost), and on Windows a file another start is replacing
+    refuses a reader for an instant. Still failing at the end, it raises as it would have. Blocks: this runs before the
+    controller serves requests, in the lifespan or in the manager's __init__.
+    """
+    deadline = time.monotonic() + _FILE_BEING_WRITTEN_WAIT_SECONDS
+    while True:
+        try:
+            return read()
+        except (ValueError, OSError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(_FILE_BEING_WRITTEN_POLL_SECONDS)
+
+
 class NodeIdentity:
     """Loaded (or generated) Ed25519 identity for this mesh node."""
 
@@ -121,7 +143,7 @@ class NodeIdentity:
 
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
-            self._private_key = self._load_private_key_being_written(priv_path)
+            self._private_key = _read_while_another_start_writes(lambda: self._load_private_key(priv_path))
         else:
             logger.info("mesh.identity: generating new keypair in %s", self._dir)
             self._private_key = Ed25519PrivateKey.generate()
@@ -132,7 +154,7 @@ class NodeIdentity:
             except FileExistsError:
                 # Another start made the key between the check and the exclusive create: that key is this node's.
                 logger.info("mesh.identity: another start created the keypair in %s; loading it", self._dir)
-                self._private_key = self._load_private_key_being_written(priv_path)
+                self._private_key = _read_while_another_start_writes(lambda: self._load_private_key(priv_path))
 
         self._public_key: Ed25519PublicKey = self._private_key.public_key()
         pub_raw = self._public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # 32 bytes
@@ -151,7 +173,7 @@ class NodeIdentity:
 
         # A consistency check, not tamper detection: meta.json sits in the same directory as the key, so whoever
         # can replace the key can replace it too. It catches a corrupt file or keys mixed from two identities.
-        stored = json.loads(meta_path.read_text())
+        stored = _read_while_another_start_writes(lambda: json.loads(meta_path.read_text()))
         if stored.get("node_id") != self._node_id:
             raise RuntimeError(
                 "mesh.identity: stored node_id does not match the key (corrupt or mixed identity directory): "
@@ -164,22 +186,6 @@ class NodeIdentity:
         if _POSIX:
             _tighten_a_loose_key(priv_path)
         return Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes()))
-
-    def _load_private_key_being_written(self, priv_path: Path) -> Ed25519PrivateKey:
-        """Load a key another start may still be writing: _write_private_file creates the file, then fills it.
-
-        Both ways a start reaches one (the file was already there, or it lost the exclusive create) can find it
-        empty or part-written. Retried for a short bound; a key still unusable at the end raises as any unreadable
-        key does. Blocks: this runs before the controller serves requests, in the lifespan or the manager's __init__.
-        """
-        deadline = time.monotonic() + _KEY_BEING_WRITTEN_WAIT_SECONDS
-        while True:
-            try:
-                return self._load_private_key(priv_path)
-            except (ValueError, OSError):
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(_KEY_BEING_WRITTEN_POLL_SECONDS)
 
     def _tighten_a_loose_directory(self) -> None:
         """mkdir's mode applies only to a directory it creates: one an older release made at 0755 keeps that mode.
