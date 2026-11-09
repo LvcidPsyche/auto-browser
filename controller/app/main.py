@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
+from starlette.exceptions import HTTPException
 
 from . import process_hardening
 from .action_errors import BrowserActionError, SessionNotFoundError
@@ -26,7 +28,7 @@ from .routes.session_diagnostics import create_session_diagnostics_router
 from .routes.sessions import create_sessions_router
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
-from .safe_json_response import SafeJSONResponse
+from .safe_json_response import SafeJSONResponse, safe_http_exception_handler, safe_validation_exception_handler
 from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -161,3 +163,7 @@ async def handle_key_not_found(request: Request, exc: KeyError) -> SafeJSONRespo
 @app.exception_handler(BrowserActionError)
 async def handle_browser_action_error(_: Request, exc: BrowserActionError) -> SafeJSONResponse:
     return SafeJSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
+app.add_exception_handler(HTTPException, safe_http_exception_handler)
+app.add_exception_handler(RequestValidationError, safe_validation_exception_handler)

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi.responses import JSONResponse
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
 
 from .utils import without_lone_surrogates
 
@@ -21,3 +25,21 @@ class SafeJSONResponse(JSONResponse):
             return super().render(content)
         except UnicodeEncodeError:
             return super().render(without_lone_surrogates(content))
+
+
+async def safe_http_exception_handler(request: Request, exc: HTTPException) -> Response:
+    """FastAPI's own answer, unless the detail holds a lone surrogate: a route's ``str(exc)`` can quote a page."""
+    try:
+        return await http_exception_handler(request, exc)
+    except UnicodeEncodeError:
+        clean = HTTPException(exc.status_code, without_lone_surrogates(exc.detail), exc.headers)
+        return await http_exception_handler(request, clean)
+
+
+async def safe_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
+    """FastAPI's own 422, unless what was refused holds a lone surrogate: its errors quote the input."""
+    try:
+        return await request_validation_exception_handler(request, exc)
+    except UnicodeEncodeError:
+        clean = RequestValidationError(without_lone_surrogates(list(exc.errors())), body=exc.body)
+        return await request_validation_exception_handler(request, clean)

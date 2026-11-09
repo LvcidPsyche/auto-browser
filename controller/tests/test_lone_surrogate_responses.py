@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -20,7 +22,7 @@ from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.main import handle_browser_action_error, handle_key_not_found
 from app.mcp_transport import McpHttpTransport, McpSession
 from app.models import McpToolCallContent, McpToolCallResponse
-from app.safe_json_response import SafeJSONResponse
+from app.safe_json_response import SafeJSONResponse, safe_http_exception_handler
 from tests.test_mcp_resource_ownership import PROTOCOL, mcp_request
 
 # A lone surrogate, as a page's broken text can carry: UTF-8 cannot encode it.
@@ -135,6 +137,49 @@ class RestRouteLoneSurrogateTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text[:200])
         self.assertEqual(response.json()["requests"][0]["url"], f"https://x.test/{REPLACED}")
+
+    def test_an_http_exception_holding_one_keeps_its_status(self) -> None:
+        error = HTTPException(status_code=409, detail=TEXT, headers={"X-Reason": "busy"})
+
+        with patch.object(main_module.manager, "observe", new=AsyncMock(side_effect=error)):
+            response = self.client.get("/sessions/s1/observe")
+
+        self.assertEqual(response.status_code, 409, response.text[:200])
+        self.assertEqual(response.json(), {"detail": REPLACED})
+        self.assertEqual(response.headers["x-reason"], "busy")
+
+    def test_a_request_body_holding_one_is_refused_as_invalid_and_not_a_500(self) -> None:
+        response = self.client.post(
+            "/sessions/s1/observe",
+            content=b'{"limit": "bad\\ud83d"}',
+            headers={"content-type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 422, response.text[:200])
+        self.assertEqual(response.json()["detail"][0]["input"], "bad\ufffd")
+
+
+class ErrorHandlerLoneSurrogateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_normal_http_exception_is_answered_as_fastapis_own_handler_answers_it(self) -> None:
+        error = HTTPException(status_code=403, detail="Not permitted", headers={"X-Reason": "no"})
+
+        ours = await safe_http_exception_handler(None, error)
+        theirs = await http_exception_handler(None, error)
+
+        self.assertEqual((ours.status_code, ours.body), (theirs.status_code, theirs.body))
+        self.assertEqual(ours.headers["x-reason"], "no")
+
+    async def test_a_status_that_carries_no_body_still_carries_none(self) -> None:
+        response = await safe_http_exception_handler(None, HTTPException(status_code=304))
+
+        self.assertEqual((response.status_code, response.body), (304, b""))
+
+    async def test_the_exception_itself_is_left_as_it_was(self) -> None:
+        error = HTTPException(status_code=400, detail=TEXT)
+
+        await safe_http_exception_handler(None, error)
+
+        self.assertEqual(error.detail, TEXT)
 
 
 if __name__ == "__main__":
