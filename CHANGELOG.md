@@ -81,6 +81,16 @@ All notable changes to auto-browser are documented here.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
   the next carries `details.count`, the refusals held back since. An alert that counts these events must add that
   field.
+- **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
+  A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
+  fire now checks `API_BEARER_TOKENS` as it is then. An owner no credential names is refused: the answer is
+  `{"triggered": false, "reason": "owner_credential_removed"}`, `last_status` reads
+  `refused: owner credential removed`, no session is opened, and one `cron_job_refused` audit event is written. A job
+  a named operator queued fails when a worker takes it, with an error that says so, if that credential has gone
+  meanwhile. Moving to the shared `API_BEARER_TOKEN` or to no token counts: every job a named operator created is then
+  refused. Give the owner a named credential again, or delete the job and create it again under a credential that
+  stays. A job created on the shared token or with no token is unowned and runs as before, as does a job queued by an
+  operator named only by a header.
 
 ### Security
 
@@ -132,6 +142,11 @@ All notable changes to auto-browser are documented here.
   `browser://<id>/network` resource, none of which checked the page. Each now refuses it, as the raw CDP route does,
   under a bounded wait for the session lock and with fixed text that names no host, checking the page before the read
   and again after it, with the entries read last (see the upgrade note). (AUTH-22)
+- **A cron job no longer fires as an operator whose credential is gone.** A job stores the token-verified operator
+  who created it and ran as that operator on every fire, whether or not `API_BEARER_TOKENS` still named them, and a
+  queued agent job ran as the operator who queued it the same way. Each fire now reads the credentials as they are at
+  that moment, and a job that a token-verified operator queued is refused when a worker takes it if that credential
+  has gone, ending as a failed job that never ran. See the upgrade note. (STORE-17)
 
 ### Fixed
 

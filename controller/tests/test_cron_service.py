@@ -529,6 +529,147 @@ class CronRunOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service._active_runs, {self.job_id: "session-1"})
 
 
+ALICE = OperatorIdentity(id="alice", source="token")
+OWNER_CREDENTIAL_GONE = "refused: owner credential removed"
+
+
+class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
+    """A job fires as its owner only while a named credential still proves who that owner is."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.manager = MagicMock()
+        self.manager.settings = SimpleNamespace(api_bearer_tokens="alice:token-a,bob:token-b", api_bearer_token=None)
+        self.manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        self.manager.close_session = AsyncMock()
+        self.manager.audit.append = AsyncMock()
+        self.queue = MagicMock()
+        self.queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+        self.service = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+        with acting_as(ALICE):
+            self.job = await self.service.create_job(name="mine", goal="g", webhook_enabled=True)
+
+    def _stored(self) -> dict:
+        return self.service._load()[self.job["id"]]
+
+    def _assert_refused(self, result: dict | None) -> None:
+        if result is not None:
+            self.assertEqual(
+                result, {"triggered": False, "job_id": self.job["id"], "reason": "owner_credential_removed"}
+            )
+        self.manager.create_session.assert_not_awaited()
+        self.queue.enqueue_run.assert_not_awaited()
+        self.assertEqual(self.service._active_runs, {})
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        self.manager.audit.append.assert_awaited_once()
+        audited = self.manager.audit.append.await_args.kwargs
+        self.assertEqual(audited["event_type"], "cron_job_refused")
+        self.assertEqual(audited["status"], "refused")
+        self.assertEqual(
+            audited["details"],
+            {"cron_job": self.job["id"], "owner": "alice", "reason": "owner_credential_removed"},
+        )
+        self.assertNotIn(self.job["webhook_key"], str(audited))
+
+    async def test_a_configured_owner_still_fires_as_itself(self) -> None:
+        result = await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertTrue(result["triggered"])
+        self.manager.create_session.assert_awaited_once()
+        self.manager.audit.append.assert_not_awaited()
+
+    async def test_a_removed_owner_is_refused_on_every_path(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        async def scheduled() -> None:
+            await self.service._scheduled_run(self.job["id"])
+
+        async def webhook() -> dict:
+            return await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        async def trigger_tool() -> dict:
+            with acting_as(ALICE):
+                return await self.service.trigger_job(self.job["id"])
+
+        for name, fire in (("scheduled", scheduled), ("webhook", webhook), ("trigger", trigger_tool)):
+            with self.subTest(name):
+                self.manager.audit.append.reset_mock()
+                self._assert_refused(await fire())
+
+    async def test_a_deployment_moved_to_the_shared_token_or_to_none_refuses_named_owners(self) -> None:
+        for tokens, shared in (("", "the-shared-token"), ("", None), ("malformed-without-a-colon", None)):
+            with self.subTest(tokens=tokens, shared=shared):
+                self.manager.audit.append.reset_mock()
+                self.manager.settings.api_bearer_tokens = tokens
+                self.manager.settings.api_bearer_token = shared
+
+                self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+
+    async def test_an_unowned_job_still_runs_as_anonymous_whatever_the_credentials(self) -> None:
+        unowned = await self.service.create_job(name="shared", goal="g", webhook_enabled=True)
+        self.assertIsNone(unowned["owner"])
+        seen: list[tuple[str, str]] = []
+
+        async def create_session(**_kwargs):
+            seen.append(_who())
+            return {"id": "session-1"}
+
+        self.manager.create_session = create_session
+        self.manager.settings.api_bearer_tokens = ""
+        self.manager.settings.api_bearer_token = None
+
+        result = await self.service.trigger_via_webhook(unowned["id"], unowned["webhook_key"])
+
+        self.assertTrue(result["triggered"])
+        self.assertEqual(seen, [("anonymous", "anonymous")])
+        self.manager.audit.append.assert_not_awaited()
+
+    async def test_a_restored_credential_fires_again_with_no_restart(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+
+        self.manager.settings.api_bearer_tokens = "alice:another-token"
+        result = await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertTrue(result["triggered"])
+
+    async def test_a_refused_fire_is_not_counted_as_a_run(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        stored = self._stored()
+        self.assertEqual(stored["run_count"], 0)
+        self.assertIsNone(stored["last_run_at"])
+
+    async def test_a_refusal_is_answered_before_a_previous_run_is_considered(self) -> None:
+        self.service._active_runs[self.job["id"]] = "session-0"
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        result = await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertEqual(result["reason"], "owner_credential_removed")
+        self.assertEqual(self.service._active_runs, {self.job["id"]: "session-0"}, "the refusal touched the slot")
+
+    async def test_a_refusal_still_stands_when_its_status_or_its_audit_cannot_be_written(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        cases = (
+            ("store unreadable", patch.object(self.service, "_load", side_effect=CronStoreUnreadableError())),
+            ("store unsaveable", patch.object(self.service, "_save", side_effect=OSError("disk full"))),
+            ("audit failing", patch.object(self.manager.audit, "append", new=AsyncMock(side_effect=OSError("full")))),
+        )
+        job = self.service._load()[self.job["id"]]
+        for name, failing in cases:
+            with self.subTest(name), failing, self.assertLogs("app.cron_service", level="ERROR") as logged:
+                result = await self.service._run_job_now(job)
+
+                self.assertEqual(result["reason"], "owner_credential_removed")
+                self.assertTrue(any(self.job["id"] in line for line in logged.output), logged.output)
+            self.manager.create_session.assert_not_awaited()
+            self.queue.enqueue_run.assert_not_awaited()
+
+
 class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
     """A job fires as the operator who owns it, and an unowned job fires as nobody.
 
@@ -551,6 +692,7 @@ class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
             return {"id": "agent-job-1"}
 
         manager = MagicMock()
+        manager.settings = SimpleNamespace(api_bearer_tokens="alice:token-a", api_bearer_token=None)
         manager.create_session = create_session
         queue = MagicMock()
         queue.enqueue_run = enqueue_run

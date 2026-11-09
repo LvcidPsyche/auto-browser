@@ -263,6 +263,9 @@ class AgentJobStore:
 
 RESUME_CONTEXT_PREFIX = "Resuming background agent job"
 RESUME_CONTEXT_MIN_CHARS = 1000
+QUEUED_OPERATOR_CREDENTIAL_REMOVED = (
+    "refused: the operator who queued this job no longer has a named credential (API_BEARER_TOKENS)"
+)
 
 
 class AgentJobQueue:
@@ -274,7 +277,11 @@ class AgentJobQueue:
         session_accessible: Callable[[str], Awaitable[bool]],
         worker_count: int = 1,
         audit_store=None,
+        operator_configured: Callable[[str], bool] | None = None,
     ):
+        # Whether a named credential still proves an operator (build_controller_services wires it to the settings); None
+        # checks nothing. A job a token-verified operator queued does not run once that credential is gone.
+        self._operator_configured = operator_configured
         self.orchestrator = orchestrator
         # Whether the current operator may use a session (BrowserManager.session_accessible): a job in
         # another operator's session, or of an id with no session under named credentials, is left out
@@ -578,6 +585,13 @@ class AgentJobQueue:
             return
 
         try:
+            if self._queued_by_a_removed_operator(record):
+                # Never started: it ends as any failed job does, and _process_job's finally releases its session.
+                record = await self.store.finish(
+                    record.id, status="failed", result=None, error=QUEUED_OPERATOR_CREDENTIAL_REMOVED
+                )
+                await self._audit_quietly("agent_job_finished", record.status, record)
+                return
             await self._audit("agent_job_started", "running", record)
         except asyncio.CancelledError:
             # Stopped as it started: recorded as a stop during the run is, or the record stays "running" or
@@ -644,6 +658,17 @@ class AgentJobQueue:
                 error=detail[:500],
             )
         await self._audit("agent_job_finished", record.status, record)
+
+    def _queued_by_a_removed_operator(self, record: AgentJobRecord) -> bool:
+        """Whether a token-verified operator queued this job and no named credential proves them any more.
+
+        Only a token-verified operator proved who they were when queuing: one named by a header claimed it, and no
+        operator named no one, so no credential is asked about either of those.
+        """
+        operator = record.operator
+        if self._operator_configured is None or operator is None or operator.source != "token":
+            return False
+        return not self._operator_configured(operator.id)
 
     async def _record_stop(self, job_id: str) -> None:
         """Record a job that was stopped: cancelled by its operator, or interrupted (a shutdown, a withdrawal)."""

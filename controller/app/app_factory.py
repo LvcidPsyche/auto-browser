@@ -17,7 +17,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from .agent_jobs import AgentJobQueue
-from .auth_policy import has_named_credentials
+from .auth_policy import credential_names_operator, has_named_credentials
 from .browser_manager import BrowserManager
 from .config import Settings
 from .cron_service import CronService
@@ -78,6 +78,7 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
         session_accessible=manager.session_accessible,
         worker_count=settings.agent_job_worker_count,
         audit_store=manager.audit,
+        operator_configured=lambda operator_id: credential_names_operator(settings, operator_id),
     )
     cron_service = CronService(
         store_path=settings.cron_store_path,

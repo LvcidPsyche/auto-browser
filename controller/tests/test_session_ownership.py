@@ -210,6 +210,8 @@ class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
         job_queue = SimpleNamespace(enqueue_run=enqueue_run)
         cron = CronService(store_path=Path(self.tmp.name) / "crons.json", job_queue=job_queue, manager=self.manager)
+        # A job fires as its owner only while a named credential still proves who that is.
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
         created_session = {}
 
         async def create_session(**kwargs):

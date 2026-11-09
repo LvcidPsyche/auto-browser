@@ -24,7 +24,8 @@ Job schema:
     "created_at":  ISO datetime,
     "last_run_at": ISO datetime | null,
     "last_status": str | null ("queued", then how that run's agent job ended: "completed", "failed", "cancelled",
-                   "interrupted" or "discarded", or "unknown" when its record could not say),
+                   "interrupted" or "discarded", or "unknown" when its record could not say; or
+                   "refused: owner credential removed" when a fire was refused),
     "run_count":   int,
   }
 
@@ -47,6 +48,7 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+from .auth_policy import credential_names_operator
 from .session_ownership import ANONYMOUS, acting_as, as_system, may_use, owner_identity, verified_operator
 from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
 
@@ -67,6 +69,9 @@ except ImportError:
 _FINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "discarded"})
 # The run ended (its finish callback came), and its agent job's record cannot say how.
 RUN_OUTCOME_UNKNOWN = "unknown"
+# A fire refused because no named credential proves the job's owner any more: the answer's reason, and last_status.
+OWNER_CREDENTIAL_REMOVED = "owner_credential_removed"
+OWNER_CREDENTIAL_REMOVED_STATUS = "refused: owner credential removed"
 
 
 class CronJobDisabledError(RuntimeError):
@@ -354,6 +359,12 @@ class CronService:
         if not job.get("enabled", True):
             raise CronJobDisabledError("job is disabled; enable it to run it")
 
+        # From the settings as they are now, whoever fired it: a job does not outlive its owner's credential. A
+        # deployment moved to the shared token or to none has no named credential left, so it refuses named owners too.
+        owner_id = job.get("owner")
+        if owner_id and not credential_names_operator(self.manager.settings, owner_id):
+            return await self._refuse_run(job_id, owner_id)
+
         from .models import AGENT_RUN_MAX_STEPS, AgentRunRequest
 
         # Refuse to start a second run while this job's previous one is still in
@@ -441,6 +452,33 @@ class CronService:
             "session_id": session_id,
             "queued_job": queued,
         }
+
+    async def _refuse_run(self, job_id: str, owner_id: str) -> dict[str, Any]:
+        """Refuse a fire whose owner no named credential proves any more: no session, no agent job, one audit event."""
+        logger.warning("cron job %s refused: no named credential proves its owner %s any more", job_id, owner_id)
+        try:
+            async with self._lock:
+                jobs = self._load()
+                if job_id in jobs:
+                    jobs[job_id]["last_status"] = OWNER_CREDENTIAL_REMOVED_STATUS
+                    self._save(jobs)
+        except (CronStoreUnreadableError, OSError) as exc:
+            logger.error("cron job %s: its refusal could not be saved in last_status: %s", job_id, exc)
+        await self._audit_quietly(
+            job_id,
+            event_type="cron_job_refused",
+            status="refused",
+            action="fire_cron_job",
+            details={"cron_job": job_id, "owner": owner_id, "reason": OWNER_CREDENTIAL_REMOVED},
+        )
+        return {"triggered": False, "job_id": job_id, "reason": OWNER_CREDENTIAL_REMOVED}
+
+    async def _audit_quietly(self, job_id: str, *, event_type: str, status: str, action: str, details: dict) -> None:
+        """Audit what has already happened: a failure is logged, never raised over it."""
+        try:
+            await self.manager.audit.append(event_type=event_type, status=status, action=action, details=details)
+        except Exception:
+            logger.exception("cron job %s: the %s audit event could not be written", job_id, event_type)
 
     async def _finish_run(self, job_id: str, session_id: str, agent_job_id: str) -> None:
         """The agent job's finish callback: record how the run ended in last_status, then release its session.

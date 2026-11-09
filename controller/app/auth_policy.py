@@ -237,6 +237,11 @@ def has_named_credentials(settings: Any) -> bool:
     return any(credential.verifies_identity for credential in credentials_for(settings))
 
 
+def credential_names_operator(settings: Any, operator_id: str) -> bool:
+    """Whether a named credential proves ``operator_id`` now, by the settings as they are: a removal counts at once."""
+    return any(credential.operator_id == operator_id for credential in credentials_for(settings))
+
+
 _HTTP_OPTIONAL_WHITESPACE = " \t"
 
 

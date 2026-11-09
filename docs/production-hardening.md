@@ -45,7 +45,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   agent jobs, cron jobs and `/artifacts` files; nothing under `/artifacts` that
   is not inside a session directory with a stored record is served to anyone.
   Agent jobs run as the operator who queued them, and cron jobs fire as their creator, opening only the auth
-  profiles their creator may open. Sessions created under the shared token are
+  profiles their creator may open. Neither outlives that operator's named credential: a cron fire is refused and a
+  queued job fails once `API_BEARER_TOKENS` no longer names them, as after a move to the shared token.
+  Sessions created under the shared token are
   unowned and open to every operator. The audit log stays operator-wide (an
   approval's id, kind, origin and tool, and its decision's comment, included), and
   the takeover desktop is shared by every session on a browser node; use
