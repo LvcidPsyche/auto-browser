@@ -24,7 +24,8 @@ All notable changes to auto-browser are documented here.
   `browser.get_html`, which pages through the rest.
 - **A session's second `GET /mcp` ends its first.** A client that keeps two event streams open for one MCP session now
   loses the older one when it opens the newer, and a stream also ends when its session is deleted or evicted. Open one
-  stream per session, and reconnect only when it has ended.
+  stream per session, reconnect only when it has ended, and after reconnecting read again what you watch:
+  notifications are not replayed.
 
 ### Fixed
 

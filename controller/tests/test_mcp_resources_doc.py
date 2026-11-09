@@ -21,9 +21,10 @@ _TRANSPORT = _REPO / "controller" / "app" / "mcp_transport.py"
 
 class McpResourcesDocTests(unittest.TestCase):
     def setUp(self) -> None:
-        if not _DOC.exists() or not _TRANSPORT.exists():  # repo layout absent in the controller image
-            self.skipTest(f"doc-sync sources unavailable: {_DOC}")
+        if not _DOC.exists() or not _CLIENTS_DOC.exists() or not _TRANSPORT.exists():  # repo layout absent in the image
+            self.skipTest(f"doc-sync sources unavailable: {_DOC}, {_CLIENTS_DOC}")
         self.doc = _DOC.read_text(encoding="utf-8")
+        self.clients_doc = _CLIENTS_DOC.read_text(encoding="utf-8")
         self.transport = _TRANSPORT.read_text(encoding="utf-8")
 
     def test_documented_resource_schemes_exist_in_code(self) -> None:
@@ -51,9 +52,12 @@ class McpResourcesDocTests(unittest.TestCase):
         self.assertIn("-32602", self.doc)
 
     def test_the_doc_does_not_promise_a_notification_for_every_change(self) -> None:
-        clients = _CLIENTS_DOC.read_text(encoding="utf-8")
         self.assertNotIn("whenever that resource changes", self.doc)
-        self.assertNotIn("When a subscribed resource changes", clients)
+        self.assertNotIn("When a subscribed resource changes", self.clients_doc)
+
+    def test_the_doc_says_a_session_has_one_stream_and_that_notifications_are_not_replayed(self) -> None:
+        self.assertIn("one live stream", self.clients_doc)
+        self.assertIn("not replayed", self.clients_doc)
 
     def test_documented_notifications_match_the_code(self) -> None:
         uris = [f"browser://s/{kind}" for kind in ("screenshot", "dom", "console", "network")]

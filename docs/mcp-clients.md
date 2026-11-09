@@ -347,6 +347,10 @@ Only the events listed in
 notify, each for the URIs listed there; for anything else, read the resource
 again.
 
+An MCP session has one live stream: a new `GET /mcp` ends the older one, and
+`DELETE` or the session's eviction ends it. Notifications are not replayed, so
+after reconnecting read again what you watch.
+
 ## MCP tool profiles and packs
 
 Every tool the controller lists costs the model context on every request, so the
