@@ -208,6 +208,13 @@ All notable changes to auto-browser are documented here.
   for a limit at or below zero, and the SQLite store itself returns none for one. (AUTH-28)
 - **A `RuntimeError` behind a `409 Conflict` from `POST /sessions` or a fork is logged.** The answer stays `409`
   `Conflict`; its cause, which nothing recorded, now goes in the log with its traceback. (AUTH-21)
+- **More routes that call the browser manager answer its errors as the others do.** `GET /sessions`, `GET` of a
+  session, the screenshot and tab routes, the session auth-state and auth-profile routes, `/remote-access`,
+  `/audit/events`, the approval reads, `/pii-scrubber` and the agent and job routes let a `PermissionError`, a
+  `ValueError` or a `FileNotFoundError` reach the client as a bare `500`. They now answer as the rest do: a typed
+  error keeps its status and `code`, a refusal is a generic `403`, a bad value `400`, a missing file `404`, and
+  anything else a logged `500`. What a route answered on purpose (a tab another tab refused, a job's own `400`, a
+  run's `503`) is unchanged. (AUTH-10)
 
 ### Changed
 

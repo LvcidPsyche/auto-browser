@@ -35,13 +35,14 @@ def create_operations_router(
 
     @router.get("/remote-access")
     async def get_remote_access(session_id: str | None = None) -> dict[str, Any]:
-        if session_id and session_id not in manager.sessions:
-            try:
-                record = await manager.get_session_record(session_id)
-                return record["remote_access"]
-            except KeyError:
-                raise HTTPException(status_code=404, detail="Unknown session") from None
-        return manager.get_remote_access_info(session_id)
+        with typed_route_errors(logger, "remote access info failed"):
+            if session_id and session_id not in manager.sessions:
+                try:
+                    record = await manager.get_session_record(session_id)
+                    return record["remote_access"]
+                except KeyError:
+                    raise HTTPException(status_code=404, detail="Unknown session") from None
+            return manager.get_remote_access_info(session_id)
 
     @router.get("/audit/events")
     async def list_audit_events(
@@ -50,25 +51,29 @@ def create_operations_router(
         event_type: str | None = None,
         operator_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await manager.list_audit_events(
-            limit=bounded_limit(limit, 500),
-            session_id=session_id,
-            event_type=event_type,
-            operator_id=operator_id,
-        )
+        with typed_route_errors(logger, "audit events listing failed"):
+            return await manager.list_audit_events(
+                limit=bounded_limit(limit, 500),
+                session_id=session_id,
+                event_type=event_type,
+                operator_id=operator_id,
+            )
 
     @router.get("/approvals")
     async def list_approvals(status: str | None = None, session_id: str | None = None) -> list[dict[str, Any]]:
-        return await manager.list_approvals(status=status, session_id=session_id)
+        with typed_route_errors(logger, "approvals listing failed"):
+            return await manager.list_approvals(status=status, session_id=session_id)
 
     @router.get("/approvals/{approval_id}")
     async def get_approval(approval_id: str) -> dict[str, Any]:
-        return await manager.get_approval(approval_id)
+        with typed_route_errors(logger, "get approval failed for approval %s", approval_id):
+            return await manager.get_approval(approval_id)
 
     # A tool call's whole arguments, which the approval's reason previews; the record's access rule.
     @router.get("/approvals/{approval_id}/arguments")
     async def get_approval_arguments(approval_id: str) -> dict[str, Any]:
-        return await manager.approval_arguments(approval_id)
+        with typed_route_errors(logger, "approval arguments failed for approval %s", approval_id):
+            return await manager.approval_arguments(approval_id)
 
     # A decision refused for what the server knows (an approval its action holds, or one whose
     # arguments or text are gone) answers with why: ServerStateRefusal names nothing an agent
@@ -101,7 +106,8 @@ def create_operations_router(
 
     @router.get("/pii-scrubber")
     async def get_pii_scrubber() -> dict[str, Any]:
-        return manager.get_pii_scrubber_status()
+        with typed_route_errors(logger, "pii scrubber status failed"):
+            return manager.get_pii_scrubber_status()
 
     @router.get("/proxy-personas")
     async def list_proxy_personas() -> list[Any]:

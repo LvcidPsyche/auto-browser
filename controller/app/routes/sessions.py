@@ -57,7 +57,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.get("/sessions")
     async def list_sessions() -> list[dict[str, Any]]:
-        return await manager.list_sessions()
+        with typed_route_errors(logger, "list sessions failed"):
+            return await manager.list_sessions()
 
     @router.post("/sessions")
     async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
@@ -92,7 +93,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, Any]:
-        return await manager.get_session_record(session_id)
+        with typed_route_errors(logger, "get session failed for session %s", session_id):
+            return await manager.get_session_record(session_id)
 
     @router.get(TAKEOVER_LINK_ROUTE)
     async def get_takeover_link(
@@ -150,10 +152,11 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.post("/sessions/{session_id}/screenshot")
     async def capture_screenshot(session_id: str, payload: ScreenshotRequest) -> dict[str, Any]:
-        try:
-            return await manager.capture_screenshot(session_id, label=payload.label)
-        except PermissionError:
-            raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
+        with typed_route_errors(logger, "screenshot failed for session %s", session_id):
+            try:
+                return await manager.capture_screenshot(session_id, label=payload.label)
+            except PermissionError:
+                raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
 
     @router.get("/sessions/{session_id}/downloads")
     async def list_downloads(session_id: str) -> list[dict[str, Any]]:
@@ -167,32 +170,35 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.post("/sessions/{session_id}/tabs/activate")
     async def activate_tab(session_id: str, payload: TabIndexRequest) -> dict[str, Any]:
-        try:
-            return await manager.activate_tab(session_id, payload.index)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid request") from None
-        except TabRefusedByAnotherTabError:
-            raise HTTPException(status_code=403, detail=OFF_LIST_OTHER_TAB_DETAIL) from None
-        except TabUnjudgedError:
-            raise HTTPException(status_code=403, detail=UNJUDGED_TAB_DETAIL) from None
-        except PermissionError:
-            raise HTTPException(status_code=403, detail=OFF_LIST_TAB_DETAIL) from None
+        with typed_route_errors(logger, "activate tab failed for session %s", session_id):
+            try:
+                return await manager.activate_tab(session_id, payload.index)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid request") from None
+            except TabRefusedByAnotherTabError:
+                raise HTTPException(status_code=403, detail=OFF_LIST_OTHER_TAB_DETAIL) from None
+            except TabUnjudgedError:
+                raise HTTPException(status_code=403, detail=UNJUDGED_TAB_DETAIL) from None
+            except PermissionError:
+                raise HTTPException(status_code=403, detail=OFF_LIST_TAB_DETAIL) from None
 
     @router.post("/sessions/{session_id}/tabs/close")
     async def close_tab(session_id: str, payload: TabIndexRequest) -> dict[str, Any]:
-        try:
-            return await manager.close_tab(session_id, payload.index)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid request") from None
+        with typed_route_errors(logger, "close tab failed for session %s", session_id):
+            try:
+                return await manager.close_tab(session_id, payload.index)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.post("/sessions/{session_id}/tabs/open")
     async def open_tab(session_id: str, payload: OpenTabRequest) -> dict[str, Any]:
-        try:
-            return await manager.open_tab(session_id, payload.url, payload.activate)
-        except PermissionError:
-            raise HTTPException(status_code=403, detail="Not permitted") from None
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid request") from None
+        with typed_route_errors(logger, "open tab failed for session %s", session_id):
+            try:
+                return await manager.open_tab(session_id, payload.url, payload.activate)
+            except PermissionError:
+                raise HTTPException(status_code=403, detail="Not permitted") from None
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.post("/sessions/{session_id}/actions/navigate")
     async def navigate(session_id: str, payload: NavigateRequest) -> dict[str, Any]:

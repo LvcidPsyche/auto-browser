@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,7 +30,7 @@ from app.browser.services.session_creation import SessionLimitError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
-from app.routes._utils import OFF_LIST_PAGE_DETAIL
+from app.routes._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL
 
 SID = "s-missing"
 
@@ -42,10 +42,14 @@ class Route:
     verb: str
     path: str
     body: dict | None
-    method: str  # the manager attribute the route awaits
+    method: str  # the attribute the route calls, on the manager unless `owner` names another service of app.main
     # Route-specific answers that exist on purpose and must survive the fix.
     permission: tuple[int, str] = (403, "Not permitted")
     runtime: tuple[int, str] = (500, "Internal error")
+    owner: str = "manager"
+    sync: bool = False  # the route calls `method` without awaiting it
+    # False for a route that answers a ValueError with its own text, on purpose (a job's state refusal).
+    value_error_is_generic: bool = True
 
     @property
     def id(self) -> str:
@@ -53,6 +57,8 @@ class Route:
 
 
 _ELEMENT = {"selector": "#a"}
+_AGENT_BODY = {"provider": "openai", "goal": "inspect the page"}
+_AGENT_DOWN = (503, "Service unavailable")
 SESSION_ROUTES = [
     Route("get", f"/sessions/{SID}/observe", None, "observe", permission=(403, OFF_LIST_PAGE_DETAIL)),
     Route("post", f"/sessions/{SID}/observe", {}, "observe", permission=(403, OFF_LIST_PAGE_DETAIL)),
@@ -89,6 +95,14 @@ SESSION_ROUTES = [
         "post", f"/sessions/{SID}/fork?start_url=https://example.com/", None, "fork_session", runtime=(409, "Conflict")
     ),
     Route("post", f"/sessions/{SID}/storage-state", {"path": "state.json"}, "save_storage_state"),
+    Route("get", f"/sessions/{SID}", None, "get_session_record"),
+    Route("post", f"/sessions/{SID}/screenshot", {}, "capture_screenshot", permission=(403, OFF_LIST_PAGE_DETAIL)),
+    Route(
+        "post", f"/sessions/{SID}/tabs/activate", {"index": 0}, "activate_tab", permission=(403, OFF_LIST_TAB_DETAIL)
+    ),
+    Route("post", f"/sessions/{SID}/tabs/close", {"index": 0}, "close_tab"),
+    Route("post", f"/sessions/{SID}/tabs/open", {"url": "https://example.com/"}, "open_tab"),
+    Route("post", f"/sessions/{SID}/auth-profiles", {"profile_name": "p1"}, "save_auth_profile"),
 ]
 
 # Records of a session: they outlive it, so an id that never existed answers an
@@ -109,6 +123,36 @@ OTHER_ROUTES = [
     Route("post", "/approvals/a-1/execute", None, "execute_approval", permission=(409, "Conflict")),
     Route("get", "/auth-profiles/p1/export", None, "export_auth_profile"),
     Route("post", "/auth-profiles/import", {"archive_path": "a.tgz"}, "import_auth_profile"),
+    Route("get", "/sessions", None, "list_sessions"),
+    # An unknown session is a plain 404 here, the session store's KeyError, not the coded one the session routes give.
+    Route("get", f"/sessions/{SID}/auth-state", None, "get_auth_state_info"),
+    Route("get", "/auth-profiles/p1", None, "get_auth_profile"),
+    Route("get", "/remote-access", None, "get_remote_access_info", sync=True),
+    Route("get", "/audit/events", None, "list_audit_events"),
+    Route("get", "/approvals", None, "list_approvals"),
+    Route("get", "/approvals/a-1", None, "get_approval"),
+    Route("get", "/approvals/a-1/arguments", None, "approval_arguments"),
+    Route("get", "/pii-scrubber", None, "get_pii_scrubber_status", sync=True),
+    # The agent routes keep their own answers: an unknown session (the orchestrator's KeyError) is 404 "Unknown
+    # session", and a RuntimeError from a run is 503. The enqueue routes check the session first, so that call stands
+    # in for the route.
+    Route("get", "/agent/jobs", None, "list_jobs", owner="job_queue"),
+    Route("get", "/agent/jobs/j-1", None, "get_job", owner="job_queue"),
+    Route("post", f"/sessions/{SID}/agent/step", _AGENT_BODY, "step", owner="orchestrator", runtime=_AGENT_DOWN),
+    Route("post", f"/sessions/{SID}/agent/run", _AGENT_BODY, "run", owner="orchestrator", runtime=_AGENT_DOWN),
+    Route("post", f"/sessions/{SID}/agent/jobs/step", _AGENT_BODY, "get_session"),
+    Route("post", f"/sessions/{SID}/agent/jobs/run", _AGENT_BODY, "get_session"),
+    Route(
+        "post",
+        "/agent/jobs/j-1/resume",
+        None,
+        "resume_job",
+        owner="job_queue",
+        runtime=_AGENT_DOWN,
+        value_error_is_generic=False,
+    ),
+    Route("post", "/agent/jobs/j-1/discard", None, "discard_job", owner="job_queue", value_error_is_generic=False),
+    Route("post", "/agent/jobs/j-1/cancel", None, "cancel_job", owner="job_queue", value_error_is_generic=False),
 ]
 
 ALL_ROUTES = SESSION_ROUTES + RECORD_ROUTES + OTHER_ROUTES
@@ -150,10 +194,10 @@ def _call(client: TestClient, route: Route):
 
 def _raising(route: Route, exc: BaseException):
     *owners, name = route.method.split(".")
-    target = main_module.manager
+    target = getattr(main_module, route.owner)
     for owner in owners:
         target = getattr(target, owner)
-    return patch.object(target, name, new=AsyncMock(side_effect=exc))
+    return patch.object(target, name, new=(Mock if route.sync else AsyncMock)(side_effect=exc))
 
 
 @pytest.mark.parametrize("route", SESSION_ROUTES, ids=lambda r: r.id)
@@ -250,7 +294,7 @@ def test_a_runtime_error_answered_409_is_logged_with_its_cause(
     assert "boom-cause" in str(logged[0].exc_info[1])
 
 
-@pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
+@pytest.mark.parametrize("route", [r for r in ALL_ROUTES if r.value_error_is_generic], ids=lambda r: r.id)
 def test_value_error_is_400_without_its_message(client: TestClient, route: Route) -> None:
     with _raising(route, ValueError("bad value at /srv/secret/path")):
         response = _call(client, route)
