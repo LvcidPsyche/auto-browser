@@ -223,6 +223,8 @@ All notable changes to auto-browser are documented here.
   seconds are only counted, and the first refusal after that writes one event whose `details.count` says how many
   were held back. Every refusal still answers `403`, `takeover_link_viewed` is written every time, and at most 1024
   sources are remembered: the oldest is forgotten first, with its count. See the upgrade note. (R5C-6)
+- **A start that loses the race to create the mesh or Witness key loads the key the other start made.** It raised
+  `FileExistsError` instead, which failed that start. (R5C-8)
 
 ### Changed
 

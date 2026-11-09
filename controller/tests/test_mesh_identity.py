@@ -55,6 +55,31 @@ class NodeIdentityKeyFileTests(unittest.TestCase):
         first = NodeIdentity(self.dir).node_id
         self.assertEqual(NodeIdentity(self.dir).node_id, first)
 
+    def test_a_key_another_start_created_after_the_check_is_loaded(self):
+        # R5C-8: the file appears between exists() and the exclusive create, and the node keeps that key.
+        first = NodeIdentity(self.dir).node_id
+        real_exists = Path.exists
+
+        def not_yet(path, *args, **kwargs):
+            return False if path.name == "node_private.pem" else real_exists(path, *args, **kwargs)
+
+        with patch.object(Path, "exists", not_yet):
+            self.assertEqual(NodeIdentity(self.dir).node_id, first)
+
+    @_POSIX_ONLY
+    def test_a_loose_key_found_at_the_exclusive_create_is_tightened_as_any_loaded_key(self):
+        NodeIdentity(self.dir)
+        key = self.dir / "node_private.pem"
+        key.chmod(0o644)
+        real_exists = Path.exists
+
+        def not_yet(path, *args, **kwargs):
+            return False if path.name == "node_private.pem" else real_exists(path, *args, **kwargs)
+
+        with patch.object(Path, "exists", not_yet):
+            NodeIdentity(self.dir)
+        self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
+
     @_POSIX_ONLY
     def test_new_key_file_and_directory_have_private_modes(self):
         NodeIdentity(self.dir)

@@ -114,16 +114,18 @@ class NodeIdentity:
 
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
-            if _POSIX:
-                _tighten_a_loose_key(priv_path)
-            pem = priv_path.read_bytes()
-            self._private_key = Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(pem))
+            self._private_key = self._load_private_key(priv_path)
         else:
             logger.info("mesh.identity: generating new keypair in %s", self._dir)
             self._private_key = Ed25519PrivateKey.generate()
             # Write private key
             priv_pem = self._private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
-            _write_private_file(priv_path, priv_pem)
+            try:
+                _write_private_file(priv_path, priv_pem)
+            except FileExistsError:
+                # Another start made the key between the check and the exclusive create: that key is this node's.
+                logger.info("mesh.identity: another start created the keypair in %s; loading it", self._dir)
+                self._private_key = self._load_private_key(priv_path)
 
         self._public_key: Ed25519PublicKey = self._private_key.public_key()
         pub_raw = self._public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # 32 bytes
@@ -150,6 +152,11 @@ class NodeIdentity:
             )
 
         logger.info("mesh.identity: node_id=%s", self._node_id)
+
+    def _load_private_key(self, priv_path: Path) -> Ed25519PrivateKey:
+        if _POSIX:
+            _tighten_a_loose_key(priv_path)
+        return Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes()))
 
     def _tighten_a_loose_directory(self) -> None:
         """mkdir's mode applies only to a directory it creates: one an older release made at 0755 keeps that mode.
