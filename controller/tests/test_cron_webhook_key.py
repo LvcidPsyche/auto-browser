@@ -105,6 +105,23 @@ class CronWebhookKeyAtRestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["webhook_key_hash"], _digest(LEGACY_KEY))
         self.assertTrue((await service.trigger_via_webhook("job-1", LEGACY_KEY))["triggered"])
 
+    async def test_a_job_holding_both_a_key_and_a_hash_keeps_the_hash_and_loses_the_key(self) -> None:
+        _legacy_store(self.path)
+        stored = json.loads(self.path.read_text(encoding="utf-8"))
+        stored["job-1"]["webhook_key_hash"] = _digest("the-newer-key")
+        self.path.write_text(json.dumps(stored), encoding="utf-8")
+        service, _ = _service(self.path)
+
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+
+        after = json.loads(self.path.read_text(encoding="utf-8"))["job-1"]
+        self.assertNotIn("webhook_key", after)
+        self.assertEqual(after["webhook_key_hash"], _digest("the-newer-key"))
+        with self.assertRaises(PermissionError):
+            await service.trigger_via_webhook("job-1", LEGACY_KEY)
+        self.assertTrue((await service.trigger_via_webhook("job-1", "the-newer-key"))["triggered"])
+
     async def test_startup_writes_nothing_when_there_is_nothing_to_hash(self) -> None:
         _legacy_store(self.path, key=None)
         before = self.path.read_bytes()
