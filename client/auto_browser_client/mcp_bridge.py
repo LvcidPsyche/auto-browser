@@ -280,11 +280,8 @@ def _goes_direct(request: Request) -> bool:
     path and query) holding a character a request line cannot carry, which http.client refuses (a space or a
     control character, U+0000 to U+0020 or U+007F) or cannot encode (one outside ASCII) only once a connection is
     chosen, and a fragment holding one, which urllib puts into a proxied request line (R5C-28). Each reason is the
-    bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
-    (``request.host`` None), which ``urlopen`` refuses before asking, is not direct (W10-14).
+    bridges' own, never the parse error's text, which can quote the URL (W14-1).
     """
-    if request.host is None:
-        return False
     if _not_for_a_request_line(request.selector):
         raise InvalidControllerURL(
             "its path or query holds a space, a control character or a character outside ASCII; percent-encode it"
