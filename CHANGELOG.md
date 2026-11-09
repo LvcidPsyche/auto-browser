@@ -115,9 +115,6 @@ All notable changes to auto-browser are documented here.
   leaves an archive behind, for a name a page can guess. Host names compare case-insensitively, a port equal to the
   `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
   See the upgrade note. (AUTH-24)
-- **The session replay page links only an http(s) URL.** A page sets its own URL, and the page rendered it as a link
-  whatever its scheme, so a `javascript:` or `data:` one clicked in the replay page ran on the controller's own
-  origin. Any other scheme is now shown as plain text, and the link opens with `rel="noopener noreferrer"`. (AUTH-37)
 - **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
   `GET /auth-profiles/{name}`, `GET /auth-profiles/{name}/export` and `POST /sessions` with `auth_profile` or a
   `storage_state_path` under `profiles/` answered `403` for a foreign profile and `404` for a missing one, and
@@ -243,6 +240,9 @@ All notable changes to auto-browser are documented here.
   the race raised `FileExistsError`, which failed that start; it now loads the key the other start made, retrying
   for up to 2 seconds while the file is still being written, and the public key and `node_meta.json` are published
   whole, so a reader never sees part of one. A key still unreadable when the wait ends is treated as before. (R5C-8)
+- **The session replay page's URL line now shows, and links only an http(s) URL.** The page read a key a session
+  summary and a stored record do not have (`url`, not `current_url`), so its URL line never rendered. It now shows
+  the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)
 
 ### Changed
 

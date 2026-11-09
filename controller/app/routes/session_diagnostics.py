@@ -132,7 +132,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         )
 
         status = esc(session_info.get("status", "unknown"))
-        current_url = esc(session_info.get("url", ""))
+        current_url = esc(session_info.get("current_url", ""))
         title = esc(session_info.get("title", session_id))
         created = esc(str(session_info.get("created_at", ""))[:19])
 
@@ -140,7 +140,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         if current_url:
             # A page sets its own URL: only http(s) becomes a link, or a javascript: one runs on this origin if clicked.
             link = f'<a href="{current_url}" target="_blank" rel="noopener noreferrer">{current_url}</a>'
-            shown = link if is_http_link(session_info.get("url")) else current_url
+            shown = link if is_http_link(session_info.get("current_url")) else current_url
             url_line = f"<span>URL: {shown}</span>"
 
         body = f"""<!DOCTYPE html>
