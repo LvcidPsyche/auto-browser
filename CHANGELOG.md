@@ -92,6 +92,11 @@ All notable changes to auto-browser are documented here.
 - **`tools/list` now shows the governed approval arguments.** Every tool with a governed kind accepts
   `workflow_profile` and `approval_id`, but its advertised schema named neither, so a client could not find the
   approval retry flow from it. Both are now optional properties on exactly those tools. (MCP-20)
+- **A drag that fails on a hung page no longer leaves that page's world session cached.** Removing the drag's scroll
+  watch had only its 2-second outer bound, so a hung setup was cancelled there and the world's CDP session stayed
+  cached for the next call to hang on. The removal now has a setup budget below that bound: a hung setup ends there,
+  its session dropped and detached as the read tools' bounds do, and the drag's own error is still what is
+  reported. (N7)
 - **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
   candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the

@@ -25,6 +25,7 @@ from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.browser.element_ids import ElementIds
 from app.browser.element_target import ElementTarget
 from app.browser.element_world import READ, PageWorld
+from app.tool_gateway import drag
 from app.tool_inputs import FindElementsInput, GetPageHtmlInput
 from tests.test_allowed_hosts_reads import gateway_for, manager_for, read_session
 
@@ -370,3 +371,36 @@ async def test_a_find_elements_query_whose_setup_hangs_ends_as_page_not_respondi
     assert error.code == PAGE_NOT_RESPONDING
     assert elapsed < LONG_MS / 1000
     assert manager.element_ids._world(session.page)._cdp is None
+
+
+# -- a drag's scroll watch: removed under the drag's cleanup bound -----------------
+
+
+class WorldPage:
+    """A page the world can be keyed on (a SimpleNamespace cannot), with the fake CDP session's context."""
+
+    def __init__(self, cdp: SlowCdp) -> None:
+        self.context = slow_page(cdp).context
+
+
+async def test_a_hung_setup_while_a_drag_watch_is_removed_ends_by_its_own_bound_and_drops_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The removal's only bound was the outer wait_for: a hung setup was cancelled there and the world's session stayed
+    # cached for the next call, past the point where setup ends a session on any other path (N7).
+    monkeypatch.setattr(drag, "UNWATCH_SETUP_TIMEOUT_MS", SHORT_MS, raising=False)
+    monkeypatch.setattr(drag, "UNWATCH_TIMEOUT_SECONDS", LONG_MS / 1000)
+    cdp = SlowCdp({"Page.getFrameTree": HUNG_S})
+    page = WorldPage(cdp)
+    manager = SimpleNamespace(element_ids=ElementIds(SimpleNamespace(action_timeout_ms=int(HUNG_S * 1000))))
+
+    await asyncio.wait_for(drag._stop_watching_quietly(manager, SimpleNamespace(page=page), "nonce"), TEST_BOUND_S)
+
+    world_of_page = manager.element_ids._world(page)
+    assert (world_of_page._cdp, world_of_page._frame_id) == (None, None)
+    await asyncio.wait_for(detached(cdp), timeout=TEST_BOUND_S)
+    assert cdp.detached == 1
+
+
+async def test_the_setup_budget_of_a_watch_removal_is_named_and_below_its_outer_bound() -> None:
+    assert drag.UNWATCH_SETUP_TIMEOUT_MS < drag.UNWATCH_TIMEOUT_SECONDS * 1000

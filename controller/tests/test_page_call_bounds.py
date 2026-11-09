@@ -326,7 +326,7 @@ async def test_a_drag_cut_off_while_an_end_comes_into_view_holds_the_session_a_b
     monkeypatch.setattr(drag_module, "UNWATCH_TIMEOUT_SECONDS", 0.2, raising=False)
     manager, session = still_session(tmp_path)
 
-    async def evaluate(_page, script: str, _arg) -> dict:
+    async def evaluate(_page, script: str, _arg, **_kwargs) -> dict:
         if script == drag_module._UNWATCH_SCRIPT:
             await hang()
         return {"x": 0, "y": 0}
