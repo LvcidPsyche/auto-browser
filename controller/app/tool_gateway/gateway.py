@@ -1193,8 +1193,11 @@ class McpToolGateway:
         session = await self.manager.get_session(payload.session_id)
         size = {"width": payload.width, "height": payload.height}
         async with recorded_write(self.manager, session, "browser.set_viewport", size) as write:
-            write.reached_page = True
-            await session.page.set_viewport_size(size)
+            # Under the session lock and bounded, as a storage write: a viewport change cannot land under another
+            # call's coordinates, and a hung renderer cannot hold the call.
+            async with locked_read(self.manager, session):
+                write.reached_page = True
+                await bounded(session.page.set_viewport_size(size))
         return {"session_id": payload.session_id, "width": payload.width, "height": payload.height}
 
     async def _get_cookies(self, payload: GetCookiesInput) -> dict[str, Any]:

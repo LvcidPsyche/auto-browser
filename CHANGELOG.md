@@ -123,6 +123,11 @@ All notable changes to auto-browser are documented here.
   script as a Python repr, which is not a JavaScript string: a non-printable character past the BMP (U+10FFFF, say)
   was written as `\U0010ffff`, which JavaScript reads as other text, so the read looked up another key. The key is
   now the evaluate's argument, as `browser.set_local_storage`'s always was. (MCP-34)
+- **`browser.set_viewport` runs under the session lock and a bound, as a read does.** A viewport change could land
+  under another call's coordinates, and a hung renderer could hold the call for good. The call now waits for the
+  session as a read does and answers `The session is busy with another call. Try again.` after 10 seconds, a page on
+  a host `ALLOWED_HOSTS` refuses is refused before the viewport changes, and a page that does not answer ends the
+  call after 30 seconds. (MCP-23)
 
 ### Changed
 

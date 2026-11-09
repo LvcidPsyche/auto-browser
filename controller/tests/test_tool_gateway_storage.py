@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from playwright.async_api import Error as PlaywrightError
@@ -19,12 +19,14 @@ from app.session_ownership import acting_as
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import GetStorageInput, SetCookiesInput, SetStorageInput, SetViewportInput
 from app.witness import REDACTED
-from tests.test_approval_spend import SESSION, SpendBase
+from tests.test_approval_spend import SESSION, WAIT_SECONDS, SpendBase
 
 # Goes in every cookie value and every storage value; neither it nor its SHA-256 may reach a record.
 CANARY = "canary-secret-value-90c1"
 CANARY_SHA256 = hashlib.sha256(CANARY.encode("utf-8")).hexdigest()
 WRITE_RECORDS_LOGGER = "app.tool_gateway.write_records"
+# Patched over a page call's 30-second bound, for a hung call to end quickly.
+SHORT_PAGE_BOUND_SECONDS = 0.05
 NAMED_OPERATOR_REQUIRED = "Confidential high-risk actions require a named operator identity."
 ALICE = OperatorIdentity(id="alice", source="token")
 # A receipt of a call with no approval.
@@ -588,6 +590,54 @@ class GatewayWriteRecordTests(SpendBase):
         _events, receipts = await self.records("browser.set_local_storage")
         self.assertEqual(receipts[0]["status"], "ok")
         self.assertEqual(receipts[0]["approval"], self.spent_approval(approval_id))
+
+    def viewport_payload(self) -> SetViewportInput:
+        return SetViewportInput(session_id=SESSION, width=800, height=600)
+
+    async def test_a_viewport_change_waits_for_the_session_lock_and_runs_once_it_is_released(self) -> None:
+        await self.session.lock.acquire()
+        waiting = asyncio.Event()
+        acquire = self.session.lock.acquire
+
+        async def watched_acquire() -> bool:
+            waiting.set()
+            return await acquire()
+
+        self.session.lock.acquire = watched_acquire  # type: ignore[method-assign]
+        task = asyncio.ensure_future(self.gateway._set_viewport(self.viewport_payload()))
+        at_the_lock = asyncio.ensure_future(waiting.wait())
+
+        # Whichever comes first, reaching the lock or (the bug) finishing without it: events, not a sleep, decide.
+        await asyncio.wait({task, at_the_lock}, return_when=asyncio.FIRST_COMPLETED, timeout=WAIT_SECONDS)
+
+        self.page.set_viewport_size.assert_not_awaited()
+        self.assertTrue(waiting.is_set(), "the call did not wait for the session lock")
+        self.session.lock.release()
+        await asyncio.wait_for(task, WAIT_SECONDS)
+        self.page.set_viewport_size.assert_awaited_once_with({"width": 800, "height": 600})
+        events, receipts = await self.records("browser.set_viewport")
+        self.assertEqual(([event.status for event in events], [item["status"] for item in receipts]), (["ok"], ["ok"]))
+
+    async def test_a_hung_viewport_change_ends_by_the_page_bound_and_records_failed(self) -> None:
+        async def hung(_size: dict[str, int]) -> None:
+            await asyncio.Event().wait()
+
+        self.page.set_viewport_size = hung
+
+        with patch("app.browser.page_read.PAGE_READ_TIMEOUT_SECONDS", SHORT_PAGE_BOUND_SECONDS):
+            with self.assertRaisesRegex(RuntimeError, "did not answer within"):
+                await asyncio.wait_for(self.gateway._set_viewport(self.viewport_payload()), WAIT_SECONDS)
+
+        await self.assert_recorded_failed("browser.set_viewport", error_name="RuntimeError", began=True)
+
+    async def test_a_viewport_change_on_a_refused_page_records_failed_before_touching_it(self) -> None:
+        self.page.url = "https://elsewhere.test/"
+
+        with self.assertRaises(PermissionError):
+            await self.gateway._set_viewport(self.viewport_payload())
+
+        self.page.set_viewport_size.assert_not_awaited()
+        await self.assert_recorded_failed("browser.set_viewport", error_name="RefusedPageError", began=False)
 
     async def test_a_cancellation_while_a_success_is_recorded_lands_ok_and_ends_cancelled(self) -> None:
         recording, release = self.hold_the_audit_write()
