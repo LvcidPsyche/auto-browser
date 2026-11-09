@@ -38,6 +38,15 @@ All notable changes to auto-browser are documented here.
   wrong case, a non-string) used to read as `fast`, so the call ran without the approval it asked for. It now answers
   an error that names the two values, and nothing runs: send one of them, or leave the argument out (`null` counts as
   left out). Tools that are not governed ignore the argument, as before.
+- **A garbled reply from `browser.find_by_vision`'s model is now a tool error, where it read as `found: false`.** That
+  is a reply that is not a JSON object, one with no `found` or a `found` that is neither true nor false, or a
+  `found: true` reply whose point is not usable (see Changed). A client that took `found: false` to cover those must
+  handle the error, by retrying the call or finding the element another way. A reply of `found: false` stays a normal
+  answer.
+- **A `browser.find_elements` pattern that ran can now be refused.** With `regex=true`, a pattern whose group repeats
+  without bound and holds an unbounded repeat of its own or overlapping alternatives, at any depth (`(a+)+$`,
+  `(a|aa)+`, `((a|aa))+`), fails validation with a message naming the group and why, where it used to reach the
+  page. Rewrite the group (`a+`, not `(a+)+`), or pass `regex=false` to match the text literally.
 
 ### Security
 
@@ -116,8 +125,9 @@ All notable changes to auto-browser are documented here.
   `structuredContent` alike, with one of `too_large`, `outside_artifact_root`, `unsupported_type`, `unreadable` or
   `no_artifact_root`; a result that carries its image, or was never meant to, has no such key. (MCP-26)
 - **`tools/list` now shows the governed approval arguments.** Every tool with a governed kind accepts
-  `workflow_profile` and `approval_id`, but its advertised schema named neither, so a client could not find the
-  approval retry flow from it. Both are now optional properties on exactly those tools. (MCP-20)
+  `workflow_profile` and `approval_id`, but its advertised schema named neither (`browser.execute_action`'s named only
+  `approval_id`), so a client could not find the approval retry flow from it. Both are now optional properties on
+  exactly those tools. (MCP-20)
 - **A drag that fails on a hung page no longer leaves that page's world session cached.** Removing the drag's scroll
   watch had only its 2-second outer bound, so a hung setup was cancelled there and the world's CDP session stayed
   cached for the next call to hang on. The removal now has a setup budget below that bound: a hung setup ends there,
