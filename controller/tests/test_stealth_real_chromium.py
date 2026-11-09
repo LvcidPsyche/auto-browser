@@ -277,6 +277,21 @@ EXPORT_TYPE_EMPTIES_THE_CANVAS = (
 }"""
 )
 
+# A canvas 0 wide when toDataURL is called, whose type's toString gives it a size and draws: the size the noise goes by
+# is the one after the conversion, so the export carries the noise (a read before it would skip the noise).
+EXPORT_TYPE_GIVES_AN_EMPTY_CANVAS_A_SIZE = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  canvas.width = 0;
+  const url = canvas.toDataURL({
+    toString() { canvas.width = 1; canvas.height = 1; drawRed200(ctx); return 'image/png'; },
+  });
+  return await exportedPixel(url);
+}"""
+)
+
 # A canvas with width and height accessors of its own that throw, which the native export never reads.
 EXPORT_WITH_OWN_THROWING_SIZE = (
     "async () => {"
@@ -351,11 +366,22 @@ def test_a_quality_object_is_passed_on_without_calling_its_value_of() -> None:
 
 @requires_chromium
 def test_a_type_that_empties_the_canvas_exports_what_the_native_exports() -> None:
-    """Review of c6: the type's toString runs first, so the size is read after it, as the native export goes by it."""
+    """Review of c6: this pins the export's result (the wrapped export is the native's "data:,"). The order of the size
+    check is pinned by the test below."""
     native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_EMPTIES_THE_CANVAS))
 
     assert native == "data:,", native
     assert stealthy == native
+
+
+@requires_chromium
+def test_the_noise_goes_by_the_canvas_size_after_the_type_is_converted() -> None:
+    """Review of c6b: a canvas 0 wide whose type's toString sizes it and draws is exported with the noise. A size read
+    before the conversion saw 0, skipped the noise, and exported what the native page does."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_GIVES_AN_EMPTY_CANVAS_A_SIZE))
+
+    assert native == [200, 100, 100, 255], native
+    assert stealthy == [201, 100, 100, 255], stealthy
 
 
 @requires_chromium
