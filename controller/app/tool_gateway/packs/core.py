@@ -160,11 +160,10 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.get_auth_profile",
             description=(
-                "Inspect one saved auth profile by name: its normalized name, on-disk "
-                "profile directory, storage-state metadata, and any saved profile "
-                "metadata. Profiles are created with browser.save_auth_profile and loaded "
-                "into new sessions via browser.create_session; discover names with "
-                "browser.list_auth_profiles."
+                "Inspect one saved auth profile by name: its normalized name, storage-state "
+                "metadata, and any saved profile metadata. Profiles are created with "
+                "browser.save_auth_profile and loaded into new sessions via "
+                "browser.create_session; discover names with browser.list_auth_profiles."
             ),
             input_model=AuthProfileNameInput,
             handler=gateway._get_auth_profile,

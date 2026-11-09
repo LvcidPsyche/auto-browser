@@ -59,11 +59,15 @@ All notable changes to auto-browser are documented here.
   `/mesh/receive` is signed and not checked; `/mcp` (and `/mcp/`, which only redirects to it, behind a `root_path` as
   well) keeps its own Origin check and `MCP_ALLOWED_ORIGINS`, so a browser MCP client on a listed origin goes on
   working, while `/mcp/tools/call` is checked like any other write. A controller with a token is not affected.
-- **Another operator's auth profile now answers as one that does not exist.** `GET /auth-profiles/{name}` on a profile
-  someone else owns answers `404` and `Not found: <name>`, byte for byte what a missing profile gets, where it
-  answered `403`, and `browser.get_auth_profile` answers as it does for a missing name instead of naming the owner.
-  A client that took `403` to mean "it exists but is not yours" must treat `404` as either. `profile_dir` is gone from
-  that answer and from `GET /auth-profiles`: use `profile_name`.
+- **Another operator's auth profile now answers as one that does not exist, everywhere it is read.** A caller reading
+  a profile someone else owns gets what a missing profile gets, byte for byte: `GET /auth-profiles/{name}` and
+  `GET /auth-profiles/{name}/export` answer `404`, as `POST /sessions` does with `auth_profile` or a
+  `storage_state_path` under `profiles/`, where each answered `403`, and `browser.get_auth_profile` and
+  `browser.create_session` answer their not-found text, where they named the owner. A client that took `403` to mean
+  "it exists but is not yours" must treat `404` as either. A save over such a profile and an import that overwrites
+  one stay refused (`403`), and the refusal no longer names the owner. `profile_dir` and `auth_state.path` are gone
+  from the answers of `GET /auth-profiles/{name}`, `GET /auth-profiles` and `browser.get_auth_profile`: use
+  `profile_name`. `GET /sessions/{id}/auth-state` keeps its `path`.
 - **The network log of a page `ALLOWED_HOSTS` refuses is now refused, as a raw CDP read of it is.**
   `GET /sessions/{id}/network/requests` and `GET /sessions/{id}/network-log` answer `403` with the same fixed text as
   the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. A session
@@ -112,10 +116,13 @@ All notable changes to auto-browser are documented here.
   whatever its scheme, so a `javascript:` or `data:` one clicked in the replay page ran on the controller's own
   origin. Any other scheme is now shown as plain text, and the link opens with `rel="noopener noreferrer"`. (AUTH-37)
 - **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
-  `GET /auth-profiles/{name}` answered `403` for a foreign profile and `404` for a missing one, and
-  `browser.get_auth_profile`'s error named the owner. Both now answer as for a profile that does not exist (see the
-  upgrade note). `profile_dir`, the profile's absolute path on the controller, is no longer in that answer or in
-  `GET /auth-profiles`. (AUTH-31)
+  `GET /auth-profiles/{name}`, `GET /auth-profiles/{name}/export` and `POST /sessions` with `auth_profile` or a
+  `storage_state_path` under `profiles/` answered `403` for a foreign profile and `404` for a missing one, and
+  `browser.get_auth_profile` and `browser.create_session` named the owner. Each now answers as it does for a profile
+  that does not exist (see the upgrade note), and a refused save over such a profile, or an import that would
+  overwrite one, no longer names its owner. `profile_dir` and `auth_state.path`, the profile's absolute paths on the
+  controller, are no longer in the answer of `GET /auth-profiles/{name}` or `GET /auth-profiles`, and the
+  `browser.get_auth_profile` tool no longer promises them. (AUTH-31)
 - **A page `ALLOWED_HOSTS` refuses no longer shows in the network log, on any surface.** The log holds the URL of
   every request, and a page that had moved onto a refused host had its own requests read back through
   `GET /sessions/{id}/network/requests`, `GET /sessions/{id}/network-log`, `browser.get_network_log` and the

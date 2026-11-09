@@ -233,6 +233,7 @@ class AuthProfileOwnershipTests(unittest.TestCase):
 
         Naming the profile's state file directly used to skip the owner check
         that `auth_profile` gets, so Bob could open a session logged in as Alice.
+        Bob's answer is the one for a file that is not there (AUTH-31).
         """
         self.as_operator("alice")
         self.save("alice-login")
@@ -243,7 +244,7 @@ class AuthProfileOwnershipTests(unittest.TestCase):
             "./profiles/../profiles/alice-login/state.json",
             "profiles/alice-login/../alice-login/state.json",
         ):
-            with self.subTest(path=path), self.assertRaises(PermissionError):
+            with self.subTest(path=path), self.assertRaises(FileNotFoundError):
                 self.service.storage_state_source(path)
 
         self.as_operator("alice")

@@ -233,12 +233,12 @@ async def test_a_first_save_killed_between_its_renames_leaves_no_state_without_a
 
     assert_no_state_another_operator_may_open(service)
     assert [name for name in profile_files(service) if name.startswith("state.json")] == []
-    # Metadata naming alice and no state: hidden from bob, and no login to load for alice.
+    # Metadata naming alice and no state: hidden from bob, as a profile that does not exist, and no login for alice.
     with acting_as(BOB):
         assert await service.list() == []
-        with pytest.raises(PermissionError):
+        with pytest.raises(KeyError):
             await service.get(PROFILE)
-        with pytest.raises(PermissionError):
+        with pytest.raises(FileNotFoundError):
             await service.export(PROFILE)
     with acting_as(ALICE):
         [listed] = await service.list()

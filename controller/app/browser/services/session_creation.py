@@ -106,8 +106,7 @@ class SessionCreation:
             # The takeover the report described: opening a session against
             # someone else's stored profile drives a browser already logged in
             # as them. Authorize before the state is ever loaded.
-            self.manager.auth_profiles.require_access(auth_profile, action="opening a session from an auth profile")
-            source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
+            source_path = self.manager.auth_profiles.state_path_to_load(auth_profile)
         elif storage_state_path:
             source_path = self.manager.auth_profiles.storage_state_source(storage_state_path)
             await self.manager.auth_profiles.require_session_record_access(source_path)
