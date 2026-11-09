@@ -270,8 +270,12 @@ def _offset_field() -> Any:
     )
 
 
+# The most characters one tool result may return, whatever max_chars asks for (the MCP DOM resource's cap too).
+MAX_TOOL_RESULT_CHARS = 1_000_000
+
+
 def _max_chars_field() -> Any:
-    return Field(default=20_000, ge=1_000, le=1_000_000, description="Most characters to return.")
+    return Field(default=20_000, ge=1_000, le=MAX_TOOL_RESULT_CHARS, description="Most characters to return.")
 
 
 class ReadDownloadInput(SessionIdInput):

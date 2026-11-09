@@ -29,7 +29,7 @@ from app.action_errors import BrowserActionError
 from app.browser import page_read
 from app.browser.services import sessions as sessions_module
 from app.browser_manager import BrowserSession
-from app.mcp_transport import McpHttpTransport
+from app.mcp_transport import McpHttpTransport, McpSession
 from app.models import McpToolCallRequest
 from app.network_inspector import url_origin
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
@@ -681,10 +681,12 @@ async def test_the_dom_resource_is_refused_when_its_page_moved_while_it_was_read
         server_version="0",
         manager=manager,
     )
+    mcp_session = McpSession(id="m", protocol_version="2025-11-25", client_info={}, client_capabilities={})
 
-    resource = await transport._read_resource("browser://s1/dom")
+    response = await transport._handle_resource_read(1, mcp_session, {"uri": "browser://s1/dom"})
 
-    assert resource is None or LEAKED not in str(resource), resource
+    assert json.loads(response.body)["error"]["code"] == -32603, response.body
+    assert LEAKED not in response.body.decode(), response.body
 
 
 async def test_an_mcp_page_tool_gives_up_on_a_session_another_call_keeps(tmp_path: Path, monkeypatch) -> None:

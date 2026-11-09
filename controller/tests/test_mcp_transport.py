@@ -772,11 +772,11 @@ class McpResourceEncodingTests(unittest.IsolatedAsyncioTestCase):
                     parsed = json.loads(resource["text"], parse_constant=lambda name: self.fail(f"{uri} sent {name}"))
                     self.assertIn(None, [*parsed[0].values()])
 
-    async def test_a_resource_that_cannot_be_encoded_is_not_served_and_is_logged(self) -> None:
+    async def test_a_resource_that_cannot_be_encoded_is_not_served(self) -> None:
         transport = self._transport(object())
         for uri in self.URIS:
-            with self.subTest(uri=uri), self.assertLogs("app.mcp_transport", "WARNING"):
-                self.assertIsNone(await transport._read_resource(uri))
+            with self.subTest(uri=uri), self.assertRaises(TypeError):
+                await transport._read_resource(uri)
 
 
 if __name__ == "__main__":

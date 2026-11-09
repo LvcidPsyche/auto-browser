@@ -15,12 +15,14 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from . import events as _events
+from .action_errors import SessionNotFoundError
 from .audit import get_current_operator
 from .browser.page_read import bounded, locked_read
 from .mcp_instructions import server_instructions
 from .models import McpToolCallRequest, OperatorIdentity
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .tool_gateway.gateway import _json_safe
+from .tool_inputs import MAX_TOOL_RESULT_CHARS
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
@@ -38,6 +40,9 @@ CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 INITIALIZATION_REQUIRED_ERROR = -32005
 # Readable, but no event ever notifies them (_updated_resource_uris), so a subscription would wait for ever.
 NEVER_NOTIFIED_RESOURCES = frozenset({"browser://audit/events"})
+# The most characters of a page's DOM one read returns: the most a tool result may return, so a page a tool could
+# hand over whole is not cut here. A longer page ends in a comment that says so and names the paging tool.
+MAX_DOM_RESOURCE_CHARS = MAX_TOOL_RESULT_CHARS
 # The most MCP sessions the table keeps, and the most one token-verified operator keeps: past its
 # cap an operator loses its own least recently used sessions, so its initialize flood cannot evict
 # another operator's. Unowned sessions (shared token, no token) are bounded by the table's cap alone.
@@ -259,27 +264,7 @@ class McpHttpTransport:
                 headers=self._session_headers(session),
             )
         if method == "resources/read":
-            uri = params.get("uri")
-            if not isinstance(uri, str) or not uri:
-                return self._json_error_response(
-                    request_id,
-                    -32602,
-                    "resources/read requires a non-empty uri",
-                    headers=self._session_headers(session),
-                )
-            content = await self._read_resource(uri)
-            if content is None:
-                return self._json_error_response(
-                    request_id,
-                    -32002,
-                    f"Resource not found: {uri}",
-                    headers=self._session_headers(session),
-                )
-            return self._json_result_response(
-                request_id,
-                {"contents": [content]},
-                headers=self._session_headers(session),
-            )
+            return await self._handle_resource_read(request_id, session, params)
         if method == "resources/subscribe":
             return await self._handle_resource_subscribe(request_id, session, params)
         if method == "resources/unsubscribe":
@@ -347,8 +332,42 @@ class McpHttpTransport:
             ]
         return resources
 
+    async def _handle_resource_read(
+        self,
+        request_id: Any,
+        session: McpSession,
+        params: dict[str, Any],
+    ) -> Response:
+        uri = params.get("uri")
+        headers = self._session_headers(session)
+        if not isinstance(uri, str) or not uri:
+            return self._json_error_response(
+                request_id,
+                -32602,
+                "resources/read requires a non-empty uri",
+                headers=headers,
+            )
+        # The one place a read's failure becomes an answer. -32002 is only for what does not exist; a session of
+        # another operator's raises SessionNotFoundError, and must read the same as a resource that was never there.
+        not_found = self._json_error_response(request_id, -32002, f"Resource not found: {uri}", headers=headers)
+        try:
+            content = await self._read_resource(uri)
+            if content is None:
+                return not_found
+            return self._json_result_response(request_id, {"contents": [content]}, headers=headers)
+        except SessionNotFoundError:
+            return not_found
+        except Exception as exc:
+            # The class only, and the URI quoted, as it is caller input: an exception's text can carry a page URL
+            # with a token in it, so the client's message is fixed text and the log keeps the class.
+            logger.warning("MCP resource read of %r failed: %s", uri, type(exc).__name__)
+            return self._json_error_response(request_id, -32603, f"Could not read resource: {uri}", headers=headers)
+
     async def _read_resource(self, uri: str) -> dict[str, Any] | None:
-        """Fetch the content of a specific resource URI."""
+        """Fetch the content of a resource URI, or None if it names no resource.
+
+        Any other failure raises, and _handle_resource_read decides the answer.
+        """
         if uri == "browser://sessions":
             if self.manager is None:
                 return {"uri": uri, "mimeType": "application/json", "text": "[]"}
@@ -372,33 +391,26 @@ class McpHttpTransport:
         if self.manager is None:
             return None
 
-        try:
-            if resource == "screenshot":
-                shot = await self.manager.capture_screenshot(session_id, label="mcp-resource")
-                shot_path = Path(shot["screenshot_path"])
-                if shot_path.exists():
-                    import base64
+        if resource == "screenshot":
+            import base64
 
-                    img_b64 = base64.standard_b64encode(shot_path.read_bytes()).decode()
-                    return {"uri": uri, "mimeType": "image/png", "blob": img_b64}
-                return None
+            shot = await self.manager.capture_screenshot(session_id, label="mcp-resource")
+            img_b64 = base64.standard_b64encode(Path(shot["screenshot_path"]).read_bytes()).decode()
+            return {"uri": uri, "mimeType": "image/png", "blob": img_b64}
 
-            if resource == "dom":
-                session = await self.manager.get_session(session_id)
-                async with locked_read(self.manager, session):
-                    html = await bounded(session.page.content())
-                return {"uri": uri, "mimeType": "text/html", "text": html}
+        if resource == "dom":
+            session = await self.manager.get_session(session_id)
+            async with locked_read(self.manager, session):
+                html = await bounded(session.page.content())
+            return {"uri": uri, "mimeType": "text/html", "text": _capped_dom(html)}
 
-            if resource == "console":
-                result = await self.manager.get_console_messages(session_id, limit=50)
-                return _json_resource(uri, result.get("items", []))
+        if resource == "console":
+            result = await self.manager.get_console_messages(session_id, limit=50)
+            return _json_resource(uri, result.get("items", []))
 
-            if resource == "network":
-                result = await self.manager.get_network_log(session_id, limit=100)
-                return _json_resource(uri, result.get("entries", []))
-
-        except Exception as exc:
-            logger.debug("resource read error for %s: %s", uri, exc)
+        if resource == "network":
+            result = await self.manager.get_network_log(session_id, limit=100)
+            return _json_resource(uri, result.get("entries", []))
 
         return None
 
@@ -812,13 +824,19 @@ def _least_recently_used(sessions: Iterable[McpSession]) -> list[McpSession]:
     return sorted(sessions, key=lambda item: (item.last_used_at or item.created_at or "", item.id))
 
 
-def _json_resource(uri: str, payload: Any) -> dict[str, Any] | None:
+def _json_resource(uri: str, payload: Any) -> dict[str, Any]:
     """A JSON resource, encoded as strictly as a tool result: a NaN or an infinity (a console or network entry can
     carry one) is null, not the bare NaN strict parsers reject, and an object is refused rather than sent as its
-    repr. One that cannot be encoded is not served (an unknown resource), and the reason is logged."""
-    try:
-        text = json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError, RecursionError) as exc:
-        logger.warning("MCP resource %s could not be encoded as JSON: %s", uri, exc)
-        return None
+    repr. A payload that cannot be encoded raises, and is answered as a failed read (-32603)."""
+    text = json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False)
     return {"uri": uri, "mimeType": "application/json", "text": text}
+
+
+def _capped_dom(html: str) -> str:
+    """A page's HTML, cut to MAX_DOM_RESOURCE_CHARS, with a trailing comment saying so when it was cut."""
+    if len(html) <= MAX_DOM_RESOURCE_CHARS:
+        return html
+    return (
+        f"{html[:MAX_DOM_RESOURCE_CHARS]}<!-- auto-browser: cut at {MAX_DOM_RESOURCE_CHARS:,} of {len(html):,} "
+        "characters; browser.get_html pages through the whole text -->"
+    )

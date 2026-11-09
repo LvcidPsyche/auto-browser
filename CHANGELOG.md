@@ -15,6 +15,13 @@ All notable changes to auto-browser are documented here.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
   silent, as it always was, and `resources/unsubscribe` still removes it.
+- **A failed `resources/read` now answers `-32603`, and a page's DOM is capped.** A read that failed for any reason
+  but an unknown resource or session (a timeout, a closed page, a policy refusal, a screenshot file that has gone, a
+  result that cannot be encoded) answered `-32002` "Resource not found", and a failed `browser://sessions` or
+  `browser://audit/events` read was an unhandled `500`. A client that took `-32002` to mean a resource is gone now
+  gets `-32603` for those, and should retry or report them. `browser://<id>/dom` now returns at most 1,000,000
+  characters, the most a tool result may return; a longer page ends in an HTML comment that says so and names
+  `browser.get_html`, which pages through the rest.
 
 ### Fixed
 
@@ -26,6 +33,16 @@ All notable changes to auto-browser are documented here.
   observe, action, session and approval events, as listed in `examples/mcp-resources.md`: a console message or a
   network request the page makes by itself notifies nobody until one of those follows. `browser://audit/events` is
   never notified, and subscribing to it is now refused (see the upgrade note). (MCP-10)
+- **`resources/read` no longer reports every failure as a missing resource.** `-32002` now means only that the URI
+  names no resource or the session is not there (another operator's session reads exactly the same); anything else
+  that goes wrong is `-32603`, with a fixed message that names the URI and never the exception's text, which can
+  hold a page URL with a token in it. The controller logs each one at WARNING with the URI and the exception's class,
+  where it was a debug line. A response that cannot be written as JSON (a lone surrogate from a page) is `-32603`
+  too, not a `500`. (MCP-35)
+- **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
+  read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
+  and a longer page ends in an HTML comment that names the cap, the page's length and `browser.get_html`, which
+  pages through the rest. A screenshot read stays a fresh, redacted, page-checked capture. (MCP-35)
 
 ### Changed
 
