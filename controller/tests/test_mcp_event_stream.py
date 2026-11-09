@@ -125,6 +125,17 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         response = await self.transport.handle_delete_request(mcp_request("DELETE", session_id))
         self.assertEqual(response.status_code, 204)
 
+    def listening_session(self, session_id: str, **fields) -> McpSession:
+        """A session eviction counts as listening; the registry is all eviction looks at, so no stream is run."""
+        session = self.new_session(session_id, **fields)
+        self.transport._event_streams[session_id] = asyncio.Event()
+        return session
+
+    @staticmethod
+    def minute_of(index: int) -> str:
+        """A last_used_at that sorts by index, for up to an hour's worth of sessions."""
+        return f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z"
+
     # ── Takeover ────────────────────────────────────────────────────────────
 
     async def test_a_second_get_ends_the_first_stream_and_keeps_the_second(self) -> None:
@@ -250,10 +261,11 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("m1", self.transport._event_streams)
         self.assertEqual(self.pending_tasks(), before)
 
-    async def test_eviction_past_an_owners_cap_ends_that_sessions_stream(self) -> None:
+    async def test_with_every_session_listening_an_owners_cap_ends_the_least_recently_used_stream(self) -> None:
+        """A live stream is the last thing eviction picks, but with nothing else to pick it is still picked."""
         self.transport._sessions.clear()
         for index in range(MAX_MCP_SESSIONS_PER_OWNER):
-            self.new_session(f"newer-{index}", owner="alice", last_used_at=f"2026-01-01T00:00:{index % 60:02d}Z")
+            self.listening_session(f"newer-{index}", owner="alice", last_used_at=self.minute_of(index))
         evicted = self.new_session("evicted", owner="alice")
         with acting_as(ALICE):
             stream = await self.open_stream("evicted")
@@ -263,14 +275,15 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         self.transport._evict_stale_sessions()
 
         self.assertNotIn("evicted", self.transport._sessions)
+        self.assertIn("newer-0", self.transport._sessions, "the next least recently used is kept")
         await stream.ended()
         self.assertEqual(self.queues(), queues - 1)
         self.assertNotIn("evicted", self.transport._event_streams)
 
-    async def test_eviction_by_the_table_cap_ends_that_sessions_stream(self) -> None:
+    async def test_with_every_session_listening_the_table_cap_ends_the_least_recently_used_stream(self) -> None:
         self.transport._sessions.clear()
         for index in range(MAX_MCP_SESSIONS):
-            self.new_session(f"newer-{index}", last_used_at=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z")
+            self.listening_session(f"newer-{index}", last_used_at=self.minute_of(index))
         evicted = self.new_session("evicted")
         stream = await self.open_stream("evicted")
         evicted.last_used_at = OLD
@@ -279,8 +292,66 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         self.transport._evict_stale_sessions()
 
         self.assertNotIn("evicted", self.transport._sessions)
+        self.assertIn("newer-0", self.transport._sessions, "the next least recently used is kept")
         await stream.ended()
         self.assertEqual(self.queues(), queues - 1)
+
+    async def test_an_owners_cap_takes_its_oldest_session_without_a_stream_before_a_silent_listener(self) -> None:
+        """No event since its GET, so its last_used_at is as old as it was: only the live stream keeps it."""
+        self.transport._sessions.clear()
+        listening = self.new_session("listening", owner="alice")
+        with acting_as(ALICE):
+            stream = await self.open_stream("listening")
+        listening.last_used_at = OLD
+        for index in range(MAX_MCP_SESSIONS_PER_OWNER):
+            self.new_session(f"other-{index}", owner="alice", last_used_at=self.minute_of(index))
+
+        self.transport._evict_stale_sessions()
+
+        self.assertIn("listening", self.transport._sessions)
+        self.assertNotIn("other-0", self.transport._sessions)
+        self.assertEqual(len(self.transport._sessions), MAX_MCP_SESSIONS_PER_OWNER)
+        self.assertFalse(stream.task.done())
+
+    async def test_the_table_cap_takes_the_oldest_session_without_a_stream_before_a_silent_listener(self) -> None:
+        """No event since its GET, so its last_used_at is as old as it was: only the live stream keeps it."""
+        self.transport._sessions.clear()
+        listening = self.new_session("listening")
+        stream = await self.open_stream("listening")
+        listening.last_used_at = OLD
+        for index in range(MAX_MCP_SESSIONS):
+            self.new_session(f"other-{index}", last_used_at=self.minute_of(index))
+
+        self.transport._evict_stale_sessions()
+
+        self.assertIn("listening", self.transport._sessions)
+        self.assertNotIn("other-0", self.transport._sessions)
+        self.assertEqual(len(self.transport._sessions), MAX_MCP_SESSIONS)
+        self.assertFalse(stream.task.done())
+
+    async def test_a_client_initializing_into_a_table_of_listeners_keeps_its_session(self) -> None:
+        """The session it is handed has no stream yet: evicted, the id in its answer would already be gone.
+
+        The least recently used listener makes room, once: the next initialize takes the previous new session, which has
+        no stream either, so a flood of initializations cannot walk through the listeners.
+        """
+        init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": PROTOCOL}}
+        self.transport._session_store_path = None  # 500 store writes would prove nothing here
+        for operator, owner, cap in ((ALICE, "alice", MAX_MCP_SESSIONS_PER_OWNER), (None, None, MAX_MCP_SESSIONS)):
+            with self.subTest(owner=owner):
+                self.transport._sessions.clear()
+                self.transport._event_streams.clear()
+                for index in range(cap):
+                    self.listening_session(f"listening-{index}", owner=owner, last_used_at=self.minute_of(index))
+
+                with acting_as(operator):
+                    first = await self.transport.handle_post_request(mcp_request("POST", body=init))
+                    second = await self.transport.handle_post_request(mcp_request("POST", body=init))
+
+                self.assertIn(second.headers[MCP_SESSION_HEADER], self.transport._sessions)
+                self.assertNotIn(first.headers[MCP_SESSION_HEADER], self.transport._sessions)
+                self.assertNotIn("listening-0", self.transport._sessions)
+                self.assertIn("listening-1", self.transport._sessions)
 
     async def test_an_open_stream_counts_as_use_and_is_not_the_one_evicted(self) -> None:
         """A listening client whose stream ended on eviction lost it for no reason: it is the busiest in the table."""

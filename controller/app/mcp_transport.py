@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -629,7 +628,7 @@ class McpHttpTransport:
         self._sessions[session.id] = session
         # Here as well as in _persist_sessions: with no store path configured
         # nothing else bounds the session table.
-        self._evict_stale_sessions()
+        self._evict_stale_sessions(keep=session.id)
         self._persist_sessions()
 
         result = {
@@ -775,20 +774,34 @@ class McpHttpTransport:
             restored[session.id] = session
         self._sessions = restored
 
-    def _evict_stale_sessions(self) -> None:
-        # Least recently used first. Ordering by creation evicted a client that
-        # had been connected (and busy) the longest as soon as 500 newer
-        # sessions, most of them abandoned without a DELETE, piled up behind it.
+    def _evict_stale_sessions(self, *, keep: str | None = None) -> None:
+        # Sessions without a live stream go first, so a client that only listens outlasts a flood of initializations,
+        # and within each group the least recently used goes first. Ordering by creation evicted a client that had been
+        # connected (and busy) the longest as soon as 500 newer sessions, most of them abandoned without a DELETE,
+        # piled up behind it. keep is the session an initialize has just created: see _eviction_order.
         by_owner: dict[str, list[McpSession]] = {}
-        for session in _least_recently_used(self._sessions.values()):
+        for session in self._eviction_order(keep):
             if session.owner is not None:
                 by_owner.setdefault(session.owner, []).append(session)
         for sessions in by_owner.values():
             for session in sessions[: max(0, len(sessions) - MAX_MCP_SESSIONS_PER_OWNER)]:
                 self._forget_session(session.id)
         excess = len(self._sessions) - MAX_MCP_SESSIONS
-        for session in _least_recently_used(self._sessions.values())[: max(0, excess)]:
+        for session in self._eviction_order(keep)[: max(0, excess)]:
             self._forget_session(session.id)
+
+    def _eviction_order(self, keep: str | None) -> list[McpSession]:
+        """Every session without a live stream, then those with one, each least recently used first.
+
+        keep ranks with the live streams: the session of an initialize being answered has had no time to open one, and
+        evicted here the id in its answer would already be gone. It is a session like any other at the next eviction.
+        """
+
+        def order(session: McpSession) -> tuple[bool, str, str]:
+            listening = session.id in self._event_streams or session.id == keep
+            return (listening, session.last_used_at or session.created_at or "", session.id)
+
+        return sorted(self._sessions.values(), key=order)
 
     def _persist_sessions(self) -> None:
         if self._session_store_path is None:
@@ -876,10 +889,6 @@ async def _next_stream_event(queue: asyncio.Queue, stop: asyncio.Event) -> str |
         getter.cancel()
         stopper.cancel()
         await asyncio.gather(getter, stopper, return_exceptions=True)
-
-
-def _least_recently_used(sessions: Iterable[McpSession]) -> list[McpSession]:
-    return sorted(sessions, key=lambda item: (item.last_used_at or item.created_at or "", item.id))
 
 
 def _json_resource(uri: str, payload: Any) -> dict[str, Any]:

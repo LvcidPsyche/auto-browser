@@ -52,8 +52,10 @@ All notable changes to auto-browser are documented here.
   `DELETE` or an eviction past the session caps ends it, at once rather than at its next 15-second keepalive, and a
   stopped stream sends nothing more. A stream blocked sending to a client that has stopped reading, which 1.17.0
   could not stop either, ends when that send returns or the connection goes. Its event queue is released however the
-  stream ends. An open stream counts as use when eviction picks the least recently used session, as a request does,
-  so a client that only listens is not the one dropped. (MCP-11)
+  stream ends. Eviction past the session caps now takes every session without a live stream before any session with
+  one, least recently used first within each, so a client that only listens outlasts a flood of `initialize` requests
+  and goes only when nothing but listeners remain; a client initializing into a table full of listeners keeps its new
+  session. An open stream still counts as use, as a request does, in the last-used time a restart goes by. (MCP-11)
 
 ### Changed
 
