@@ -86,9 +86,9 @@ All notable changes to auto-browser are documented here.
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
   no usable key. `GET /crons`, `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and
   `browser.create_cron_job` answered the key's first 8 characters in `webhook_key_preview`: they now answer
-  `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key cannot
-  be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key` makes a
-  new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
+  `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key
+  cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
+  makes a new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
   `browser.revoke_cron_webhook_key` removes it.
 - **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
