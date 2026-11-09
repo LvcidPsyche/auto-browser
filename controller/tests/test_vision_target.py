@@ -110,6 +110,14 @@ class VisionTargeterAsyncTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(reply=reply), self.assertRaises(VisionReplyError):
                 await self._find(reply)
 
+    async def test_a_reply_without_found_raises_the_named_error(self) -> None:
+        # The prompt requires the key, so a reply object without it is no more an answer than a non-boolean found.
+        for reply in ("{}", '{"x": 3, "y": 4, "confidence": 0.9}'):
+            with self.subTest(reply=reply):
+                with self.assertRaises(VisionReplyError) as raised:
+                    await self._find(reply)
+                self.assertIn("missing", str(raised.exception))
+
     async def test_a_found_reply_with_a_bad_number_raises_the_named_error(self) -> None:
         replies = (
             '{"found": true, "x": "abc", "y": 2, "confidence": 0.5}',

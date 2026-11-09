@@ -208,9 +208,9 @@ class VisionTargeter:
                 break
 
         reply = _reply_object(raw_text)
-        found = reply.get("found", False)
+        found = reply.get("found")
         if not isinstance(found, bool):
-            raise _refused(raw_text, "its found field was neither true nor false", type(found).__name__)
+            raise _refused(raw_text, "its found field was missing or neither true nor false", type(found).__name__)
         # A not-found reply's coordinates are not read: it may omit them or send junk.
         x, y, confidence = _checked_point(reply, raw_text, image_bytes) if found else (0, 0, 0.0)
         return {

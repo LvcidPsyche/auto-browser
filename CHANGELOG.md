@@ -135,8 +135,8 @@ All notable changes to auto-browser are documented here.
   refuses them, so a client on it was promised what the server would not do. `2025-11-25` and `2025-06-18` remain.
   (MCP-15)
 - **A garbled reply from `browser.find_by_vision`'s model is now an error, where it was `found: false`.** A reply that
-  was not a JSON object, a `found` that was neither true nor false, or a `found: true` reply whose `x`, `y` or
-  `confidence` was not a finite number (a boolean is not one) or whose point fell outside the screenshot read as a
+  was not a JSON object, a `found` that was missing or neither true nor false, or a `found: true` reply whose `x`, `y`
+  or `confidence` was not a finite number (a boolean is not one) or whose point fell outside the screenshot read as a
   normal not-found or failed with a raw Python error. Each is now a tool error with a fixed message that does not
   quote the reply; `found: false` stays a normal answer, and its coordinates are not read. The reply is no longer
   logged whole or returned as `raw_response`: only its length and the failure's class are logged, as a reply is model
