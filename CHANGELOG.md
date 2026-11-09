@@ -8,43 +8,43 @@ All notable changes to auto-browser are documented here.
 
 - **A `MESH_TIMESTAMP_WINDOW` above 250 seconds, or at or below 0, now stops startup.** Set it inside those limits
   (the default is 30), on a controller with the mesh off too. With the mesh on, lowering it needs the wait that
-  `docs/mesh.md` describes for any lowering: the startup check assumes the last process ran with no larger window,
-  so start this release only once the old window has passed since the old controller last accepted an envelope
-  (stop it, then wait that long).
+  `docs/mesh.md` describes for any lowering: the startup check assumes the last process ran with no larger window, so
+  start this release only once the old window has passed since the old controller last accepted an envelope (stop it,
+  then wait that long).
 
 ### Security
 
 - **The controller image now installs its whole Python dependency tree from `controller/constraints.txt`, pinned at
   releases at least 72 hours old, and CI's Python test installs take no younger release.** `requirements.txt` and
   `requirements-dev.txt` pin only the packages the controller names, so every build took the newest release of each
-  package below them, however new: a build on 2026-11-06 took pydantic-core 2.50.4, uploaded the day before. The
-  file is uv's universal resolution of both files for Python 3.11 and later, with its command and cutoff in its
-  header. The host tests and the devcontainer install under it too, and CI's host tests hold what it does not pin,
-  the build backend of the editable install, to releases at least 72 hours old. The dependency audits read the
-  file as it is, where they resolved the top-level pins afresh: CI's, on Linux and Python 3.11 as the image is,
-  checks the versions the image installs, and `scripts/release_audit.py`'s the versions the file gives the platform
-  and Python it runs on. A requirements file moved to a release the file pins at another fails CI's
-  install until the file is generated again. The client and LangChain tests still take the newest release of each
-  package, as those libraries' users do, but only one at least 72 hours old, their build backends included.
-  Dependabot holds version updates three days, as its configuration now says. (R5C-14)
+  package below them, however new: a build on 2026-11-06 took pydantic-core 2.50.4, uploaded the day before. The file
+  is uv's universal resolution of both files for Python 3.11 and later, with its command and cutoff in its header. The
+  host tests and the devcontainer install under it too, and CI's host tests hold what it does not pin, the build
+  backend of the editable install, to releases at least 72 hours old. The dependency audits read the file as it is,
+  where they resolved the top-level pins afresh: CI's, on Linux and Python 3.11 as the image is, checks the versions
+  the image installs, and `scripts/release_audit.py`'s the versions the file gives the platform and Python it runs on.
+  A requirements file moved to a release the file pins at another fails CI's install until the file is generated
+  again. The client and LangChain tests still take the newest release of each package, as those libraries' users do,
+  but only one at least 72 hours old, their build backends included. Dependabot holds version updates three days, as
+  its configuration now says. (R5C-14)
 - **A restricted witness receipt now withholds secrets at any depth, and in its metadata and approval reason too.** A
   receipt in restricted evidence mode (a confidential session, or a sensitive, high-risk or auth-material action)
   blanked five top-level target keys (`text`, `text_preview`, `file_path`, `password`, `totp_secret`) and what a
-  select_option chose, and kept its metadata and its approval's reason as given. It now withholds, at any depth of
-  the target and the metadata, those keys, every key whose name holds a word the run trace redacts by
-  (`authorization`, `cookie`, `api-key`, `api_key`, `token`, `password`, `secret`), and the free text an agent or a
-  tool call wrote: a `reason` key, and the approval's reason, which for a governed tool call previews its arguments,
-  and an operator's `comment` on an approval decision. Each URL there (a `url` key's) now has its query and fragment
-  scrubbed as the run trace scrubs a URL's, by the PII scrubber (so not with `PII_SCRUB_ENABLED` or
-  `PII_SCRUB_NETWORK` off): a navigate's kept an OAuth code or a token in full. Receipts recorded without a policy
-  outcome were standard, and kept the reason in full, in the approval and again in the metadata: an approval's
-  receipts (its request, decision and execution) now take the evidence mode of the action it approves, as the
-  approval describes it, so those of an action marked sensitive, a high-risk one or one that moves auth material are
-  restricted as that action's own receipt is, in a normal session too (a field an action finds sensitive only as it
-  runs restricts that action's own receipt, not its approval's, which hold none of what it typed); and every approval
-  receipt of a confidential session, like a human takeover's receipt there, is restricted. The approval store still
-  keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the comment. A
-  hosted Witness service and an exported bundle receive the receipt as recorded.
+  select_option chose, and kept its metadata and its approval's reason as given. It now withholds, at any depth of the
+  target and the metadata, those keys, every key whose name holds a word the run trace redacts by (`authorization`,
+  `cookie`, `api-key`, `api_key`, `token`, `password`, `secret`), and the free text an agent or a tool call wrote: a
+  `reason` key, and the approval's reason, which for a governed tool call previews its arguments, and an operator's
+  `comment` on an approval decision. Each URL there (a `url` key's) now has its query and fragment scrubbed as the run
+  trace scrubs a URL's, by the PII scrubber (so not with `PII_SCRUB_ENABLED` or `PII_SCRUB_NETWORK` off): a navigate's
+  kept an OAuth code or a token in full. Receipts recorded without a policy outcome were standard, and kept the reason
+  in full, in the approval and again in the metadata: an approval's receipts (its request, decision and execution) now
+  take the evidence mode of the action it approves, as the approval describes it, so those of an action marked
+  sensitive, a high-risk one or one that moves auth material are restricted as that action's own receipt is, in a
+  normal session too (a field an action finds sensitive only as it runs restricts that action's own receipt, not its
+  approval's, which hold none of what it typed); and every approval receipt of a confidential session, like a human
+  takeover's receipt there, is restricted. The approval store still keeps an approval's reason and its decision's
+  comment, and the audit log a takeover's reason and the comment. A hosted Witness service and an exported bundle
+  receive the receipt as recorded.
 - **The MCP bridges no longer show the agent a character or a byte of a token they cannot send.** A bearer token
   holding a character outside latin-1 (from `--bearer-token`, `AUTO_BROWSER_BEARER_TOKEN` or the token file), which an
   HTTP header cannot carry, was answered as an unexpected bridge failure quoting http.client's encoding error, which
@@ -61,21 +61,22 @@ All notable changes to auto-browser are documented here.
   each query value of 8 or more characters, in each of those forms; a structured detail is shown as JSON after its
   strings are redacted; a forwarded JSON-RPC error's message and its data are redacted, the data keeping its shape (a
   result is never rewritten); and the line a bridge prints on stderr for an unexpected failure is redacted as its
-  answer is. A list or an object nested more than 100 deep in a detail or the data is replaced by `[redacted: nested
-  too deep]`, not walked, since a walk that deep would run out of stack and end the bridge with no answer. A response body
-  nested too deep for Python's `json` to parse (`RecursionError`) is answered as an unreadable one is, with its HTTP
-  status, not as an unexpected bridge failure. An answer `json` parsed but cannot write back (on Python 3.14 the two
-  limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is not a string or a
-  number, and a line from the client too deep to parse, or holding an integer of more than 4300 digits, with `-32700`,
-  where the `RecursionError` or `ValueError` ended the bridge with no answer. A short secret is no longer replaced
-  again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a userinfo and dropped.
+  answer is. A list or an object nested more than 100 deep in a detail or the data is replaced by
+  `[redacted: nested too deep]`, not walked, since a walk that deep would run out of stack and end the bridge with no
+  answer. A response body nested too deep for Python's `json` to parse (`RecursionError`) is answered as an unreadable
+  one is, with its HTTP status, not as an unexpected bridge failure. An answer `json` parsed but cannot write back (on
+  Python 3.14 the two limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is
+  not a string or a number, and a line from the client too deep to parse, or holding an integer of more than 4300
+  digits, with `-32700`, where the `RecursionError` or `ValueError` ended the bridge with no answer. A short secret is
+  no longer replaced again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a
+  userinfo and dropped.
 - **The Python client's and the LangChain tools' errors no longer show the bearer token or a secret of the controller
   URL.** The client's `AutoBrowserError` quoted a server's error detail as it came, so a proxy's or gateway's detail
   that echoed the base URL (its password, a token in its query) or the bearer token was shown whole; its `detail` and
   its message now leave them out as the MCP bridges' answers do, any other `user@` run included, and keep the detail's
   shape. The LangChain tool, `AutoBrowserTool.list_tools` and `AutoBrowserNode` raised httpx's `HTTPStatusError` for
-  an answer that was not 2xx, whose message names the request URL whole, password, query and fragment included; it
-  now names the URL without them (the path is kept), in httpx's words otherwise, and leaves them out of the server's
+  an answer that was not 2xx, whose message names the request URL whole, password, query and fragment included; it now
+  names the URL without them (the path is kept), in httpx's words otherwise, and leaves them out of the server's
   reason phrase too. httpx's own errors (a connection or protocol failure), which both let through, are now raised
   with them left out as well, their type and request kept: the one for an answer httpx cannot read quotes what the
   server sent, which can echo the request line or a header. The URL's secrets count there, and in a server's detail,
@@ -84,44 +85,47 @@ All notable changes to auto-browser are documented here.
   pairs alone too (a request's own parameter replaces one of the same name, so the query is then not sent whole), and
   so do the `Authorization: Basic` credentials httpx sends for the URL's user name and password (their base64); the
   MCP bridges, which share the client's redaction, send no such header. httpx itself still logs every request at INFO
-  on its `httpx` logger, naming the URL as sent (userinfo and query included) and the server's reason
-  phrase: the packages do not own that
-  logger, and a filter added at import would change the logging of everything else in the process, so they leave it
-  alone, and their READMEs now say to keep a secret in the token, not in the base URL. A tool's own error (`isError`),
-  which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the controller sent it, as the MCP
-  bridges pass on a tool call's result. A token httpx cannot send in a header (one holding a line break, a NUL, a vertical tab, a form feed or a character outside ASCII) failed the first request with httpx's error, which quoted the whole header for the first four and named a character outside ASCII and its position; the client and the LangChain tools now refuse it, and a token holding any other control character but a tab (httpx sent those as they were), with a `ValueError` naming `token`, `bearer_token` or the
-  token file, never the token; a token file that is not UTF-8 text, whose `UnicodeDecodeError` named one of its bytes
-  and its position, now raises a `ValueError` naming the file and saying so, as the MCP bridges' answer does. The
-  client refuses an `Authorization` header given in `headers` the same way, and leaves its credentials out of its
-  errors as it leaves the token out. It refuses more than one (`headers` can hold one per case of the name, and httpx
-  sends each), and a token from `token` or `token_file` now replaces every one of them, where one whose name differed
-  in case from `Authorization` was sent beside the token's.
+  on its `httpx` logger, naming the URL as sent (userinfo and query included) and the server's reason phrase: the
+  packages do not own that logger, and a filter added at import would change the logging of everything else in the
+  process, so they leave it alone, and their READMEs now say to keep a secret in the token, not in the base URL. A
+  tool's own error (`isError`), which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the
+  controller sent it, as the MCP bridges pass on a tool call's result. A token httpx cannot send in a header (one
+  holding a line break, a NUL, a vertical tab, a form feed or a character outside ASCII) failed the first request with
+  httpx's error, which quoted the whole header for the first four and named a character outside ASCII and its
+  position; the client and the LangChain tools now refuse it, and a token holding any other control character but a
+  tab (httpx sent those as they were), with a `ValueError` naming `token`, `bearer_token` or the token file, never the
+  token; a token file that is not UTF-8 text, whose `UnicodeDecodeError` named one of its bytes and its position, now
+  raises a `ValueError` naming the file and saying so, as the MCP bridges' answer does. The client refuses an
+  `Authorization` header given in `headers` the same way, and leaves its credentials out of its errors as it leaves
+  the token out. It refuses more than one (`headers` can hold one per case of the name, and httpx sends each), and a
+  token from `token` or `token_file` now replaces every one of them, where one whose name differed in case from
+  `Authorization` was sent beside the token's.
 - **A screenshot that is to be PII-redacted is no longer served before its redaction is done.** With
   `PII_SCRUB_SCREENSHOT` on, a capture was written straight to the name `/artifacts` serves it under, and OCR and the
   redaction then ran on that file, so the raw image was one request away for as long as OCR took; and the redacted
   bytes were written over it in place, so a write cut short left a partly written image there. A capture, an
   observation's screenshot, an action's before and after snapshots, a share frame and the copies the compare tool
-  redacts are now written under a hidden name beside their published one, redacted there (the redacted bytes through
-  a temporary file and `os.replace`), and only then moved onto the published name with `os.replace`; one with nothing
-  to redact, or that could not be scrubbed (which its result says), is moved there as it is. A redaction that does
-  not finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name, and its hidden file
-  goes too, after any write to it a worker thread had begun, which a cancel (a shutdown's too) does not stop. A
-  staged screenshot becomes the one that vision targeting (`take_screenshot=false`) and the compare tool reuse only
-  once it is published; until then they reuse the one before it. A screenshot that is not to be redacted (scrubbing
-  off, or an action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
-- **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so
-  a CSV export of customers gave the agent every email address and SSN in it, while console messages and network
-  bodies were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the MIME type its file name maps to in
-  Python's built-in table, as a network body is by its content type (a JSON or JavaScript type, which on the image's
-  Python 3.11 is `.json`, `.js`, `.mjs` and `.webmanifest`, by its members' names; any other as plain text), off
-  the event loop; the result's new `pii_scrub` says whether the scrub ran and how many redactions it made, and a
-  read that redacted something is audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The
-  file at the download's artifact URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not
-  scrubbed" to "Scrubbed".
+  redacts are now written under a hidden name beside their published one, redacted there (the redacted bytes through a
+  temporary file and `os.replace`), and only then moved onto the published name with `os.replace`; one with nothing to
+  redact, or that could not be scrubbed (which its result says), is moved there as it is. A redaction that does not
+  finish (a strict-mode refusal, an error, a cancel) leaves nothing at the published name, and its hidden file goes
+  too, after any write to it a worker thread had begun, which a cancel (a shutdown's too) does not stop. A staged
+  screenshot becomes the one that vision targeting (`take_screenshot=false`) and the compare tool reuse only once it
+  is published; until then they reuse the one before it. A screenshot that is not to be redacted (scrubbing off, or an
+  action snapshot with `PII_SCRUB_ACTION_SCREENSHOTS=false`) is still written straight to its name.
+- **A download read with `browser.read_download` is now PII-scrubbed.** Its text came back as the file held it, so a
+  CSV export of customers gave the agent every email address and SSN in it, while console messages and network bodies
+  were scrubbed. Under `PII_SCRUB_ENABLED` the text is now scrubbed by the MIME type its file name maps to in Python's
+  built-in table, as a network body is by its content type (a JSON or JavaScript type, which on the image's Python
+  3.11 is `.json`, `.js`, `.mjs` and `.webmanifest`, by its members' names; any other as plain text), off the event
+  loop; the result's new `pii_scrub` says whether the scrub ran and how many redactions it made, and a read that
+  redacted something is audited as `pii_redaction` (layer `download`) under `PII_SCRUB_AUDIT_REPORT`. The file at the
+  download's artifact URL is unchanged. `docs/deployment.md` moves downloads read this way from "Not scrubbed" to
+  "Scrubbed".
 - **The audit log is documented as not scrubbed.** The PII scrubber's module description listed "audit metadata:
-  sensitive fields masked before writing to audit log" among its layers, but nothing masks an audit event: its
-  details are stored as written (a navigated URL keeps its query). It now says what `PII_SCRUB_AUDIT_REPORT` does,
-  which is to add `pii_redaction` events (a scrub's layer, hit count and pattern names, never the values), and
+  sensitive fields masked before writing to audit log" among its layers, but nothing masks an audit event: its details
+  are stored as written (a navigated URL keeps its query). It now says what `PII_SCRUB_AUDIT_REPORT` does, which is to
+  add `pii_redaction` events (a scrub's layer, hit count and pattern names, never the values), and
   `docs/deployment.md` lists the audit log under "Not scrubbed".
 - **`browser.get_html` with `text_only` and `browser.find_elements` now read the page in the controller's isolated
   world.** Their scripts ran in the page's own JavaScript world, so a page that replaced a DOM getter or a built-in
@@ -129,39 +133,39 @@ All notable changes to auto-browser are documented here.
   text and elements in place of what it shows, and saw what the agent searched for. They now run where the
   observation's scripts already ran (`app/browser/element_ids.py`), which shares the page's DOM and none of its
   JavaScript. `browser.eval_js` still runs in the page's world, as an expression is there to read the page's own
-  state, and so do the local-storage tools, which read and write what the page can itself, and the bot-challenge
-  check after each action, which reads only the title, text and frames the page writes as it likes in either world.
-  An invalid CSS selector in `find_elements` now answers with a structured `invalid_selector` error, as an invalid
-  regex answers `invalid_regex`. Every planner's prompt now says that the page text, titles, names and element text
-  in an observation are untrusted page data, never instructions: the system prompt of the Claude, OpenAI and
+  state, and so do the local-storage tools, which read and write what the page can itself, and the bot-challenge check
+  after each action, which reads only the title, text and frames the page writes as it likes in either world. An
+  invalid CSS selector in `find_elements` now answers with a structured `invalid_selector` error, as an invalid regex
+  answers `invalid_regex`. Every planner's prompt now says that the page text, titles, names and element text in an
+  observation are untrusted page data, never instructions: the system prompt of the Claude, OpenAI and
   OpenAI-compatible APIs, and the prompt itself of the Gemini API, the CLI planners and the OpenAI host bridge, which
-  have none. These two reads wait for the script's message in the world 5 seconds past the read's own bound (30 s
-  for a page text read or a selector search, 10 s for a query), so the world's own deadline, the action timeout,
-  never reports the page as not answering before the read's bound does. The messages that set the call up (the
-  CDP session's attach, the frame tree and the world's creation) share one deadline, counted from the start of
-  the call and 2 seconds under that bound: a page busy for longer than the default action timeout still gets a text or
-  selector read, and a setup unfinished at the deadline ends as `page_not_responding`, with its session dropped and
-  detached, before the read's own bound.
-- **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
-  was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
-  a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through
+  have none. These two reads wait for the script's message in the world 5 seconds past the read's own bound (30 s for
+  a page text read or a selector search, 10 s for a query), so the world's own deadline, the action timeout, never
+  reports the page as not answering before the read's bound does. The messages that set the call up (the CDP session's
+  attach, the frame tree and the world's creation) share one deadline, counted from the start of the call and 2
+  seconds under that bound: a page busy for longer than the default action timeout still gets a text or selector read,
+  and a setup unfinished at the deadline ends as `page_not_responding`, with its session dropped and detached, before
+  the read's own bound.
+- **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text was
+  cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates, a
+  scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through
   `repr`, so an event holding code in a number's place (an audit log written by something other than the controller)
-  put that code into a script an operator runs. Each must now be a finite int or float, written with `repr`; any
-  other value skips its step with a comment that says so. A typed text longer than the 80 characters the audit log
-  keeps is now marked `text_truncated` in its action's target (dropped with the preview when the field turns out to
-  be secret), and its exported `fill` line says that only the start of the text was kept.
-- **A bot challenge's report names the page by its origin and path only.** The `captcha_detected` error's details,
-  and the warning a navigation logs when it lands on a challenge, gave the page's URL whole: its user name and
-  password, its query and fragment (which can carry an OAuth code or a token) and all of its length. It is now cut
-  as the frames the report lists already were, to scheme, host, port and path, and capped like a URL; an address
-  with no host (`data:`, `about:`) keeps its scheme and path.
+  put that code into a script an operator runs. Each must now be a finite int or float, written with `repr`; any other
+  value skips its step with a comment that says so. A typed text longer than the 80 characters the audit log keeps is
+  now marked `text_truncated` in its action's target (dropped with the preview when the field turns out to be secret),
+  and its exported `fill` line says that only the start of the text was kept.
+- **A bot challenge's report names the page by its origin and path only.** The `captcha_detected` error's details, and
+  the warning a navigation logs when it lands on a challenge, gave the page's URL whole: its user name and password,
+  its query and fragment (which can carry an OAuth code or a token) and all of its length. It is now cut as the frames
+  the report lists already were, to scheme, host, port and path, and capped like a URL; an address with no host
+  (`data:`, `about:`) keeps its scheme and path.
 - **Two operators saving one new auth profile name at once are no longer both told it worked.** A save checked the
-  profile's owner before writing the browser state and put its files in place after, holding only its own
-  session's lock, so a second operator's save of a name the first was still saving passed the check (no owner yet),
-  and whichever finished last replaced the profile the other had just been given. Saves of one name, or of names
-  that differ only in case or a trailing dot (one folder on Windows, and in case on macOS), now run one at a time,
-  from the owner check until the files are in place, so the second sees the first's owner and is refused.
-  An import with `overwrite` still checks the owner outside that lock.
+  profile's owner before writing the browser state and put its files in place after, holding only its own session's
+  lock, so a second operator's save of a name the first was still saving passed the check (no owner yet), and
+  whichever finished last replaced the profile the other had just been given. Saves of one name, or of names that
+  differ only in case or a trailing dot (one folder on Windows, and in case on macOS), now run one at a time, from the
+  owner check until the files are in place, so the second sees the first's owner and is refused. An import with
+  `overwrite` still checks the owner outside that lock.
 - **The scripts refuse a controller address with an empty bracketed host.** 1.16.0's check refused a base URL whose
   host is empty (`http://:8000/`) but passed one whose host is an empty pair of brackets, `http://[]:8000/`,
   `http://[]/` or `http://[/`, and left it to curl, which refuses the first two and reads the third as a glob. The
@@ -169,13 +173,13 @@ All notable changes to auto-browser are documented here.
 - **The raw CDP route checks what it is sent, and a DOM read no longer returns a typed password.**
   `POST /sessions/{id}/cdp/raw` took its `method` and `params` as they came: a `method` that was a list raised a
   `TypeError` in the allowlist check (a 500), and `params` went to the browser whatever their names and types. A
-  `method` that is not a string, or `params` that are not an object, now get 422, and each allowed command takes
-  only its own parameters, by name and type; any other gets 422 with the reason. `DOM.getDocument` with
-  `"pierce": true` returned each input's user-agent shadow text, which is what was typed into it, so a password
-  typed into a page came back in plain text; a `DOM.*` read now blanks that text and the `value` attribute of any
-  element whose `type` attribute is `password`, and `GET /sessions/{id}/cdp/element`, which reads an element's
-  attributes itself, blanks that `value` attribute too. `docs/deployment.md` says what is still returned: what was
-  typed into a field of any other type.
+  `method` that is not a string, or `params` that are not an object, now get 422, and each allowed command takes only
+  its own parameters, by name and type; any other gets 422 with the reason. `DOM.getDocument` with `"pierce": true`
+  returned each input's user-agent shadow text, which is what was typed into it, so a password typed into a page came
+  back in plain text; a `DOM.*` read now blanks that text and the `value` attribute of any element whose `type`
+  attribute is `password`, and `GET /sessions/{id}/cdp/element`, which reads an element's attributes itself, blanks
+  that `value` attribute too. `docs/deployment.md` says what is still returned: what was typed into a field of any
+  other type.
 
 ### Fixed
 
@@ -184,16 +188,15 @@ All notable changes to auto-browser are documented here.
   session's file writes; an append now takes a lock per scope and per chain file. A receipt for the hosted Witness
   service (`WITNESS_REMOTE_URL`) was sent inline, under the session's lock, so a slow or unreachable service delayed
   each action by up to its timeout. The receipt still goes to the local chain first; the hosted copy now goes from a
-  background queue (first in, first out, up to 1,000 receipts), and the session's `witness_remote` state shows how
-  the newest receipt's delivery went once it lands or fails. A delivery that never reached the service (no
-  connection was made) is tried up to three times with backoff; any other failure, a 429 or 503 answer included, is
-  not sent again, since the payload carries no id the service could tell a second copy by. A full queue fails that
-  receipt's delivery (`witness_remote.last_error` says so), not the action. A close waits up to a second for its
-  session's receipts before it saves the closed record, and saves it again when one still on its way lands or fails,
-  even when its own save failed. Shutdown waits up to three seconds for the queue, logs what is left and fails its
-  delivery (as it does what a delivery worker that died left queued, and the receipt it died on), then waits up to
-  three seconds more for those closed records to be saved. The hosted Witness preflight before a confidential
-  session's actions is unchanged.
+  background queue (first in, first out, up to 1,000 receipts), and the session's `witness_remote` state shows how the
+  newest receipt's delivery went once it lands or fails. A delivery that never reached the service (no connection was
+  made) is tried up to three times with backoff; any other failure, a 429 or 503 answer included, is not sent again,
+  since the payload carries no id the service could tell a second copy by. A full queue fails that receipt's delivery
+  (`witness_remote.last_error` says so), not the action. A close waits up to a second for its session's receipts
+  before it saves the closed record, and saves it again when one still on its way lands or fails, even when its own
+  save failed. Shutdown waits up to three seconds for the queue, logs what is left and fails its delivery (as it does
+  what a delivery worker that died left queued, and the receipt it died on), then waits up to three seconds more for
+  those closed records to be saved. The hosted Witness preflight before a confidential session's actions is unchanged.
 - **A witness bundle's receipts and its chain check now come from one read of the chain.** The export
   (`GET /sessions/{session_id}/witness/bundle`, `browser.export_witness_bundle`) read the receipts, then read the
   chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described
@@ -211,22 +214,21 @@ All notable changes to auto-browser are documented here.
   `SESSION_ISOLATION_MODE=docker_ephemeral`, a create cancelled (its caller gave up, or shutdown) while the controller
   was creating the session's container and network let that work finish and dropped what it made, so the container
   ran, holding the session's profile, until the next controller start swept it. The cancelled create now waits up to
-  ten seconds for that work and releases what it made (the container, the session network, the profile and
-  downloads), also when the work had just finished and a shutdown's cancel dropped its result on the way back; work
-  that takes longer releases what it made itself when it ends, even when a shutdown has ended the controller's event
-  loop by then. With `ISOLATED_BROWSER_KEEP_CONTAINERS=true` the container is stopped and kept with its network,
-  profile and downloads, as a close keeps them.
+  ten seconds for that work and releases what it made (the container, the session network, the profile and downloads),
+  also when the work had just finished and a shutdown's cancel dropped its result on the way back; work that takes
+  longer releases what it made itself when it ends, even when a shutdown has ended the controller's event loop by
+  then. With `ISOLATED_BROWSER_KEEP_CONTAINERS=true` the container is stopped and kept with its network, profile and
+  downloads, as a close keeps them.
 - **With `ISOLATED_BROWSER_KEEP_CONTAINERS=true`, a session whose browser container did not stop now closes as a
   partial teardown.** Nothing removes a kept container, and a failed stop was logged at debug level only, so the close
-  reported `teardown: complete` while the container could still be running. The failed stop is now a warning with
-  the daemon's reason, and the close reports `teardown: partial` with `release isolated runtime` in its
-  `failed_steps`.
-- **An isolated session's release now names the browser container's own failure when the Docker daemon fails
-  midway.** A container lookup that failed (an unreachable daemon) escaped as the daemon's bare error before the
-  session network was touched, and a failed removal followed by a failed network lookup was logged as the network's
-  error. The release now still leaves the session network (and removes it when it can), logs each of the daemon's
-  errors as a warning, and fails with `browser container <name> could not be looked up` (or `could not be removed`),
-  caused by the daemon's error; the session's profile and downloads stay, as before.
+  reported `teardown: complete` while the container could still be running. The failed stop is now a warning with the
+  daemon's reason, and the close reports `teardown: partial` with `release isolated runtime` in its `failed_steps`.
+- **An isolated session's release now names the browser container's own failure when the Docker daemon fails midway.**
+  A container lookup that failed (an unreachable daemon) escaped as the daemon's bare error before the session network
+  was touched, and a failed removal followed by a failed network lookup was logged as the network's error. The release
+  now still leaves the session network (and removes it when it can), logs each of the daemon's errors as a warning,
+  and fails with `browser container <name> could not be looked up` (or `could not be removed`), caused by the daemon's
+  error; the session's profile and downloads stay, as before.
 - **With Redis as the session store (`REDIS_URL`), a close whose Redis write failed no longer leaves the session
   reading as active.** The closed record reached the durable file copy while Redis kept the record from before the
   close, which reads and listings prefer; a later write was refused by the closed guard, nothing repaired Redis, and
@@ -241,17 +243,17 @@ All notable changes to auto-browser are documented here.
   remembers the 10,000 most recent), a missing file copy now defers to Redis: a closed record there refuses the write,
   and a Redis that cannot be read skips it until the next write. A new session's first write still asks nothing of
   Redis.
-- **A failed shadow browse now always rolls back fully and reports its own error, and a close always records
-  itself.** Marking a session-owned browser's pre-request gate before its close, and releasing the gate and the
-  window-birth watcher after it, could raise, and nothing caught it: the rollback of a failed `enable_shadow_browse`
-  stopped there, leaving the shadow session's directories and the active record its persist had written, and its
-  caller got that error instead of the one that failed the shadow; the rollback of a failed isolated create stopped
-  before releasing the isolated runtime; and a close of such a session skipped its audit event, witness receipt and
-  closed record. Those steps are now bounded and logged as the other teardown steps are, the rest runs, and a shadow
-  browse's rollback that still fails is logged while the original error is raised.
-- **A teardown step cancelled on its own no longer ends a rollback or a close.** A step whose own future was
-  cancelled (a context or browser close, or a hook, cancelled independently) while the task running it was not raised
-  a `CancelledError` through a failed create's or shadow browse's rollback, or a close: the isolated runtime was not
+- **A failed shadow browse now always rolls back fully and reports its own error, and a close always records itself.**
+  Marking a session-owned browser's pre-request gate before its close, and releasing the gate and the window-birth
+  watcher after it, could raise, and nothing caught it: the rollback of a failed `enable_shadow_browse` stopped there,
+  leaving the shadow session's directories and the active record its persist had written, and its caller got that
+  error instead of the one that failed the shadow; the rollback of a failed isolated create stopped before releasing
+  the isolated runtime; and a close of such a session skipped its audit event, witness receipt and closed record.
+  Those steps are now bounded and logged as the other teardown steps are, the rest runs, and a shadow browse's
+  rollback that still fails is logged while the original error is raised.
+- **A teardown step cancelled on its own no longer ends a rollback or a close.** A step whose own future was cancelled
+  (a context or browser close, or a hook, cancelled independently) while the task running it was not raised a
+  `CancelledError` through a failed create's or shadow browse's rollback, or a close: the isolated runtime was not
   released, the record not closed, and a caller that was never cancelled got a `CancelledError`. Such a step is now a
   failed step, logged, and the rest runs; a cancel of the task itself is still raised. No path in the controller is
   known to cancel a step's future that way. The session-closed hook of the controller's extensions now runs as a
@@ -261,11 +263,12 @@ All notable changes to auto-browser are documented here.
   after it follows links, so the rollback said nothing about the link it left. It is now logged as not removed, as a
   link to an existing directory already was; the rollback removes neither, and never goes through one.
 - **A converging harness run no longer holds up the controller while retention removes an old skill candidate.** A
-  converged run built and placed its candidate on the event loop, and placing it waits for the staging lock, which
-  the `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal. The candidate is now built and signed in a worker thread, and placed once
-  the lock is free, which the event loop no longer waits for, and the candidate a re-stage replaces is removed in a
-  worker thread too; a run cancelled meanwhile waits for that work, and its record names the candidate it staged. A
-  shutdown that cancels the staging itself places nothing, and the next start marks that run failed.
+  converged run built and placed its candidate on the event loop, and placing it waits for the staging lock, which the
+  `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal. The
+  candidate is now built and signed in a worker thread, and placed once the lock is free, which the event loop no
+  longer waits for, and the candidate a re-stage replaces is removed in a worker thread too; a run cancelled meanwhile
+  waits for that work, and its record names the candidate it staged. A shutdown that cancels the staging itself places
+  nothing, and the next start marks that run failed.
 - **A staged skill candidate that `HARNESS_RETENTION_DAYS` is removing no longer reads as tampered with.** The
   retention prune removed an aged candidate's files in a worker thread while `harness.get_candidate`,
   `harness.list_candidates` and the drift checks read candidates without a lock, so a read in between found some of
@@ -276,9 +279,9 @@ All notable changes to auto-browser are documented here.
 - **A drift check no longer writes its result beside another candidate, or brings back a removed one.**
   `harness.check_drift` and `harness.check_all_drifts` read a candidate, waited for the verifier, then wrote
   `drift.json` into whatever the candidate's directory held by then: a candidate re-staged meanwhile (a later run of
-  its contract) got the old one's result, and one retention removed got its directory back, holding only
-  `drift.json`. The result is now written only while the directory still holds the candidate that was checked;
-  otherwise it is returned with a note saying `drift.json` was not written.
+  its contract) got the old one's result, and one retention removed got its directory back, holding only `drift.json`.
+  The result is now written only while the directory still holds the candidate that was checked; otherwise it is
+  returned with a note saying `drift.json` was not written.
 - **An OCR run that never finishes no longer holds its session for ever.** OCR ran tesseract with no timeout, under
   the session's lock (an observation, a screenshot and, with screenshots redacted, every action's before and after
   snapshots), so a tesseract that hung held the session until it exited. A run is now stopped after
@@ -291,16 +294,18 @@ All notable changes to auto-browser are documented here.
   node's name whole, and decoded the whole quoted name first, so a page that gave an element a megabyte `aria-label`
   put that megabyte into every observation and action snapshot that listed it or found it focused. A name is now cut
   to 200 characters, as an element's text is, and only as much of it as gives those is decoded.
-- **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that every observation but a `fast` one and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
-  together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of
-  the session's lock; it now waits for both, as the observation's other paired reads do, then raises the error.
+- **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that
+  every observation but a `fast` one and every action's before and after snapshot take ran its script and Playwright's
+  ARIA snapshot together and gave up at the first error, so the snapshot went on reading the page after the caller had
+  let go of the session's lock; it now waits for both, as the observation's other paired reads do, then raises the
+  error.
 - **A screenshot capture cut off by a shutdown, or whose write fails, no longer leaves its image behind.** A capture
   whose read was cancelled has its file removed once the capture ends, since nothing checked what it shows; but a
   shutdown cancels the capture itself, which then ended before Playwright's write of the file (in a thread of
   Playwright's own) did, so the image was written after its removal and stayed in the session's artifact directory.
-  The controller now writes the image Playwright returns, in a worker thread that removes the file itself when it
-  ends after its capture was cancelled. A capture whose write failed partway (a full disk) left the part it wrote, at its published name; that part is now removed before the error
-  goes on.
+  The controller now writes the image Playwright returns, in a worker thread that removes the file itself when it ends
+  after its capture was cancelled. A capture whose write failed partway (a full disk) left the part it wrote, at its
+  published name; that part is now removed before the error goes on.
 - **A click or key press that opens a tab is verified by it, and its result names the tab.** Observations and actions
   stay on the active tab, which a tab a page opens does not become, so a click on a link that opened a new tab changed
   nothing the action's verification compared and could read `verified: false`: an agent that retried opened a second
@@ -310,10 +315,10 @@ All notable changes to auto-browser are documented here.
   Tabs are counted, not told apart: an action that opens one tab and closes another leaves the count, and so its
   verification, as they were, and `new_tab` names only the newest of several.
 - **A download's record no longer names the file's path on the server, and its URL works for any file name.** Every
-  download record (the session's list, an observation's `recent_downloads`, `downloads.jsonl`) carried `path`, a
-  saved file's absolute path on the controller's disk. It is gone: `browser.read_download` finds the file by its name
-  in the session's downloads directory, and a stopped session's stored record leaves it out of the records it saved
-  before, wherever it is returned (its downloads list, `GET /sessions/{session_id}` and the session listing). A
+  download record (the session's list, an observation's `recent_downloads`, `downloads.jsonl`) carried `path`, a saved
+  file's absolute path on the controller's disk. It is gone: `browser.read_download` finds the file by its name in the
+  session's downloads directory, and a stopped session's stored record leaves it out of the records it saved before,
+  wherever it is returned (its downloads list, `GET /sessions/{session_id}` and the session listing). A
   `downloads.jsonl` written before keeps it on disk. A file name holding `#` or `%` gave a `url` that named another
   path or none (`#` starts a fragment); the name is now quoted in it. A save that failed was recorded as
   `download_save_failed` with nothing logged; it is now logged as a warning naming the session.
@@ -321,85 +326,86 @@ All notable changes to auto-browser are documented here.
   `browser.list_memory_profiles` failed as a whole on a file in `MEMORY_ROOT` that held a JSON list, or a
   `completed_steps` with no length (a number), listed objects that no get could load (`{}`, or steps given as a
   string, counted by its characters), and skipped a file that did not parse without saying so. It now lists only the
-  files that load as a profile, as getting one does, and logs each other as a warning naming the file (and the
-  error's type, not its text). Getting, saving or deleting a profile whose file is not a valid profile failed with
-  the parser's error, which quoted the file (another operator's too); it now fails with "memory profile '<name>'
-  cannot be read", and the file stays for its operator to fix or remove. A delete now waits for a save in progress,
-  as saves wait for each other, so a save's write no longer brings back a profile a delete just removed, nor a
-  delete's unlink removes one a save just wrote; a save or delete cancelled, once or more, holds the others off until
-  its write or unlink has landed.
+  files that load as a profile, as getting one does, and logs each other as a warning naming the file (and the error's
+  type, not its text). Getting, saving or deleting a profile whose file is not a valid profile failed with the
+  parser's error, which quoted the file (another operator's too); it now fails with "memory profile '<name>' cannot be
+  read", and the file stays for its operator to fix or remove. A delete now waits for a save in progress, as saves
+  wait for each other, so a save's write no longer brings back a profile a delete just removed, nor a delete's unlink
+  removes one a save just wrote; a save or delete cancelled, once or more, holds the others off until its write or
+  unlink has landed.
 - **An audit event written to SQLite now survives a power loss once committed.** With `STATE_DB_PATH` set, audit
   events go to SQLite, whose connections ran WAL with `synchronous=NORMAL`, under which the last commits can roll back
   after a power loss or an OS crash. The audit store's connections now run `synchronous=FULL`, a sync of the WAL per
   event; approvals and harness traces keep `NORMAL`. A database whose journal mode stays out of WAL was logged at
-  debug level; it is now a warning. A connection whose configuration raised was left open, holding its file; it is
-  now closed before the error goes on.
-- **The network inspector caps a request body by its bytes, and never reads a streaming response.** A request body
-  was kept when its characters, not its UTF-8 bytes, fit `NETWORK_INSPECTOR_BODY_MAX_BYTES`, so one of multibyte
-  text was kept at up to four times the cap; it is now measured in bytes, as a response body is. A
-  `text/event-stream` response counted as text and its body was read, and Playwright's `response.body()` waits for
-  the end of a response, which an event stream need not reach, so the read stayed pending for as long as the page
-  kept the stream open. A response of either streaming type, `text/event-stream` or `multipart/x-mixed-replace`, is
-  now never read; its entry keeps no body.
-- **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed
-  when its session's record cannot be saved.** Once an action had taken effect and been recorded (its
-  `actions.jsonl` line, audit entry and witness receipt), saving the session's record could still fail (a full disk,
-  or Redis failing the write), and that error reached the caller as the action's, so an agent that retried made the
-  change twice. Opening, switching to or closing a tab, a human takeover request, and saving a session's auth state
-  or an auth profile from it did the same, so an agent that retried a tab's close closed another tab. The failure is
-  now logged with the session id and the result is returned; the stored record catches up at the session's next
-  save.
-- **One mesh peer flooding the replay cache no longer locks every other peer out.** A registered peer that got
-  10,000 signed envelopes through inside a timestamp window filled the 10,000-nonce replay cache, and every peer was
-  refused (`503`) until those nonces expired. Each peer now holds at most 1,000 of them: one at its share is refused
-  with the same `503` while the others' envelopes still pass. An envelope whose request does not decode is refused
-  before its nonce is recorded, since it can run nothing, and a replay of one that runs still meets its seen nonce.
+  debug level; it is now a warning. A connection whose configuration raised was left open, holding its file; it is now
+  closed before the error goes on.
+- **The network inspector caps a request body by its bytes, and never reads a streaming response.** A request body was
+  kept when its characters, not its UTF-8 bytes, fit `NETWORK_INSPECTOR_BODY_MAX_BYTES`, so one of multibyte text was
+  kept at up to four times the cap; it is now measured in bytes, as a response body is. A `text/event-stream` response
+  counted as text and its body was read, and Playwright's `response.body()` waits for the end of a response, which an
+  event stream need not reach, so the read stayed pending for as long as the page kept the stream open. A response of
+  either streaming type, `text/event-stream` or `multipart/x-mixed-replace`, is now never read; its entry keeps no
+  body.
+- **A browser action, tab change, takeover request or auth save that took effect is no longer reported as failed when
+  its session's record cannot be saved.** Once an action had taken effect and been recorded (its `actions.jsonl` line,
+  audit entry and witness receipt), saving the session's record could still fail (a full disk, or Redis failing the
+  write), and that error reached the caller as the action's, so an agent that retried made the change twice. Opening,
+  switching to or closing a tab, a human takeover request, and saving a session's auth state or an auth profile from
+  it did the same, so an agent that retried a tab's close closed another tab. The failure is now logged with the
+  session id and the result is returned; the stored record catches up at the session's next save.
+- **One mesh peer flooding the replay cache no longer locks every other peer out.** A registered peer that got 10,000
+  signed envelopes through inside a timestamp window filled the 10,000-nonce replay cache, and every peer was refused
+  (`503`) until those nonces expired. Each peer now holds at most 1,000 of them: one at its share is refused with the
+  same `503` while the others' envelopes still pass. An envelope whose request does not decode is refused before its
+  nonce is recorded, since it can run nothing, and a replay of one that runs still meets its seen nonce.
   `docs/mesh.md` says so.
 - **An isolated-session create that gives up on its tunnel no longer waits for ever on an autossh that never exits.**
   With `ISOLATED_TUNNEL_ENABLED`, a create cancelled (or failing) while its autossh started killed autossh and waited
   for it with no bound, so one stuck in uninterruptible I/O held the create until it exited. That wait is now bounded
   at five seconds, as a release's has been since 1.16.0, and then logged as a warning naming the session and the pid.
-  A second cancel during that wait also left autossh's log open and its metadata (which names the bastion and its user) on disk; both now go whatever ends the wait.
-- **A token file whose mode cannot be read, and whose descriptor then fails to close, is reported for the read.**
-  When the mode check of `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE` failed to read the file's mode (an I/O error) and
-  closing the file failed too, the close's error replaced the read's, so the takeover token's warning gave the
-  generic "its mode could not be tightened" cause. The read's error is now the one raised, and the failed close is
-  logged as a warning of its own.
+  A second cancel during that wait also left autossh's log open and its metadata (which names the bastion and its
+  user) on disk; both now go whatever ends the wait.
+- **A token file whose mode cannot be read, and whose descriptor then fails to close, is reported for the read.** When
+  the mode check of `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE` failed to read the file's mode (an I/O error) and
+  closing the file failed too, the close's error replaced the read's, so the takeover token's warning gave the generic
+  "its mode could not be tightened" cause. The read's error is now the one raised, and the failed close is logged as a
+  warning of its own.
 - **A controller serving without a token now rate-limits each client address, whatever headers a request carries.**
-  Under `API_ALLOW_TOKENLESS_LOOPBACK` with no credential, every request counted as authenticated, so the request
-  rate limit keyed it by its `Authorization` header, else its `X-Operator-Id` header: values a sender mints at will,
-  so one that varied either was never limited, churned the limiter's buckets, and could fill the mesh replay cache
-  from one address. Such requests are now keyed by client address, as unauthenticated requests are, so clients
-  behind one address that each sent their own `X-Operator-Id` or `Authorization` now share that address's limit
+  Under `API_ALLOW_TOKENLESS_LOOPBACK` with no credential, every request counted as authenticated, so the request rate
+  limit keyed it by its `Authorization` header, else its `X-Operator-Id` header: values a sender mints at will, so one
+  that varied either was never limited, churned the limiter's buckets, and could fill the mesh replay cache from one
+  address. Such requests are now keyed by client address, as unauthenticated requests are, so clients behind one
+  address that each sent their own `X-Operator-Id` or `Authorization` now share that address's limit
   (`REQUEST_RATE_LIMIT_REQUESTS`, 120 a minute by default); paths exempt from the limiter stay exempt in that mode.
   `docs/mesh.md` says so.
 - **The MCP bridges no longer answer a notification the controller never got.** A notification (a message with no
   `id`, such as `notifications/initialized`) sent while the controller was unreachable, with an invalid controller
   URL, or meeting an unexpected bridge failure got an error answer with `"id": null`, which a notification must never
-  get and which matches no request the client sent. It now gets none, as when the controller answers it, and the
-  error goes to the bridge's stderr. A notification the controller refused with an HTTP error (a `401` for a bad
-  token, a `5xx`), which was dropped without a word, is now reported on stderr the same way, redacted as an answer
-  is; it still gets no answer.
+  get and which matches no request the client sent. It now gets none, as when the controller answers it, and the error
+  goes to the bridge's stderr. A notification the controller refused with an HTTP error (a `401` for a bad token, a
+  `5xx`), which was dropped without a word, is now reported on stderr the same way, redacted as an answer is; it still
+  gets no answer.
 - **The MCP bridges and `scripts/agent_eval.py` refuse a controller URL http.client cannot send, as an invalid one.**
   A base URL whose path or query holds a character outside ASCII, or whose fragment holds a space, a control character
   or a character outside ASCII (urllib puts the fragment into the request line it sends an environment proxy), failed
-  only once a connection was chosen, and the bridges answered it as an unexpected bridge failure quoting
-  http.client's error. It is now refused before anything is sent, with a fixed reason, as a path or query holding a
-  space or a control character has been since 1.16.0; such a fragment is refused for a loopback controller too, which
-  urllib reached directly without sending the fragment, so a URL like that which worked must drop or percent-encode
-  it. Both also refuse a host or userinfo holding a character http.client cannot send (outside ASCII in the request
-  line an environment proxy gets, outside latin-1 in the `Host` header), which the bridges answered as that failure,
-  naming the character and its position, and agent_eval failed on with http.client's error. The bridges' openers now
-  handle only `http://` and `https://`: urllib's default handlers, which they kept, answer a `file:`, `data:` or
-  `ftp:` request from a local file, the URL itself or an FTP server, and an environment proxy of such a scheme turns a
-  request into one. Nor do they take an environment proxy for another scheme any more: with `ftp_proxy` set, urllib sent an `ftp://` URL handed to such an opener to that proxy as an HTTP request, bearer token included, and took its answer as the
-  controller's. The bridges' `urlopen` itself now refuses a URL that is not `http://` or `https://` with a host, as an
-  invalid controller URL, before an opener is chosen, as their own requests have been refused since 1.16.0. agent_eval
-  built openers of its own with urllib's `build_opener`, which kept all of those handlers and that proxy (its
-  `--execute` sent an `ftp://` base URL's requests, token included, to an `ftp_proxy`); it now opens through the
-  bridges' `urlopen`, so it follows each of these rules, and a base URL that is not `http://` or `https://` with a
-  host (`localhost:8000`), which failed with urllib's "unknown url type" error, is refused as an invalid controller
-  URL too.
+  only once a connection was chosen, and the bridges answered it as an unexpected bridge failure quoting http.client's
+  error. It is now refused before anything is sent, with a fixed reason, as a path or query holding a space or a
+  control character has been since 1.16.0; such a fragment is refused for a loopback controller too, which urllib
+  reached directly without sending the fragment, so a URL like that which worked must drop or percent-encode it. Both
+  also refuse a host or userinfo holding a character http.client cannot send (outside ASCII in the request line an
+  environment proxy gets, outside latin-1 in the `Host` header), which the bridges answered as that failure, naming
+  the character and its position, and agent_eval failed on with http.client's error. The bridges' openers now handle
+  only `http://` and `https://`: urllib's default handlers, which they kept, answer a `file:`, `data:` or `ftp:`
+  request from a local file, the URL itself or an FTP server, and an environment proxy of such a scheme turns a
+  request into one. Nor do they take an environment proxy for another scheme any more: with `ftp_proxy` set, urllib
+  sent an `ftp://` URL handed to such an opener to that proxy as an HTTP request, bearer token included, and took its
+  answer as the controller's. The bridges' `urlopen` itself now refuses a URL that is not `http://` or `https://` with
+  a host, as an invalid controller URL, before an opener is chosen, as their own requests have been refused since
+  1.16.0. agent_eval built openers of its own with urllib's `build_opener`, which kept all of those handlers and that
+  proxy (its `--execute` sent an `ftp://` base URL's requests, token included, to an `ftp_proxy`); it now opens
+  through the bridges' `urlopen`, so it follows each of these rules, and a base URL that is not `http://` or
+  `https://` with a host (`localhost:8000`), which failed with urllib's "unknown url type" error, is refused as an
+  invalid controller URL too.
 - **The Python client and the LangChain tools no longer send a base URL's user name and password in place of the
   token.** Given a token, a base URL holding a user name or a password (`http://user:pass@host`) made httpx send them
   as `Authorization: Basic` credentials, which replaced the token's header, so the controller got no token and the
@@ -408,42 +414,45 @@ All notable changes to auto-browser are documented here.
   refuse that combination when built, with a `ValueError` that names the parts, never their values. Without a token,
   the user name and password still go as Basic credentials.
 - **The Python client and the LangChain tools now send a base URL's query with every request, at the request's own
-  path.** httpx joined a request's path after the base URL's query (`http://host/?key=value` sent `POST
-  /?key=value/sessions`, the path inside the query), and a GET with parameters of its own sent neither that query nor
-  the request's path (`GET /?limit=5`); the client's `stream_events` also put its path after a base URL's fragment,
-  so it asked for the base path alone. The query now goes as the parameters of every request, beside a request's own
-  (one of the same name replaces it), as the MCP bridges send the query of their URL, written as httpx writes
-  parameters (a space as `+`, a key with no value as `key=`); the fragment is never sent.
-- **With `STEALTH_ENABLED`, exporting a canvas no longer stops it taking a WebGL context, and the canvas patches
-  read as native code.** The stealth script's `toDataURL` asked the canvas for its 2d context to add its noise, which
-  gives a canvas that has no context yet a 2d one, so a page that exported a fresh canvas and then asked it for
+  path.** httpx joined a request's path after the base URL's query (`http://host/?key=value` sent
+  `POST /?key=value/sessions`, the path inside the query), and a GET with parameters of its own sent neither that
+  query nor the request's path (`GET /?limit=5`); the client's `stream_events` also put its path after a base URL's
+  fragment, so it asked for the base path alone. The query now goes as the parameters of every request, beside a
+  request's own (one of the same name replaces it), as the MCP bridges send the query of their URL, written as httpx
+  writes parameters (a space as `+`, a key with no value as `key=`); the fragment is never sent.
+- **With `STEALTH_ENABLED`, exporting a canvas no longer stops it taking a WebGL context, and the canvas patches read
+  as native code.** The stealth script's `toDataURL` asked the canvas for its 2d context to add its noise, which gives
+  a canvas that has no context yet a 2d one, so a page that exported a fresh canvas and then asked it for
   `getContext('webgl')` or `getContext('bitmaprenderer')` got `null`. The noise now goes only on a canvas the page
   gave a 2d context, which a wrapped `getContext` records; any other canvas is exported as it is. The patched
   `toDataURL` and `getContext`, and the `Function.prototype.toString` that masks them, now read as native code
   (`function toDataURL() { [native code] }`) with the native name and length; the script's WebGL `getParameter` and
-  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source. A
-  `type` whose `toString` throws now throws before any export is made and leaves the canvas as it was, where the noise stayed on its first pixel and the export was tried a second time, running the `toString` again. The `type` is converted once before the canvas is
-  touched, so what its `toString` draws is kept (the export shows it), where the restored pixel erased it; a Symbol
-  `type` is the native's `TypeError` and leaves the canvas alone; a canvas with a `width` or `height` accessor of its
-  own that throws is still exported, as the native export reads neither; and a receiver that is not a canvas is
-  refused before anything is converted.
-- **With `STEALTH_PROFILE=light`, a canvas read is noised per pixel and per colour channel.** The noise
-  `getImageData` adds came from the session's seed and the byte index, which is a multiple of 4 at every red byte, so
-  every pixel got the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of
-  a pixel's R, G and B now goes one up or one down by a hash of the pixel's place on the canvas and the session's
-  seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle. A read
-  of float values (`getImageData` with `pixelFormat: "rgba-float16"`) is now left as it is: a shift of one there is
-  the whole 0-1 range, so a grey of 0.5 read as 0 or 1.5. The wrapper also checks its receiver before it converts a
-  coordinate, as the native does: `getImageData.call({}, ...)` is a `TypeError` that calls no `valueOf`. And it
-  converts the coordinates one at a time and stops at the first the native refuses (not finite, or out of a `long`'s
-  range): the native's `TypeError` comes at that coordinate and no later `valueOf` runs. A BigInt or a Symbol
-  coordinate goes to the native as it is, so its `TypeError` is the native's own message, and the wrapper calls the
-  `Math.trunc` it captured at init, not the page's.
-- **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** Some ran the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran; the rest ran Git's `bin\bash.exe` wrapper, found beside `git`, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a
-  `usr\bin` folder (Git's or MSYS2's), the first on PATH or else the one beside `git`, or the bash
-  `AUTO_BROWSER_TEST_BASH` names (`controller/tests/_bash.py`), and skip when there is none; on
-  other systems, the bash on PATH as before. On Windows what a script runs by name (`bash`, a stub's
-  `#!/usr/bin/env bash`, and the tools beside bash, such as `rm`) is found beside that bash, after the test's stubs.
+  permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source. A `type`
+  whose `toString` throws now throws before any export is made and leaves the canvas as it was, where the noise stayed
+  on its first pixel and the export was tried a second time, running the `toString` again. The `type` is converted
+  once before the canvas is touched, so what its `toString` draws is kept (the export shows it), where the restored
+  pixel erased it; a Symbol `type` is the native's `TypeError` and leaves the canvas alone; a canvas with a `width` or
+  `height` accessor of its own that throws is still exported, as the native export reads neither; and a receiver that
+  is not a canvas is refused before anything is converted.
+- **With `STEALTH_PROFILE=light`, a canvas read is noised per pixel and per colour channel.** The noise `getImageData`
+  adds came from the session's seed and the byte index, which is a multiple of 4 at every red byte, so every pixel got
+  the same shift, on red only, and a canvas read one of two ways in all, whatever the session. Each of a pixel's R, G
+  and B now goes one up or one down by a hash of the pixel's place on the canvas and the session's seed (alpha is left
+  alone), so the noise holds for the session and a pixel reads the same in any rectangle. A read of float values
+  (`getImageData` with `pixelFormat: "rgba-float16"`) is now left as it is: a shift of one there is the whole 0-1
+  range, so a grey of 0.5 read as 0 or 1.5. The wrapper also checks its receiver before it converts a coordinate, as
+  the native does: `getImageData.call({}, ...)` is a `TypeError` that calls no `valueOf`. And it converts the
+  coordinates one at a time and stops at the first the native refuses (not finite, or out of a `long`'s range): the
+  native's `TypeError` comes at that coordinate and no later `valueOf` runs. A BigInt or a Symbol coordinate goes to
+  the native as it is, so its `TypeError` is the native's own message, and the wrapper calls the `Math.trunc` it
+  captured at init, not the page's.
+- **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** Some ran the
+  first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran; the rest
+  ran Git's `bin\bash.exe` wrapper, found beside `git`, which puts `/usr/bin` ahead of a test's stubs. They now use a
+  `bash.exe` in a `usr\bin` folder (Git's or MSYS2's), the first on PATH or else the one beside `git`, or the bash
+  `AUTO_BROWSER_TEST_BASH` names (`controller/tests/_bash.py`), and skip when there is none; on other systems, the
+  bash on PATH as before. On Windows what a script runs by name (`bash`, a stub's `#!/usr/bin/env bash`, and the tools
+  beside bash, such as `rm`) is found beside that bash, after the test's stubs.
 
 ### Changed
 
@@ -452,18 +461,18 @@ All notable changes to auto-browser are documented here.
   compare. Its `signals` still say what changed. A caller that tests `verified` for truth now reads both as not
   verified; the agent loop's no-progress check, which acts on `false` and otherwise compares the page before and
   after, judges them as before.
-- **`MESH_TIMESTAMP_WINDOW` is now bounded: more than 0, and at most 250 seconds.** Any other value stops startup
-  with "MESH_TIMESTAMP_WINDOW must be more than 0 and at most 250 seconds", as an unparseable one already did, with
-  the mesh off too. The window had no limit, and a nonce is kept for up to two windows, so at the default request
-  rate limit one address could fill the 10,000-nonce replay cache from a window of about 2,500 seconds, and a wider
-  window keeps a captured envelope replayable longer to a controller restarted with its clock set back. At 250
-  seconds one address holds at most about 1,000 nonces at the default limit, one peer's share of the cache, and that
-  only when it stamps its envelopes about a window ahead of this node's clock; one whose clock agrees holds about
-  half as many. `docs/mesh.md` and `.env.example` say so.
+- **`MESH_TIMESTAMP_WINDOW` is now bounded: more than 0, and at most 250 seconds.** Any other value stops startup with
+  "MESH_TIMESTAMP_WINDOW must be more than 0 and at most 250 seconds", as an unparseable one already did, with the
+  mesh off too. The window had no limit, and a nonce is kept for up to two windows, so at the default request rate
+  limit one address could fill the 10,000-nonce replay cache from a window of about 2,500 seconds, and a wider window
+  keeps a captured envelope replayable longer to a controller restarted with its clock set back. At 250 seconds one
+  address holds at most about 1,000 nonces at the default limit, one peer's share of the cache, and that only when it
+  stamps its envelopes about a window ahead of this node's clock; one whose clock agrees holds about half as many.
+  `docs/mesh.md` and `.env.example` say so.
 - **A `typing_timeout` is no longer retryable.** It stops typing part way, and its message already said that part of
   the text may have been entered and to check the field first, but it carried `retryable: true`, so a client that
-  retries on that flag could type the part already entered a second time. It now carries `retryable: false`; the
-  code, the status (504) and the message are unchanged.
+  retries on that flag could type the part already entered a second time. It now carries `retryable: false`; the code,
+  the status (504) and the message are unchanged.
 
 ## [1.16.0] — 2026-11-06
 
