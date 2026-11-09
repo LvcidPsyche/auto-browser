@@ -85,8 +85,11 @@ token, from either source.
   production controller. Such a controller refuses (403) a POST, PUT, PATCH or DELETE that a browser marks as
   `Sec-Fetch-Site: cross-site` or `same-site`, or whose `Origin` is not the host and port in its `Host` header: a web
   page on another origin, or on another port of the same host, must send a token or be served from the same origin.
+  `GET /auth-profiles/{name}/export`, which writes an archive, is refused the same way when a browser marks it so.
   A request with neither header (curl, an SDK) is served. `/mesh/receive` is signed, and `/mcp` keeps its own Origin
-  check and `MCP_ALLOWED_ORIGINS`.
+  check and `MCP_ALLOWED_ORIGINS`. A loopback reverse proxy in front of such a controller must pass the browser's
+  `Host` through, or the controller needs a token: a proxy that rewrites `Host` leaves the browser's `Origin` naming
+  another host, so its writes are refused.
 - `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
 ## Chromium's sandbox (BROWSER_SANDBOX)

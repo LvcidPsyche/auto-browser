@@ -6,11 +6,13 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from ..audit import reset_current_operator, set_current_operator
 from ..auth_policy import (
+    AUTH_PROFILE_EXPORT_ROUTE,
     BIND_SCOPE_LOOPBACK,
     AuthPolicy,
     Credential,
@@ -29,11 +31,16 @@ logger = logging.getLogger(__name__)
 
 # The writes a page on another site can send a controller with no token, and how a browser says so. Exempt:
 # /mesh/receive proves its sender with a signature, and /mcp checks Origin itself against MCP_ALLOWED_ORIGINS
-# (_validate_origin), where a browser client on a listed origin is cross-site by definition. /mcp/tools/call never
-# reaches that check, so it is not exempt; this list names exact paths, not a prefix.
+# (_validate_origin), where a browser client on a listed origin is cross-site by definition; /mcp/ is the router's
+# redirect to it, which does nothing itself. /mcp/tools/call never reaches that check, so it is not exempt; this list
+# names exact paths, not a prefix. Compared relative to root_path, as the router compares them.
 _CROSS_SITE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _CROSS_SITE_FETCH_SITES = frozenset({"cross-site", "same-site"})
-_CROSS_SITE_EXEMPT_PATHS = frozenset({"/mesh/receive", "/mcp"})
+_CROSS_SITE_EXEMPT_PATHS = frozenset({"/mesh/receive", "/mcp", "/mcp/"})
+# GET /auth-profiles/{name}/export writes (an archive, its sidecar, an audit event and a receipt), and a page can send
+# it blind: a profile's name can be guessed, where a session id or a share token cannot. Compiled as the router
+# compiles it, so what routes to it is what this refuses.
+_EXPORT_ROUTE_PATTERN = compile_path(AUTH_PROFILE_EXPORT_ROUTE)[0]
 CROSS_SITE_WRITE_DETAIL = (
     "This controller has no API token, so it refuses a write sent from another web origin. Send a bearer token, or "
     "call it from the same origin."
@@ -295,10 +302,11 @@ def install_controller_http_middleware(
     # reading the answer, not sending the write.
     @application.middleware("http")
     async def refuse_cross_site_writes_when_unauthenticated(request: Request, call_next):
+        route_path = _route_path(request)
         if (
             _auth_policy().required
-            or request.method not in _CROSS_SITE_WRITE_METHODS
-            or _request_path(request) in _CROSS_SITE_EXEMPT_PATHS
+            or not _is_a_write(request.method, route_path)
+            or route_path in _CROSS_SITE_EXEMPT_PATHS
             or not _comes_from_another_origin(request)
         ):
             return await call_next(request)
@@ -398,6 +406,20 @@ def install_security_headers(application: FastAPI) -> None:
 
 def _request_path(request: Request) -> str:
     return str(request.scope.get("path") or "")
+
+
+def _route_path(request: Request) -> str:
+    """The path as the router matches it: what follows ``root_path``, when the path carries one."""
+    path = _request_path(request)
+    root_path = str(request.scope.get("root_path") or "")
+    if not root_path or not path.startswith(root_path):
+        return path
+    rest = path[len(root_path) :]
+    return rest if not rest or rest.startswith("/") else path
+
+
+def _is_a_write(method: str, route_path: str) -> bool:
+    return method in _CROSS_SITE_WRITE_METHODS or (method == "GET" and bool(_EXPORT_ROUTE_PATTERN.match(route_path)))
 
 
 def _comes_from_another_origin(request: Request) -> bool:

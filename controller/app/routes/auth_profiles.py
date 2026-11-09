@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
+from ..auth_policy import AUTH_PROFILE_EXPORT_ROUTE
 from ..models import ImportAuthProfileRequest, SaveAuthProfileRequest, SaveStorageStateRequest
 from ._utils import require_safe_segment, typed_route_errors
 
@@ -50,7 +51,7 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
             except PermissionError:
                 raise HTTPException(status_code=403, detail="Not permitted") from None
 
-    @router.get("/auth-profiles/{profile_name}/export")
+    @router.get(AUTH_PROFILE_EXPORT_ROUTE)
     async def export_auth_profile(profile_name: str):
         safe_profile_name = require_safe_segment(profile_name, field="profile_name")
         with typed_route_errors(logger, "auth profile export failed for profile %s", profile_name):

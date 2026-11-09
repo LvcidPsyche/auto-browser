@@ -198,6 +198,9 @@ def tokenless_loopback_allowed(settings: Any) -> bool:
 
 _DOCS_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
 
+# Its own route because middleware/http.py judges a cross-site GET of it as a write.
+AUTH_PROFILE_EXPORT_ROUTE = "/auth-profiles/{profile_name}/export"
+
 
 def is_bearer_exempt_path(path: str, *, docs_are_public: bool) -> bool:
     """Whether a path answers without the bearer token: the one list, the token gate's and the session check's."""

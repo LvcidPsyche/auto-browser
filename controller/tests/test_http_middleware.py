@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,6 +19,7 @@ from app.auth_policy import BIND_SCOPE_LOOPBACK
 from app.mcp_transport import McpHttpTransport
 from app.middleware.hosts import origin_matches_host
 from app.middleware.http import CROSS_SITE_WRITE_DETAIL, install_controller_http_middleware
+from app.routes.auth_profiles import create_auth_profiles_router
 from app.routes.mcp import create_mcp_router
 
 BASE_URL = "http://127.0.0.1:8000"
@@ -35,9 +37,8 @@ INITIALIZE = {
 }
 
 
-def _application(*, token: str | None = None) -> FastAPI:
-    application = FastAPI()
-    settings = SimpleNamespace(
+def _settings(token: str | None) -> SimpleNamespace:
+    return SimpleNamespace(
         api_bearer_token=token,
         api_allow_tokenless_loopback=token is None,
         api_bind_scope=BIND_SCOPE_LOOPBACK,
@@ -48,12 +49,20 @@ def _application(*, token: str | None = None) -> FastAPI:
         require_operator_id=False,
     )
 
+
+def _application(*, token: str | None = None) -> FastAPI:
+    application = FastAPI()
+    settings = _settings(token)
+
     @application.get("/maintenance/cleanup")
     @application.post("/maintenance/cleanup")
     @application.put("/maintenance/cleanup")
     @application.patch("/maintenance/cleanup")
     @application.delete("/maintenance/cleanup")
     @application.post("/mesh/receive")
+    @application.get("/dashboard")
+    @application.get("/auth-profiles/{profile_name}")
+    @application.get("/auth-profiles/{profile_name}/export")
     async def served() -> dict[str, bool]:
         return {"ok": True}
 
@@ -272,6 +281,177 @@ class WhatHasItsOwnCheckIsNotRefusedHereTests(unittest.TestCase):
         for path in ("/mesh/receive/x", "/mcpx"):
             response = self.client.post(path, headers={"Sec-Fetch-Site": "cross-site"})
             self.assertEqual((response.status_code, response.json()), (403, REFUSED), path)
+
+
+class TheExportIsAWriteTests(unittest.TestCase):
+    """GET /auth-profiles/{name}/export writes an archive, its sidecar, an audit event and a receipt, and a profile's
+    name can be guessed where a session id cannot. A cross-site GET usually has no Origin: Sec-Fetch-Site says so."""
+
+    PATH = "/auth-profiles/shop/export"
+
+    def setUp(self) -> None:
+        self.client = _client()
+
+    def assert_refused(self, headers: dict[str, str], path: str = PATH) -> None:
+        response = self.client.get(path, headers=headers)
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED), f"{path} {headers}")
+
+    def assert_served(self, headers: dict[str, str], path: str = PATH) -> None:
+        response = self.client.get(path, headers=headers)
+        self.assertEqual((response.status_code, response.json()), (200, {"ok": True}), f"{path} {headers}")
+
+    def test_a_get_a_browser_marks_as_cross_site_or_same_site_is_refused(self) -> None:
+        for site in ("cross-site", "same-site"):
+            self.assert_refused({"Sec-Fetch-Site": site})
+
+    def test_a_get_from_a_foreign_origin_is_refused(self) -> None:
+        self.assert_refused({"Origin": FOREIGN_ORIGIN})
+
+    def test_a_get_with_neither_header_is_served(self) -> None:
+        self.assert_served({})
+
+    def test_a_get_from_the_controllers_own_pages_or_the_address_bar_is_served(self) -> None:
+        self.assert_served({"Sec-Fetch-Site": "same-origin"})
+        self.assert_served({"Sec-Fetch-Site": "none"})
+        self.assert_served({"Sec-Fetch-Site": "same-origin", "Origin": SAME_ORIGIN})
+
+    def test_a_cross_site_get_of_anything_else_is_served(self) -> None:
+        # A link to the dashboard from another site still opens it.
+        for path in ("/dashboard", "/auth-profiles/shop", "/auth-profiles/export"):
+            self.assert_served({"Sec-Fetch-Site": "cross-site", "Origin": FOREIGN_ORIGIN}, path)
+
+    def test_what_only_starts_or_ends_like_the_route_is_not_it(self) -> None:
+        for path in ("/auth-profiles/shop/exports", "/auth-profiles/a/b/export", "/x/auth-profiles/shop/export"):
+            response = self.client.get(path, headers={"Sec-Fetch-Site": "cross-site"})
+            self.assertEqual(response.status_code, 404, path)
+
+    def test_everything_the_router_routes_to_it_is_refused(self) -> None:
+        # The router's pattern ends in `$`, so a trailing newline routes to the export too.
+        path = "/auth-profiles/shop/export%0A"
+        self.assert_served({}, path)
+        self.assert_refused({"Sec-Fetch-Site": "cross-site"}, path)
+
+    def test_a_controller_with_a_token_leaves_the_token_to_decide(self) -> None:
+        client = _client(token=TOKEN)
+        headers = {"Authorization": f"Bearer {TOKEN}", "Sec-Fetch-Site": "cross-site"}
+        self.assertEqual(client.get(self.PATH, headers=headers).status_code, 200)
+        self.assertEqual(client.get(self.PATH, headers={"Sec-Fetch-Site": "cross-site"}).status_code, 401)
+
+    def test_the_route_itself_is_refused_before_anything_is_written(self) -> None:
+        export = AsyncMock(return_value={"archive_name": "x"})
+        application = FastAPI()
+        application.include_router(
+            create_auth_profiles_router(manager=SimpleNamespace(export_auth_profile=export), settings=SimpleNamespace())
+        )
+        install_controller_http_middleware(
+            application, settings=_settings(None), rate_limiter=None, metrics=SimpleNamespace(enabled=False)
+        )
+
+        response = TestClient(application, base_url=BASE_URL).get(self.PATH, headers={"Sec-Fetch-Site": "cross-site"})
+
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+        export.assert_not_called()
+
+
+class ARootPathIsNotPartOfThePathComparedTests(unittest.TestCase):
+    """Behind a prefix (`uvicorn --root-path`) the path carries it and the router matches what follows it."""
+
+    def setUp(self) -> None:
+        self.client = TestClient(_application(), base_url=BASE_URL, root_path="/api")
+
+    def test_a_browser_mcp_client_on_a_listed_origin_keeps_working(self) -> None:
+        response = self.client.post(
+            "/api/mcp", json=INITIALIZE, headers={"Origin": LISTED_ORIGIN, "Sec-Fetch-Site": "cross-site"}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_an_mcp_origin_that_is_not_listed_is_refused_by_the_transport_not_here(self) -> None:
+        response = self.client.post(
+            "/api/mcp", json=INITIALIZE, headers={"Origin": FOREIGN_ORIGIN, "Sec-Fetch-Site": "cross-site"}
+        )
+        self.assertEqual(response.json()["error"]["message"], f"Forbidden Origin header: {FOREIGN_ORIGIN}")
+
+    def test_mesh_receive_is_not_refused_by_this_layer(self) -> None:
+        response = self.client.post("/api/mesh/receive", headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual((response.status_code, response.json()), (200, {"ok": True}))
+
+    def test_a_path_under_mcp_stays_checked(self) -> None:
+        response = self.client.post(
+            "/api/mcp/tools/call", json={"name": "browser.list_sessions"}, headers={"Sec-Fetch-Site": "cross-site"}
+        )
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+
+    def test_the_export_is_refused(self) -> None:
+        response = self.client.get("/api/auth-profiles/shop/export", headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+
+    def test_a_path_the_router_reads_without_the_root_path_is_compared_as_it_reads_it(self) -> None:
+        response = self.client.post("/mcp", json=INITIALIZE, headers={"Origin": LISTED_ORIGIN})
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_a_path_that_only_starts_with_the_root_path_is_not_under_it(self) -> None:
+        response = self.client.post("/apimcp", headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+
+    def test_the_root_path_itself_is_no_exempt_path(self) -> None:
+        client = TestClient(_application(), base_url=BASE_URL, root_path="/mcp")
+        response = client.post("/mcp", headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+
+
+class McpWithATrailingSlashTests(unittest.TestCase):
+    """POST /mcp/ is Starlette's redirect to /mcp, which does nothing itself and lands on the transport's own check."""
+
+    def setUp(self) -> None:
+        self.client = _client()
+
+    def test_it_answers_the_routers_redirect_to_the_transport(self) -> None:
+        for method in ("post", "delete"):
+            for origin in (LISTED_ORIGIN, FOREIGN_ORIGIN):
+                response = self.client.request(
+                    method,
+                    "/mcp/",
+                    headers={"Origin": origin, "Sec-Fetch-Site": "cross-site"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 307, response.text)
+                self.assertEqual(response.headers["location"], f"{BASE_URL}/mcp")
+
+    def test_the_redirect_lands_on_the_transports_own_check(self) -> None:
+        listed = self.client.post(
+            "/mcp/", json=INITIALIZE, headers={"Origin": LISTED_ORIGIN, "Sec-Fetch-Site": "cross-site"}
+        )
+        foreign = self.client.post(
+            "/mcp/", json=INITIALIZE, headers={"Origin": FOREIGN_ORIGIN, "Sec-Fetch-Site": "cross-site"}
+        )
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(foreign.json()["error"]["message"], f"Forbidden Origin header: {FOREIGN_ORIGIN}")
+
+    def test_it_is_exempt_under_a_root_path_too(self) -> None:
+        client = TestClient(_application(), base_url=BASE_URL, root_path="/api")
+        response = client.post("/api/mcp/", headers={"Sec-Fetch-Site": "cross-site"}, follow_redirects=False)
+        self.assertEqual(response.status_code, 307, response.text)
+
+
+class AProxyInFrontOfATokenlessControllerTests(unittest.TestCase):
+    """The browser's Origin names the proxy, and only the Host it passes on can agree with it."""
+
+    SAME_ORIGIN_THROUGH_PROXY = {"Origin": "http://localhost:8080", "Sec-Fetch-Site": "same-origin"}
+
+    def setUp(self) -> None:
+        self.client = _client()
+
+    def test_a_proxy_that_rewrites_host_is_refused(self) -> None:
+        response = self.client.post(
+            "/maintenance/cleanup", headers={**self.SAME_ORIGIN_THROUGH_PROXY, "Host": "127.0.0.1:8000"}
+        )
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+
+    def test_a_proxy_that_passes_the_browsers_host_through_is_served(self) -> None:
+        response = self.client.post(
+            "/maintenance/cleanup", headers={**self.SAME_ORIGIN_THROUGH_PROXY, "Host": "localhost:8080"}
+        )
+        self.assertEqual((response.status_code, response.json()), (200, {"ok": True}))
 
 
 class OnlyATokenlessControllerRefusesTests(unittest.TestCase):

@@ -50,12 +50,15 @@ All notable changes to auto-browser are documented here.
 - **A controller with no token now refuses a write from another web origin.** On a tokenless loopback controller
   (`API_ALLOW_TOKENLESS_LOOPBACK=true`), a POST, PUT, PATCH or DELETE that a browser marks `Sec-Fetch-Site:
   cross-site` or `same-site`, or whose `Origin` names another host or port than its `Host` (`Origin: null` and one
-  that cannot be parsed included), answers `403`. A page on another origin, or on another port of the same host, that
-  writes to such a controller must send a bearer token or call it from the same origin. A request with neither header
-  (curl, an SDK) is served as before, and so is one whose `Origin` matches its `Host` with `Sec-Fetch-Site`
-  `same-origin` or `none`. `/mesh/receive` is signed and not checked; `/mcp` keeps its own Origin check and
-  `MCP_ALLOWED_ORIGINS`, so a browser MCP client on a listed origin goes on working, while `/mcp/tools/call` is
-  checked like any other write. A controller with a token is not affected.
+  that cannot be parsed included), answers `403`, and so does a `GET /auth-profiles/{name}/export` marked that way,
+  since an export writes an archive. A page on another origin, or on another port of the same host, that writes to
+  such a controller must send a bearer token or call it from the same origin. A loopback reverse proxy in front of
+  such a controller must pass the browser's `Host` through, or the controller needs a token: one that rewrites `Host`
+  leaves the browser's `Origin` naming another host, and is refused. A request with neither header (curl, an SDK) is
+  served as before, and so is one whose `Origin` matches its `Host` with `Sec-Fetch-Site` `same-origin` or `none`.
+  `/mesh/receive` is signed and not checked; `/mcp` (and `/mcp/`, which only redirects to it, behind a `root_path` as
+  well) keeps its own Origin check and `MCP_ALLOWED_ORIGINS`, so a browser MCP client on a listed origin goes on
+  working, while `/mcp/tools/call` is checked like any other write. A controller with a token is not affected.
 - **Another operator's auth profile now answers as one that does not exist.** `GET /auth-profiles/{name}` on a profile
   someone else owns answers `404` and `Not found: <name>`, byte for byte what a missing profile gets, where it
   answered `403`, and `browser.get_auth_profile` answers as it does for a missing name instead of naming the owner.
@@ -101,7 +104,8 @@ All notable changes to auto-browser are documented here.
   no cookies to check, so a form or a no-cors `fetch` reached `POST /maintenance/cleanup` and every action route. The
   controller now refuses, with a `403` and one fixed text, a write a browser marks as `cross-site` or `same-site`, or
   whose `Origin` is not the host and port the request's `Host` names, and it does so after the Host check, so a
-  DNS-rebinding hostname is refused as a Host error first. Host names compare case-insensitively, a port equal to the
+  DNS-rebinding hostname is refused as a Host error first. `GET /auth-profiles/{name}/export` counts as a write: it
+  leaves an archive behind, for a name a page can guess. Host names compare case-insensitively, a port equal to the
   `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
   See the upgrade note. (AUTH-24)
 - **The session replay page links only an http(s) URL.** A page sets its own URL, and the page rendered it as a link
