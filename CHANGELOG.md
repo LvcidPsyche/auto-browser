@@ -57,6 +57,10 @@ All notable changes to auto-browser are documented here.
   one, least recently used first within each, so a client that only listens outlasts a flood of `initialize` requests
   and goes only when nothing but listeners remain; a client initializing into a table full of listeners keeps its new
   session. An open stream still counts as use, as a request does, in the last-used time a restart goes by. (MCP-11)
+- **`DELETE /mcp` checks `MCP-Protocol-Version`, as every other request after `initialize` does.** It ignored the
+  header and deleted the session whatever the header said. An unsupported version is now `400` and `-32602`, a
+  version other than the session's `400` and `-32600`, and the session stays; a matching or absent header still
+  deletes it.
 
 ### Changed
 

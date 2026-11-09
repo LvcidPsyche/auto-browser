@@ -343,6 +343,37 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(missing_response.status_code, 404)
         self.assertEqual(missing_response.json()["error"]["code"], -32001)
 
+    def test_delete_refuses_an_unsupported_protocol_version_and_keeps_the_session(self) -> None:
+        headers = self._ready_headers()
+
+        response = self.client.delete("/mcp", headers={**headers, MCP_PROTOCOL_HEADER: "2099-01-01"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], -32602)
+        self.assertIn(headers[MCP_SESSION_HEADER], self.transport._sessions)
+
+    def test_delete_refuses_a_protocol_version_that_differs_from_the_sessions_and_keeps_it(self) -> None:
+        headers = self._ready_headers()
+
+        response = self.client.delete("/mcp", headers={**headers, MCP_PROTOCOL_HEADER: "2025-06-18"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], -32600)
+        self.assertIn(headers[MCP_SESSION_HEADER], self.transport._sessions)
+
+    def test_delete_with_a_matching_or_absent_protocol_version_deletes_the_session(self) -> None:
+        for label, drop in (("matching", False), ("absent", True)):
+            with self.subTest(label):
+                headers = self._ready_headers()
+                session_id = headers[MCP_SESSION_HEADER]
+                if drop:
+                    del headers[MCP_PROTOCOL_HEADER]
+
+                response = self.client.delete("/mcp", headers=headers)
+
+                self.assertEqual(response.status_code, 204)
+                self.assertNotIn(session_id, self.transport._sessions)
+
     def test_origin_allowlist_blocks_untrusted_browser_origins(self) -> None:
         response = self.client.post(
             "/mcp",
