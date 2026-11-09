@@ -120,6 +120,7 @@ from .packs import register_all
 from .previews import preview_arguments
 from .registry import ToolRegistry, ToolSpec
 from .selection import withheld_tool_message
+from .write_records import cookie_digest, recorded_write
 
 logger = logging.getLogger(__name__)
 
@@ -1180,7 +1181,10 @@ class McpToolGateway:
 
     async def _set_viewport(self, payload: SetViewportInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        await session.page.set_viewport_size({"width": payload.width, "height": payload.height})
+        size = {"width": payload.width, "height": payload.height}
+        async with recorded_write(self.manager, session, "browser.set_viewport", size) as write:
+            write.reached_page = True
+            await session.page.set_viewport_size(size)
         return {"session_id": payload.session_id, "width": payload.width, "height": payload.height}
 
     async def _get_cookies(self, payload: GetCookiesInput) -> dict[str, Any]:
@@ -1206,17 +1210,22 @@ class McpToolGateway:
 
     async def _set_cookies(self, payload: SetCookiesInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        # Cookies are scoped to a site, so ALLOWED_HOSTS has to cover the site
-        # each one is for: otherwise a caller confined to one host plants a
-        # session cookie on another. All are checked before any is added.
-        for cookie in payload.cookies:
-            url = str(cookie.get("url") or "").strip()
-            domain = str(cookie.get("domain") or "").strip()
-            if url:
-                self.manager._assert_url_allowed(url)
-            if domain:
-                self.manager._assert_url_allowed(f"https://{domain.lstrip('.')}/")
-        await session.context.add_cookies(payload.cookies)
+        digest = {"cookies": [cookie_digest(cookie) for cookie in payload.cookies]}
+        async with recorded_write(
+            self.manager, session, "browser.set_cookies", digest, risk_category="account_change"
+        ) as write:
+            # Cookies are scoped to a site, so ALLOWED_HOSTS has to cover the site
+            # each one is for: otherwise a caller confined to one host plants a
+            # session cookie on another. All are checked before any is added.
+            for cookie in payload.cookies:
+                url = str(cookie.get("url") or "").strip()
+                domain = str(cookie.get("domain") or "").strip()
+                if url:
+                    self.manager._assert_url_allowed(url)
+                if domain:
+                    self.manager._assert_url_allowed(f"https://{domain.lstrip('.')}/")
+            write.reached_page = True
+            await session.context.add_cookies(payload.cookies)
         return {"session_id": payload.session_id, "set": len(payload.cookies)}
 
     async def _get_local_storage(self, payload: GetStorageInput) -> dict[str, Any]:
@@ -1242,10 +1251,15 @@ class McpToolGateway:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
         script = f"([k, v]) => window.{payload.storage_type}Storage.setItem(k, v)"
-        # Refused before the write, and after it if the page moved meanwhile: the
-        # value may then be in a refused page's storage.
-        async with locked_read(self.manager, session):
-            await bounded(session.page.evaluate(script, [payload.key, payload.value]))
+        digest = {"storage_type": payload.storage_type, "key": payload.key}
+        async with recorded_write(
+            self.manager, session, "browser.set_local_storage", digest, risk_category="account_change"
+        ) as write:
+            # Refused before the write, and after it if the page moved meanwhile: the
+            # value may then be in a refused page's storage.
+            async with locked_read(self.manager, session):
+                write.reached_page = True
+                await bounded(session.page.evaluate(script, [payload.key, payload.value]))
         return {"session_id": payload.session_id, "key": payload.key, "set": True}
 
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:

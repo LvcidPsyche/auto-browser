@@ -27,6 +27,19 @@ All notable changes to auto-browser are documented here.
   stream per session, reconnect only when it has ended, and after reconnecting read again what you watch:
   notifications are not replayed.
 
+### Security
+
+- **`browser.set_viewport`, `browser.set_cookies` and `browser.set_local_storage` now leave an audit entry and a
+  witness receipt.** These three tools change a session outside the action pipeline, and in the fast profile they
+  recorded nothing. Each call now writes one audit event (`mcp_tool_write`) and one receipt, on success and on failure
+  (a host off `ALLOWED_HOSTS`, a Playwright error, a page that moved), naming the tool, the session and what changed:
+  the viewport size, the cookies' names and domains or URL origins, the storage type and key. Neither a value nor a
+  hash of one goes in the record: a short value's hash can be guessed offline. A failure's record keeps its error's
+  class only, and the error goes on unchanged. A call cancelled after it reached the page is recorded with an unknown
+  outcome, as a cancelled action is; one cancelled before it reached the page records nothing, as nothing ran. A
+  record that cannot be written fails a change that was made, as an action's does, and is only logged beside a
+  failure's own error. (MCP-23)
+
 ### Fixed
 
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an

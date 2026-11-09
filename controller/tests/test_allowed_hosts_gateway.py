@@ -40,7 +40,8 @@ def _gateway(tmp_path: Path, allowed_hosts: str) -> tuple[McpToolGateway, AsyncM
     settings.allowed_hosts = allowed_hosts
     manager = BrowserManager(settings)
     context = SimpleNamespace(add_cookies=AsyncMock())
-    manager.get_session = AsyncMock(return_value=SimpleNamespace(context=context))  # type: ignore[method-assign]
+    session = SimpleNamespace(id="s1", context=context)  # the id names the write's audit entry
+    manager.get_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
     gateway = McpToolGateway(manager=manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace())
     return gateway, context.add_cookies
 

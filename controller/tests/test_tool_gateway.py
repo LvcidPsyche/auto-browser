@@ -68,6 +68,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             page_provenance=PageProvenance(),
             element_ids=FakePageElementIds(),
             get_session=AsyncMock(return_value={"id": "session-1"}),
+            # What the gateway's own state changes record through (set_viewport, set_cookies, set_local_storage).
+            audit=SimpleNamespace(append=AsyncMock()),
+            _record_witness_receipt=AsyncMock(),
             verify_witness_chain=AsyncMock(
                 return_value={
                     "scope": "session-1",
@@ -798,7 +801,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.require_governed_approval = AsyncMock(return_value=approval)
         page = SimpleNamespace(evaluate=AsyncMock())
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+        self.manager.get_session = AsyncMock(
+            return_value=SimpleNamespace(id="session-1", page=page, lock=asyncio.Lock())
+        )
 
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
@@ -999,6 +1004,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             add_cookies=AsyncMock(),
         )
         fake_session = SimpleNamespace(
+            id="session-1",
             page=FakePage(),
             context=fake_context,
             artifact_dir=Path("."),
@@ -1011,7 +1017,6 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.enable_shadow_browse = AsyncMock(return_value={"enabled": True})
         self.manager.capture_screenshot = AsyncMock(return_value={"screenshot_path": "vision.png"})
         self.manager.get_pii_scrubber_status = lambda: {"enabled": True}
-        self.manager.audit = object()
         self.manager.settings.default_viewport_width = 1280
         self.manager.settings.default_viewport_height = 720
 
