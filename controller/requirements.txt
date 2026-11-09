@@ -17,8 +17,8 @@ pydantic-settings==2.16.2
 # pydantic and typing-inspection come in through pydantic-settings and FastAPI, and click through uvicorn. Pinned for
 # the 1.16.0 build, where their newest releases (pydantic 2.14.3, typing-inspection 0.4.5, click 8.5.1) were under 72
 # hours old; pydantic's own exact pin holds pydantic-core. Dependabot's weekly group moves them like any other pin.
-pydantic==2.14.2
-typing-inspection==0.4.4
+pydantic==2.14.3
+typing-inspection==0.4.5
 click==8.5.0
 httpx==0.28.1
 # Imported directly (url_safety maps a host through its UTS 46 table, as a browser does);

@@ -117,12 +117,12 @@ py-serializable==2.1.0
     # via cyclonedx-python-lib
 pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
-pydantic==2.14.2
+pydantic==2.14.3
     # via
     #   -r requirements.txt
     #   fastapi
     #   pydantic-settings
-pydantic-core==2.50.2
+pydantic-core==2.50.4
     # via pydantic
 pydantic-settings==2.16.2
     # via -r requirements.txt
@@ -170,7 +170,7 @@ respx==0.23.1
     # via -r requirements-dev.txt
 rich==15.0.0
     # via pip-audit
-ruff==0.17.3
+ruff==0.17.4
     # via -r requirements-dev.txt
 sortedcontainers==2.4.0
     # via cyclonedx-python-lib
@@ -197,7 +197,7 @@ typing-extensions==4.16.0
     #   pytest-asyncio
     #   starlette
     #   typing-inspection
-typing-inspection==0.4.4
+typing-inspection==0.4.5
     # via
     #   -r requirements.txt
     #   fastapi
