@@ -142,8 +142,8 @@ All notable changes to auto-browser are documented here.
   for a page text read or a selector search, 10 s for a query), so the world's own deadline, the action timeout,
   never reports the page as not answering before the read's bound does. The messages that set the call up (the
   CDP session's attach, the frame tree and the world's creation) share one deadline, counted from the start of
-  the call and 2 seconds under that bound: a page busy for longer than the default action timeout still gets its
-  read, and a setup unfinished at the deadline ends as `page_not_responding`, with its session dropped and
+  the call and 2 seconds under that bound: a page busy for longer than the default action timeout still gets a text or
+  selector read, and a setup unfinished at the deadline ends as `page_not_responding`, with its session dropped and
   detached, before the read's own bound.
 - **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
   was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
