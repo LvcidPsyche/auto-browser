@@ -10,6 +10,7 @@ client was refused. This keeps the same pattern language (exact names,
 
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 from fastapi import FastAPI
@@ -31,6 +32,37 @@ def host_from_header(value: str) -> str:
     if candidate.count(":") == 1:  # name:port — a bare IPv6 literal has more colons
         candidate = candidate.partition(":")[0]
     return candidate.lower()
+
+
+# What a browser serializes an Origin to, and nothing looser: a scheme with a default port, a name or a bracketed IPv6
+# address, and a port. A path, a query, a user or a second origin in the header is no Origin a browser sent.
+_SERIALIZED_ORIGIN = re.compile(r"(https?)://(\[[0-9a-f:.]+\]|[^\[\]/?#@:\s]+)(?::([0-9]{1,5}))?", re.IGNORECASE)
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_HTTP_OPTIONAL_WHITESPACE = " \t"
+
+
+def _origin_key(origin: str) -> tuple[str, int] | None:
+    """The host (lowercased, without IPv6 brackets) and port of ``origin``, its scheme's default when it names none."""
+    match = _SERIALIZED_ORIGIN.fullmatch(origin)
+    if match is None:
+        return None
+    scheme, host, port = match.groups()
+    return host.strip("[]").lower(), int(port) if port else _DEFAULT_PORTS[scheme.lower()]
+
+
+def origin_matches_host(origin: str, host_header: str) -> bool:
+    """Whether an Origin header names the host and port a request's Host header does, as a browser compares them.
+
+    Only host and port: a TLS-terminating proxy leaves the controller on plain HTTP behind an https page. A Host with
+    no port means the default port of the scheme the Origin used, so ``http://localhost`` matches ``localhost:80``. An
+    Origin or a Host that cannot be parsed matches nothing, which the caller must read as foreign.
+    """
+    origin = origin.strip(_HTTP_OPTIONAL_WHITESPACE)
+    own = _origin_key(origin)
+    if own is None:
+        return False
+    scheme = origin.partition("://")[0]
+    return own == _origin_key(f"{scheme}://{host_header.strip(_HTTP_OPTIONAL_WHITESPACE)}")
 
 
 def _normalize_pattern(pattern: str) -> str:

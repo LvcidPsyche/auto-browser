@@ -47,6 +47,15 @@ All notable changes to auto-browser are documented here.
   without bound and holds an unbounded repeat of its own or overlapping alternatives, at any depth (`(a+)+$`,
   `(a|aa)+`, `((a|aa))+`), fails validation with a message naming the group and why, where it used to reach the
   page. Rewrite the group (`a+`, not `(a+)+`), or pass `regex=false` to match the text literally.
+- **A controller with no token now refuses a write from another web origin.** On a tokenless loopback controller
+  (`API_ALLOW_TOKENLESS_LOOPBACK=true`), a POST, PUT, PATCH or DELETE that a browser marks `Sec-Fetch-Site:
+  cross-site` or `same-site`, or whose `Origin` names another host or port than its `Host` (`Origin: null` and one
+  that cannot be parsed included), answers `403`. A page on another origin, or on another port of the same host, that
+  writes to such a controller must send a bearer token or call it from the same origin. A request with neither header
+  (curl, an SDK) is served as before, and so is one whose `Origin` matches its `Host` with `Sec-Fetch-Site`
+  `same-origin` or `none`. `/mesh/receive` is signed and not checked; `/mcp` keeps its own Origin check and
+  `MCP_ALLOWED_ORIGINS`, so a browser MCP client on a listed origin goes on working, while `/mcp/tools/call` is
+  checked like any other write. A controller with a token is not affected.
 
 ### Security
 
@@ -74,6 +83,14 @@ All notable changes to auto-browser are documented here.
   A tool with a governed kind now refuses it, and `policy_profile` likewise, before anything runs, with a message that
   names the two allowed values and does not repeat what was sent (see the upgrade note). The argument's description
   in `tools/list` now says what the profile does in every configuration. (MCP-20)
+- **A controller with no token refuses a write a web page sends from another origin.** A page on any site could POST
+  to a tokenless loopback controller: CORS stops a page reading the answer, not sending the request, and the API has
+  no cookies to check, so a form or a no-cors `fetch` reached `POST /maintenance/cleanup` and every action route. The
+  controller now refuses, with a `403` and one fixed text, a write a browser marks as `cross-site` or `same-site`, or
+  whose `Origin` is not the host and port the request's `Host` names, and it does so after the Host check, so a
+  DNS-rebinding hostname is refused as a Host error first. Host names compare case-insensitively, a port equal to the
+  `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
+  See the upgrade note. (AUTH-24)
 
 ### Fixed
 

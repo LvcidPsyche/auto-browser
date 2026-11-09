@@ -82,7 +82,11 @@ token, from either source.
 - `API_ALLOW_TOKENLESS_LOOPBACK=true` serves a loopback controller with no token.
   Any process that can reach port 8000, containers on the compose network
   included, can then drive the browser. It never applies to an exposed or
-  production controller.
+  production controller. Such a controller refuses (403) a POST, PUT, PATCH or DELETE that a browser marks as
+  `Sec-Fetch-Site: cross-site` or `same-site`, or whose `Origin` is not the host and port in its `Host` header: a web
+  page on another origin, or on another port of the same host, must send a token or be served from the same origin.
+  A request with neither header (curl, an SDK) is served. `/mesh/receive` is signed, and `/mcp` keeps its own Origin
+  check and `MCP_ALLOWED_ORIGINS`.
 - `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
 ## Chromium's sandbox (BROWSER_SANDBOX)

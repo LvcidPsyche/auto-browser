@@ -22,9 +22,21 @@ from ..auth_policy import (
     tokenless_loopback_allowed,
 )
 from ..rate_limits import build_rate_limit_key, is_exempt_path
-from .hosts import install_controller_host_middleware
+from .hosts import install_controller_host_middleware, origin_matches_host
 
 logger = logging.getLogger(__name__)
+
+# The writes a page on another site can send a controller with no token, and how a browser says so. Exempt:
+# /mesh/receive proves its sender with a signature, and /mcp checks Origin itself against MCP_ALLOWED_ORIGINS
+# (_validate_origin), where a browser client on a listed origin is cross-site by definition. /mcp/tools/call never
+# reaches that check, so it is not exempt; this list names exact paths, not a prefix.
+_CROSS_SITE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_CROSS_SITE_FETCH_SITES = frozenset({"cross-site", "same-site"})
+_CROSS_SITE_EXEMPT_PATHS = frozenset({"/mesh/receive", "/mcp"})
+CROSS_SITE_WRITE_DETAIL = (
+    "This controller has no API token, so it refuses a write sent from another web origin. Send a bearer token, or "
+    "call it from the same origin."
+)
 
 
 class SessionNetworkPeerMiddleware:
@@ -270,6 +282,22 @@ def install_controller_http_middleware(
     # deployment with a bearer credential is unaffected.
     configured_hosts = list(getattr(settings, "controller_allowed_host_patterns", None) or [])
 
+    # Installed before the Host check, so it runs after it: a rebinding hostname is refused there as a Host error, and
+    # the refusal here spends no rate-limit budget. Sits with the Host check for the same reason: a page reaches a
+    # controller with no token as easily as DNS rebinding does, by writing to it from its own origin. CORS stops a page
+    # reading the answer, not sending the write.
+    @application.middleware("http")
+    async def refuse_cross_site_writes_when_unauthenticated(request: Request, call_next):
+        if (
+            _auth_policy().required
+            or request.method not in _CROSS_SITE_WRITE_METHODS
+            or _request_path(request) in _CROSS_SITE_EXEMPT_PATHS
+            or not _comes_from_another_origin(request)
+        ):
+            return await call_next(request)
+        logger.warning("refused a write to %s from another web origin", _request_path(request))
+        return JSONResponse(status_code=403, content={"detail": CROSS_SITE_WRITE_DETAIL})
+
     @application.middleware("http")
     async def require_loopback_host_when_unauthenticated(request: Request, call_next):
         if configured_hosts or _auth_policy().required or _request_path(request) == "/healthz":
@@ -366,6 +394,15 @@ _DOCS_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
 
 def _request_path(request: Request) -> str:
     return str(request.scope.get("path") or "")
+
+
+def _comes_from_another_origin(request: Request) -> bool:
+    """Whether a browser says this request came from another origin. Saying nothing is not saying so (curl, SDKs)."""
+    if request.headers.get("sec-fetch-site", "").strip().lower() in _CROSS_SITE_FETCH_SITES:
+        return True
+    origin = request.headers.get("origin")
+    # Present and empty counts as present: only a request with no Origin at all is one no browser marked.
+    return origin is not None and not origin_matches_host(origin, request.headers.get("host", ""))
 
 
 def _is_bearer_token_exempt_path(path: str, *, docs_are_public: bool) -> bool:
