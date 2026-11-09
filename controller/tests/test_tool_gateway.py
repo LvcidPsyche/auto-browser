@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import unittest
 from pathlib import Path
@@ -195,6 +196,47 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             if not schema.get("description")
         ]
         self.assertEqual(undescribed, [], "add description= to these input fields")
+
+    # Governed tools take fast or governed, nothing else: a typo that ran as fast silently dropped the approval.
+    GOVERNED_CALL = {"session_id": "session-1", "action": {"action": "click", "reason": "r", "selector": "#a"}}
+    UNKNOWN_PROFILES = ("Governed", "strict", "", 1, True, ["governed"])
+
+    async def test_a_governed_tool_refuses_an_unknown_profile_and_runs_nothing(self) -> None:
+        for field, profile in itertools.product(("workflow_profile", "policy_profile"), self.UNKNOWN_PROFILES):
+            with self.subTest(field=field, profile=repr(profile)):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(name="browser.execute_action", arguments={**self.GOVERNED_CALL, field: profile})
+                )
+
+                self.assertTrue(response.isError, response.content[0].text)
+                self.assertEqual(response.structuredContent["error"], "workflow_profile must be one of: fast, governed")
+                self.assertNotIn("Governed", response.structuredContent["error"])
+                self.assertNotIn("strict", response.structuredContent["error"])
+        self.manager.execute_decision.assert_not_awaited()
+        self.manager.require_governed_approval.assert_not_awaited()
+
+    async def test_an_unset_profile_on_a_governed_tool_runs_as_fast(self) -> None:
+        # None is what a client that fills every optional field sends: the same as leaving it out.
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.execute_action", arguments={**self.GOVERNED_CALL, "workflow_profile": None}
+            )
+        )
+
+        self.assertFalse(response.isError, response.content[0].text)
+        self.manager.execute_decision.assert_awaited_once()
+
+    async def test_a_tool_that_is_not_governed_still_ignores_an_unknown_profile(self) -> None:
+        for profile in self.UNKNOWN_PROFILES:
+            with self.subTest(profile=repr(profile)):
+                response = await self.full_gateway.call_tool(
+                    McpToolCallRequest(
+                        name="browser.get_console", arguments={"session_id": "session-1", "workflow_profile": profile}
+                    )
+                )
+
+                self.assertFalse(response.isError, response.content[0].text)
+        self.assertEqual(self.manager.get_console_messages.await_count, len(self.UNKNOWN_PROFILES))
 
     async def test_governed_tools_advertise_the_approval_arguments_and_others_are_unchanged(self) -> None:
         # An agent cannot find the approval retry flow from a schema that does not name it (MCP-20).

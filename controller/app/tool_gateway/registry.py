@@ -17,8 +17,9 @@ _GOVERNED_CALL_ARGUMENTS: dict[str, dict[str, Any]] = {
         "type": "string",
         "enum": ["fast", "governed"],
         "description": (
-            "governed runs this call only with an operator's approval: the first call answers status "
-            "approval_required with an approval_id. Defaults to fast."
+            "governed: a call that can change something waits for approval. It answers status approval_required with "
+            "an approval_id; call again with that id once it is granted. fast, the default, runs it directly unless "
+            "this tool or deployment always requires approval."
         ),
     },
     "approval_id": {

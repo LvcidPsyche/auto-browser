@@ -50,6 +50,7 @@ from ..models import (
     McpToolCallContent,
     McpToolCallRequest,
     McpToolCallResponse,
+    WorkflowProfile,
 )
 from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
@@ -215,6 +216,8 @@ def _read_inline_image(path: Path) -> bytes | None:
 
 
 _ACTION_NAMES = frozenset(get_args(ActionName))
+# A tuple, and not a set: a non-string a client sends, a list included, can be compared with it (_pop_policy_profile).
+_WORKFLOW_PROFILES = get_args(WorkflowProfile)
 
 
 # Types strict JSON has no form for that a result may still carry, sent as their text.
@@ -685,7 +688,18 @@ class McpToolGateway:
 
     @staticmethod
     def _pop_policy_profile(spec: ToolSpec, raw_arguments: dict[str, Any]) -> str:
-        profile = str(raw_arguments.pop("policy_profile", "") or raw_arguments.get("workflow_profile") or "fast")
+        """The call's profile, from policy_profile or workflow_profile: fast when neither names one (None is unset).
+
+        A governed tool refuses anything else, in words that do not repeat what was sent: read as fast, a typo
+        silently dropped the approval it asked for. A tool that is not governed ignores the argument.
+        """
+        policy_profile = raw_arguments.pop("policy_profile", None)
+        workflow_profile = raw_arguments.get("workflow_profile")
+        if spec.governed_kind is not None:
+            for value in (policy_profile, workflow_profile):
+                if value is not None and value not in _WORKFLOW_PROFILES:
+                    raise ValueError(f"workflow_profile must be one of: {', '.join(_WORKFLOW_PROFILES)}")
+        profile = str(policy_profile or workflow_profile or "fast")
         if "workflow_profile" not in spec.input_model.model_fields:
             raw_arguments.pop("workflow_profile", None)
         return profile

@@ -34,6 +34,10 @@ All notable changes to auto-browser are documented here.
   (`WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL`) and it is not configured or does not answer. Send an operator id
   (`X-Operator-Id`), run such sessions with an isolated takeover surface and browser, and keep the hosted Witness
   reachable.
+- **A governed tool now refuses a `workflow_profile` other than `fast` or `governed`.** Any other value (a typo, the
+  wrong case, a non-string) used to read as `fast`, so the call ran without the approval it asked for. It now answers
+  an error that names the two values, and nothing runs: send one of them, or leave the argument out (`null` counts as
+  left out). Tools that are not governed ignore the argument, as before.
 
 ### Security
 
@@ -56,6 +60,11 @@ All notable changes to auto-browser are documented here.
   action is; one cancelled before it reached the page records nothing, as nothing ran. A record that cannot be
   written fails a change that was made, as an action's does, and is only logged beside a failure's own error, whose
   text stays out of that log, as out of the record. (MCP-23)
+- **A governed tool no longer reads an unknown `workflow_profile` as `fast`.** The argument is how a caller asks for
+  an operator's approval, so a mistyped value (`Governed`, `strict`, a non-string) silently ran the call without one.
+  A tool with a governed kind now refuses it, and `policy_profile` likewise, before anything runs, with a message that
+  names the two allowed values and does not repeat what was sent (see the upgrade note). The argument's description
+  in `tools/list` now says what the profile does in every configuration. (MCP-20)
 
 ### Fixed
 

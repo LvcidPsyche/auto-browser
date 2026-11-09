@@ -125,11 +125,22 @@ class ForceGovernedTests(unittest.IsolatedAsyncioTestCase):
     async def test_forced_a_caller_cannot_ask_for_fast(self) -> None:
         self.settings.force_governed_approvals = True
 
-        for spelling in ({"workflow_profile": "fast"}, {"policy_profile": "fast"}, {"workflow_profile": "bogus"}):
+        for spelling in ({"workflow_profile": "fast"}, {"policy_profile": "fast"}):
             with self.subTest(spelling=spelling):
                 for call in (self._session_write, self._sessionless_write):
                     response = await call(**spelling)
                     self.assertEqual(response.structuredContent.get("status"), "approval_required")
+        self.manager.click.assert_not_awaited()
+        self.delete.assert_not_awaited()
+
+    async def test_forced_an_unknown_profile_is_refused_as_anywhere_else(self) -> None:
+        # Refused before the deployment's forced profile applies: a typo is the caller's to fix, and nothing runs.
+        self.settings.force_governed_approvals = True
+
+        for call in (self._session_write, self._sessionless_write):
+            response = await call(workflow_profile="bogus")
+            self.assertTrue(response.isError)
+            self.assertIn("workflow_profile must be one of", response.content[0].text)
         self.manager.click.assert_not_awaited()
         self.delete.assert_not_awaited()
 
