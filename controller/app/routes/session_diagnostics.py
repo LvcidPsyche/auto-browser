@@ -13,6 +13,7 @@ from starlette.responses import StreamingResponse
 
 from .. import events as _events
 from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError
 from ..playwright_export import export_session_script
 from ._utils import OFF_LIST_PAGE_DETAIL, bounded_limit, is_http_link, require_safe_segment, typed_route_errors
 
@@ -199,6 +200,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                 return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
             except PermissionError:
                 raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
+            except SessionBusyError:
+                raise HTTPException(status_code=409, detail=SESSION_BUSY_DETAIL) from None
 
     @router.post("/sessions/{session_id}/shadow-browse")
     async def enable_shadow_browse(session_id: str) -> dict[str, Any]:

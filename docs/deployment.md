@@ -853,10 +853,11 @@ attached, lost or attach failed).
 
 ### Reading a refused page again
 
-Observe, screenshots, the page-reading MCP tools and actions other than navigation answer that a
-refused page is not read (REST: 403), also after the controller has sent it back to `about:blank`, and
-after the page has loaded an allowed URL on its own (a refused host's redirect, a script). The taint
-clears only in two ways:
+Observe, screenshots, the page-reading MCP tools, the network log (`GET /sessions/{id}/network/requests`,
+`GET /sessions/{id}/network-log`, `browser.get_network_log` and the `browser://<id>/network` resource) and
+actions other than navigation answer that a refused page is not read (REST: 403), also after the controller
+has sent it back to `about:blank`, and after the page has loaded an allowed URL on its own (a refused host's
+redirect, a script). The taint clears only in two ways:
 
 - the agent navigates the page to an allowed URL, and that navigation returns a response that ends on an
   allowed http(s) URL, no hop of its redirect chain was refused, no commit during it came from a refused
@@ -921,6 +922,12 @@ for its birth verdict has its console messages and page errors kept aside (at mo
 verdict is clean, including when the popup closed before the verdict landed; a refused verdict, or anything
 else refusing the popup meanwhile, drops them, and so does a popup that closed before its target id could be
 read (unjudged).
+
+The network log is not served at all while the session's active page is refused: `GET /sessions/{id}/network/requests`
+and `GET /sessions/{id}/network-log` answer `403`, `browser.get_network_log` is a refusal and
+`browser://<id>/network` answers `-32603`. Navigate the page to an allowed URL to read it again (see above); what it
+holds then is below. A page that moves onto a refused host while the log is read is refused too, and a session
+another call holds past the bound answers `409` over REST.
 
 The network log withholds a request made by a refused page, and one that navigates a top-level page to
 a refused host. Such a request is recorded with `"withheld": "page off ALLOWED_HOSTS"`, its URL cut to

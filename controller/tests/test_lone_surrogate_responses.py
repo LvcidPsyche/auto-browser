@@ -6,6 +6,7 @@ raised UnicodeEncodeError after the handler had run, so tools/call and any REST 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import unittest
 from types import SimpleNamespace
@@ -132,7 +133,14 @@ class RestRouteLoneSurrogateTests(unittest.TestCase):
     def test_a_route_without_a_response_model_returns_a_pages_string_with_the_replacement_character(self) -> None:
         inspector = SimpleNamespace(entries=lambda **_: [{"url": f"https://x.test/{TEXT}"}], summary=lambda: {})
 
-        with patch("app.routes.extensions.network._get_inspector", return_value=inspector):
+        @contextlib.asynccontextmanager
+        async def no_page_to_judge(_app, _session_id):
+            yield
+
+        with (
+            patch("app.routes.extensions.network._get_inspector", return_value=inspector),
+            patch("app.routes.extensions.network._reading_an_allowed_page", no_page_to_judge),
+        ):
             response = self.client.get("/sessions/s1/network/requests")
 
         self.assertEqual(response.status_code, 200, response.text[:200])

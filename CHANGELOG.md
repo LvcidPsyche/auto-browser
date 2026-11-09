@@ -70,9 +70,12 @@ All notable changes to auto-browser are documented here.
   `profile_name`. `GET /sessions/{id}/auth-state` keeps its `path`.
 - **The network log of a page `ALLOWED_HOSTS` refuses is now refused, as a raw CDP read of it is.**
   `GET /sessions/{id}/network/requests` and `GET /sessions/{id}/network-log` answer `403` with the same fixed text as
-  the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. A session
-  whose page is allowed gets its log as before, and one whose page is refused gets it again once the page is
-  navigated to an allowed URL.
+  the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. The page
+  is checked before the read and again after it, so one that moves onto a refused host meanwhile is refused too. A
+  session whose page is allowed gets its log as before, and one whose page is refused gets it again once the page is
+  navigated to an allowed URL. `GET /sessions/{id}/network-log` now answers `409` for a session another call holds
+  past the bound, as `GET /sessions/{id}/network/requests` does, where it waited without limit, and that route answers
+  `404` for a session that has gone, as for a session with no inspector, where it read the log of one being closed.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
   the next carries `details.count`, the refusals held back since. An alert that counts these events must add that
   field.
@@ -126,8 +129,9 @@ All notable changes to auto-browser are documented here.
 - **A page `ALLOWED_HOSTS` refuses no longer shows in the network log, on any surface.** The log holds the URL of
   every request, and a page that had moved onto a refused host had its own requests read back through
   `GET /sessions/{id}/network/requests`, `GET /sessions/{id}/network-log`, `browser.get_network_log` and the
-  `browser://<id>/network` resource, none of which checked the page. Each now refuses it under the session lock, as
-  the raw CDP route does, with fixed text that names no host (see the upgrade note). (AUTH-22)
+  `browser://<id>/network` resource, none of which checked the page. Each now refuses it, as the raw CDP route does,
+  under a bounded wait for the session lock and with fixed text that names no host, checking the page before the read
+  and again after it, with the entries read last (see the upgrade note). (AUTH-22)
 
 ### Fixed
 

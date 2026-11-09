@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -10,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ...browser.page_read import READ_LOCK_TIMEOUT_SECONDS
+from ...browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError, locked_read
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ async def network_get_requests(
 ):
     inspector = _get_inspector(request.app, session_id)
     if inspector is None:
-        raise HTTPException(404, f"No network inspector for session {session_id!r}")
+        raise _no_inspector(session_id)
     async with _reading_an_allowed_page(request.app, session_id):
         entries = inspector.entries(limit=limit, method=method or None, url_contains=url_filter or None)
         if resource_type:
@@ -42,25 +41,21 @@ async def _reading_an_allowed_page(app, session_id: str) -> AsyncIterator[None]:
     """Hold the session lock while its active page is one ALLOWED_HOSTS allows, as the raw CDP routes do (cdp.py).
 
     The inspector's entries are the URLs of every request, the refused page's included: the same refusal, on every
-    surface that serves them (browser/services/diagnostics.py has the others). No live session has no page to judge.
+    surface that serves them (browser/services/diagnostics.py has the others). The lock is waited for within a bound,
+    and the page checked before and under it (locked_read). An inspector with no live session has no page to judge
+    and so no log to give: it answers as a missing inspector does.
     """
     manager = getattr(app.state, "browser_manager", None)
     session = manager.sessions.get(session_id) if manager is not None else None
     if session is None:
-        yield
-        return
+        raise _no_inspector(session_id)
     try:
-        await asyncio.wait_for(session.lock.acquire(), timeout=READ_LOCK_TIMEOUT_SECONDS)
-    except TimeoutError:
-        raise HTTPException(409, "The session is busy with another call. Try again.") from None
-    try:
-        try:
-            manager._assert_page_allowed(session)
-        except PermissionError:
-            raise HTTPException(403, OFF_LIST_PAGE_DETAIL) from None
-        yield
-    finally:
-        session.lock.release()
+        async with locked_read(manager, session):
+            yield
+    except SessionBusyError:
+        raise HTTPException(409, SESSION_BUSY_DETAIL) from None
+    except PermissionError:
+        raise HTTPException(403, OFF_LIST_PAGE_DETAIL) from None
 
 
 @network_router.post("/hooks")
@@ -97,6 +92,10 @@ async def network_remove_hook(session_id: str, pattern: str, request: Request):
         raise HTTPException(404, f"No network inspector for session {session_id!r}")
     removed = inspector.remove_hook(pattern)
     return {"removed": removed, "pattern": pattern}
+
+
+def _no_inspector(session_id: str) -> HTTPException:
+    return HTTPException(404, f"No network inspector for session {session_id!r}")
 
 
 def _get_inspector(app, session_id: str):

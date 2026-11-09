@@ -21,7 +21,7 @@ from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
-from ..page_read import REFUSED_NETWORK_LOG_DETAIL
+from ..page_read import REFUSED_NETWORK_LOG_DETAIL, locked_read
 from ..window_births import BirthVerdict
 from .observation import _scrub_disclosure
 
@@ -167,27 +167,24 @@ class BrowserDiagnosticsService:
         url_contains: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        async with session.lock:
-            # The log holds the URL of every request, the refused page's included: refused as a raw CDP read of that
-            # page is, under the lock, with a text that names no host (this is what an MCP caller reads).
-            try:
-                self.manager._assert_page_allowed(session)
-            except PermissionError:
-                raise PermissionError(REFUSED_NETWORK_LOG_DETAIL) from None
-            inspector = session.network_inspector
-            if inspector is None:
+        # The log holds the URL of every request, the refused page's included: refused as a raw CDP read of that
+        # page is, with a text that names no host (this is what an MCP caller reads). The page is checked before and
+        # under the lock and after the summary, which awaits: the entries are read last, with nothing awaited between
+        # them and that check.
+        try:
+            async with locked_read(self.manager, session):
+                summary = await self.manager._session_summary(session)
+                inspector = session.network_inspector
+                if inspector is None:
+                    return {"session": summary, "enabled": False, "entries": [], "summary": {}}
                 return {
-                    "session": await self.manager._session_summary(session),
-                    "enabled": False,
-                    "entries": [],
-                    "summary": {},
+                    "session": summary,
+                    "enabled": True,
+                    "entries": inspector.entries(limit=limit, method=method, url_contains=url_contains),
+                    "summary": inspector.summary(),
                 }
-            return {
-                "session": await self.manager._session_summary(session),
-                "enabled": True,
-                "entries": inspector.entries(limit=limit, method=method, url_contains=url_contains),
-                "summary": inspector.summary(),
-            }
+        except PermissionError:
+            raise PermissionError(REFUSED_NETWORK_LOG_DETAIL) from None
 
     def attach_popup(self, page: "Page", session: "BrowserSession") -> None:
         """Attach to a page the context reports, refused until its opener has judged it.
