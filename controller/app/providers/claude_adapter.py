@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from ..models import BrowserActionDecision
-from .base import BaseProviderAdapter, ProviderDecision
+from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderDecision
 
 # Current Claude models think on every request, and thinking counts against
 # max_tokens; 1024 could run out before the tool call was written.
@@ -84,7 +84,7 @@ class ClaudeAdapter(BaseProviderAdapter):
             "model": model,
             "max_tokens": _MAX_TOKENS,
             "system": (
-                "You are the Auto Browser planner. Pick exactly one next action. "
+                f"You are the Auto Browser planner. Pick exactly one next action. {PAGE_DATA_NOTICE} "
                 "Respond by calling the browser_action tool exactly once."
             ),
             # Requested, not forced: Claude Opus 5.5, Sonnet 5.5 and Fable 5.1

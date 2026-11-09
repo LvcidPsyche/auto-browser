@@ -5,16 +5,20 @@ import json
 import logging
 import os
 import threading
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
-from .utils import atomic_write_text, record_path, utc_now, without_lone_surrogates
+from .network_inspector import URL_SCRUB_MAX_BYTES, scrub_url
+from .utils import SECRET_KEY_FRAGMENTS, atomic_write_text, record_path, utc_now, without_lone_surrogates
 from .witness_anchor import (
     anchor_fields,
     anchor_path,
@@ -24,9 +28,13 @@ from .witness_anchor import (
     read_anchor,
     read_records,
     read_tail_line,
+    shared_lock,
     write_anchor,
 )
 from .witness_signing import SIGNATURE_ALGORITHM
+
+if TYPE_CHECKING:
+    from .pii_scrub import PiiScrubber
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +116,37 @@ ActionClass = Literal[
 ]
 
 _HIGH_RISK_CLASSES = {"upload", "post", "payment", "account_change", "destructive", "auth"}
+
+REDACTED = "[REDACTED]"
+# Withheld from a restricted receipt by name, at any depth, beside a secret-named key (SECRET_KEY_FRAGMENTS): what an
+# action typed or uploaded, the free text an agent or a tool call wrote (an approval's reason previews the call's
+# arguments; a takeover's is the agent's own words), and an operator's comment on an approval decision. The approval
+# store keeps an approval's reason and its decision's comment, and the audit log a takeover's reason and the comment.
+_RESTRICTED_KEYS = frozenset({"text", "text_preview", "file_path", "password", "totp_secret", "reason", "comment"})
+# What a select_option chose (by value, label or index); a None is another way of choosing, kept so the receipt shows
+# which was used.
+_CHOICE_KEYS = frozenset({"value", "label", "index"})
+
+
+def _redact_restricted(value: Any, scrubber: PiiScrubber | None) -> Any:
+    """A copy of a restricted receipt's target or metadata with its secrets and typed text withheld, at any depth, and
+    each URL (a `url` key's string) with its query and fragment scrubbed as the run trace scrubs a URL's: a navigate's
+    can carry an OAuth code or a token."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            withheld = name in _RESTRICTED_KEYS or any(fragment in name for fragment in SECRET_KEY_FRAGMENTS)
+            if withheld or (name in _CHOICE_KEYS and item is not None):
+                redacted[key] = REDACTED
+            elif name == "url" and isinstance(item, str):
+                redacted[key] = scrub_url(item, scrubber, URL_SCRUB_MAX_BYTES)[0]
+            else:
+                redacted[key] = _redact_restricted(item, scrubber)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [_redact_restricted(item, scrubber) for item in value]
+    return value
 
 
 class WitnessConcern(BaseModel):
@@ -333,48 +372,101 @@ class WitnessPolicyEngine:
         return outcome
 
     @staticmethod
-    def redact_target(target: dict[str, Any], *, evidence_mode: EvidenceMode) -> dict[str, Any]:
+    def redact_target(
+        target: dict[str, Any], *, evidence_mode: EvidenceMode, scrubber: PiiScrubber | None = None
+    ) -> dict[str, Any]:
+        """A receipt's target or metadata as the evidence mode keeps it (a copy either way); ``scrubber`` is the PII
+        scrubber a restricted one's URLs go through (without one they are kept)."""
         if evidence_mode != "restricted":
             return dict(target)
-        redacted = dict(target)
-        for key in ("text", "text_preview", "file_path", "password", "totp_secret"):
-            if key in redacted:
-                redacted[key] = "[REDACTED]"
-        # What a select_option chose (by value, label or index); a None is another way of choosing, kept so the receipt
-        # shows which was used.
-        for key in ("value", "label", "index"):
-            if redacted.get(key) is not None:
-                redacted[key] = "[REDACTED]"
-        return redacted
+        return _redact_restricted(target, scrubber)
+
+    @staticmethod
+    def redact_approval(approval: WitnessApproval, *, evidence_mode: EvidenceMode) -> WitnessApproval:
+        """A receipt's approval as the evidence mode keeps it: restricted withholds the reason, and a None stays."""
+        if evidence_mode != "restricted" or approval.reason is None:
+            return approval.model_copy()
+        return approval.model_copy(update={"reason": REDACTED})
 
     @staticmethod
     def _is_anonymous(operator: OperatorIdentity) -> bool:
         return (operator.id or "anonymous").strip() in {"", "anonymous"}
 
 
+@dataclass
+class _SharedLock:
+    """A lock and how many holders and waiters it has, so it is dropped when it has none."""
+
+    lock: Any
+    users: int = 0
+
+
+class _ChainThreadLocks:
+    """One threading.Lock per chain file, dropped once no thread holds or waits for it.
+
+    Per file, so appends to different chains run side by side. Two threads on one file still queue here, which is
+    what Windows needs: its byte-range locks are owned per process, so two of this process's threads contending for
+    the file lock deadlock rather than queue. The key is the path as the file system compares it (case-folded on
+    Windows), so two spellings of one file share a lock."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, _SharedLock] = {}
+
+    @contextmanager
+    def hold(self, path: Path) -> Iterator[None]:
+        key = os.path.normcase(os.path.abspath(path))
+        with self._guard:
+            shared = self._locks.setdefault(key, _SharedLock(threading.Lock()))
+            shared.users += 1
+        try:
+            with shared.lock:
+                yield
+        finally:
+            with self._guard:
+                shared.users -= 1
+                if not shared.users:
+                    del self._locks[key]
+
+
 class WitnessRecorder:
     """Append-only, hash-chained receipt log (one JSONL file per scope).
 
-    Chain integrity assumes a single writer process: the asyncio.Lock serializes
-    concurrent appends within one event loop and self._heads caches each scope's
-    head hash in memory. This holds for the supported deployment (uvicorn with a
-    single worker — see controller/Dockerfile). Running multiple worker processes
-    against the same witness_root would fork the chain (duplicate chain_prev_hash)
-    and needs OS-level file locking or a shared store — out of scope until
-    multi-worker is actually adopted.
+    Chain integrity assumes a single writer process: a scope's asyncio lock
+    orders its appends within one event loop (other scopes' appends run beside
+    them) and self._heads caches each scope's head hash in memory. This holds for
+    the supported deployment (uvicorn with a single worker — see
+    controller/Dockerfile). Running multiple worker processes against the same
+    witness_root would fork the chain (duplicate chain_prev_hash) and needs
+    OS-level file locking or a shared store — out of scope until multi-worker is
+    actually adopted.
     """
 
     def __init__(self, root: str | Path, *, signer: Any = None):
         self.root = Path(root)
-        self._lock = asyncio.Lock()
-        # Three scopes, because each covers what the next cannot: the asyncio
-        # lock orders tasks on one event loop, this one orders threads inside
-        # this process (appends run in a worker thread, and Windows byte-range
-        # locks are owned per process, so two threads contending for the file
-        # lock deadlock rather than queue), and the file lock orders processes.
-        self._thread_lock = threading.Lock()
+        # Three kinds of lock, because each covers what the next cannot: a
+        # scope's asyncio lock orders its tasks on one event loop, first come
+        # first served; a chain file's thread lock orders threads inside this
+        # process (appends run in a worker thread; see _ChainThreadLocks); and
+        # the file lock orders processes. The first two are per scope and per
+        # file, so one session's appends never wait for another's.
+        self._scope_locks: dict[str, _SharedLock] = {}
+        self._thread_locks = _ChainThreadLocks()
         self._heads: dict[str, str] = {}
         self.signer = signer
+
+    @asynccontextmanager
+    async def _scope_lock(self, scope: str) -> AsyncIterator[None]:
+        """Hold the scope's asyncio lock; it is dropped once no task holds or waits for it."""
+        shared = self._scope_locks.setdefault(scope, _SharedLock(asyncio.Lock()))
+        shared.users += 1
+        try:
+            async with shared.lock:
+                yield
+        finally:
+            shared.users -= 1
+            if not shared.users:
+                del self._scope_locks[scope]
 
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -403,7 +495,7 @@ class WitnessRecorder:
         atomic_write_text(marker, utc_now())
 
     def _anchor_chain(self, path: Path) -> None:
-        with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+        with self._thread_locks.hold(path), open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
             if anchor_path(path).exists():  # another worker anchored it first
                 return
             self._set_aside_torn_tail(path, handle)
@@ -428,7 +520,7 @@ class WitnessRecorder:
         return await self.append(scope, receipt)
 
     async def append(self, scope: str, receipt: WitnessReceipt) -> WitnessReceipt:
-        async with self._lock:
+        async with self._scope_lock(scope):
             path = self._path(scope)
             # A copy, its lone surrogates replaced before it is hashed: UTF-8 cannot encode one, so the receipt
             # could not be written, and the action it records had already run.
@@ -445,7 +537,7 @@ class WitnessRecorder:
 
     def _append_locked(self, path: Path, item: WitnessReceipt) -> WitnessReceipt:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+        with self._thread_locks.hold(path), open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
             self._set_aside_torn_tail(path, handle)
             last_line = read_tail_line(handle)
             item.chain_prev_hash = WitnessReceipt.model_validate_json(last_line).chain_hash if last_line else None
@@ -586,17 +678,29 @@ class WitnessRecorder:
         `valid` passes only when the hash walk, the anchor and the signatures all
         do, so a client that reads one field cannot accept a chain whose
         signatures were stripped. `chain_valid` keeps the hash-walk verdict alone.
+
+        Both checks read one copy of the chain, as export_bundle's do: read twice,
+        an append in between gave a verdict over two chains.
         """
-        chain = await self.verify(scope)
-        signatures = await self.verify_signatures(scope)
+        path = self._path(scope)
+        key = self.signer.public_key_b64 if self.signer is not None else None
+        chain, signatures = await asyncio.to_thread(
+            self._locked_read,
+            path,
+            lambda data: (self._verify_data(scope, path, data), self._verify_signatures_data(scope, data, key)),
+        )
         result = {**chain, "chain_valid": chain["valid"], "signatures": signatures}
         if chain["valid"] and not signatures["valid"]:
             result["valid"] = False
             result["reason"] = f"signatures: {signatures['reason']}"
         return result
 
+    @classmethod
+    def _verify_signatures_sync(cls, scope: str, path: Path, public_key_b64: str | None) -> dict[str, Any]:
+        return cls._verify_signatures_data(scope, path.read_bytes() if path.exists() else b"", public_key_b64)
+
     @staticmethod
-    def _verify_signatures_sync(scope: str, path: Path, public_key_b64: str | None) -> dict[str, Any]:
+    def _verify_signatures_data(scope: str, data: bytes, public_key_b64: str | None) -> dict[str, Any]:
         from .witness_signing import verify_signature
 
         result: dict[str, Any] = {
@@ -614,10 +718,8 @@ class WitnessRecorder:
             result["valid"] = False
             result["reason"] = "no public key available to verify against"
             return result
-        if not path.exists():
-            return result
 
-        for index, line in enumerate(chain_records(path.read_bytes())):
+        for index, line in enumerate(chain_records(data)):
             try:
                 receipt = WitnessReceipt.model_validate_json(line)
             except ValueError:
@@ -669,9 +771,15 @@ class WitnessRecorder:
         hash, the public key, and the algorithm, so a recipient with
         `scripts/verify_witness_bundle.py` — which imports nothing from this
         project — can check the chain and its signatures independently.
+
+        The receipts and the chain check come from one read of the chain: read
+        twice, an append that landed in between gave a bundle whose head hash
+        and verdict described a receipt its list did not hold.
         """
-        receipts = await asyncio.to_thread(self._read_all_sync, self._path(scope))
-        chain = await self.verify(scope)
+        path = self._path(scope)
+        receipts, chain = await asyncio.to_thread(
+            self._locked_read, path, lambda data: (self._receipts_of(path, data), self._verify_data(scope, path, data))
+        )
         return {
             "format": "auto-browser-witness-bundle",
             "version": 1,
@@ -701,17 +809,36 @@ class WitnessRecorder:
             "receipts": [r.model_dump(mode="json") for r in receipts],
         }
 
-    @staticmethod
-    def _read_all_sync(path: Path) -> ReceiptList:
+    def _locked_read(self, path: Path, use: Callable[[bytes], Any]) -> Any:
+        """``use`` applied to the chain's bytes, read once and used under the chain's thread and file locks.
+
+        No append lands in between, nor between the chain and its anchor, which an
+        append writes under the same locks. Read through the locked handle, never
+        a second one: a Windows byte-range lock excludes every other handle, this
+        process's own included. A chain that does not exist is read as empty, and
+        is not created. The file lock is a shared one (shared_lock): an exclusive
+        lock on this read-only handle fails on Linux over NFS, and the shared one
+        excludes an append's all the same.
+        """
         if not path.exists():
-            return ReceiptList()
-        lines, torn_tail = _chain_lines(path.read_bytes())
+            return use(b"")
+        with self._thread_locks.hold(path), open(path, "rb") as handle, shared_lock(handle):
+            handle.seek(0)
+            return use(handle.read())
+
+    @staticmethod
+    def _receipts_of(path: Path, data: bytes) -> ReceiptList:
+        lines, torn_tail = _chain_lines(data)
         receipts = _parse_receipts(lines, path)
         receipts.torn_tail = torn_tail
         return receipts
 
     @classmethod
     def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
+        return cls._verify_data(scope, path, path.read_bytes() if path.exists() else b"")
+
+    @classmethod
+    def _verify_data(cls, scope: str, path: Path, data: bytes) -> dict[str, Any]:
         result: dict[str, Any] = {
             "scope": scope,
             "valid": True,
@@ -723,7 +850,7 @@ class WitnessRecorder:
             "first_invalid_receipt_id": None,
             "reason": None,
         }
-        lines = chain_records(path.read_bytes()) if path.exists() else []
+        lines = chain_records(data)
 
         previous: str | None = None
         index = -1
@@ -808,9 +935,10 @@ class WitnessRecorder:
         # the entire receipt chain dumped into a response instead of an empty page.
         if limit <= 0:
             return ReceiptList()
-        lines, _ = _chain_lines(path.read_bytes())
+        lines, torn_tail = _chain_lines(path.read_bytes())
         items = _parse_receipts(lines[-limit:], path)
         items.reverse()
+        items.torn_tail = torn_tail
         return items
 
     @staticmethod

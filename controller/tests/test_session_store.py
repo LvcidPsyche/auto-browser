@@ -96,15 +96,16 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([record.id for record in records], ["session-1"])
 
     async def test_durable_list_merges_redis_and_file_records_with_redis_winning(self) -> None:
-        redis_a = _record("session-1", status="active", live=True)
+        # Both copies open: a closed file copy wins over an open Redis one (R5C-5, test_persist_after_close).
+        redis_a = _record("session-1", status="active", live=True).model_copy(update={"title": "from redis"})
         store = await self._durable_with_fake_redis(redis_list=AsyncMock(return_value=[redis_a]))
-        await store.file_store.upsert(_record("session-1", status="closed", live=False))
+        await store.file_store.upsert(_record("session-1", status="active", live=True))
         await store.file_store.upsert(_record("session-2", status="closed", live=False))
 
         records = await store.list()
 
         self.assertEqual([record.id for record in records], ["session-2", "session-1"])
-        self.assertEqual({record.id: record.status for record in records}["session-1"], "active")
+        self.assertEqual({record.id: record.title for record in records}["session-1"], "from redis")
 
     async def test_redis_store_uses_indexed_records_and_transactional_upsert(self) -> None:
         record = _record("session-4")
@@ -185,10 +186,13 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("redis down" in line for line in logs.output))
 
     async def test_durable_get_prefers_the_redis_record(self) -> None:
-        redis_record = _record("session-6", status="active", live=True)
+        # Over an open file copy only: written first, a closed file copy is the newest record, and wins over any Redis
+        # copy, open or closed (R5C-5, test_persist_after_close).
+        redis_record = _record("session-6", status="closed", live=False).model_copy(update={"title": "from redis"})
         store = await self._durable_with_stub_primary(return_value=redis_record)
+        await store.file_store.upsert(_record("session-6"))
 
-        self.assertEqual((await store.get("session-6")).status, "active")
+        self.assertEqual((await store.get("session-6")).title, "from redis")
 
 
 class FileSessionStoreConcurrencyTests(unittest.IsolatedAsyncioTestCase):

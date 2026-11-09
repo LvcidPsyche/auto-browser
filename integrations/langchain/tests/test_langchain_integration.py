@@ -9,6 +9,7 @@ until a user's agent starts returning empty strings.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 
@@ -194,6 +195,89 @@ class AutoBrowserToolListToolsTests(unittest.TestCase):
 
         self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer s3cret")
         self.assertNotIn("authorization", {k.lower() for k in route.calls[1].request.headers})
+
+
+class UserinfoWithTokenTests(unittest.TestCase):
+    """c4's report: httpx sends a base URL's user name and password as Basic credentials, which replace the token's
+    Authorization header, so the controller got no token and the caller was not told."""
+
+    URL = "http://alice:sentinel-pass@auto-browser.test"
+    REFUSAL = (
+        "base_url holds a user name or password, which httpx would send as Basic credentials in place of the token: "
+        "give the token or the URL's user name and password, not both"
+    )
+
+    def test_a_base_url_user_name_or_password_with_a_token_is_refused_without_their_values(self) -> None:
+        cases = {
+            "tool": lambda url, **given: AutoBrowserTool(base_url=url, **given),
+            "node": lambda url, **given: AutoBrowserNode(base_url=url, **given),
+            "list_tools": lambda url, **given: AutoBrowserTool.list_tools(base_url=url, **given),
+        }
+        for url in (self.URL, "http://alice@auto-browser.test", "http://:sentinel-pass@auto-browser.test"):
+            for given in ({"bearer_token": "sentinel-token"}, {"token_file": "sentinel-missing-file"}):
+                for name, build in cases.items():
+                    with self.subTest(url=url, given=next(iter(given)), entry=name):
+                        with self.assertRaises(ValueError) as caught:
+                            build(url, **given)
+                        self.assertEqual(str(caught.exception), self.REFUSAL)
+
+    @respx.mock
+    def test_without_a_token_the_user_name_and_password_still_go_as_basic_credentials(self) -> None:
+        route = respx.get(f"{BASE_URL}/mcp/tools").mock(return_value=httpx.Response(200, json=[]))
+
+        AutoBrowserTool.list_tools(base_url=self.URL)
+        AutoBrowserTool(base_url=self.URL)
+        AutoBrowserNode(base_url=self.URL)
+
+        self.assertEqual(route.calls[0].request.headers["Authorization"], "Basic YWxpY2U6c2VudGluZWwtcGFzcw==")
+
+    def test_a_base_url_httpx_cannot_read_is_left_to_the_first_request(self) -> None:
+        with self.assertRaises(httpx.InvalidURL):
+            AutoBrowserTool.list_tools(base_url="http://[::1", bearer_token="s3cret")
+        AutoBrowserNode(base_url="http://[::1", bearer_token="s3cret")
+
+
+class BaseUrlQueryTests(unittest.IsolatedAsyncioTestCase):
+    """c4's report: httpx put the request's path after a base URL's query (``/?key=value/mcp/tools/call``). The query
+    now goes with every request, at the request's own path, as the MCP bridges send theirs; no request sends a
+    fragment."""
+
+    URL = f"{BASE_URL}/prefix?key=sentinel-value&flag#frag"
+    QUERY = "key=sentinel-value&flag="  # as httpx writes params: a key with no value gets "="
+
+    @respx.mock
+    async def test_the_tool_the_node_and_list_tools_send_the_query_at_their_own_path(self) -> None:
+        route = respx.route(host="auto-browser.test").mock(return_value=httpx.Response(200, json=_content("{}")))
+
+        await AutoBrowserTool(base_url=self.URL)._arun("browser.observe", {})
+        await AutoBrowserNode(base_url=self.URL).call_tool("browser.observe", {})
+        await asyncio.to_thread(AutoBrowserTool.list_tools, base_url=self.URL)
+
+        self.assertEqual(
+            [f"{call.request.method} {call.request.url.raw_path.decode('ascii')}" for call in route.calls],
+            [
+                f"POST /prefix/mcp/tools/call?{self.QUERY}",
+                f"POST /prefix/mcp/tools/call?{self.QUERY}",
+                f"GET /prefix/mcp/tools?{self.QUERY}",
+            ],
+        )
+
+    @respx.mock
+    async def test_a_query_value_ending_in_a_slash_is_sent_whole(self) -> None:
+        # Review of c5 (Codex): the node cut a base URL's trailing slashes before it split off the query, so for
+        # ?key=value/ it sent key=value. Only the path's trailing slashes go.
+        route = respx.route(host="auto-browser.test").mock(return_value=httpx.Response(200, json=_content("{}")))
+        url = f"{BASE_URL}/prefix/?key=sentinel-value/"
+
+        await AutoBrowserTool(base_url=url)._arun("browser.observe", {})
+        await AutoBrowserNode(base_url=url).call_tool("browser.observe", {})
+        await asyncio.to_thread(AutoBrowserTool.list_tools, base_url=url)
+
+        self.assertEqual([call.request.url.params["key"] for call in route.calls], ["sentinel-value/"] * 3)
+        self.assertEqual(
+            [call.request.url.path for call in route.calls],
+            ["/prefix/mcp/tools/call", "/prefix/mcp/tools/call", "/prefix/mcp/tools"],
+        )
 
 
 class AutoBrowserNodeTests(unittest.TestCase):

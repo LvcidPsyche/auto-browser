@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from app import memory_manager
 from app.memory_manager import MemoryManager, MemoryProfile
 
 
@@ -116,3 +120,146 @@ class MemoryProfileNameCollisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleting_a_colliding_name_leaves_the_other_profile(self) -> None:
         self.assertFalse(await self.manager.delete("github_com"))
         self.assertIsNotNone(await self.manager.get("github.com"))
+
+
+class UnreadableProfileTests(unittest.IsolatedAsyncioTestCase):
+    """STORE-36: a file that is no profile broke the whole listing, and failed get, save and delete with an error that
+    quoted the file; a delete did not wait for a save of the same profile."""
+
+    async def asyncSetUp(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.root = Path(tempdir.name)
+        self.manager = MemoryManager(self.root)
+        await self.manager.startup()
+        await self.manager.save("kept")
+
+    async def test_a_listing_skips_files_that_are_no_profile_and_says_so(self) -> None:
+        (self.root / "a_list.json").write_text("[1, 2]", encoding="utf-8")
+        (self.root / "broken.json").write_text("{not json", encoding="utf-8")
+
+        with self.assertLogs("app.memory_manager", level="WARNING") as logs:
+            profiles = await self.manager.list()
+
+        self.assertEqual([profile["name"] for profile in profiles], ["kept"])
+        logged = "\n".join(logs.output)
+        self.assertIn("a_list.json", logged)
+        self.assertIn("broken.json", logged)
+
+    async def test_a_listing_leaves_out_files_that_do_not_load_as_a_profile(self) -> None:
+        # Review of c4 (Codex 10): an object that is no profile was listed, {} under its file's name and a string of
+        # steps counted by its characters, though getting either fails.
+        (self.root / "empty.json").write_text("{}", encoding="utf-8")
+        (self.root / "steps.json").write_text('{"name": "steps", "completed_steps": "oops"}', encoding="utf-8")
+
+        with self.assertLogs("app.memory_manager", level="WARNING") as logs:
+            profiles = await self.manager.list()
+
+        self.assertEqual([profile["name"] for profile in profiles], ["kept"])
+        logged = "\n".join(logs.output)
+        self.assertIn("empty.json", logged)
+        self.assertIn("steps.json", logged)
+
+    async def test_an_unreadable_profile_is_refused_by_name_without_its_content(self) -> None:
+        (self.root / "broken.json").write_text('{"name": "broken", "notes": "SECRET-NOTE"', encoding="utf-8")
+        calls = {
+            "get": self.manager.get,
+            "delete": self.manager.delete,
+            "save": lambda name: self.manager.save(name, notes=["n"]),
+        }
+
+        for label, call in calls.items():
+            with self.subTest(label):
+                with self.assertRaisesRegex(ValueError, "memory profile 'broken' cannot be read") as caught:
+                    await call("broken")
+                self.assertNotIn("SECRET-NOTE", str(caught.exception))
+        self.assertTrue((self.root / "broken.json").exists())
+
+    @staticmethod
+    async def _cancel(task: asyncio.Future, times: int) -> None:
+        # Each cancel lands before the next one is sent.
+        for _ in range(times):
+            task.cancel()
+            await asyncio.sleep(0.05)
+
+    async def _a_cancelled_save_finishes_its_write_before_a_delete_runs(self, cancels: int) -> None:
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        write = memory_manager.atomic_write_text
+
+        def paused(*args: object) -> None:
+            started.set()
+            release.wait(5)
+            try:
+                write(*args)
+            finally:
+                finished.set()
+
+        with patch.object(memory_manager, "atomic_write_text", paused):
+            saving = asyncio.ensure_future(self.manager.save("kept", notes=["more"]))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            await self._cancel(saving, cancels)
+            deleting = asyncio.ensure_future(self.manager.delete("kept"))
+            await asyncio.sleep(0.2)
+            release.set()
+            self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+            with self.assertRaises(asyncio.CancelledError):
+                await saving
+            self.assertTrue(await deleting)
+
+        self.assertFalse((self.root / "kept.json").exists())
+
+    async def _a_cancelled_delete_finishes_its_unlink_before_a_save_runs(self, cancels: int) -> None:
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        unlink = Path.unlink
+
+        def paused(path: Path, *args: object, **kwargs: object) -> None:
+            if path.name != "kept.json":
+                return unlink(path, *args, **kwargs)
+            started.set()
+            release.wait(5)
+            try:
+                return unlink(path, *args, **kwargs)
+            finally:
+                finished.set()
+
+        with patch.object(Path, "unlink", paused):
+            deleting = asyncio.ensure_future(self.manager.delete("kept"))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            await self._cancel(deleting, cancels)
+            saving = asyncio.ensure_future(self.manager.save("kept", notes=["after"]))
+            await asyncio.sleep(0.2)
+            release.set()
+            self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+            with self.assertRaises(asyncio.CancelledError):
+                await deleting
+            profile = await saving
+
+        self.assertEqual(profile.notes, ["after"])
+        self.assertTrue((self.root / "kept.json").exists())
+
+    async def test_a_cancelled_save_finishes_its_write_before_a_delete_runs(self) -> None:
+        # Review of c4 (Codex 5): a save cancelled during its write let go of the lock while the write went on in its
+        # thread, so a delete ran first and the write then brought the profile back.
+        await self._a_cancelled_save_finishes_its_write_before_a_delete_runs(cancels=1)
+
+    async def test_a_cancelled_delete_finishes_its_unlink_before_a_save_runs(self) -> None:
+        # The other way round: the delete let go of the lock, a save read the profile and wrote it, and the unlink then
+        # removed what the save had just written.
+        await self._a_cancelled_delete_finishes_its_unlink_before_a_save_runs(cancels=1)
+
+    async def test_a_save_cancelled_twice_finishes_its_write_before_a_delete_runs(self) -> None:
+        # Review of c4b (Codex 1): the second cancel ended the wait for the thread that the first one began.
+        await self._a_cancelled_save_finishes_its_write_before_a_delete_runs(cancels=2)
+
+    async def test_a_delete_cancelled_twice_finishes_its_unlink_before_a_save_runs(self) -> None:
+        await self._a_cancelled_delete_finishes_its_unlink_before_a_save_runs(cancels=2)
+
+    async def test_a_delete_waits_for_a_save_in_progress(self) -> None:
+        async with self.manager._lock:
+            deleting = asyncio.ensure_future(self.manager.delete("kept"))
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(deleting), 0.5)
+            self.assertTrue((self.root / "kept.json").exists())
+
+        self.assertTrue(await deleting)
+        self.assertFalse((self.root / "kept.json").exists())

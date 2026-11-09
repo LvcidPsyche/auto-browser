@@ -852,13 +852,14 @@ async def test_activate_tab_of_a_session_closed_during_the_wait_is_an_unknown_se
 
 # ── round 4: what a held popup logs reaches the agent once it is judged clean ──
 
-CALLBACK_FLOW = {
+# An OAuth callback popup that logs at load and posts its code to the opener; it closes itself when the test cues it
+# (`window.close()` from its own script), not on a timer of its own.
+CLOSE_ON_CUE = {
     "/start": "<title>start</title><p>start</p>"
     "<script>window.addEventListener('message', (e) => { window.__code = e.data })</script>",
     "/authorize": nav.redirect("{ALLOWED}/callback"),
     "/callback": "<title>cb</title><p>cb</p><script>console.log('callback-loaded');"
-    "window.opener && window.opener.postMessage('code-123', '*');"
-    "setTimeout(() => window.close(), 1500)</script>",
+    "window.opener && window.opener.postMessage('code-123', '*')</script>",
 }
 
 
@@ -868,8 +869,13 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
 ) -> None:
     """Reviewer's R5 (L1): an OAuth callback popup logs at load, posts its code to the opener and closes itself.
     Its load-time console line was emitted while the popup was held for its birth verdict and dropped; base kept
-    it. Held output is kept aside and appended once the verdict is clean, with another tab refused too."""
-    async with browser_env(tmp_path, {**PAGES, **CALLBACK_FLOW}) as env:
+    it. Held output is kept aside and appended once the verdict is clean, with another tab refused too.
+
+    The popup closes itself only once its verdict has landed. On a timer of its own (1.5 s) it closed first when a
+    busy runner was slow to read its targetId, and a popup that closes before its targetId can be read is refused as
+    unjudged and keeps nothing (test_a_popup_closed_mid_hold_before_its_id_was_read_shows_nothing_it_emitted), so
+    its line never came (CI, a9db183f)."""
+    async with browser_env(tmp_path, {**PAGES, **CLOSE_ON_CUE}) as env:
         session_id = await env.create("/start")
         session = env.manager.sessions[session_id]
         if variant == "other-refused":
@@ -878,11 +884,16 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
         popup = await open_popup(session, f"{env.allowed}/authorize")
 
         await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
-        await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
-
-        assert any("callback-loaded" in json.dumps(message) for message in session.console_messages), (
-            "the callback's console line did not reach the agent"
+        assert await settle(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT), (
+            "the popup's birth verdict never landed"
         )
+        await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")  # it closes itself
+        assert await settle(lambda: popup.is_closed(), timeout=TIMEOUT), "the popup did not close itself"
+
+        assert await settle(
+            lambda: any("callback-loaded" in json.dumps(message) for message in session.console_messages),
+            timeout=TIMEOUT,
+        ), "the callback's console line did not reach the agent"
         assert SECRET not in json.dumps(session.console_messages)
 
 
@@ -957,15 +968,6 @@ async def test_a_popup_closed_mid_hold_before_its_id_was_read_shows_nothing_it_e
         assert SECRET not in json.dumps(session.page_errors)
         assert SECRET not in json.dumps(await env.manager.list_tabs(session_id))
         assert SECRET not in json.dumps(await env.manager.observe(session_id, preset="text"), default=str)
-
-
-CLOSE_ON_CUE = {
-    "/start": "<title>start</title><p>start</p>"
-    "<script>window.addEventListener('message', (e) => { window.__code = e.data })</script>",
-    "/authorize": nav.redirect("{ALLOWED}/callback"),
-    "/callback": "<title>cb</title><p>cb</p><script>console.log('callback-loaded');"
-    "window.opener && window.opener.postMessage('code-123', '*')</script>",
-}
 
 
 @pytest.mark.parametrize("outcome", ["clean", "refused", "refused-meanwhile"])

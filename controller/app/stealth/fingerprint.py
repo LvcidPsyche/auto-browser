@@ -106,19 +106,68 @@ class FingerprintConfig:
         window.chrome.app = window.chrome.app || {{}};
     }}
 
-    // 3. Canvas fingerprint noise — add deterministic per-pixel noise.
+    // 3. Canvas fingerprint noise: a shift of one up or down on each of a
+    // pixel's R, G and B (alpha is left alone), from a hash of the pixel's place
+    // on the canvas and the session's seed, so a pixel reads the same in any
+    // rectangle. It came from the seed and the byte index, a multiple of 4 at
+    // every red byte: every pixel got the same shift, on red only (NAV-24).
     // Patched once on the prototype: getContext('2d') returns the same context
     // every time, so wrapping the instance there stacked another layer of noise
     // (and another stack frame) on every call.
     const _noise_seed = {noise_seed};
+    const _seed_hash = Math.imul(_noise_seed, 0xC2B2AE3D);
     const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    // The prototype's own getter for canvas, called on the receiver first: it throws the same "Illegal invocation"
+    // for a receiver that is not a 2d context, and runs no page code, where the coordinates below can (review of c5).
+    const _canvasOf = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'canvas').get;
+    const _getPrototypeOf = Object.getPrototypeOf;
+    // Captured with the others: the loop below called the live global, which a page can change to turn the noise off.
+    const _trunc = Math.trunc;
+    const _bytesPrototype = Uint8ClampedArray.prototype;
+    const _LONG_MIN = -2147483648;
+    const _LONG_MAX = 2147483647;
     CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
+        _canvasOf.call(this);
+        if (args.length >= 4) {{
+            // Each coordinate read once, as a number, and passed on as that number: read again below once the native
+            // call had read it, an object's valueOf ran twice, and could answer differently or throw (review of c5).
+            // One at a time: at the first the native's [EnforceRange] refuses (not finite, or out of a long's range
+            // when truncated) the native is called at once, with the numbers so far and the rest as they stand, so it
+            // throws at that coordinate and converts nothing after it, as it does alone (review of c6). A BigInt or a
+            // Symbol goes to the native as it is: the unary plus would throw V8's bare TypeError, where the native's
+            // message names the method and the interface.
+            for (let index = 0; index < 4; index++) {{
+                const type = typeof args[index];
+                if (type === 'bigint' || type === 'symbol') return _origGetImageData.apply(this, args);
+                args[index] = +args[index];
+                const truncated = _trunc(args[index]);
+                if (!(truncated >= _LONG_MIN && truncated <= _LONG_MAX)) return _origGetImageData.apply(this, args);
+            }}
+        }}
         const imageData = _origGetImageData.apply(this, args);
         const data = imageData.data;
-        for (let i = 0; i < data.length; i += 4) {{
-            // Add ±1 noise based on pixel index + seed
-            const noise = ((_noise_seed ^ i) & 1) ? 1 : -1;
-            data[i] = Math.max(0, Math.min(255, data[i] + noise));
+        // Bytes only: a read of float values (pixelFormat "rgba-float16") is left as it is, as a shift of one there
+        // is the whole 0-1 range (review of c5).
+        if (_getPrototypeOf(data) !== _bytesPrototype) return imageData;
+        const width = imageData.width;
+        const height = imageData.height;
+        // The read's top left corner: a negative width or height reads to the left of or above (sx, sy).
+        const left = (args[0] | 0) + Math.min(args[2] | 0, 0);
+        const top = (args[1] | 0) + Math.min(args[3] | 0, 0);
+        let i = 0;
+        for (let row = 0; row < height; row++) {{
+            const rowHash = Math.imul(top + row, 0x85EBCA77) ^ _seed_hash;
+            for (let column = 0; column < width; column++, i += 4) {{
+                // MurmurHash3's finaliser over the place and the seed; bits 0, 1 and 2 pick R's, G's and B's shift.
+                let h = Math.imul(left + column, 0x9E3779B1) ^ rowHash;
+                h = Math.imul(h ^ (h >>> 16), 0x85EBCA6B);
+                h = Math.imul(h ^ (h >>> 13), 0xC2B2AE35);
+                h ^= h >>> 16;
+                // A Uint8ClampedArray: a shift past 0 or 255 stops there.
+                data[i] += (h & 1) * 2 - 1;
+                data[i + 1] += (h & 2) - 1;
+                data[i + 2] += ((h >>> 1) & 2) - 1;
+            }}
         }}
         return imageData;
     }};

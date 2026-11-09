@@ -517,10 +517,18 @@ class StaysSpentTests(SpendBase):
         self.assertEqual(refused.code, "captcha_detected")
 
     async def test_a_failure_recording_the_click_stays_spent(self) -> None:
+        # R5C-13: the click ran and is recorded, so its result is returned though the session's record could not be
+        # saved (raised, it read as a failed click, which an agent retried); the approval stays spent all the same.
         decision, approval_id = await self.approved_click()
         self.manager._persist_session = AsyncMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
 
-        await self.assert_spent(decision, approval_id, raises=OSError)
+        result = await self.manager.execute_decision(SESSION, decision, approval_id=approval_id)
+
+        self.assertEqual(result["action"], "click")
+        self.assertEqual((self.page.clicks, await self.status(approval_id)), (1, "executed"))
+        with self.assertRaisesRegex(PermissionError, "was spent when its action started"):
+            await self.manager.execute_decision(SESSION, decision, approval_id=approval_id)
+        self.assertEqual(self.page.clicks, 1, "the same approval clicked again")
 
     async def test_a_click_cancelled_mid_operation_stays_spent(self) -> None:
         decision, approval_id = await self.approved_click()

@@ -139,6 +139,126 @@ class ClientConstructionTests(unittest.TestCase):
         self.assertIsNone(client._sync_client)
 
 
+class UserinfoWithTokenTests(unittest.TestCase):
+    """c4's report: httpx sends a base URL's user name and password as Basic credentials, which replace the token's
+    Authorization header, so the controller got no token and the caller was not told."""
+
+    URLS = (
+        "http://alice:sentinel-pass@auto-browser.test",
+        "http://alice@auto-browser.test",
+        "http://:sentinel-pass@auto-browser.test",
+    )
+
+    def test_a_base_url_user_name_or_password_with_a_token_is_refused_without_their_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "api-token"
+            token_file.write_text("sentinel-from-file\n", encoding="utf-8")
+            given = (
+                ("token", {"token": "sentinel-token"}),
+                ("token", {"token_file": token_file}),
+                ("Authorization header in headers", {"headers": {"Authorization": "Bearer sentinel-header"}}),
+            )
+            for url in self.URLS:
+                for what, options in given:
+                    with self.subTest(url=url, given=next(iter(options))):
+                        with self.assertRaises(ValueError) as caught:
+                            AutoBrowserClient(url, **options)
+                        self.assertEqual(
+                            str(caught.exception),
+                            "base_url holds a user name or password, which httpx would send as Basic credentials in "
+                            f"place of the {what}: give the {what} or the URL's user name and password, not both",
+                        )
+
+    def test_without_a_token_the_user_name_and_password_still_go_as_basic_credentials(self) -> None:
+        client, requests = _make_client(_ok, base_url=self.URLS[0])
+
+        client.health()
+
+        self.assertEqual(requests[0].headers["Authorization"], "Basic YWxpY2U6c2VudGluZWwtcGFzcw==")
+
+    def test_a_token_with_a_base_url_without_userinfo_is_sent(self) -> None:
+        client, requests = _make_client(_ok, token="sekret", base_url="http://@auto-browser.test")
+
+        client.health()
+
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
+
+    def test_a_base_url_httpx_cannot_read_is_left_to_the_first_request(self) -> None:
+        client = AutoBrowserClient("http://[::1", token="sekret")
+
+        with self.assertRaises(httpx.InvalidURL):
+            client.health()
+
+
+class BaseUrlQueryTests(unittest.IsolatedAsyncioTestCase):
+    """c4's report: httpx put a request's path after a base URL's query (``/?key=value/sessions``), a GET with params
+    of its own lost the query and the path, and the event stream's URL put its path after a fragment. The query now
+    goes with every request, at the request's own path, as the MCP bridges send theirs; no request sends a fragment.
+    The clients are the SDK's own: a loopback base URL gets httpx.HTTPTransport, a MockTransport here."""
+
+    BASE = "http://127.0.0.1:9/prefix?key=sentinel-value&flag#frag"
+    QUERY = "key=sentinel-value&flag="  # as httpx writes params: a key with no value gets "="
+
+    def setUp(self) -> None:
+        self.sent: list[str] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            self.sent.append(f"{request.method} {request.url.raw_path.decode('ascii')}")
+            if request.url.path.endswith("/sessions/s1/events"):
+                return httpx.Response(200, text="data: {}\n\n")
+            return httpx.Response(200, json={})
+
+        for name in ("HTTPTransport", "AsyncHTTPTransport"):
+            patcher = patch.object(httpx, name, lambda: httpx.MockTransport(answer))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_each_kind_of_request_sends_the_query_at_its_own_path(self) -> None:
+        calls = {
+            "GET": (lambda c: c.health(), f"GET /prefix/healthz?{self.QUERY}"),
+            "GET with params": (
+                lambda c: c.list_audit_events(limit=5),
+                f"GET /prefix/audit/events?{self.QUERY}&limit=5",
+            ),
+            "POST": (lambda c: c.create_session(name="s"), f"POST /prefix/sessions?{self.QUERY}"),
+            "DELETE": (lambda c: c.close_session("s1"), f"DELETE /prefix/sessions/s1?{self.QUERY}"),
+            "event stream": (
+                lambda c: next(iter(c.stream_events("s1"))),
+                f"GET /prefix/sessions/s1/events?{self.QUERY}",
+            ),
+        }
+        for kind, (call, line) in calls.items():
+            with self.subTest(kind):
+                self.sent.clear()
+                with AutoBrowserClient(self.BASE) as client:
+                    call(client)
+                self.assertEqual(self.sent, [line])
+
+    async def test_the_async_calls_send_it_too(self) -> None:
+        async with AutoBrowserClient(self.BASE) as client:
+            await client.async_health()
+            await client.async_list_audit_events(limit=5)
+            await client.async_create_session(name="s")
+            await client.async_close_session("s1")
+
+        self.assertEqual(
+            self.sent,
+            [
+                f"GET /prefix/healthz?{self.QUERY}",
+                f"GET /prefix/audit/events?{self.QUERY}&limit=5",
+                f"POST /prefix/sessions?{self.QUERY}",
+                f"DELETE /prefix/sessions/s1?{self.QUERY}",
+            ],
+        )
+
+    def test_a_fragment_alone_leaves_every_path_as_it_is(self) -> None:
+        with AutoBrowserClient("http://127.0.0.1:9/prefix#frag") as client:
+            client.health()
+            next(iter(client.stream_events("s1")))
+
+        self.assertEqual(self.sent, ["GET /prefix/healthz", "GET /prefix/sessions/s1/events"])
+
+
 class ClientErrorTests(unittest.TestCase):
     def test_http_error_raises_with_status_and_json_detail(self) -> None:
         client, _ = _make_client(lambda _r: httpx.Response(404, json={"detail": "Not found"}))

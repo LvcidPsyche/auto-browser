@@ -37,6 +37,8 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 # Redirects are refused (W10-13).
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects)
 PORT = 8099
+# docker-compose.yml pins ARTIFACT_ROOT for the controller.
+CONTROLLER_ARTIFACT_ROOT = "/data/artifacts"
 
 
 def compose(*args: str, check: bool = True) -> str:
@@ -104,13 +106,15 @@ def main() -> int:
             print(f"FAIL: no download recorded: HTTP {status} {records}")
             return 1
         record = records[-1]
-        print("record:", {key: record.get(key) for key in ("status", "filename", "path", "failure")})
+        print("record:", {key: record.get(key) for key in ("status", "filename", "failure")})
         if record.get("status") != "completed":
             print("FAIL: the download did not complete")
             return 1
+        # A record names no server path (STORE-40): the file is its filename in the session's downloads directory.
+        saved = f"{CONTROLLER_ARTIFACT_ROOT}/{sid}/downloads/{record['filename']}"
         uid = compose("exec", "-T", "controller", "awk", "/^Uid:/ {print $2}", "/proc/1/status").strip()
-        owner = compose("exec", "-T", "controller", "stat", "-c", "%u %a", record["path"]).strip()
-        read = compose("exec", "-T", "controller", "cat", record["path"])
+        owner = compose("exec", "-T", "controller", "stat", "-c", "%u %a", saved).strip()
+        read = compose("exec", "-T", "controller", "cat", saved)
         print(f"controller uid {uid}; capture owner and mode {owner}")
         if read != content:
             print("FAIL: the controller read different bytes from its capture")

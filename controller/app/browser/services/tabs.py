@@ -145,7 +145,7 @@ class BrowserTabService:
                     await new_page.bring_to_front()
             pages = self.pages(session)
             new_index = pages.index(new_page) if new_page in pages else len(pages) - 1
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "open_tab")
             return {
                 "index": new_index,
                 "activated": activate,
@@ -191,7 +191,7 @@ class BrowserTabService:
                 await target_page.bring_to_front()
             session.page = target_page
             await self.manager._settle(session.page)
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "activate_tab")
             return {
                 "index": index,
                 "session": await self.manager._session_summary(session),
@@ -227,7 +227,7 @@ class BrowserTabService:
                 if hasattr(session.page, "bring_to_front"):
                     await session.page.bring_to_front()
                 await self.manager._settle(session.page)
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "close_tab")
             return {
                 "closed_index": index,
                 "session": await self.manager._session_summary(session),

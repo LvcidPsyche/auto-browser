@@ -243,12 +243,26 @@ class IsolatedSessionTunnelBroker:
         # wait below cannot leave the port reserved.
         self._forget_starting(tunnel)
         process = tunnel.process
-        if process.returncode is None:
-            process.kill()
-            await asyncio.shield(process.wait())
-        tunnel.error = reason
-        # Given up on: the files (bastion, user, key path; autossh's stderr) go, as on release.
-        self._give_up_files(tunnel)
+        try:
+            if process.returncode is None:
+                process.kill()
+                # Bounded, as release()'s teardown is (W10-7): an autossh stuck in uninterruptible I/O never exits
+                # after SIGKILL, and the provision giving up on it held its caller (the session create) until it did.
+                # Still shielded, so a second cancel ends this wait and not the process's own.
+                try:
+                    await asyncio.wait_for(asyncio.shield(process.wait()), timeout=_PROCESS_EXIT_WAIT_SECONDS)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "autossh (pid %s) of session %s's tunnel did not exit after SIGKILL; "
+                        "giving up on it without it",
+                        process.pid,
+                        tunnel.session_id,
+                    )
+        finally:
+            # Given up on: the files (bastion, user, key path; autossh's stderr) go, as on release, and also when a
+            # second cancel ends the wait above, which left them and the log's handle open.
+            tunnel.error = reason
+            self._give_up_files(tunnel)
 
     def _give_up_files(self, tunnel: IsolatedSessionTunnel) -> None:
         """Record the error status, then close the log handle and remove both files, whatever that write does.

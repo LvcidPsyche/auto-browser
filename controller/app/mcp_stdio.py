@@ -10,18 +10,29 @@ edit here must be mirrored to the other copy.
 from __future__ import annotations
 
 import argparse
+import base64
 import ipaddress
 import json
 import os
 import re
 import socket
 import sys
+import urllib.request
 from dataclasses import dataclass
 from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, unwrap, urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.parse import unquote, unquote_plus, unwrap, urlsplit
+from urllib.request import (
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
+    HTTPHandler,
+    HTTPRedirectHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    UnknownHandler,
+)
 
 # MCP spec header names, kept as local constants so the bridge has no
 # controller dependency. The controller test suite asserts these match
@@ -47,11 +58,42 @@ class _NoRedirects(HTTPRedirectHandler):
         return None
 
 
-_DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
+def _opener(proxies: dict[str, str] | None = None) -> OpenerDirector:
+    """An opener for http:// and https:// only that never follows a redirect, using the http and https entries of
+    ``proxies`` as ProxyHandler takes them (None: the environment's, read now).
 
-# A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1).
-# The lookbehind lets a match start only where a run starts, so the scan is linear in the text's length (W14-1).
-_USERINFO_RUN = re.compile(r"""(?<![^\s'"/@])[^\s'"/@]*@""")
+    urllib's build_opener adds its file:, data: and ftp: handlers too, which answer such a URL (or a request an
+    environment proxy of that scheme takes) from a local file, the URL itself or an FTP server, as if a controller had;
+    here any other scheme meets UnknownHandler's URLError (R5C-28). ProxyHandler turns a request of any scheme it
+    holds a proxy for into an http one to that proxy, before UnknownHandler is reached: with ftp_proxy set, an ftp://
+    URL went to that proxy, token included, and its answer was taken as the controller's (c4).
+    """
+    proxies = urllib.request.getproxies() if proxies is None else proxies
+    kept = {scheme: proxy for scheme, proxy in proxies.items() if scheme in ("http", "https")}
+    handlers = [ProxyHandler(kept), UnknownHandler(), HTTPHandler(), HTTPDefaultErrorHandler(), _NoRedirects()]
+    https = getattr(urllib.request, "HTTPSHandler", None)  # absent from a Python built without ssl
+    if https is not None:
+        handlers.append(https())
+    opener = OpenerDirector()
+    for handler in (*handlers, HTTPErrorProcessor()):
+        opener.add_handler(handler)
+    return opener
+
+
+_DIRECT = _opener({})
+
+# A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1). It
+# starts at the text's start, or after whitespace, a quote, an @ or the // before an authority, never after a path's
+# single / (R5C-20: /a@b/mcp is a path); so a match starts only where a run starts, and the scan is linear (W14-1).
+_USERINFO_RUN = re.compile(r"""(?:(?<![^\s'"@])|(?<=//))[^\s'"/@]*@""")
+
+# A query value this long or longer is redacted on its own too, as a server's detail can quote one without its key; a
+# shorter one (a page number, a flag) would cut words out of every answer (R5C-20).
+_SHORTEST_REDACTED_QUERY_VALUE = 8
+# How deep _redacted_value walks a server's JSON. JSON parses deeper than Python's recursion limit lets a walk go, and
+# the walk's RecursionError ended the bridge with no answer (review of c4); a value deeper than this is replaced.
+_REDACTED_DEPTH_MAX = 100
+_TOO_DEEP = "[redacted: nested too deep]"
 
 
 class InvalidControllerURL(InvalidURL):
@@ -90,21 +132,82 @@ def _display_url(url: str) -> str:
     return _without_userinfo((before + after).split("#", 1)[0].split("?", 1)[0])
 
 
-def _redacted(text: str, url: str) -> str:
-    """``text`` with ``url``'s userinfo, password, query and fragment replaced and any userinfo run dropped (W14-1).
+def _redacted(text: str, url: str | tuple[str, ...], token: str | None = None) -> str:
+    """``text`` with ``url``'s secrets and ``token`` replaced with ``[redacted]``, and any userinfo run dropped (W14-1).
+
+    The secrets (``_secrets_of``) are replaced in one pass, longest first (R5C-20), so a short one is never replaced
+    again inside a ``[redacted]`` already written; then ``_without_userinfo`` drops any other ``user:password@``.
+    ``url`` can be several forms of one URL, whose secrets all count (the client SDK gives its base URL as configured
+    and as httpx sends it).
+    """
+    secrets = sorted(_secrets_of(url, token), key=lambda secret: (-len(secret), secret))
+    if secrets:
+        text = re.compile("|".join(map(re.escape, secrets))).sub("[redacted]", text)
+    return _without_userinfo(text)
+
+
+def _secrets_of(url: str | tuple[str, ...], token: str | None) -> set[str]:
+    """What an answer must not show of ``url`` and ``token``, in each form a text can quote it in.
 
     The URL is read first as urllib's Request reads it (W15-6): a CR left on it by a CRLF .env file, which urllib
-    strips, would otherwise end the query and match no text. Each is found with string operations, so a malformed
-    URL is handled, and is replaced as written and percent-decoded, longest first, with ``[redacted]``; then
-    ``_without_userinfo`` drops any other ``user:password@``.
+    strips, would otherwise end the query and match no text. Its userinfo, password, query and fragment, and each
+    query value of _SHORTEST_REDACTED_QUERY_VALUE or more characters (R5C-20), are found with string operations, so a
+    malformed URL is handled, and count as written and percent-decoded (a query's ``+`` as a space too); each of
+    those, and ``token``, counts as ``repr()`` and ``json.dumps()`` write it too (R5C-20). The userinfo counts as
+    the Basic credentials httpx sends for it too (``_basic_credentials``). Several forms of one URL count each: httpx
+    percent-encodes a space or a character outside ASCII in the query it sends, which a server then quotes (review of
+    c3's fixes).
     """
+    if not isinstance(url, str):
+        return set().union(*(_secrets_of(form, token) for form in url))
     url = unwrap(url)
     userinfo = _split_userinfo(url)[1]
-    parts = (userinfo, userinfo.partition(":")[2], url.partition("?")[2].partition("#")[0], url.partition("#")[2])
-    known = {value for part in parts for value in (part, unquote(part)) if value}
-    for value in sorted(known, key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    return _without_userinfo(text)
+    query = url.partition("?")[2].partition("#")[0]
+    values = [item.partition("=")[2] if "=" in item else item for item in query.split("&")]
+    in_query = {query, *(value for value in values if len(value) >= _SHORTEST_REDACTED_QUERY_VALUE)}
+    written = {userinfo, userinfo.partition(":")[2], url.partition("#")[2], *in_query}
+    forms = {*written, *map(unquote, written), *map(unquote_plus, in_query), token or "", _basic_credentials(userinfo)}
+    quoted = {
+        form[1:-1]
+        for value in forms
+        for form in (repr(value), json.dumps(value), json.dumps(value, ensure_ascii=False))
+    }
+    return {secret for secret in forms | quoted if secret}
+
+
+def _basic_credentials(userinfo: str) -> str:
+    """What httpx sends for ``userinfo`` after ``Authorization: Basic``: the base64 of its user name and password, each
+    percent-decoded, joined by a colon, as UTF-8; "" when both are empty, as httpx then sends none.
+
+    The client SDK shares this redaction, and an echo of that header showed the URL's credentials (review of c3's
+    fixes); the bridges send no Basic header, so for them it only redacts more. A lone surrogate, which httpx cannot
+    encode (so it sends no header), is encoded anyway rather than failing the redaction.
+    """
+    user, _, password = userinfo.partition(":")
+    user, password = unquote(user), unquote(password)
+    if not user and not password:
+        return ""
+    return base64.b64encode(f"{user}:{password}".encode("utf-8", "surrogatepass")).decode("ascii")
+
+
+def _redacted_value(value: Any, url: str | tuple[str, ...], token: str | None = None, *, _depth: int = 0) -> Any:
+    """``value``, a server's error detail as JSON parsed it, with each string in it (keys too) through ``_redacted``
+    and each number that is one of the secrets replaced, its shape kept (R5C-20). A list or an object more than
+    _REDACTED_DEPTH_MAX deep is replaced by _TOO_DEEP, not walked."""
+    if isinstance(value, str):
+        return _redacted(value, url, token)
+    if isinstance(value, (dict, list)) and _depth >= _REDACTED_DEPTH_MAX:
+        return _TOO_DEEP
+    if isinstance(value, dict):
+        return {
+            _redacted(str(key), url, token): _redacted_value(item, url, token, _depth=_depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redacted_value(item, url, token, _depth=_depth + 1) for item in value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value if _redacted(str(value), url, token) == str(value) else "[redacted]"
+    return value
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -149,6 +252,12 @@ def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
         return None
 
 
+def _not_for_a_request_line(text: str) -> bool:
+    """Whether ``text`` holds a space, a control character (U+0000 to U+0020 or U+007F) or a character outside ASCII,
+    none of which http.client sends in a request line."""
+    return any(not " " < character < "\x7f" for character in text)
+
+
 def _goes_direct(request: Request) -> bool:
     """Whether the request goes past any environment proxy: the host http.client connects to is local (W13-2).
 
@@ -167,17 +276,24 @@ def _goes_direct(request: Request) -> bool:
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), a port it
     reads outside 0 to 65535 (W15-4), and a reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and
     its ValueError (W12-3), raise InvalidControllerURL (W13-1), so a malformed authority is refused before any
-    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector``
-    holding a space or a control character (U+0000 to U+0020 or U+007F), which http.client refuses only once a
-    connection is chosen. Each reason is the
+    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector`` (the
+    path and query) holding a character a request line cannot carry, which http.client refuses (a space or a
+    control character, U+0000 to U+0020 or U+007F) or cannot encode (one outside ASCII) only once a connection is
+    chosen, and a fragment holding one, which urllib puts into a proxied request line (R5C-28). Each reason is the
     bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
-    (``request.host`` None) is not direct and falls through to urllib's own error, raised before any proxy is used
-    (W10-14).
+    (``request.host`` None), which ``urlopen`` refuses before asking, is not direct (W10-14).
     """
     if request.host is None:
         return False
-    if any(character <= " " or character == "\x7f" for character in request.selector):
-        raise InvalidControllerURL("its path or query holds a space or a control character; percent-encode it")
+    if _not_for_a_request_line(request.selector):
+        raise InvalidControllerURL(
+            "its path or query holds a space, a control character or a character outside ASCII; percent-encode it"
+        )
+    if _not_for_a_request_line(request.fragment or ""):
+        raise InvalidControllerURL(
+            "its fragment holds a space, a control character or a character outside ASCII; percent-encode it or "
+            "leave the fragment out"
+        )
     try:
         connection = HTTPConnection(request.host)
     except InvalidURL as exc:
@@ -224,18 +340,54 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
     environment names, read for each request. ``_goes_direct`` decides, from the host http.client connects to, and
     refuses a host another reading finds local.
+
+    A request that is not http:// or https:// with a host is refused first, so nothing is sent (W15-3, c4): urllib
+    reads a scheme-less userinfo's user name as the scheme (sentinel:x@host/mcp), answers a data: or file: URL from
+    the URL or the local file as if a controller had, sends a URL of any scheme an environment proxy names (ftp_proxy)
+    to that proxy, and leaves a URL without a host to fail later. Its type is lowercased; its host is "" for
+    http:///mcp and None for http:mcp.
+
+    ``_goes_direct`` checks the path, query and fragment (R5C-28); a host or userinfo http.client cannot send is
+    refused once it fails to encode, before any byte goes out (review of c3): urllib puts the URL whole into the
+    request line an environment proxy gets, which goes as ASCII, and the host it decoded, userinfo included, into the
+    Host header, which goes as latin-1, and the UnicodeEncodeError named the character and its position.
     """
-    if _goes_direct(request):
-        return _DIRECT.open(request, *args, **kwargs)
-    return build_opener(_NoRedirects).open(request, *args, **kwargs)
+    if request.type not in ("http", "https") or not request.host:
+        raise InvalidControllerURL("it is not an http:// or https:// URL with a host")
+    opener = _DIRECT if _goes_direct(request) else _opener()
+    authority = (request.host or "", urlsplit(request.full_url).netloc)  # as urllib decoded it, and as written
+    try:
+        return opener.open(request, *args, **kwargs)
+    except UnicodeEncodeError as exc:
+        if not any(part and part in exc.object for part in authority):
+            raise
+        raise InvalidControllerURL(
+            "its host or userinfo holds a character http.client cannot send (outside ASCII through a proxy, outside "
+            "latin-1 in the Host header); write the host in its IDNA (xn--) form and leave any userinfo out"
+        ) from exc
 
 
-# Why a request went without the token that --bearer-token gives, added to a 401's answer (W15-7): fixed text, which
-# names the source and never the token.
-_ARGUMENT_HOLDS_A_LINE_BREAK = (
-    "--bearer-token or AUTO_BROWSER_BEARER_TOKEN holds a line break, which an HTTP header cannot carry, so no token "
-    "was sent"
-)
+# Where a token given as an argument comes from, as the reason it went unsent names it (W15-7).
+_ARGUMENT_SOURCE = "--bearer-token or AUTO_BROWSER_BEARER_TOKEN"
+
+
+def _unsent_because(source: str, token: str) -> str | None:
+    """Why ``token`` from ``source`` cannot go in a header, as fixed text that names the source and never the token;
+    None when it can (W15-7, R5C-30).
+
+    http.client refuses a line break with a ValueError that quotes the header whole, and encodes a header as latin-1,
+    whose UnicodeEncodeError names a character outside it and its position: an answer would show the agent either.
+    A token inside latin-1 is sent, ASCII or not: the controller reads the header as latin-1.
+    """
+    if "\r" in token or "\n" in token:
+        held = "a line break"
+    else:
+        try:
+            token.encode("latin-1")
+            return None
+        except UnicodeEncodeError:
+            held = "a character outside latin-1"
+    return f"{source} holds {held}, which an HTTP header cannot carry, so no token was sent"
 
 
 @dataclass
@@ -262,6 +414,8 @@ class HttpMcpClient:
         self.token_file = os.path.expanduser(token_file) if token_file else None
         # Why the last request went without a token, from token_file or bearer_token; added to a 401's message.
         self.token_file_problem: str | None = None
+        # The token the last request sent, or would not send: what an answer shows never holds it (R5C-20).
+        self.last_token: str | None = None
 
     def _bearer(self) -> str | None:
         """The token to send: bearer_token when set, else the one in token_file, read now.
@@ -271,26 +425,31 @@ class HttpMcpClient:
         restart. A missing or unreadable file sends no header, so a controller
         running without a token still works.
 
-        A token holding a line break, from either source, sends no header either (W15-7): http.client refuses that
-        header with a ValueError quoting it whole, which an answer would show the agent. ``token_file_problem`` says
-        why the last request went without a token, for bearer_token as well as for token_file.
+        A token holding a line break (W15-7) or a character outside latin-1 (R5C-30), from either source, sends no
+        header either: http.client's errors for those quote the header or name the character, which an answer would
+        show the agent. ``token_file_problem`` says why the last request went without a token, for bearer_token as
+        well as for token_file.
         """
-        if self.bearer_token and ("\r" in self.bearer_token or "\n" in self.bearer_token):
-            self.token_file_problem = _ARGUMENT_HOLDS_A_LINE_BREAK
+        if self.bearer_token:
+            self.last_token = self.bearer_token
+            self.token_file_problem = _unsent_because(_ARGUMENT_SOURCE, self.bearer_token)
+            return None if self.token_file_problem else self.bearer_token
+        if not self.token_file:
             return None
-        if self.bearer_token or not self.token_file:
-            return self.bearer_token
         try:
             with open(self.token_file, encoding="utf-8") as handle:
                 token = handle.read().strip()
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError:
+            # Not the decode error's text, which names one of the token's bytes and its position, as R5C-30's encode
+            # error named a character (review of c3).
+            self.token_file_problem = f"the token file {self.token_file} is not UTF-8 text, so no token was sent"
+            return None
+        except OSError as exc:
             self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
             return None
-        if "\r" in token or "\n" in token:
-            self.token_file_problem = (
-                f"the token file {self.token_file} holds a line break, which an HTTP header cannot carry, so no token "
-                "was sent"
-            )
+        self.last_token = token or None
+        self.token_file_problem = _unsent_because(f"the token file {self.token_file}", token)
+        if self.token_file_problem:
             return None
         self.token_file_problem = None if token else f"the token file {self.token_file} is empty"
         return token or None
@@ -338,12 +497,6 @@ class HttpMcpClient:
                 "urllib cannot read it as an http:// or https:// URL (for example, no scheme, a malformed bracket or "
                 "a character it refuses)"
             ) from exc
-        # Before any opener is chosen, so nothing is sent (W15-3). urllib reads a scheme-less userinfo's user name as
-        # the scheme (sentinel:x@host/mcp), answers a data: or file: URL from the URL or the local file as if a
-        # controller had, and leaves a URL without a host to fail later. Its type is lowercased; its host is "" for
-        # http:///mcp and None for http:mcp.
-        if request.type not in ("http", "https") or not request.host:
-            raise InvalidControllerURL("it is not an http:// or https:// URL with a host")
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read()
@@ -365,8 +518,9 @@ class HttpMcpClient:
             return None
         try:
             return json.loads(raw.decode("utf-8"))
-        except ValueError:
-            # A proxy's HTML error page, say. Reported with its status below.
+        except (ValueError, RecursionError):
+            # A proxy's HTML error page, say, or a body nested too deep for json to parse. Reported with its status
+            # below.
             return None
 
 
@@ -391,16 +545,37 @@ class StdioMcpBridge:
                     continue
                 response = self._handle_line(line)
                 if response is not None:
-                    output_stream.write(json.dumps(response, ensure_ascii=False) + "\n")
+                    output_stream.write(self._encoded(response) + "\n")
                     output_stream.flush()
         finally:
             self.client.delete_session(session_id=self.session_id)
         return 0
 
+    def _encoded(self, response: dict[str, Any]) -> str:
+        """``response`` as the line the client reads. A body ``json.loads`` parsed can be too deep for ``json.dumps``
+        to write (their limits differ on Python 3.14); that request gets an error, with a null id if the id is not a
+        string or a number, and the bridge goes on."""
+        try:
+            return json.dumps(response, ensure_ascii=False)
+        except RecursionError:
+            request_id = response.get("id")
+            return json.dumps(
+                self._jsonrpc_error(
+                    request_id
+                    if isinstance(request_id, (str, int, float)) and not isinstance(request_id, bool)
+                    else None,
+                    -32000,
+                    "The answer is nested too deep for the stdio bridge to send.",
+                ),
+                ensure_ascii=False,
+            )
+
     def _handle_line(self, line: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # ValueError covers JSONDecodeError and an int of more than 4300 digits; RecursionError, a line
+            # nested too deep for json to parse.
             return self._jsonrpc_error(None, -32700, "Invalid JSON payload")
 
         if isinstance(payload, list):
@@ -440,11 +615,10 @@ class StdioMcpBridge:
         # The answers go to the agent. The answer that no controller is reachable names the URL without its userinfo,
         # query or fragment (W13-1); the invalid-URL answer names no part of it, since a URL that cannot be read
         # cannot be cut safely either (W15-2); and the error text they show has the URL's userinfo, password, query
-        # and fragment and any user:password@ removed (W14-1).
+        # and fragment and any user:password@ removed (W14-1), and the token and each long query value (R5C-20).
         except URLError as exc:
-            return self._jsonrpc_error(
+            return self._failed(
                 request_id,
-                -32000,
                 f"No Auto Browser controller reachable at {_display_url(self.client.base_url)} — "
                 "start one with 'docker compose up -d' in the auto-browser repo, or pass "
                 "--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. "
@@ -454,15 +628,15 @@ class StdioMcpBridge:
             # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3). Only the controller
             # URL's own: an InvalidURL from elsewhere (an environment proxy's port) is answered as a failure. Its
             # text is a fixed reason in the bridges' own words (W14-1).
-            return self._jsonrpc_error(
+            return self._failed(
                 request_id,
-                -32000,
                 "The configured controller URL is not a valid Auto Browser controller URL — fix "
                 f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
-            print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
-            return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
+            # stderr as the answer: a client can show it to the agent, or keep it in a log the agent reads (R5C-20).
+            print(f"stdio bridge unexpected error: {self._shown(str(exc))}", file=self.stderr)
+            return self._failed(request_id, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
 
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if next_session_id:
@@ -479,6 +653,10 @@ class StdioMcpBridge:
                     self.protocol_version = version.strip()
 
         if payload.get("id") is None:
+            # A notification gets no answer, but one the controller refused (a 401 for a bad token, a 5xx) is said on
+            # stderr as _failed says one it never got (R5C-23), redacted as an answer is (c4).
+            if not 200 <= response.status_code < 300:
+                return self._failed(request_id, self._http_error_message(response))
             return None
         if not isinstance(response.body, dict) or "jsonrpc" not in response.body:
             # The HTTP layer's own errors (401 bad token, 400 missing operator
@@ -486,9 +664,25 @@ class StdioMcpBridge:
             # they carried no id, so the client never saw a response to its
             # request and hung without learning why.
             return self._jsonrpc_error(request_id, -32000, self._http_error_message(response))
+        body = self._with_error_shown(response.body)
         if method == "initialize":
-            return self._without_resource_subscribe(response.body)
-        return response.body
+            return self._without_resource_subscribe(body)
+        return body
+
+    def _with_error_shown(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``body``, a JSON-RPC answer forwarded to the agent, with its error's message and data shown as the bridges'
+        own answers are (R5C-20; the data since c4): a proxy, an MCP gateway or the controller can quote the URL or
+        the token in either. The data keeps its shape (``_redacted_value``). Everything else, and a result, goes as
+        it came."""
+        error = body.get("error")
+        if not isinstance(error, dict):
+            return body
+        shown = dict(error)
+        if isinstance(error.get("message"), str):
+            shown["message"] = self._shown(error["message"])
+        if "data" in error:
+            shown["data"] = _redacted_value(error["data"], *self._secrets())
+        return body if shown == error else {**body, "error": shown}
 
     @staticmethod
     def _without_resource_subscribe(body: dict[str, Any]) -> dict[str, Any]:
@@ -503,10 +697,23 @@ class StdioMcpBridge:
             "result": {**result, "capabilities": {**capabilities, "resources": {**resources, "subscribe": False}}},
         }
 
-    def _shown(self, text: str) -> str:
-        """An error's ``text`` as an answer shows it, without the base URL's known secrets (W14-1)."""
+    def _secrets(self) -> tuple[str, str | None]:
+        """The base URL and the token the last request carried, whose secrets an answer never shows (R5C-20)."""
         base_url = getattr(self.client, "base_url", "")
-        return _redacted(text, base_url if isinstance(base_url, str) else "")
+        token = getattr(self.client, "last_token", None)
+        return (base_url if isinstance(base_url, str) else "", token if isinstance(token, str) else None)
+
+    def _shown(self, text: str) -> str:
+        """An error's ``text`` as an answer shows it, without the base URL's known secrets or the token (W14-1)."""
+        return _redacted(text, *self._secrets())
+
+    def _shown_detail(self, detail: Any) -> str:
+        """A server's error detail as an answer shows it: a structure (a dict or a list) as JSON after
+        ``_redacted_value``, where str() wrote it with repr(), which escapes what the redaction looks for (a backslash
+        in a decoded query); anything else as its text through ``_shown`` (R5C-20)."""
+        if isinstance(detail, (dict, list)):
+            return json.dumps(_redacted_value(detail, *self._secrets()), ensure_ascii=False)
+        return self._shown(str(detail))
 
     def _http_error_message(self, response: HttpMcpResponse) -> str:
         if response.body is None:
@@ -514,7 +721,7 @@ class StdioMcpBridge:
         detail = response.body.get("detail") if isinstance(response.body, dict) else None
         message = f"Auto Browser controller returned HTTP {response.status_code}"
         if detail:
-            message += f": {self._shown(str(detail))}"
+            message += f": {self._shown_detail(detail)}"
         if response.status_code == 401:
             message += (
                 " (set --token-file or AUTO_BROWSER_TOKEN_FILE to the controller's token file, data/api-token in"
@@ -582,6 +789,15 @@ class StdioMcpBridge:
         """Drop the half-open session and go back to the old id, so the next call retries."""
         self.client.delete_session(session_id=self.session_id)
         self.session_id, self.protocol_version = previous
+
+    def _failed(self, request_id: Any, message: str) -> dict[str, Any] | None:
+        """The answer to a request the controller never answered: a JSON-RPC error carrying ``message``. A notification
+        (no id) gets none here either, as it gets none once the controller has answered it: its ``message`` goes to
+        stderr instead (R5C-23)."""
+        if request_id is None:
+            print(f"stdio bridge: {message}", file=self.stderr)
+            return None
+        return self._jsonrpc_error(request_id, -32000, message)
 
     @staticmethod
     def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:

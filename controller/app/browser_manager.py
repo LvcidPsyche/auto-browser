@@ -280,6 +280,7 @@ class BrowserManager:
             language=self.settings.ocr_language,
             max_blocks=self.settings.ocr_max_blocks,
             text_limit=self.settings.ocr_text_limit,
+            timeout_seconds=self.settings.ocr_timeout_seconds,
         )
         self.pii_scrubber = PiiScrubber.from_settings(self.settings)
         self.diagnostics = BrowserDiagnosticsService(
@@ -354,6 +355,8 @@ class BrowserManager:
             await self.playwright.stop()
             self.playwright = None
         await self.tunnel_broker.shutdown()
+        # Receipts still queued for the hosted Witness service get a bounded chance to go before its client closes.
+        await self.witness_bridge.stop_delivery()
         await self.witness_remote.shutdown()
         await self.session_store.shutdown()
 
@@ -496,6 +499,9 @@ class BrowserManager:
     async def _persist_session(self, session: BrowserSession, *, status: SessionStatus) -> None:
         await self.session_lifecycle.persist(session, status=status)
 
+    async def _persist_session_after_action(self, session: BrowserSession, action: str) -> None:
+        await self.session_lifecycle.persist_after_action(session, action)
+
     async def _maybe_provision_session_tunnel(self, session: BrowserSession) -> None:
         await self.session_lifecycle.maybe_provision_tunnel(session)
 
@@ -582,8 +588,8 @@ class BrowserManager:
     async def _light_snapshot(self, session: BrowserSession, *, label: str) -> dict[str, Any]:
         return await self.observation.light_snapshot(session, label=label)
 
-    async def _capture_screenshot(self, session: BrowserSession, label: str) -> dict[str, str]:
-        return await self.observation.capture_session_screenshot(session, label)
+    async def _capture_screenshot(self, session: BrowserSession, label: str, *, staged: bool = False) -> dict[str, str]:
+        return await self.observation.capture_session_screenshot(session, label, staged=staged)
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
 
@@ -791,6 +797,10 @@ class BrowserManager:
         after: dict[str, Any],
     ) -> dict[str, Any]:
         return BrowserActionService.action_verification(action_name, target, before, after)
+
+    @staticmethod
+    def _new_tab(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
+        return BrowserActionService.new_tab(before, after)
 
     # ── URL policy ───────────────────────────────────────────────────────────
 
@@ -1122,6 +1132,7 @@ class BrowserManager:
         receipts = await self.witness.list(session_id, limit=limit)
         listing = ReceiptList(item.model_dump() for item in receipts)
         listing.unparseable_lines = receipts.unparseable_lines
+        listing.torn_tail = receipts.torn_tail
         return listing
 
     async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:
@@ -1174,6 +1185,7 @@ class BrowserManager:
         verification: dict[str, Any] | None = None,
         approval: WitnessApproval | None = None,
         metadata: dict[str, Any] | None = None,
+        approved_action: BrowserActionDecision | None = None,
     ) -> None:
         await self.witness_bridge.record_receipt(
             session,
@@ -1189,6 +1201,7 @@ class BrowserManager:
             verification=verification,
             approval=approval,
             metadata=metadata,
+            approved_action=approved_action,
         )
 
     def _witness_action_class(self, action_name: str, *, risk_category: str | None = None) -> str:

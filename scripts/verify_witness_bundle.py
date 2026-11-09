@@ -41,7 +41,9 @@ it skipped a line (`unparseable_lines` anything but the integer 0), or that its 
 was exported (`chain_valid_at_export` anything but true; a bundle made before that field existed passes
 without it), fails. Both fields are self-reported by the exporter and unsigned, so this catches an honest but
 incomplete export, not a forgery; someone who edits the bundle can set them to look clean. The signatures and
---expect-head are what hold against that.
+--expect-head are what hold against that. A bundle that says it left out a torn tail (`torn_tail` true: bytes
+after the chain's last newline, an append cut short that was never a receipt) gets a note saying so: its
+exporter's chain check fails on those bytes until the controller's next append sets them aside.
 
 Text taken from the bundle (its scope, algorithm, key ids, head, receipt ids and the exporter's reason) is
 printed with control and format characters escaped and cut at 200 characters, so a bundle cannot hide or
@@ -192,6 +194,12 @@ def verify_bundle(
             + ("false" if valid is False else _shown(repr(valid)))
             + (f": {_shown(reason)}" if reason else "")
             + ")"
+        )
+    if bundle.get("torn_tail") is True:
+        notes.append(
+            "the chain ended in a torn tail (an append cut short, never a receipt), which the bundle leaves out; "
+            "the exporter's chain check fails on it until the controller's next append sets it aside, so export "
+            "again after one"
         )
     if expect_head and head != expect_head:
         failures.append(f"the chain ends at {_shown(head)}, not the expected head {expect_head}")

@@ -28,7 +28,17 @@ import json
 import re
 from typing import Any
 
+from ..browser_scripts import AB_TEXT_MAX, cap_text
+
 ACCESSIBILITY_NODE_LIMIT = 30
+# The longest name a node keeps, as an element's text is capped elsewhere (ACT-38): a page can name an element with
+# megabytes (an aria-label), and each node kept its name whole.
+ACCESSIBILITY_NAME_MAX = AB_TEXT_MAX
+# How much of a quoted name is decoded: the snapshot writes one character in at most 12 (a surrogate pair's two \uXXXX
+# escapes), so this decodes to at least ACCESSIBILITY_NAME_MAX characters, or to the whole name.
+_QUOTED_NAME_MAX = ACCESSIBILITY_NAME_MAX * 12
+# The longest escape the snapshot writes (\uXXXX): a cut can leave all but its last character.
+_LONGEST_ESCAPE = 6
 
 _LINE = re.compile(r"^(?P<indent> *)- (?P<body>.*)$")
 _ENTRY = re.compile(r'^(?P<role>[a-z][a-z-]*)(?: "(?P<name>(?:[^"\\]|\\.)*)")?(?P<attrs>(?: \[[^\]]*\])*)$')
@@ -174,10 +184,7 @@ def _parse_entry(body: str) -> dict[str, Any] | None:
         return None
     node: dict[str, Any] = {"role": match["role"]}
     if match["name"] is not None:
-        try:
-            node["name"] = json.loads(f'"{match["name"]}"')
-        except ValueError:
-            node["name"] = match["name"]
+        node["name"] = _decoded_name(match["name"])
     for attr in _ATTR.finditer(match["attrs"] or ""):
         key, value = attr["key"], attr["value"]
         if key == "active":
@@ -190,6 +197,23 @@ def _parse_entry(body: str) -> dict[str, Any] | None:
             else:
                 node[key] = value  # e.g. checked=mixed
     return node
+
+
+def _decoded_name(quoted: str) -> str:
+    """A name the snapshot quotes as a JSON string, decoded and cut to ACCESSIBILITY_NAME_MAX characters (ACT-38).
+
+    Only its first _QUOTED_NAME_MAX characters are decoded, so a megabyte name costs what a short one does. When that
+    cut splits an escape, up to five more characters go until the rest decodes. A name that does not decode (an escape
+    JSON does not know) is kept as quoted, as before.
+    """
+    part = quoted[:_QUOTED_NAME_MAX]
+    shortest = len(part) - (_LONGEST_ESCAPE - 1) if len(part) < len(quoted) else len(part)
+    for end in range(len(part), max(shortest, 0) - 1, -1):
+        try:
+            return cap_text(json.loads(f'"{part[:end]}"'), ACCESSIBILITY_NAME_MAX)
+        except ValueError:
+            continue
+    return cap_text(part, ACCESSIBILITY_NAME_MAX)
 
 
 def _entry_key(body: str) -> str | None:

@@ -245,7 +245,8 @@ def blocked_downloads(spy) -> list:
 
 def assert_blocked(record: dict, env: nav.Env, session) -> None:
     assert record["status"] == "blocked", record
-    assert (record["path"], record["url"], record["filename"]) == (None, None, None), record
+    assert "path" not in record, record
+    assert (record["url"], record["filename"]) == (None, None), record
     assert record["source_url"] == env.evil, record
     assert record["failure"], record
     assert not list((session.artifact_dir / "downloads").glob("*")), "a refused download was saved"
@@ -331,7 +332,8 @@ async def test_control_a_download_from_an_allowed_page_is_still_captured(tmp_pat
 
         record = session.downloads[-1]
         assert record["status"] == "completed", record
-        assert Path(record["path"]).read_bytes() == CSV
+        assert "path" not in record, record
+        assert (session.artifact_dir / "downloads" / record["filename"]).read_bytes() == CSV
         assert (await env.manager.read_download_text(session_id, record["id"]))["text"] == CSV.decode()
 
 

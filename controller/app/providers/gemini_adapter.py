@@ -4,7 +4,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ..models import BrowserActionDecision
-from .base import BaseProviderAdapter, ProviderDecision
+from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderDecision
 
 
 class GeminiAdapter(BaseProviderAdapter):
@@ -85,7 +85,9 @@ class GeminiAdapter(BaseProviderAdapter):
                     "parts": [
                         *([{"inlineData": {"mimeType": image[0], "data": image[1]}}] if image else []),
                         {
-                            "text": self.build_text_prompt(
+                            # No system prompt here, so the request's text says what the others' system prompts do.
+                            "text": f"{PAGE_DATA_NOTICE}\n\n"
+                            + self.build_text_prompt(
                                 goal=goal,
                                 observation=observation,
                                 context_hints=context_hints,

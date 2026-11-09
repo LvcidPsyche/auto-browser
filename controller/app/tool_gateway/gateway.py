@@ -30,7 +30,7 @@ from ..action_errors import (
 from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
-from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
+from ..browser.page_read import MOVED_DETAIL, PAGE_READ_TIMEOUT_SECONDS, bounded, locked_read, start_read
 from ..browser.request_gate import block_summary
 from ..browser.services.actions import BrowserActionService
 from ..browser.services.diagnostics import checked_screenshot
@@ -124,9 +124,23 @@ from .selection import withheld_tool_message
 logger = logging.getLogger(__name__)
 
 # Bound on the in-page text walk for find_elements' query mode — a
-# catastrophically backtracking regex would otherwise hang page.evaluate
+# catastrophically backtracking regex would otherwise hang the read
 # (and the session) indefinitely.
 FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
+# How much longer the isolated world waits for a read than the read's own timeout (that walk's, or a page read's
+# PAGE_READ_TIMEOUT_SECONDS), so the world's deadline (ACTION_TIMEOUT_MS, which can be shorter) never reports the page
+# as not answering before that timeout does (NAV-12, review of c5).
+WORLD_PAD_SECONDS = 5.0
+PAGE_READ_WORLD_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000)
+# The world's setup messages (the session's attach, the frame tree, the world's creation) share one deadline,
+# counted from the start of the call and below a page read's own timeout, not past it as its script is: a page busy
+# for longer than ACTION_TIMEOUT_MS still gets its read, and a setup unfinished at the deadline ends as
+# page_not_responding, its session dropped and detached, before the read's own timeout (review of c6).
+WORLD_SETUP_MARGIN_SECONDS = 2.0
+PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
+# find_elements' query mode has its own, shorter timeout, and the same margin under it: a setup that hangs there is the
+# page not answering, not a pattern that backtracks.
+FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS = int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
 
 # How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
 # answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.
@@ -1038,6 +1052,7 @@ class McpToolGateway:
         timeout = (payload.timeout_ms or EVAL_JS_DEFAULT_TIMEOUT_MS) / 1000
         async with locked_read(self.manager, session):
             try:
+                # In the page's own world, unlike the read tools (NAV-12): an expression is there to read its JS state.
                 result = await asyncio.wait_for(session.page.evaluate(payload.expression), timeout=timeout)
             except TimeoutError:
                 # Giving up does not stop the page's script: the renderer keeps running it.
@@ -1077,7 +1092,16 @@ class McpToolGateway:
         session = await self.manager.get_session(payload.session_id)
         async with locked_read(self.manager, session):
             if payload.text_only:
-                content = await bounded(session.page.evaluate(PAGE_TEXT_SCRIPT))
+                # In the controller's isolated world, as the observation's scripts run (NAV-12): in the page's own,
+                # a page that replaced the innerText getter gave this its own text.
+                content = await bounded(
+                    self.manager.element_ids.evaluate(
+                        session.page,
+                        PAGE_TEXT_SCRIPT,
+                        timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
+                        setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
+                    )
+                )
                 kind = "text"
             else:
                 content = await bounded(session.page.content())
@@ -1101,10 +1125,18 @@ class McpToolGateway:
             return await self._find_elements_read(session, payload)
 
     async def _find_elements_read(self, session: Any, payload: FindElementsInput) -> dict[str, Any]:
+        # Both modes run in the controller's isolated world, as the observation's scripts do (NAV-12): in the page's
+        # own, a page that replaced a built-in or a DOM method saw the query or the selector and chose the results.
+        # eval_js still runs in the page's world, as its expressions are there to read the page's own JS state.
+        element_ids = self.manager.element_ids
         if payload.query is not None:
-            evaluate = session.page.evaluate(
+            evaluate = element_ids.evaluate(
+                session.page,
                 FIND_ELEMENTS_TEXT_SCRIPT,
                 [payload.query, payload.regex, payload.context, payload.limit],
+                # The world's own deadline must not cut this off before the timeout below says why.
+                timeout_ms=int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000),
+                setup_timeout_ms=FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
             )
             try:
                 elements = await asyncio.wait_for(evaluate, timeout=FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS)
@@ -1126,11 +1158,20 @@ class McpToolGateway:
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
         elements = await bounded(
-            session.page.evaluate(
+            element_ids.evaluate(
+                session.page,
                 FIND_ELEMENTS_SELECTOR_SCRIPT,
                 [payload.selector, payload.limit],
+                timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
+                setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
             )
         )
+        if isinstance(elements, dict) and "__invalid_selector" in elements:
+            raise BrowserActionError(
+                f"Invalid selector: {elements['__invalid_selector']}",
+                code="invalid_selector",
+                action="find_elements",
+            )
         elements = cap_found_elements(elements, 0, BrowserActionService.is_sensitive_field)
         return {"session_id": payload.session_id, "selector": payload.selector, "elements": elements}
 

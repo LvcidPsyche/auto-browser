@@ -31,6 +31,19 @@ os.umask(_UMASK)
 # What stores that hold credentials, tokens or typed text ask atomic_write_text for.
 PRIVATE_FILE_MODE = 0o600
 
+# A key whose lower-case name holds one of these names a secret, at any depth: the run trace redacts by them, and so
+# does a restricted witness receipt.
+SECRET_KEY_FRAGMENTS = (
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "api-key",
+    "api_key",
+    "token",
+    "password",
+    "secret",
+)
+
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 # A UTF-16 surrogate code point, which a Python string holds only on its own (a JSON "\ud800" escape
@@ -145,6 +158,22 @@ def spawn_background_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
     task.add_done_callback(_BACKGROUND_TASKS.discard)
     task.add_done_callback(_log_background_task_exception)
     return task
+
+
+async def run_to_completion(work: Coroutine[Any, Any, Any]) -> Any:
+    """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised once the
+    work has finished, and its result is returned otherwise."""
+    task = asyncio.ensure_future(work)
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    result = task.result()
+    if cancelled is not None:
+        raise cancelled
+    return result
 
 
 def _log_background_task_exception(task: asyncio.Task[Any]) -> None:

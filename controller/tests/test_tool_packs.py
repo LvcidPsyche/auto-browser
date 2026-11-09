@@ -31,6 +31,7 @@ from app.tool_gateway.gateway import IMPLICIT_SESSION_CREATE_TOOLS
 from app.tool_gateway.packs import register_all
 from app.tool_gateway.selection import DEFAULT_PROFILE, PACKS, PROFILES, resolve_tool_selection, smallest_profile_with
 from app.tool_inputs import EmptyInput
+from tests._fake_element_ids import FakePageElementIds
 
 LEAN = [
     "browser.observe",
@@ -661,6 +662,7 @@ class LeanSessionTests(unittest.IsolatedAsyncioTestCase):
                     _assert_page_allowed=Mock(),
                     _page_refused=Mock(return_value=False),
                     page_provenance=PageProvenance(),
+                    element_ids=FakePageElementIds(),
                 )
                 response = await _gateway(manager, tool_profile="lean").call_tool(
                     McpToolCallRequest(name=name, arguments=arguments)

@@ -18,6 +18,16 @@ ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
 USER_AGENT_POOL_SEPARATOR = "|"
 _USER_AGENT_POOL_SPLIT = re.compile(r"[|\r\n]")
 
+# The largest MESH_TIMESTAMP_WINDOW, in seconds. A nonce is kept for up to two windows, so at the default request rate
+# limit one address can hold about four times the window in seconds of them: about 1,000 here, one peer's share of the
+# 10,000-nonce replay cache, and that only for a peer stamping its envelopes a full window ahead of this node's clock
+# (one whose clock agrees holds about half). A wider window also keeps a captured envelope replayable longer to a
+# controller restarted with its clock set back, and lengthens the refusals after each start (docs/mesh.md).
+MESH_TIMESTAMP_WINDOW_MAX_SECONDS = 250.0
+# How long one OCR run may take before pytesseract kills tesseract (ACT-27): OCR runs under the session lock, for an
+# observation and, with screenshots redacted, before and after every action.
+OCR_TIMEOUT_SECONDS = 20.0
+
 
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
@@ -125,6 +135,7 @@ class Settings(BaseSettings):
     ocr_language: str = Field("eng", alias="OCR_LANGUAGE")
     ocr_max_blocks: int = Field(20, alias="OCR_MAX_BLOCKS")
     ocr_text_limit: int = Field(1200, alias="OCR_TEXT_LIMIT")
+    ocr_timeout_seconds: float = Field(OCR_TIMEOUT_SECONDS, alias="OCR_TIMEOUT_SECONDS")
     operator_id_header: str = Field("X-Operator-Id", alias="OPERATOR_ID_HEADER")
     operator_name_header: str = Field("X-Operator-Name", alias="OPERATOR_NAME_HEADER")
     require_operator_id: bool = Field(False, alias="REQUIRE_OPERATOR_ID")
@@ -501,6 +512,26 @@ class Settings(BaseSettings):
         # Zero and negative stay valid: ARTIFACT_RETENTION_HOURS <= 0 means "keep forever".
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
+        return value
+
+    @field_validator("mesh_timestamp_window")
+    @classmethod
+    def _mesh_timestamp_window_bounded(cls, value: float) -> float:
+        # At 0 or below no envelope fits the window; above the ceiling, see MESH_TIMESTAMP_WINDOW_MAX_SECONDS. Checked
+        # with the mesh off too, as an unparseable value is.
+        if not 0 < value <= MESH_TIMESTAMP_WINDOW_MAX_SECONDS:
+            raise ValueError(
+                f"MESH_TIMESTAMP_WINDOW must be more than 0 and at most {MESH_TIMESTAMP_WINDOW_MAX_SECONDS:g} seconds, "
+                f"got {value!r}"
+            )
+        return value
+
+    @field_validator("ocr_timeout_seconds")
+    @classmethod
+    def _ocr_timeout_above_zero(cls, value: float) -> float:
+        # pytesseract reads 0 as no timeout at all, and a negative one fails every run.
+        if value <= 0:
+            raise ValueError(f"OCR_TIMEOUT_SECONDS must be more than 0 seconds, got {value!r}")
         return value
 
     @field_validator("cdp_connect_url", mode="before")

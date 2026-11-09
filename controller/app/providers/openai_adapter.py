@@ -11,7 +11,7 @@ import httpx
 
 from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision
-from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
+from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         payload = {
             "model": model,
             "instructions": (
-                "You are the Auto Browser planner. Pick exactly one next action. "
+                f"You are the Auto Browser planner. Pick exactly one next action. {PAGE_DATA_NOTICE} "
                 "Use the provided function tool for your answer."
             ),
             "input": [

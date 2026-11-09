@@ -75,6 +75,81 @@ _ALLOWED_CDP_COMMANDS = frozenset(
     ]
 )
 
+# The parameters each allowed command takes, by name and JSON type, all of them scalars; a command missing here
+# takes none. Anything else is refused before it reaches the browser (NAV-31): params went to it as they came.
+_ALLOWED_CDP_PARAMS: dict[str, dict[str, type]] = {
+    "DOM.getDocument": {"depth": int, "pierce": bool},
+    "DOM.querySelector": {"nodeId": int, "selector": str},
+    "DOM.getAttributes": {"nodeId": int},
+    "DOM.getBoxModel": {"nodeId": int, "backendNodeId": int, "objectId": str},
+    "CSS.getComputedStyleForNode": {"nodeId": int},
+    "CSS.getMatchedStylesForNode": {"nodeId": int},
+    "Accessibility.getFullAXTree": {"depth": int, "frameId": str},
+}
+_JSON_TYPE_NAMES = {int: "an integer", bool: "true or false", str: "a string"}
+
+
+class CDPParamsError(ValueError):
+    """A raw command's params are not the ones it takes: the route answers 422 with this message."""
+
+
+def _check_params(method: str, params: Any) -> None:
+    if not isinstance(params, dict):
+        raise CDPParamsError("params must be an object")
+    taken = _ALLOWED_CDP_PARAMS.get(method, {})
+    for name, value in params.items():
+        kind = taken.get(name)
+        if kind is None:
+            shown = cap_text(str(name), AB_ATTR_MAX)
+            raise CDPParamsError(f"{method} does not take {shown!r}; it takes {sorted(taken) or 'no parameters'}")
+        # By the exact type: True is an int to Python, and a depth of True is no depth.
+        if type(value) is not kind:
+            raise CDPParamsError(f"{method}'s {name!r} must be {_JSON_TYPE_NAMES[kind]}")
+
+
+def _names_a_password_field(attributes: list[Any]) -> bool:
+    pairs = zip(attributes[::2], attributes[1::2])
+    return any(str(name).lower() == "type" and str(value).strip().lower() == "password" for name, value in pairs)
+
+
+def _blank_node_values(root: dict[str, Any]) -> None:
+    stack: list[Any] = [root]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, dict):
+            if isinstance(value.get("nodeValue"), str):
+                value["nodeValue"] = ""
+            stack.extend(value.values())
+
+
+def _blank_typed_passwords(result: Any) -> None:
+    """Blank, in place, what a password field holds in a DOM read's result (NAV-31).
+
+    With ``pierce``, DOM.getDocument returns each input's user-agent shadow root, whose text is what was typed into
+    it: for a password field, the password. That text and the field's value attribute are blanked; every other
+    field keeps what it holds. A loop, not recursion: a page can nest its elements deeper than Python's stack.
+    """
+    stack: list[Any] = [result]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, list):
+            stack.extend(value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        attributes = value.get("attributes")
+        if isinstance(attributes, list) and _names_a_password_field(attributes):
+            for index in range(1, len(attributes), 2):
+                if str(attributes[index - 1]).lower() == "value":
+                    attributes[index] = ""
+            for root in value.get("shadowRoots") or ():
+                if isinstance(root, dict) and root.get("shadowRootType") == "user-agent":
+                    _blank_node_values(root)
+        stack.extend(value.values())
+
+
 # Domains allowed for element extraction (empty = all allowed)
 _ALLOWED_DOMAINS: list[str] = []
 
@@ -187,6 +262,8 @@ class CDPPassthrough:
 
             # Gather data in parallel conceptually (sequential here for clarity)
             attrs_raw = await self._cdp.send("DOM.getAttributes", {"nodeId": node_id})
+            # As a raw DOM read is (NAV-31, review of c5): a password field's value attribute is blanked.
+            _blank_typed_passwords(attrs_raw)
             attrs = _capped_attributes(attrs_raw["attributes"])
 
             box_model = await self._cdp.send("DOM.getBoxModel", {"nodeId": node_id})
@@ -277,19 +354,23 @@ class CDPPassthrough:
         Execute a raw CDP command from the allowlist.
         Raises ValueError for disallowed commands.
         """
-        params = params or {}
-        if method not in _ALLOWED_CDP_COMMANDS:
+        params = {} if params is None else params
+        if not isinstance(method, str) or method not in _ALLOWED_CDP_COMMANDS:
             raise ValueError(
                 f"CDP command {method!r} is not in the allowed list. Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
             )
+        _check_params(method, params)
         try:
             if method.startswith("CSS."):
                 async with self._css_agents():
                     return await self._cdp.send(method, params)
-            return await self._cdp.send(method, params)
+            result = await self._cdp.send(method, params)
         except Exception as exc:
             logger.warning("cdp.raw_command error method=%r: %s", method, exc)
             return {"error": "cdp_command_failed", "method": method}
+        if method.startswith("DOM."):
+            _blank_typed_passwords(result)
+        return result
 
     @classmethod
     async def from_page(cls, page: "Page") -> "CDPPassthrough":  # noqa: F821

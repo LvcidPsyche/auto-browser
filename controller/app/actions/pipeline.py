@@ -621,9 +621,10 @@ class BrowserActionPipeline:
             )
 
         await self._write_record(session, witness_state, writes)
-        await manager._persist_session(session, status="active")
+        # The action ran and is recorded: a failed save of the session's record is logged, not raised (R5C-13).
+        await manager._persist_session_after_action(session, context.action_name)
         _events.emit_action(session.id, context.action_name, "ok", {"url": manager._shown_url(session.page)})
-        return {
+        result = {
             "action": context.action_name,
             "action_class": action_class,
             "session": await manager._session_summary(session),
@@ -632,6 +633,10 @@ class BrowserActionPipeline:
             "target": context.target,
             "verification": verification,
         }
+        new_tab = manager._new_tab(witness_state.before, after)
+        if new_tab is not None:
+            result["new_tab"] = new_tab
+        return result
 
     @staticmethod
     async def _failure_snapshot(context: ActionRunContext, *, label: str) -> dict[str, Any]:

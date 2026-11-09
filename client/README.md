@@ -23,6 +23,18 @@ Every method has an `async_` twin (`await client.async_create_session(...)`), an
 client works as a sync or async context manager. HTTP errors raise
 `AutoBrowserError`, which carries `status_code` and the controller's `detail`.
 
+An `AutoBrowserError`, and httpx's own errors raised from a call (a connection or
+protocol failure), leave out the token and the base URL's userinfo, query and
+fragment. httpx itself logs every request at INFO on its `httpx` logger, naming the
+URL as sent (userinfo, query and fragment included) and the server's reason phrase,
+and this package does not filter that logger: keep a secret in `token` or
+`token_file`, not in the base URL. A base URL holding a user name or password is
+refused with a token or an Authorization header in `headers` (`ValueError`), since
+httpx would send them as Basic credentials in place of it; without either they go as
+Basic credentials. A base URL's query is sent with every request, as httpx writes
+parameters (a request's own parameter replaces one of the same name); its fragment
+is never sent.
+
 A controller with `REQUIRE_OPERATOR_ID=true` rejects requests that don't name an
 operator. A named credential (`API_BEARER_TOKENS`) names one through the token;
 with the shared token, pass `operator_id`. Any other headers go in `headers`:

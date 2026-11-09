@@ -60,13 +60,31 @@ class SkillInducer:
         self.staging_root = Path(staging_root)
         self.signer = signer
         # Held around the rename into place; HarnessService passes its store's staging lock, which retention's prune
-        # holds from a candidate's age check through its removal, so a fresh re-stage is never removed as old.
+        # holds from a candidate's age check through its rename aside, so a fresh re-stage is never removed as old.
         self.lock = lock if lock is not None else threading.Lock()
 
     def place(self, build_dir: Path, target_dir: Path) -> None:
-        """Rename a finished build over `target_dir` under the staging lock."""
+        """Rename a finished build over `target_dir` under the staging lock, then remove the candidate it replaced."""
         with self.lock:
             _move_into_place(build_dir, target_dir)
+        self.remove_aside(build_dir)
+
+    def try_place(self, build_dir: Path, target_dir: Path) -> bool:
+        """Rename a finished build over `target_dir` when the staging lock is free now; False, having changed nothing,
+        while something holds it. The candidate it replaced is left aside for remove_aside."""
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            _move_into_place(build_dir, target_dir)
+        finally:
+            self.lock.release()
+        return True
+
+    @staticmethod
+    def remove_aside(build_dir: Path) -> None:
+        """Remove the candidate that placing `build_dir` set aside, if it replaced one. It removes files: a caller on
+        the event loop runs it in a worker thread."""
+        shutil.rmtree(_aside_of(build_dir), ignore_errors=True)
 
     def induce(
         self,
@@ -79,6 +97,37 @@ class SkillInducer:
         model_tiers: dict[str, str] | None = None,
         owner: str | None = None,
     ) -> SkillCandidate:
+        """Build a candidate and place it."""
+        candidate, build_dir, target_dir = self.build(
+            contract=contract,
+            trace=trace,
+            verification=verification,
+            attempts=attempts,
+            cost_usd=cost_usd,
+            model_tiers=model_tiers,
+            owner=owner,
+        )
+        try:
+            self.place(build_dir, target_dir)
+        except BaseException:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            raise
+        return candidate
+
+    def build(
+        self,
+        *,
+        contract: TaskContract,
+        trace: TraceEnvelope,
+        verification: VerificationResult,
+        attempts: int,
+        cost_usd: float = 0.0,
+        model_tiers: dict[str, str] | None = None,
+        owner: str | None = None,
+    ) -> tuple[SkillCandidate, Path, Path]:
+        """Build and sign a candidate in a new directory beside the staged ones: (the candidate, that directory, the
+        directory it is placed at). Nothing is staged until the caller places it (place, try_place) or removes it; a
+        failure leaves no directory."""
         # The candidate stores the trace, so it stores the scrubbed one; the hash must match what is on disk.
         trace = trace.scrubbed()
         # Likewise the verification: it holds the raw URL, and it is written to the provenance and the envelope.
@@ -98,11 +147,10 @@ class SkillInducer:
             candidate = self._build(
                 contract, trace, verification, build_dir, target_dir, skill_id, attempts, cost_usd, model_tiers, owner
             )
-            self.place(build_dir, target_dir)
         except BaseException:
             shutil.rmtree(build_dir, ignore_errors=True)
             raise
-        return candidate
+        return candidate, build_dir, target_dir
 
     def _build(
         self,
@@ -223,18 +271,23 @@ class SkillInducer:
 
 
 def _move_into_place(build_dir: Path, target_dir: Path) -> None:
-    """Rename the finished directory over the target; a candidate staged before is set aside and restored on failure."""
+    """Rename the finished directory over the target; a candidate staged before is set aside (restored on failure),
+    and left there for SkillInducer.remove_aside."""
     if not target_dir.exists():
         os.replace(build_dir, target_dir)
         return
-    aside = build_dir.with_name(build_dir.name + ".old")
+    aside = _aside_of(build_dir)
     os.replace(target_dir, aside)
     try:
         os.replace(build_dir, target_dir)
     except BaseException:
         os.replace(aside, target_dir)
         raise
-    shutil.rmtree(aside, ignore_errors=True)
+
+
+def _aside_of(build_dir: Path) -> Path:
+    """Where placing `build_dir` sets aside the candidate it replaces (a `.tmp-<hex>.old` name nothing serves)."""
+    return build_dir.with_name(build_dir.name + ".old")
 
 
 def _skill_id(contract: TaskContract, owner: str | None = None) -> str:

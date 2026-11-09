@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMESTAMP_WINDOW = 30.0
 # Nonce cache max size (LRU)
 _NONCE_CACHE_MAX = 10_000
+# How many of them one sender's unexpired nonces may hold, so one peer's flood refuses only that peer (R5C-17).
+_NONCE_CACHE_MAX_PER_SENDER = _NONCE_CACHE_MAX // 10
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +58,8 @@ class DelegationReplayError(DelegationError):
 
 
 class MeshReplayCacheFull(DelegationError):
-    """The nonce cache holds its cap of nonces still inside their window: the envelope is refused, not recorded."""
+    """The nonce cache, or its sender's share of it, holds its cap of nonces still inside their window: the
+    envelope is refused, not recorded."""
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +81,9 @@ class _NonceCache:
     are in insertion order, not stamp order), and if none had expired the new nonce is refused with
     MeshReplayCacheFull and not recorded. A cache without a TTL, which the manager never builds, still evicts its
     oldest entry at the cap.
+
+    `max_per_owner` bounds the nonces one owner (the sender the manager names) holds at once, the same way: an owner
+    at its share is refused with MeshReplayCacheFull once none of its nonces has expired, and the others are not.
     """
 
     def __init__(
@@ -85,11 +91,15 @@ class _NonceCache:
         max_size: int = _NONCE_CACHE_MAX,
         ttl_seconds: Optional[float] = None,
         clock: Callable[[], float] = time.time,
+        max_per_owner: Optional[int] = None,
     ) -> None:
         self._max = max_size
         self._ttl = ttl_seconds
         self._clock = clock
-        self._seen: OrderedDict[str, float] = OrderedDict()
+        self._max_per_owner = max_per_owner
+        # Each nonce's stamp and owner, in insertion order, and how many nonces each owner holds.
+        self._seen: OrderedDict[str, tuple[float, Optional[str]]] = OrderedDict()
+        self._held: Counter[Optional[str]] = Counter()
         self._high_water = float("-inf")
         self._lock = Lock()
 
@@ -99,33 +109,58 @@ class _NonceCache:
         with self._lock:
             return self._high_water
 
-    def check_and_record(self, nonce: str, *, stamped_at: Optional[float] = None, now: Optional[float] = None) -> bool:
+    def check_and_record(
+        self,
+        nonce: str,
+        *,
+        stamped_at: Optional[float] = None,
+        now: Optional[float] = None,
+        owner: Optional[str] = None,
+    ) -> bool:
         """
         Returns True (first time seen → OK) or False (replay detected → reject); raises MeshReplayCacheFull when a
-        cache with a TTL is full of unexpired nonces.
+        cache with a TTL is full of unexpired nonces, or `owner` holds its share of them.
 
         `stamped_at` is the envelope's timestamp (the time of the check when absent); `now` the wall time the
-        caller checked it against (the cache's clock when absent).
+        caller checked it against (the cache's clock when absent); `owner` the sender the nonce is counted against.
         """
         with self._lock:
             current = self._clock() if now is None else now
             self._high_water = max(self._high_water, current)
             if self._ttl is not None:
                 # Roughly oldest first (insertion order); a later entry with an older stamp only stays longer.
-                while self._seen and self._high_water - next(iter(self._seen.values())) > self._ttl:
-                    self._seen.popitem(last=False)
+                while self._seen and self._high_water - next(iter(self._seen.values()))[0] > self._ttl:
+                    self._forget(next(iter(self._seen)))
             if nonce in self._seen:
                 return False
+            if self._max_per_owner is not None and self._held[owner] >= self._max_per_owner:
+                self._forget_expired()
+                if self._held[owner] >= self._max_per_owner:
+                    raise MeshReplayCacheFull("mesh replay cache holds this sender's share of nonces; retry later")
             if len(self._seen) >= self._max:
                 if self._ttl is None:
-                    self._seen.popitem(last=False)
+                    self._forget(next(iter(self._seen)))
                 else:
-                    for expired in [seen for seen, stamp in self._seen.items() if self._high_water - stamp > self._ttl]:
-                        del self._seen[expired]
+                    self._forget_expired()
                     if len(self._seen) >= self._max:
                         raise MeshReplayCacheFull("mesh replay cache is full; retry later")
-            self._seen[nonce] = current if stamped_at is None else stamped_at
+            self._seen[nonce] = (current if stamped_at is None else stamped_at, owner)
+            self._held[owner] += 1
             return True
+
+    def _forget(self, nonce: str) -> None:
+        _stamp, owner = self._seen.pop(nonce)
+        self._held[owner] -= 1
+        if not self._held[owner]:
+            del self._held[owner]
+
+    def _forget_expired(self) -> None:
+        """Drop every expired nonce (a full scan: entries are in insertion order, not stamp order); none without a
+        TTL."""
+        if self._ttl is None:
+            return
+        for expired in [seen for seen, (stamp, _owner) in self._seen.items() if self._high_water - stamp > self._ttl]:
+            self._forget(expired)
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +204,8 @@ class DelegationManager:
         self._timestamp_window = timestamp_window
         self._policy = PolicyEvaluator()
         # A nonce is kept until the wall clock's high-water mark is a window past its envelope's timestamp, after
-        # which that envelope can no longer pass the timestamp check.
-        self._nonce_cache = _NonceCache(ttl_seconds=timestamp_window)
+        # which that envelope can no longer pass the timestamp check; each sender's against its own share.
+        self._nonce_cache = _NonceCache(ttl_seconds=timestamp_window, max_per_owner=_NONCE_CACHE_MAX_PER_SENDER)
         # Nonces are not persisted, so an envelope the last process could have accepted is refused by its timestamp
         # instead: that process accepted envelopes stamped up to one window ahead of its clock, so up to one window
         # past this start. The cost is about one window of refusals after each start, which a sender's retry passes.
@@ -231,7 +266,7 @@ class DelegationManager:
             )
 
         if not self._nonce_cache.check_and_record(
-            reply_envelope.nonce, stamped_at=reply_envelope.timestamp, now=reply_now
+            reply_envelope.nonce, stamped_at=reply_envelope.timestamp, now=reply_now, owner=peer_node_id
         ):
             raise DelegationReplayError(f"reply nonce replay from peer={peer_node_id}")
 
@@ -296,23 +331,24 @@ class DelegationManager:
             logger.warning("mesh.delegation.envelope_invalid sender=%s error=%s", sender_id, exc)
             raise DelegationRejected(f"envelope verification failed: {exc}") from exc
 
-        # Nonce freshness — now safe to record; sender is authenticated.
-        try:
-            fresh = self._nonce_cache.check_and_record(envelope.nonce, stamped_at=envelope.timestamp, now=now)
-        except MeshReplayCacheFull:
-            logger.warning(
-                "mesh.delegation.replay_cache_full sender=%s: the replay cache is full, so the envelope was refused",
-                sender_id,
-            )
-            raise
-        if not fresh:
-            raise DelegationReplayError(f"nonce replay from sender={sender_id!r}")
-
         # Decode request
         try:
             request = DelegationRequest.model_validate(payload)
         except Exception as exc:
             raise DelegationRejected(f"Malformed DelegationRequest: {exc}") from exc
+
+        # Nonce freshness — now safe to record: the sender is authenticated, and its request decodes (one that does
+        # not runs nothing, and neither does its replay). Counted against the sender's own share of the cache, so a
+        # peer that floods it refuses only itself (R5C-17); a replay of a request that runs still meets its nonce.
+        try:
+            fresh = self._nonce_cache.check_and_record(
+                envelope.nonce, stamped_at=envelope.timestamp, now=now, owner=sender_id
+            )
+        except MeshReplayCacheFull as exc:
+            logger.warning("mesh.delegation.replay_cache_full sender=%s: the envelope was refused: %s", sender_id, exc)
+            raise
+        if not fresh:
+            raise DelegationReplayError(f"nonce replay from sender={sender_id!r}")
 
         # Policy evaluation
         try:

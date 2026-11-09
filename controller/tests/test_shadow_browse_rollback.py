@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.browser.services import sessions as sessions_module
 from tests.test_request_gate_wiring import START_URL, _browser
@@ -88,6 +88,105 @@ class ShadowBrowseTests(unittest.IsolatedAsyncioTestCase):
         self.shadow_browser.close.assert_awaited()
         self.assertNotIn(SHADOW_ID, self.manager.sessions)
         self.assertEqual(self.shadow_dirs(), [])
+
+    async def _rolled_back_after_the_persist_with(self, failing: str) -> list[str]:
+        """R5C-11: the shadow fails once its active record is written, and one of _close_owned_browser's steps around
+        the browser's close raises. Those steps sat outside every try, so the rollback stopped there (the directories
+        and the active record stayed) and the caller got that step's error instead of its own."""
+
+        async def persist_then_fail(session, *, status):
+            # The real persist (the harness stubs _persist_session), so the shadow's active record is on disk.
+            await self.manager.session_lifecycle.persist(session, status=status)
+            raise RuntimeError("failed after the persist")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        gates, births = self.manager.request_gates, self.manager.window_births
+        if failing == "gate release":
+            gates.release = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError("the gate's detach failed")
+            )
+        elif failing == "watcher release":
+            births.release = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError("the watcher's detach failed")
+            )
+        else:
+            gates.ending = Mock(side_effect=RuntimeError("the gate could not be marked"))  # type: ignore[method-assign]
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "failed after the persist"):
+                await self.manager.enable_shadow_browse(self.source_id)
+
+        self.shadow_browser.close.assert_awaited()
+        self.assertNotIn(SHADOW_ID, self.manager.sessions)
+        self.assertEqual(self.shadow_dirs(), [])
+        record = await self.manager.session_store.get(SHADOW_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        return logs.output
+
+    async def test_r5c_11_a_gate_release_that_raises_does_not_stop_the_rollback_or_replace_its_error(self) -> None:
+        logs = await self._rolled_back_after_the_persist_with("gate release")
+        self.assertIn("the gate's detach failed", "\n".join(logs))
+        self.harness.browser.close.assert_not_awaited()  # the source's browser is not the one closed
+
+    async def test_r5c_11_a_watcher_release_that_raises_does_not_stop_the_rollback_or_replace_its_error(self) -> None:
+        logs = await self._rolled_back_after_the_persist_with("watcher release")
+        self.assertIn("the watcher's detach failed", "\n".join(logs))
+
+    async def test_r5c_11_a_gate_that_cannot_be_marked_ending_does_not_stop_the_rollback(self) -> None:
+        logs = await self._rolled_back_after_the_persist_with("gate ending")
+        self.assertIn("the gate could not be marked", "\n".join(logs))
+
+    async def test_r5c_15_a_context_close_cancelled_on_its_own_does_not_end_the_rollback(self) -> None:
+        # The rollback's context close caught Exception only: a close whose own future was cancelled ended the
+        # rollback there (the browser left open, the directories and record left) and the caller, never cancelled,
+        # got a CancelledError instead of its own error.
+        async def persist_then_fail(session, *, status):
+            await self.manager.session_lifecycle.persist(session, status=status)
+            raise RuntimeError("failed after the persist")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        self.shadow_browser.context.close = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "failed after the persist"):
+                await self.manager.enable_shadow_browse(self.source_id)
+
+        self.shadow_browser.close.assert_awaited()
+        self.assertEqual(self.shadow_dirs(), [])
+        record = await self.manager.session_store.get(SHADOW_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        self.assertIn("was cancelled on its own", "\n".join(logs.output))
+
+    async def test_r5c_15_a_browser_close_cancelled_on_its_own_does_not_end_the_rollback(self) -> None:
+        # Codex review of R5C-15: _close_owned_browser caught Exception only around the browser's own close, so a close
+        # cancelled on its own still ended the rollback (directories and record left) with a CancelledError.
+        async def persist_then_fail(session, *, status):
+            await self.manager.session_lifecycle.persist(session, status=status)
+            raise RuntimeError("failed after the persist")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        self.shadow_browser.close = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "failed after the persist"):
+                await self.manager.enable_shadow_browse(self.source_id)
+
+        self.assertEqual(self.shadow_dirs(), [])
+        record = await self.manager.session_store.get(SHADOW_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        self.assertIn("did not close (CancelledError", "\n".join(logs.output))
+
+    async def test_r5c_11_a_rollback_that_raises_still_raises_the_error_that_started_it(self) -> None:
+        self.shadow_browser.new_context.side_effect = RuntimeError("context refused")
+        forget = AsyncMock(side_effect=RuntimeError("the record close failed"))
+
+        with patch.object(self.manager.session_lifecycle, "_forget_failed_session_state", forget):
+            with self.assertLogs("app.browser.services", "ERROR") as logs:
+                with self.assertRaisesRegex(RuntimeError, "context refused"):
+                    await self.manager.enable_shadow_browse(self.source_id)
+
+        self.assertIn("the record close failed", "\n".join(logs.output))
+        self.shadow_browser.close.assert_awaited()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -401,6 +402,176 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         release_runtime, cancels, logs = await self._create_whose_context_close_never_returns(cancel=True)
         self.assertEqual(cancels, 1)
         await self._assert_rolled_back_past_the_stalled_close(release_runtime, logs)
+
+    def _isolated_create_that_fails(self) -> AsyncMock:
+        """A create on an isolated runtime whose witness receipt fails; returns the runtime release."""
+        from app.session_isolation import IsolatedBrowserRuntime
+
+        runtime = IsolatedBrowserRuntime(
+            session_id=SESSION_ID,
+            container_id="c0",
+            container_name="browser-node-x",
+            network_name="net",
+            browser_node_name="browser-node-x",
+            profile_dir=self.root / "profile",
+            downloads_dir=self.root / "downloads",
+            ws_endpoint_file=self.root / "ws",
+            ws_endpoint="ws://127.0.0.1:1/",
+            takeover_url="http://127.0.0.1:6080/",
+            novnc_port=None,
+        )
+        browser = self.manager.browser
+        browser.close = AsyncMock()  # type: ignore[attr-defined]
+        self.manager._acquire_session_browser = AsyncMock(  # type: ignore[method-assign]
+            return_value=(browser, runtime)
+        )
+        release_runtime = AsyncMock()
+        self.manager.runtime_provisioner.release = release_runtime  # type: ignore[method-assign]
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("witness down")
+        )
+        return release_runtime
+
+    async def test_r5c_11_a_gate_release_that_raises_does_not_stop_a_failed_creates_rollback(self) -> None:
+        # The owned browser's gate release sat outside every try: raising there skipped the runtime release, the
+        # directory removal and the record close, and the caller got the release's error instead of its own.
+        release_runtime = self._isolated_create_that_fails()
+        self.manager.request_gates.release = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("detach failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "witness down"):
+            await self.manager.create_session()
+
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+
+    async def test_r5c_15_a_step_cancelled_on_its_own_does_not_end_a_failed_creates_rollback(self) -> None:
+        # _teardown_step caught Exception only: a context close whose own future was cancelled (the rollback's task
+        # was not) ended the rollback with a CancelledError, so the runtime was not released, the record not closed,
+        # and a caller that was never cancelled got a CancelledError.
+        import asyncio
+
+        release_runtime = self._isolated_create_that_fails()
+        browser = self.manager.browser
+        real_new_context = browser.new_context.side_effect
+
+        def new_context(**kwargs):
+            context = real_new_context(**kwargs)
+            context.close = AsyncMock(side_effect=asyncio.CancelledError())
+            return context
+
+        browser.new_context = AsyncMock(side_effect=new_context)
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "witness down"):
+                await self.manager.create_session()
+
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        self.assertIn(
+            f"close the browser context of a failed create for session {SESSION_ID} was cancelled on its own",
+            "\n".join(logs.output),
+        )
+
+    async def test_r5c_15_an_owned_browser_close_cancelled_on_its_own_does_not_end_the_rollback(self) -> None:
+        # Codex review of R5C-15: the owned browser's close sat in `except Exception` only, so its own cancellation
+        # still ended the rollback before the runtime release and the record close.
+        import asyncio
+
+        release_runtime = self._isolated_create_that_fails()
+        self.manager.browser.close = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[attr-defined]
+
+        with self.assertRaisesRegex(RuntimeError, "witness down"):
+            await self.manager.create_session()
+
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+
+    async def test_r5c_15_a_cancel_of_the_task_running_a_teardown_step_is_still_raised(self) -> None:
+        import asyncio
+
+        from app.browser.services.sessions import BrowserSessionService
+
+        started = asyncio.Event()
+
+        async def step() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        failed: list[str] = []
+        task = asyncio.create_task(BrowserSessionService._teardown_step(SESSION_ID, "close a thing", step, failed))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(failed, [])
+
+    async def test_r5c_15_a_step_cancelled_on_its_own_is_a_failed_step(self) -> None:
+        import asyncio
+
+        from app.browser.services.sessions import BrowserSessionService
+
+        async def step() -> None:
+            raise asyncio.CancelledError()
+
+        failed: list[str] = []
+        with self.assertLogs("app.browser.services", "WARNING"):
+            done = await BrowserSessionService._teardown_step(SESSION_ID, "close a thing", step, failed)
+
+        self.assertFalse(done)
+        self.assertEqual(failed, ["close a thing"])
+
+    def _dangling_link_at_the_artifacts_path(self) -> Path:
+        from tests.test_session_isolation import _link_dir
+
+        artifacts = self.root / "artifacts" / SESSION_ID
+        target = self.root / "gone"
+        target.mkdir()
+        artifacts.parent.mkdir(parents=True, exist_ok=True)
+        _link_dir(artifacts, target)
+        target.rmdir()
+        return artifacts
+
+    @unittest.skipIf(os.name == "nt", "Windows' rmtree refuses a link outright, which the callback reports")
+    async def test_r5c_22_a_dangling_symlink_at_a_session_path_is_reported(self) -> None:
+        # POSIX rmtree's lstat passes for a dangling symlink and its open fails with FileNotFoundError, which the
+        # callback took for a path already gone; the check after it follows links, so the link left was never named.
+        artifacts = self._dangling_link_at_the_artifacts_path()
+
+        with self.assertLogs("app.browser.services.session_creation", "WARNING") as logs:
+            self.manager.session_lifecycle.remove_session_dirs(SESSION_ID)
+
+        self.assertEqual([line for line in logs.output if str(artifacts) in line], [logs.output[0]], logs.output)
+        self.assertTrue(os.path.lexists(artifacts))  # a link is never removed through, as a link to a live dir is not
+
+    async def test_r5c_22_an_entry_left_after_a_not_found_error_is_reported(self) -> None:
+        # The same on every platform: rmtree as POSIX runs it on a dangling link (lstat passes, open fails with
+        # FileNotFoundError, the entry stays), over a real dangling link (a junction where Windows refuses symlinks).
+        from app.browser.services import session_creation
+
+        artifacts = self._dangling_link_at_the_artifacts_path()
+
+        def rmtree_as_posix_on_a_dangling_link(path, *, onexc=None, onerror=None) -> None:
+            error = FileNotFoundError(2, "No such file or directory", str(path))
+            if onexc is not None:
+                onexc(os.open, path, error)
+            else:
+                onerror(os.open, path, (FileNotFoundError, error, None))
+
+        with patch.object(session_creation.shutil, "rmtree", rmtree_as_posix_on_a_dangling_link):
+            with self.assertLogs("app.browser.services.session_creation", "WARNING") as logs:
+                self.manager.session_lifecycle.remove_session_dirs(SESSION_ID)
+
+        self.assertEqual([line for line in logs.output if str(artifacts) in line], [logs.output[0]], logs.output)
+        self.assertEqual(len(logs.output), 1, logs.output)  # the auth and upload paths are not there: not named
 
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()

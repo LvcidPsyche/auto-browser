@@ -33,10 +33,12 @@ RUN apt-get update \
     fi \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-dev.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+# constraints.txt pins every package the two requirements files pull in, at releases at least 72 hours old (R5C-14):
+# when either file changes, generate it again with the command in its header, with a cutoff 72 hours before then.
+COPY requirements.txt requirements-dev.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt \
     && if [ "$INSTALL_DEV_DEPS" = "true" ]; then \
-        pip install --no-cache-dir -r requirements-dev.txt; \
+        pip install --no-cache-dir -r requirements-dev.txt -c constraints.txt; \
     elif [ "$INSTALL_DEV_DEPS" != "false" ]; then \
         echo "INSTALL_DEV_DEPS must be true or false, got '$INSTALL_DEV_DEPS'" >&2; exit 1; \
     fi

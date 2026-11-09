@@ -7,7 +7,8 @@ from typing import Any, Optional, Type, Union
 
 import httpx
 
-from .auth import loopback_transport, resolve_bearer_token
+from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token, split_base_url
+from .errors import errors_shown, raise_for_status
 
 try:
     from langchain_core.tools import BaseTool
@@ -68,6 +69,11 @@ class AutoBrowserTool(BaseTool):
     operator_id: Optional[str] = None
     timeout: float = 60.0
 
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # After pydantic's own checks, not as a validator: a validator's error shows the input, URL and token included.
+        refuse_userinfo_with_token(self.base_url, self.bearer_token, self.token_file)
+
     def _run(self, action: str, arguments: dict[str, Any] | None = None) -> str:
         import asyncio
 
@@ -85,11 +91,15 @@ class AutoBrowserTool(BaseTool):
         if self.operator_id:
             headers["X-Operator-Id"] = self.operator_id
         payload = {"name": action, "arguments": arguments or {}}
-        transport = loopback_transport(self.base_url, asynchronous=True)
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
-            response = await client.post("/mcp/tools/call", json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        with errors_shown(self.base_url, bearer_token):
+            transport = loopback_transport(self.base_url, asynchronous=True)
+            base, params = split_base_url(self.base_url)
+            async with httpx.AsyncClient(
+                base_url=base, params=params, timeout=self.timeout, transport=transport
+            ) as client:
+                response = await client.post("/mcp/tools/call", json=payload, headers=headers)
+                raise_for_status(response)
+                data = response.json()
         if data.get("isError"):
             content = data.get("content") or [{}]
             return f"ERROR: {content[0].get('text', 'Unknown error')}"
@@ -104,14 +114,17 @@ class AutoBrowserTool(BaseTool):
         operator_id: str | None = None,
         token_file: str | os.PathLike[str] | None = None,
     ) -> list[dict]:
+        refuse_userinfo_with_token(base_url, bearer_token, token_file)
         headers: dict[str, str] = {}
         bearer_token = resolve_bearer_token(bearer_token, token_file)
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
         if operator_id:
             headers["X-Operator-Id"] = operator_id
-        transport = loopback_transport(base_url, asynchronous=False)
-        with httpx.Client(base_url=base_url, timeout=10, transport=transport) as client:
-            response = client.get("/mcp/tools", headers=headers)
-            response.raise_for_status()
-            return response.json()
+        with errors_shown(base_url, bearer_token):
+            transport = loopback_transport(base_url, asynchronous=False)
+            base, params = split_base_url(base_url)
+            with httpx.Client(base_url=base, params=params, timeout=10, transport=transport) as client:
+                response = client.get("/mcp/tools", headers=headers)
+                raise_for_status(response)
+                return response.json()

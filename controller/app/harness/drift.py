@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -44,49 +45,56 @@ class SkillDriftMonitor:
         registry: SkillStagingRegistry,
         *,
         verifier: VerifierAdapter | None = None,
+        lock: threading.Lock | None = None,
     ) -> None:
         self.registry = registry
         self.verifier = verifier or ProgrammaticVerifier()
+        # HarnessService passes its store's staging lock, held while a candidate is read so that retention (in a worker
+        # thread) never removes it half way through the read, and while its result is written back; never across the
+        # verifier.
+        self.lock = lock if lock is not None else threading.Lock()
 
     async def check_candidate(self, skill_id: str) -> DriftCheckResult:
-        try:
-            candidate = self.registry.get_candidate(skill_id)
-        except KeyError:
-            return DriftCheckResult(skill_id=skill_id, status="missing", notes=["candidate not found"])
+        with self.lock:
+            try:
+                candidate = self.registry.get_candidate(skill_id)
+            except KeyError:
+                return DriftCheckResult(skill_id=skill_id, status="missing", notes=["candidate not found"])
 
-        candidate_dir = self.registry.candidate_dir(candidate.skill_id)
-        try:
-            contract = TaskContract.model_validate_json(_read_artifact(candidate_dir, "contract.json"))
-            trace = TraceEnvelope.read_json(_artifact_path(candidate_dir, "trace.json"))
-        except Exception as exc:
-            result = DriftCheckResult(
-                skill_id=skill_id,
-                status="degraded",
-                notes=[f"candidate artifacts unreadable: {type(exc).__name__}"],
-            )
-            _write_result(candidate_dir, result)
-            return result
+            candidate_dir = self.registry.candidate_dir(candidate.skill_id)
+            checked = _candidate_json(candidate_dir)
+            try:
+                contract = TaskContract.model_validate_json(_read_artifact(candidate_dir, "contract.json"))
+                trace = TraceEnvelope.read_json(_artifact_path(candidate_dir, "trace.json"))
+            except Exception as exc:
+                result = DriftCheckResult(
+                    skill_id=skill_id,
+                    status="degraded",
+                    notes=[f"candidate artifacts unreadable: {type(exc).__name__}"],
+                )
+                _write_result(candidate_dir, result)
+                return result
 
-        notes: list[str] = []
-        contract_hash = contract.hash()
-        trace_hash = trace.trace_hash
-        if contract_hash != candidate.contract_hash:
-            notes.append("contract hash differs from candidate provenance")
-        if trace_hash != candidate.trace_hash:
-            notes.append("trace hash differs from candidate provenance")
+            notes: list[str] = []
+            contract_hash = contract.hash()
+            trace_hash = trace.trace_hash
+            if contract_hash != candidate.contract_hash:
+                notes.append("contract hash differs from candidate provenance")
+            if trace_hash != candidate.trace_hash:
+                notes.append("trace hash differs from candidate provenance")
 
-        try:
-            expected = _expecting_scrubbed_text(contract)
-        except Exception as exc:
-            result = DriftCheckResult(
-                skill_id=skill_id,
-                status="unverified",
-                contract_hash=contract_hash,
-                trace_hash=trace_hash,
-                notes=[*notes, f"expected text could not be scrubbed: {type(exc).__name__}"],
-            )
-            _write_result(candidate_dir, result)
-            return result
+            try:
+                expected = _expecting_scrubbed_text(contract)
+            except Exception as exc:
+                result = DriftCheckResult(
+                    skill_id=skill_id,
+                    status="unverified",
+                    contract_hash=contract_hash,
+                    trace_hash=trace_hash,
+                    notes=[*notes, f"expected text could not be scrubbed: {type(exc).__name__}"],
+                )
+                _write_result(candidate_dir, result)
+                return result
 
         verification = await self.verifier.verify(expected, trace)
         if verification.passed is True and not notes:
@@ -107,12 +115,22 @@ class SkillDriftMonitor:
             verification=verification,
             notes=notes,
         )
-        _write_result(candidate_dir, result)
+        with self.lock:
+            if _candidate_json(candidate_dir) == checked:
+                _write_result(candidate_dir, result)
+            else:
+                # Re-staged (a later run of its contract) or removed (retention) while the verifier ran: the result is
+                # the old candidate's, so it is returned, not written beside another candidate or into a new directory.
+                result.notes.append(
+                    "the candidate was re-staged or removed while it was checked: drift.json was not written"
+                )
         return result
 
     async def check_all(self) -> list[DriftCheckResult]:
         results: list[DriftCheckResult] = []
-        for item in self.registry.list_candidates():
+        with self.lock:
+            listed = self.registry.list_candidates()
+        for item in listed:
             skill_id = str(item.get("skill_id") or "")
             if skill_id:
                 results.append(await self.check_candidate(skill_id))
@@ -206,8 +224,16 @@ def _read_artifact(candidate_dir: Path, name: str) -> str:
     return _artifact_path(candidate_dir, name).read_text(encoding="utf-8")
 
 
+def _candidate_json(candidate_dir: Path) -> bytes | None:
+    """candidate.json as it is on disk now (None once it is gone), which says which candidate the directory holds."""
+    try:
+        return (candidate_dir / "candidate.json").read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def _write_result(candidate_dir: Path, result: DriftCheckResult) -> Path:
-    candidate_dir.mkdir(parents=True, exist_ok=True)
+    # Into the directory the candidate was read from, never a new one (a candidate removed meanwhile stays removed).
     target = candidate_dir / "drift.json"
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")

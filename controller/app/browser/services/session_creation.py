@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import sys
@@ -22,7 +23,7 @@ from ...models import resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
-from ...utils import UTC
+from ...utils import UTC, run_to_completion
 from ..request_gate import RequestGateUnavailable
 
 if TYPE_CHECKING:
@@ -365,7 +366,7 @@ class SessionCreation:
         """Roll back a create that failed: every step runs to its end even when the task awaiting it is cancelled
         during one (W7-2), and the cancel is raised once the rollback is done. A cancel at any step left the isolated
         runtime running, the directories in place and the record reading active."""
-        await self._run_to_completion(
+        await run_to_completion(
             self._cleanup_failed_steps(
                 session_id,
                 session=session,
@@ -431,6 +432,8 @@ class SessionCreation:
         A removal error inside rmtree is logged with the directory and the error, and rmtree goes on through the rest
         of that tree (W11-5); a path already gone is not an error. One warning per directory, naming its first error,
         the root cause (W12-4): the parent's "Directory not empty" that follows a file's unlink error is not logged.
+        A link left at a directory's place is named too (R5C-22): POSIX rmtree reports a dangling symlink as
+        FileNotFoundError and leaves it, and the check after it, which follows links, found nothing.
         """
         for directory in (
             self.manager.artifacts.artifact_root / session_id,
@@ -455,7 +458,8 @@ class SessionCreation:
                     shutil.rmtree(directory, onexc=logged)
                 else:
                     shutil.rmtree(directory, onerror=logged)
-                if not reported and directory.exists():
+                # exists() raises what it cannot answer (W10-6); lexists() then sees a dangling link it took for gone.
+                if not reported and (directory.exists() or os.path.lexists(directory)):
                     logger.warning("rollback could not remove %s", directory)
             except OSError as exc:
                 if not reported:

@@ -19,6 +19,8 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
     the caller asked for a token, and a request without one would only 401.
     """
     token = (bearer_token or "").strip() or None
+    if token:
+        _refuse_unsendable(token, "bearer_token")
     if token or token_file is None:
         return token
     token_file = os.path.expanduser(token_file)  # "~/auto-browser/data/api-token", as the stdio bridge takes it
@@ -34,9 +36,63 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
             f"cannot read token_file {token_file}: {exc.strerror}. Run as the user that owns the auto-browser "
             "folder's data/, or read the token with: docker compose exec -T controller cat /data/api-token"
         ) from exc
+    except UnicodeDecodeError:
+        # Not the decode error, whose text names one of the token's bytes and its position (review of c3's fixes).
+        raise ValueError(f"token_file {token_file} is not UTF-8 text") from None
     if not token:
         raise ValueError(f"token_file {token_file} is empty")
+    _refuse_unsendable(token, f"token_file {token_file}")
     return token
+
+
+def split_base_url(base_url: str) -> tuple[str, httpx.QueryParams]:
+    """``base_url`` without its query and fragment, and its query as the params sent with every request, as the MCP
+    bridges send theirs (c4's report): httpx put the request's path after a base URL's query
+    (``/?key=value/mcp/tools/call``). No request sends the fragment. A URL httpx cannot read is kept as it is, for the
+    request's own error."""
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return base_url, httpx.QueryParams()
+    return str(url.copy_with(query=None, fragment=None)), url.params
+
+
+def refuse_userinfo_with_token(base_url: str, bearer_token: str | None, token_file: object) -> None:
+    """Raise ValueError, naming the parts and never their values, when ``base_url`` holds a user name or password and
+    a token is given too (``bearer_token``, or ``token_file`` read on each call): httpx sends the URL's user name and
+    password as Basic credentials, which replace the token's Authorization header, so the controller got no token and
+    nothing said so (c4's report). A URL httpx cannot read is left to the first request, whose error goes out
+    redacted."""
+    if not (bearer_token or "").strip() and token_file is None:
+        return
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return
+    if url.username or url.password:
+        raise ValueError(
+            "base_url holds a user name or password, which httpx would send as Basic credentials in place of the "
+            "token: give the token or the URL's user name and password, not both"
+        )
+
+
+def _refuse_unsendable(token: str, source: str) -> None:
+    """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
+
+    h11 refuses a line break, a NUL, a vertical tab or a form feed with an error that quotes the header whole, and
+    httpx encodes a header as ASCII, so its error for a character outside ASCII names that character and its
+    position; either reached an agent shown the error. A header carries no control character but a tab (RFC 9110), so
+    any other is refused (review of c3).
+    """
+    if "\r" in token or "\n" in token:
+        held = "a line break"
+    elif not token.isascii():
+        held = "a character outside ASCII"
+    elif any(not character.isprintable() and character != "\t" for character in token):
+        held = "a control character"
+    else:
+        return
+    raise ValueError(f"{source} holds {held}, which an HTTP header cannot carry")
 
 
 # One overload per client kind (W9-12): httpx.Client takes only a BaseTransport and httpx.AsyncClient only an

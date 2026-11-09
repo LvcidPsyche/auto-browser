@@ -11,6 +11,7 @@ urllib reads the proxy variables when an opener is built, which for the old modu
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -23,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
+from urllib.request import Request
 
 import pytest
 
@@ -377,38 +379,105 @@ def closed_port():
         yield probe.getsockname()[1]
 
 
+# How often the echo server's accept() and reads wake to see whether its test is over, and how long it reads a
+# connection it accepted (R5C-31).
+_ECHO_POLL_SECONDS = 0.1
+_ECHO_READ_SECONDS = 10.0
+
+
+def _echo_request_line(connection: socket.socket, stop: threading.Event) -> None:
+    """Answer one request with its own request line as the status line, once its headers and body are read.
+
+    The reads end when the test is over or after _ECHO_READ_SECONDS, however the client sends: a read's timeout alone
+    bounded only a client gone quiet, so one sending a header line now and then kept the worker reading after its
+    test (review of c3)."""
+    deadline = time.monotonic() + _ECHO_READ_SECONDS
+    connection.settimeout(_ECHO_POLL_SECONDS)
+    received = b""
+    while True:
+        head, ended, body = received.partition(b"\r\n\r\n")
+        # The body is read too: on Windows a socket closed with unread data resets.
+        if ended and len(body) >= _content_length(head):
+            break
+        if stop.is_set() or time.monotonic() > deadline:
+            return
+        try:
+            chunk = connection.recv(65536)
+        except TimeoutError:
+            continue
+        if not chunk:
+            return
+        received += chunk
+    connection.sendall(head.split(b"\r\n", 1)[0] + b"\r\nContent-Length: 0\r\n\r\n")
+
+
+def _content_length(head: bytes) -> int:
+    for header in head.split(b"\r\n")[1:]:
+        name, _, value = header.partition(b":")
+        if name.strip().lower() == b"content-length":
+            return int(value)
+    return 0
+
+
 @pytest.fixture
 def request_line_echo():
     """A raw TCP server on 127.0.0.1 that answers each request with its own request line as the status line.
 
     http.client then raises BadStatusLine quoting that line, the URL's query included, which is not a URLError, so
-    the bridge answers with its unexpected-failure message (W15-1)."""
+    the bridge answers with its unexpected-failure message (W15-1). Its accept() and its reads wake to see whether the
+    test is over, a connection's reads are bounded, and its worker is stopped and joined when the test ends (R5C-31):
+    closing the listener from another thread does not reliably wake a thread blocked in accept(), and a connection's
+    reads had no bound."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
+    listener.settimeout(_ECHO_POLL_SECONDS)
+    stop = threading.Event()
 
     def answer() -> None:
-        while True:
+        while not stop.is_set():
             try:
                 connection, _ = listener.accept()
+            except TimeoutError:
+                continue
             except OSError:
                 return
-            with connection, connection.makefile("rb") as stream:
-                request_line = stream.readline()
-                length = 0
-                while (header := stream.readline()) not in (b"\r\n", b""):
-                    name, _, value = header.partition(b":")
-                    if name.strip().lower() == b"content-length":
-                        length = int(value)
-                # Read the body first: on Windows a socket closed with unread data resets.
-                stream.read(length)
-                connection.sendall(request_line.rstrip(b"\r\n") + b"\r\nContent-Length: 0\r\n\r\n")
+            with connection:
+                try:
+                    _echo_request_line(connection, stop)
+                except OSError:  # a connection reset
+                    continue
 
-    threading.Thread(target=answer, daemon=True).start()
+    worker = threading.Thread(target=answer, daemon=True)
+    worker.start()
     try:
         yield listener.getsockname()[1]
     finally:
+        stop.set()
+        worker.join(_ECHO_READ_SECONDS + _ECHO_POLL_SECONDS + 5)
         listener.close()
+        assert not worker.is_alive(), "the request line echo server's worker did not stop"
+
+
+def test_r5c_31_the_echo_servers_worker_stops_while_a_client_is_still_sending(request_line_echo: int) -> None:
+    # Review of c3 (Codex 8): a read timed out only when the client went quiet, so a client sending a header line
+    # every 100 ms kept the worker reading after its test, and the teardown failed 15 s later with the worker alive.
+    # The teardown is the assertion: it joins the worker and fails while the worker lives.
+    client = socket.create_connection(("127.0.0.1", request_line_echo))
+
+    def drip() -> None:
+        deadline = time.monotonic() + 30
+        with client:
+            try:
+                client.sendall(b"POST /mcp HTTP/1.1\r\n")
+                while time.monotonic() < deadline:
+                    client.sendall(b"X-Drip: 1\r\n")
+                    time.sleep(0.1)
+            except OSError:  # the server closed the connection: its worker stopped reading
+                return
+
+    threading.Thread(target=drip, daemon=True).start()
+    time.sleep(0.3)  # the worker is reading the drip's header lines when the test ends
 
 
 # Of test_w13_1's base URLs, the one answered with urllib's URLError, the answer that no controller is reachable;
@@ -559,6 +628,132 @@ def test_w15_5_a_fixed_reason_gives_its_causes_as_examples(recording_proxy, base
 
 
 @pytest.mark.parametrize(
+    ("base_url", "reason"),
+    [
+        # http.client encodes the request line as ASCII, after the opener is chosen: "Unexpected stdio bridge failure:
+        # 'ascii' codec can't encode character ...".
+        ("http://127.0.0.1:{port}/mcp/" + chr(0xE9), "or a character outside ASCII; percent-encode it"),
+        ("http://controller.invalid/mcp?key=sentinel" + chr(0xE9), "or a character outside ASCII; percent-encode it"),
+        # urllib puts the fragment into a proxied request line, which http.client refuses for a space or a control
+        # character ("URL can't contain control characters") and cannot encode outside ASCII.
+        ("http://controller.invalid/mcp?key=sentinel#frag sentinel", "its fragment holds"),
+        ("http://controller.invalid/mcp#frag" + chr(0x7F) + "sentinel", "its fragment holds"),
+        ("http://controller.invalid/mcp#frag" + chr(0xE9) + "sentinel", "its fragment holds"),
+    ],
+    ids=["path_non_ascii", "query_non_ascii", "fragment_space", "fragment_control", "fragment_non_ascii"],
+)
+def test_r5c_28_a_url_http_client_cannot_send_is_refused_as_an_invalid_controller_url(
+    recording_proxy, base_url: str, reason: str
+) -> None:
+    controller = _serve()
+    try:
+        message = _bridge_error_through_the_bridge(base_url.format(port=controller.server_port), recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert INVALID in message
+    assert reason in message
+    assert "Unexpected stdio bridge failure" not in message
+    assert "sentinel" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    assert controller.seen == []  # type: ignore[attr-defined]
+
+
+_HOST_OR_USERINFO = "its host or userinfo holds a character http.client cannot send"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://contr" + chr(0xF4) + "leur.invalid/mcp?key=sentinel",
+        "http://sentinel" + chr(0x43A) + "@controller.invalid/mcp",
+    ],
+    ids=["host_outside_ascii", "userinfo_outside_latin_1"],
+)
+def test_r5c_28_a_host_or_userinfo_a_proxy_cannot_get_is_refused_as_an_invalid_controller_url(
+    recording_proxy, base_url: str
+) -> None:
+    # Review of c3 (Codex 7): the path, query and fragment were checked, but urllib puts the URL whole, host and
+    # userinfo too, into the request line it sends an environment proxy, which http.client encodes as ASCII, and the
+    # answer was "Unexpected stdio bridge failure: 'ascii' codec can't encode character ... in position 12", one
+    # character of the URL and where it is.
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert INVALID in message
+    assert _HOST_OR_USERINFO in message
+    assert "Unexpected stdio bridge failure" not in message
+    assert "sentinel" not in message
+    assert "position" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+def test_r5c_28_a_userinfo_the_host_header_cannot_carry_is_refused_without_a_proxy(monkeypatch) -> None:
+    # Review of c3: without a proxy urllib sends the host it decoded, userinfo included, as the Host header, which
+    # http.client encodes as latin-1; a percent-encoded character outside it failed as above, naming that character.
+    import app.mcp_stdio as bridge
+
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("no_proxy", "*")  # and no proxy from the Windows registry either
+    client = bridge.HttpMcpClient(base_url="http://sentinel%D0%BA@controller.invalid/mcp")
+    reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    assert reply is not None
+    message = reply["error"]["message"]
+
+    assert INVALID in message
+    assert _HOST_OR_USERINFO in message
+    assert "sentinel" not in message
+    assert "position" not in message
+
+
+@pytest.mark.parametrize("scheme", ["file", "data", "ftp"])
+def test_r5c_28_the_bridges_openers_answer_no_file_data_or_ftp_url(tmp_path: Path, scheme: str) -> None:
+    # urlopen refuses such a URL before any opener is chosen (W15-3 refused it in HttpMcpClient only); the openers
+    # themselves kept urllib's default handlers, which answer a file: or data: URL from the local file or the URL
+    # itself, as if a controller had, and an ftp: one from an FTP server (here none listens, so urllib's FTP handler
+    # failed with its own error).
+    import app.mcp_stdio as bridge
+
+    result_file = tmp_path / "result.json"
+    result_file.write_text(_A_RESULT, encoding="utf-8")
+    url = {
+        "file": "file://localhost" + result_file.as_uri().removeprefix("file://"),
+        "data": "data:application/json," + _A_RESULT,
+        "ftp": "ftp://127.0.0.1:9/result.json",
+    }[scheme]
+
+    with pytest.raises(bridge.InvalidControllerURL, match="it is not an http:// or https:// URL with a host"):
+        bridge.urlopen(Request(url), timeout=5)
+    for opener in (bridge._DIRECT, bridge._opener()):
+        with pytest.raises(URLError, match=f"unknown url type: {scheme}"):
+            opener.open(Request(url), timeout=5)
+
+
+def test_r5c_28_a_url_of_a_scheme_an_environment_proxy_names_never_goes_to_that_proxy(
+    recording_proxy, monkeypatch
+) -> None:
+    # Found by the orchestrator (c4): with ftp_proxy set, urllib's ProxyHandler turned an ftp:// request into an http
+    # one to that proxy before UnknownHandler was reached, so the proxied opener sent it there, bearer token included,
+    # and urlopen returned the proxy's answer as the controller's.
+    import app.mcp_stdio as bridge
+
+    monkeypatch.setenv("ftp_proxy", f"http://127.0.0.1:{recording_proxy.server_port}")
+
+    def request() -> Request:  # a fresh one each time: a proxied open rewrites the request it is given
+        return Request("ftp://controller.example/mcp", headers={"Authorization": f"Bearer {MARKER}"})
+
+    with pytest.raises(bridge.InvalidControllerURL, match="it is not an http:// or https:// URL with a host"):
+        bridge.urlopen(request(), timeout=5)
+    # The proxied opener takes only the environment's http and https proxies.
+    with pytest.raises(URLError, match="unknown url type: ftp"):
+        bridge._opener().open(request(), timeout=5)
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
     ("retry_after", "shown"),
     [
         # Only the detail went through _shown: a Retry-After quoting the URL was shown whole.
@@ -671,6 +866,135 @@ def test_w15_7_a_token_holding_a_line_break_is_never_sent(tmp_path: Path, token:
     assert controller.seen == [("/mcp", None)]  # type: ignore[attr-defined]
 
 
+def _answer_with_a_401(detail: str = "Missing or invalid bearer token", **client_options: object) -> tuple[dict, list]:
+    """The bridge's answer to a tools/list a controller answers 401 with ``detail``, and what that controller saw."""
+    import app.mcp_stdio as bridge
+
+    controller = _serve()
+    controller.answer = (401, json.dumps({"detail": detail}).encode())  # type: ignore[attr-defined]
+    try:
+        client = bridge.HttpMcpClient(base_url=f"http://127.0.0.1:{controller.server_port}/mcp", **client_options)
+        reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        )
+    finally:
+        controller.shutdown()
+        controller.server_close()
+    assert reply is not None
+    return reply, controller.seen  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("in_file", [False, True], ids=["bearer_token", "token_file"])
+def test_r5c_30_a_token_holding_a_character_outside_latin_1_is_never_sent(tmp_path: Path, in_file: bool) -> None:
+    # http.client encodes a header as latin-1, and its UnicodeEncodeError named the character and its position in the
+    # header, which the generic answer showed the agent: one character of the controller's token, and where it is.
+    token = "sentinelA" + chr(0x20AC) + "sentinelB"
+    token_file = tmp_path / "api-token"
+    token_file.write_bytes(token.encode("utf-8") + b"\n")
+
+    reply, seen = _answer_with_a_401(
+        bearer_token=None if in_file else token, token_file=str(token_file) if in_file else None
+    )
+    message = reply["error"]["message"]
+
+    assert "HTTP 401" in message
+    assert "holds a character outside latin-1, which an HTTP header cannot carry, so no token was sent" in message
+    assert ("the token file" in message) is in_file
+    assert "sentinel" not in message
+    assert chr(0x20AC) not in message
+    assert seen == [("/mcp", None)]
+
+
+def test_r5c_30_a_token_inside_latin_1_is_still_sent() -> None:
+    # The refusal is what http.client cannot encode, not every non-ASCII token: the controller reads the header as
+    # latin-1 and compares it as UTF-8 (auth_policy.match_credential), so such a token authenticates today.
+    token = "sentinel" + chr(0xE4)
+
+    reply, seen = _answer_with_a_401(bearer_token=token)
+
+    assert "no token was sent" not in reply["error"]["message"]
+    assert seen == [("/mcp", f"Bearer {token}")]
+
+
+def test_r5c_30_a_token_file_that_is_not_utf_8_is_answered_without_its_bytes(tmp_path: Path) -> None:
+    # Review of c3 (Codex 6): the 401's answer quoted the decode error, which names one of the token's bytes and its
+    # position ("can't decode byte 0x80 in position 9"), as R5C-30's encode error named a character.
+    token_file = tmp_path / "api-token"
+    token_file.write_bytes(b"sentinelA" + bytes([0x80]) + b"sentinelB\n")
+
+    reply, seen = _answer_with_a_401(token_file=str(token_file))
+    message = reply["error"]["message"]
+
+    assert "HTTP 401" in message
+    assert f"the token file {token_file} is not UTF-8 text, so no token was sent" in message
+    assert "0x80" not in message
+    assert "position" not in message
+    assert seen == [("/mcp", None)]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "said"),
+    [
+        ("http://127.0.0.1:{port}/mcp?key=sentinel", UNREACHABLE),
+        ("http://controller.invalid:abc/mcp?key=sentinel", INVALID),
+    ],
+    ids=["unreachable", "invalid"],
+)
+def test_r5c_23_a_notification_gets_no_answer_when_the_controller_cannot_be_reached(
+    closed_port: int, base_url: str, said: str
+) -> None:
+    # A notification (no id) must get no answer; the URLError and invalid-URL paths answered one with "id": null,
+    # which matches no request the client sent. The diagnostic goes to stderr, without the URL's secrets.
+    import app.mcp_stdio as bridge
+
+    stderr = io.StringIO()
+    client = bridge.HttpMcpClient(base_url=base_url.format(port=closed_port))
+    reply = bridge.StdioMcpBridge(client=client, stderr=stderr)._handle_line(
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+
+    assert reply is None
+    assert said in stderr.getvalue()
+    assert "sentinel" not in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("status", "said"),
+    [
+        (401, "Auto Browser controller returned HTTP 401: refused [redacted]"),
+        (503, "Empty or non-JSON response from Auto Browser MCP endpoint (503)"),
+        (202, None),
+    ],
+)
+def test_r5c_23_a_notification_the_controller_answers_with_an_http_error_is_reported_on_stderr(
+    status: int, said: str | None
+) -> None:
+    # c3's "not done": a notification the controller answered with an HTTP error (a 401 for a bad token, a 5xx) was
+    # dropped without a word, where one the controller never got is reported on stderr (R5C-23). It still gets no
+    # answer; one the controller accepted (202) prints nothing.
+    import app.mcp_stdio as bridge
+
+    controller = _serve()
+    body = json.dumps({"detail": "refused sentinel-0123"}).encode() if status == 401 else b""
+    controller.answer = (status, body)  # type: ignore[attr-defined]
+    stderr = io.StringIO()
+    try:
+        client = bridge.HttpMcpClient(base_url=f"http://127.0.0.1:{controller.server_port}/mcp?key=sentinel-0123")
+        reply = bridge.StdioMcpBridge(client=client, stderr=stderr)._handle_line(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        )
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert reply is None
+    if said is None:
+        assert stderr.getvalue() == ""
+    else:
+        assert stderr.getvalue().startswith(f"stdio bridge: {said}")
+    assert "sentinel" not in stderr.getvalue()
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]
@@ -683,6 +1007,341 @@ def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy)
     assert "HTTP 502" in message
     assert "sentinel" not in message
     assert len(recording_proxy.seen) == 1  # type: ignore[attr-defined]
+
+
+_BACKSLASH = chr(92)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "detail"),
+    [
+        # Codex Q01: a query value quoted without its key matched no part of the URL, which was matched whole.
+        ("http://controller.invalid/mcp?key=sentinel-0123&page=2", "bad key sentinel-0123"),
+        # A value quoted as repr() or json.dumps() writes it: str() of a structure in a server's own text.
+        (
+            "http://controller.invalid/mcp?key=sentinel%5Ctail",
+            "rejected " + repr({"key": "sentinel" + _BACKSLASH + "tail"}),
+        ),
+        ("http://controller.invalid/mcp?key=sen%22tinel-0123", "rejected " + json.dumps({"key": 'sen"tinel-0123'})),
+    ],
+    ids=["query_value_alone", "repr_form", "json_form"],
+)
+def test_r5c_20_a_servers_detail_never_shows_a_secret_of_the_url_quoted_another_way(
+    recording_proxy, base_url: str, detail: str
+) -> None:
+    recording_proxy.answer = (502, json.dumps({"detail": detail}).encode())  # type: ignore[attr-defined]
+
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert message.startswith("Auto Browser controller returned HTTP 502: ")
+    assert "[redacted]" in message
+    assert "tinel" not in message
+
+
+@pytest.mark.parametrize(
+    ("base_url", "detail", "shown"),
+    [
+        # FastAPI's 422 detail quotes the value alone, in a list of objects.
+        (
+            "http://controller.invalid/mcp?key=sentinel-0123",
+            [{"loc": ["query", "key"], "input": "sentinel-0123", "ctx": {"n": 7}}],
+            [{"loc": ["query", "key"], "input": "[redacted]", "ctx": {"n": 7}}],
+        ),
+        # str() escaped the backslash a decoded query holds, so the decoded value matched nothing.
+        (
+            "http://controller.invalid/mcp?key=sentinel%5Ctail",
+            {"upstream": "key=sentinel" + _BACKSLASH + "tail"},
+            {"upstream": "[redacted]"},
+        ),
+        # A number that is a secret of the URL, as Codex R03's Retry-After was.
+        (
+            "http://alice:93847561029384756102@controller.invalid:8000/mcp",
+            {"retry": 93847561029384756102},
+            {"retry": "[redacted]"},
+        ),
+    ],
+    ids=["fastapi_422", "decoded_backslash", "numeric_secret"],
+)
+def test_r5c_20_a_structured_detail_is_shown_as_json_without_the_urls_secrets(
+    recording_proxy, base_url: str, detail: object, shown: object
+) -> None:
+    recording_proxy.answer = (502, json.dumps({"detail": detail}).encode())  # type: ignore[attr-defined]
+    prefix = "Auto Browser controller returned HTTP 502: "
+
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert message.startswith(prefix)
+    assert json.loads(message[len(prefix) :]) == shown
+
+
+@pytest.mark.parametrize("in_file", [False, True], ids=["bearer_token", "token_file"])
+def test_r5c_20_a_servers_detail_never_shows_the_token(tmp_path: Path, in_file: bool) -> None:
+    # Codex R02: the answers dropped the URL's secrets but not the bearer token the request carried.
+    token_file = tmp_path / "api-token"
+    token_file.write_text(MARKER + "\n", encoding="utf-8")
+
+    reply, seen = _answer_with_a_401(
+        f"token {MARKER} is not valid",
+        bearer_token=None if in_file else MARKER,
+        token_file=str(token_file) if in_file else None,
+    )
+
+    assert reply["error"]["message"].startswith("Auto Browser controller returned HTTP 401: token [redacted] is not")
+    assert MARKER not in reply["error"]["message"]
+    assert seen == [("/mcp", f"Bearer {MARKER}")]
+
+
+def test_r5c_20_a_forwarded_json_rpc_errors_message_is_shown_without_secrets_and_a_result_is_untouched(
+    recording_proxy,
+) -> None:
+    # Codex P03: the bridges forwarded a controller's JSON-RPC body unchanged, so an error message quoting the URL (a
+    # proxy, a gateway or the controller echoing it) reached the agent. Only an error's message is shown that way.
+    base_url = "http://controller.invalid/mcp?key=sentinel-0123"
+    message = f"upstream {base_url} refused {MARKER}"
+    error = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": message, "data": {"kept": "as sent"}}}
+    recording_proxy.answer = (200, json.dumps(error).encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge(base_url, recording_proxy)
+
+    assert reply["error"] == {
+        "code": -32001,
+        "message": "upstream http://controller.invalid/mcp?[redacted] refused [redacted]",
+        "data": {"kept": "as sent"},
+    }
+    result = {"jsonrpc": "2.0", "id": 1, "result": {"text": message}}
+    recording_proxy.answer = (200, json.dumps(result).encode())  # type: ignore[attr-defined]
+    assert _reply_through_the_bridge(base_url, recording_proxy) == result
+
+
+def test_r5c_20_a_forwarded_json_rpc_errors_data_is_shown_without_secrets(recording_proxy) -> None:
+    # c4: only the message was redacted, and a proxy or gateway can quote the URL or the token in the data too, which
+    # an agent reads as well. Its shape is kept, a number that is not a secret too.
+    base_url = "http://controller.invalid/mcp?key=sentinel-0123"
+    data = {"upstream": base_url, "auth": f"Bearer {MARKER}", "tried": ["sentinel-0123", 2], "n": 7}
+    error = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "upstream refused", "data": data}}
+    recording_proxy.answer = (200, json.dumps(error).encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge(base_url, recording_proxy)
+
+    assert reply["error"] == {
+        "code": -32001,
+        "message": "upstream refused",
+        "data": {
+            "upstream": "http://controller.invalid/mcp?[redacted]",
+            "auth": "Bearer [redacted]",
+            "tried": ["[redacted]", 2],
+            "n": 7,
+        },
+    }
+
+
+def test_c4_a_forwarded_error_whose_data_nests_deeper_than_a_walk_can_go_is_still_answered(recording_proxy) -> None:
+    # c4 review: the data's redaction walk had no depth limit, and its RecursionError ended the bridge with no answer.
+    # Past the walk's depth (_REDACTED_DEPTH_MAX, 100) the value is replaced, not shown. This depth is just over it,
+    # and one every supported Python (3.11 to 3.14) parses: 3.11's json.loads fails near 1,000 (CI's host test).
+    depth = 105
+    data = "[" * depth + "]" * depth
+    error = '{"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "deep", "data": ' + data + "}}"
+    recording_proxy.answer = (200, error.encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge("http://controller.invalid/mcp", recording_proxy)
+
+    assert (reply["error"]["code"], reply["error"]["message"]) == (-32001, "deep")
+    assert "[redacted: nested too deep]" in json.dumps(reply)
+
+
+def test_a_body_too_deep_for_any_python_to_parse_is_answered_as_an_unreadable_one(recording_proxy) -> None:
+    # json.loads raises RecursionError on this on every supported Python (3.11 to 3.14), as it raises ValueError on a
+    # proxy's HTML page: the bridge reports the status of a body it cannot read, not an unexpected failure.
+    depth = 1_000_000
+    body = '{"jsonrpc": "2.0", "id": 1, "result": ' + "[" * depth + "]" * depth + "}"
+    recording_proxy.answer = (200, body.encode())  # type: ignore[attr-defined]
+
+    reply = _reply_through_the_bridge("http://controller.invalid/mcp", recording_proxy)
+
+    assert reply["error"]["code"] == -32000
+    assert reply["error"]["message"] == "Empty or non-JSON response from Auto Browser MCP endpoint (200)"
+
+
+def test_an_answer_nested_too_deep_to_encode_is_answered_as_an_error_and_the_bridge_goes_on(monkeypatch) -> None:
+    # A body json.loads parsed can still be too deep for json.dumps (on Python 3.14 the two have different limits), and
+    # the RecursionError out of run() ended the bridge with no answer. No Python from 3.11 to 3.14 can encode this.
+    import app.mcp_stdio as bridge
+
+    nested: list = []
+    for _ in range(1_000_000):
+        nested = [nested]
+    answers = [
+        {"jsonrpc": "2.0", "id": 7, "result": nested},
+        {"jsonrpc": "2.0", "id": 8, "result": {"ok": True}},
+    ]
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    monkeypatch.setattr(proxy, "_handle_line", lambda _line: answers.pop(0))
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("first\nsecond\n"), stdout=stdout)
+
+    first, second = (json.loads(line) for line in stdout.getvalue().splitlines())
+    assert first == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32000,
+            "message": "The answer is nested too deep for the stdio bridge to send.",
+        },
+    }
+    assert second == {"jsonrpc": "2.0", "id": 8, "result": {"ok": True}}
+
+
+def test_a_request_id_too_deep_to_encode_is_answered_with_a_null_id(monkeypatch) -> None:
+    # The error for that request cannot carry the id either: JSON-RPC's null id says the request's could not be read.
+    import app.mcp_stdio as bridge
+
+    nested: list = []
+    for _ in range(1_000_000):
+        nested = [nested]
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    monkeypatch.setattr(proxy, "_handle_line", lambda _line: {"jsonrpc": "2.0", "id": nested, "result": {}})
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("line\n"), stdout=stdout)
+
+    reply = json.loads(stdout.getvalue())
+    assert reply["id"] is None
+    assert reply["error"]["code"] == -32000
+
+
+def test_a_boolean_request_id_is_answered_with_a_null_id_when_the_answer_cannot_be_encoded(monkeypatch) -> None:
+    # True is an int in Python, but JSON-RPC's id is a string, a number or null: the fallback must not say "id": true.
+    import app.mcp_stdio as bridge
+
+    nested: list = []
+    for _ in range(1_000_000):
+        nested = [nested]
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    monkeypatch.setattr(proxy, "_handle_line", lambda _line: {"jsonrpc": "2.0", "id": True, "result": nested})
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("line\n"), stdout=stdout)
+
+    reply = json.loads(stdout.getvalue())
+    assert reply["id"] is None
+    assert reply["error"]["code"] == -32000
+
+
+def test_a_stdin_line_too_deep_to_parse_is_answered_as_invalid_json() -> None:
+    # json.loads raises RecursionError on this on every supported Python, which ended the bridge with no answer.
+    import app.mcp_stdio as bridge
+
+    depth = 1_000_000
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    stdout = io.StringIO()
+
+    proxy.run(stdin=io.StringIO("[" * depth + "]" * depth + "\n"), stdout=stdout)
+
+    assert json.loads(stdout.getvalue()) == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32700, "message": "Invalid JSON payload"},
+    }
+
+
+def test_a_number_too_long_to_parse_is_answered_as_invalid_json_and_the_bridge_goes_on() -> None:
+    # CPython refuses an int of more than 4300 digits with a plain ValueError (not a JSONDecodeError), as a bare
+    # number and as an id, and that ended the bridge with no answer.
+    import app.mcp_stdio as bridge
+
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp", bearer_token=MARKER)
+    proxy = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())
+    stdout = io.StringIO()
+    digits = "9" * 5000
+    lines = digits + "\n" + '{"jsonrpc": "2.0", "id": ' + digits + ', "method": "ping"}\n' + "[" * 9 + "\n"
+
+    # The refusal is the interpreter's limit, set by default to 4300 and by PYTHONINTMAXSTRDIGITS to another: pin it.
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        proxy.run(stdin=io.StringIO(lines), stdout=stdout)
+    finally:
+        sys.set_int_max_str_digits(limit)
+
+    replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert replies == [{"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON payload"}}] * 3
+
+
+def test_r5c_20_the_unexpected_failure_on_stderr_never_shows_the_urls_secrets_or_the_token(monkeypatch) -> None:
+    # The answer went through _shown; the line the bridge printed on stderr showed the error's text as it came.
+    import app.mcp_stdio as bridge
+
+    def fails(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"upstream http://controller.invalid/mcp?key=sentinel-0123 with {MARKER}")
+
+    monkeypatch.setattr(bridge, "urlopen", fails)
+    stderr = io.StringIO()
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp?key=sentinel-0123", bearer_token=MARKER)
+    reply = bridge.StdioMcpBridge(client=client, stderr=stderr)._handle_line(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    assert reply is not None
+
+    shown = "upstream http://controller.invalid/mcp?[redacted] with [redacted]"
+    assert stderr.getvalue() == f"stdio bridge unexpected error: {shown}\n"
+    assert reply["error"]["message"] == f"Unexpected stdio bridge failure: {shown}"
+
+
+def test_r5c_20_each_secret_is_replaced_once_and_a_paths_at_sign_is_kept() -> None:
+    from app.mcp_stdio import _display_url, _redacted, _without_userinfo
+
+    # A short secret was replaced again inside the [redacted] already written: "x [red[redacted]cted] ...".
+    assert _redacted("x u:a y getaddrinfo failed", "http://u:a@h/mcp") == (
+        "x [redacted] y get[redacted]ddrinfo f[redacted]iled"
+    )
+    # The display and the detail dropped any x@ run, a path's too: /a@b/mcp showed as /b/mcp.
+    assert _display_url("http://controller.example/a@b/mcp?key=sentinel") == "http://controller.example/a@b/mcp"
+    assert _without_userinfo("upstream http://controller.example/a@b/mcp failed") == (
+        "upstream http://controller.example/a@b/mcp failed"
+    )
+    assert _without_userinfo("via http://alice:sentinel@proxy.invalid/x and 'bob@host'") == (
+        "via http://proxy.invalid/x and 'host'"
+    )
+
+
+def test_r5c_20_a_query_value_of_8_characters_is_redacted_and_one_of_7_is_kept() -> None:
+    # c3 left the boundary unpinned: every query value the other tests use is longer than 8 characters.
+    from app.mcp_stdio import _redacted
+
+    assert _redacted("short seven77, long eight888", "http://h/mcp?short=seven77&long=eight888") == (
+        "short seven77, long [redacted]"
+    )
+
+
+def test_r5c_20_the_basic_credentials_httpx_sends_for_the_userinfo_are_redacted() -> None:
+    # Review of c3's fixes (Codex 2): the client SDK shares this redaction, and httpx sends a base URL's userinfo as
+    # "Authorization: Basic" and the base64 of user:password, each percent-decoded; a server echoing that header showed
+    # the credentials. The bridges send no Basic header, so for them it only redacts more.
+    from app.mcp_stdio import _redacted
+
+    basic = base64.b64encode(b"alice:sentinel pass").decode()
+
+    assert _redacted(f"illegal status line: Authorization: Basic {basic}", "http://alice:sentinel%20pass@h/mcp") == (
+        "illegal status line: Authorization: Basic [redacted]"
+    )
+
+
+def test_r5c_20_each_form_of_the_url_given_counts_its_secrets() -> None:
+    # Review of c3's fixes (Codex 3): the client SDK gives its base URL as configured and as httpx sends it, which
+    # percent-encodes a space or a character outside ASCII in the query, so a server quoting the request line it got
+    # quoted a form the configured text does not hold.
+    from app.mcp_stdio import _redacted, _redacted_value
+
+    forms = ("http://h/mcp?key=sentinel value", "http://h/mcp?key=sentinel%20value")
+
+    assert _redacted("POST /mcp?key=sentinel%20value HTTP/1.1", forms) == "POST /mcp?[redacted] HTTP/1.1"
+    assert _redacted_value({"input": "sentinel%20value"}, forms) == {"input": "[redacted]"}
 
 
 def test_w15_1_the_unexpected_failure_answer_never_shows_the_urls_query(
@@ -734,10 +1393,12 @@ def test_w14_1_the_error_text_shown_drops_the_urls_known_secrets() -> None:
 def test_w14_1_dropping_userinfo_runs_is_linear() -> None:
     from app.mcp_stdio import _without_userinfo
 
-    started = time.monotonic()
+    # CPU seconds, not wall seconds (R5C-29): a suspended or overloaded runner can spend 2 wall seconds on anything. The
+    # linear scan takes milliseconds of CPU here; the quadratic one took about 7 CPU seconds for half this text.
+    started = time.process_time()
     _without_userinfo("a" * 65536)
 
-    assert time.monotonic() - started < 2
+    assert time.process_time() - started < 2
 
 
 def test_w13_1_an_invalid_proxy_port_is_not_answered_as_an_invalid_controller_url(recording_proxy) -> None:

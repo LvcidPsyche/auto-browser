@@ -1,3 +1,4 @@
+import errno
 import json
 import tempfile
 import unittest
@@ -203,6 +204,17 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
 
+    async def test_a_long_text_typed_into_a_password_field_leaves_no_trace_of_its_preview(self) -> None:
+        # The preview of a field found secret only when typing starts goes, and so does the mark that it was cut.
+        self.session.page.locators["#password"] = FakeLocator("#password", attributes={"type": "password"})
+
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            result = await self.manager.type("session-1", selector="#password", text="s" * 100)
+
+        self.assertTrue(result["target"]["text_redacted"])
+        self.assertNotIn("text_preview", result["target"])
+        self.assertNotIn("text_truncated", result["target"])
+
     async def test_an_upload_of_a_missing_file_fails_before_asking_for_approval(self) -> None:
         # execute_action asked the operator to approve the upload first, so the
         # approval was for an upload that could only fail once granted.
@@ -254,6 +266,36 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(closed["tabs"]), 1)
         self.assertEqual(takeover["reason"], "operator check")
         self.manager._persist_session.assert_awaited()
+
+    async def test_a_tab_change_or_takeover_that_took_effect_returns_when_its_record_cannot_be_saved(self) -> None:
+        # As for an action (R5C-13): the tab opened, switched or closed (or the takeover was recorded), then saving the
+        # session's record failed (a full disk), and that error reached the caller as the call's, so an agent that
+        # retried opened or closed a second tab.
+        self.manager._persist_session = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OSError(errno.ENOSPC, "No space left on device")
+        )
+        calls = (
+            ("open_tab", lambda: self.manager.open_tab("session-1", "https://example.com/second", activate=False)),
+            ("activate_tab", lambda: self.manager.activate_tab("session-1", 1)),
+            ("close_tab", lambda: self.manager.close_tab("session-1", 0)),
+            ("request_human_takeover", lambda: self.manager.request_human_takeover("session-1", "operator check")),
+        )
+        results = {}
+        for action, call in calls:
+            with self.subTest(action=action):
+                with self.assertLogs("app.browser.services.sessions", level="WARNING") as logs:
+                    results[action] = await call()
+                self.assertTrue(
+                    any(action in line and "session-1" in line and "No space left" in line for line in logs.output),
+                    logs.output,
+                )
+
+        self.assertEqual(results["open_tab"]["index"], 1)
+        self.assertEqual(results["activate_tab"]["index"], 1)
+        self.assertEqual(results["close_tab"]["closed_index"], 0)
+        self.assertEqual(len(self.session.context.pages), 1)
+        self.assertEqual(results["request_human_takeover"]["reason"], "operator check")
+        self.assertEqual(self.manager._persist_session.await_count, 4)
 
     async def test_run_action_records_success_and_normalized_failures(self) -> None:
         before = {

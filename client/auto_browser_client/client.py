@@ -20,14 +20,15 @@ Usage (async):
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
 from urllib.parse import quote
 
 import httpx
 
-from .mcp_bridge import _is_loopback_host
+from .mcp_bridge import _is_loopback_host, _redacted, _redacted_value
 
 
 def _seg(value: str) -> str:
@@ -57,9 +58,105 @@ def _read_token_file(path: str | os.PathLike[str]) -> str:
             f"cannot read token_file {path}: {exc.strerror}. Run as the user that owns the auto-browser "
             "folder's data/, or read the token with: docker compose exec -T controller cat /data/api-token"
         ) from exc
+    except UnicodeDecodeError:
+        # Not the decode error, whose text names one of the token's bytes and its position (review of c3's fixes).
+        raise ValueError(f"token_file {path} is not UTF-8 text") from None
     if not token:
         raise ValueError(f"token_file {path} is empty")
+    _refuse_unsendable(token, f"token_file {path}")
     return token
+
+
+def _refuse_unsendable(token: str, source: str) -> None:
+    """Raise ValueError, naming ``source`` and never the token, when httpx cannot send ``token`` in a header (R5C-20).
+
+    h11 refuses a line break, a NUL, a vertical tab or a form feed with an error that quotes the header whole, and
+    httpx encodes a header as ASCII, so its error for a character outside ASCII names that character and its
+    position; raised from the first request, either reached whatever showed the error to an agent. A header carries
+    no control character but a tab (RFC 9110), so any other is refused (review of c3).
+    """
+    if "\r" in token or "\n" in token:
+        held = "a line break"
+    elif not token.isascii():
+        held = "a character outside ASCII"
+    elif any(not character.isprintable() and character != "\t" for character in token):
+        held = "a control character"
+    else:
+        return
+    raise ValueError(f"{source} holds {held}, which an HTTP header cannot carry")
+
+
+def _header_credentials(headers: Mapping[str, str]) -> str | None:
+    """The credentials of the Authorization header in ``headers`` (the part after its scheme), which httpx sends as it
+    sends the token's: refused as a token is when httpx cannot send them (review of c3). ``headers`` can hold one per
+    case of the name, and httpx sends each, so more than one is refused (review of c3's fixes)."""
+    values = [value for name, value in headers.items() if name.lower() == "authorization"]
+    if len(values) > 1:
+        raise ValueError("headers holds more than one Authorization header, and httpx sends each; keep one")
+    for value in values:
+        if isinstance(value, str):
+            _refuse_unsendable(value, "the Authorization header in headers")
+            scheme, _, credentials = value.strip().partition(" ")
+            return credentials.strip() or scheme or None
+    return None
+
+
+def _refuse_userinfo_with(base_url: str, what: str | None) -> None:
+    """Raise ValueError, naming the parts and never their values, when ``base_url`` holds a user name or password and
+    ``what`` (a token, or an Authorization header) is given too: httpx sends the URL's user name and password as Basic
+    credentials, which replace that header, so the controller got no token and nothing said so (c4's report). A URL
+    httpx cannot read is left to the first request, whose error goes out redacted."""
+    if what is None:
+        return
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return
+    if url.username or url.password:
+        raise ValueError(
+            "base_url holds a user name or password, which httpx would send as Basic credentials in place of the "
+            f"{what}: give the {what} or the URL's user name and password, not both"
+        )
+
+
+def _split_query(base_url: str) -> tuple[str, httpx.QueryParams]:
+    """``base_url`` without its query and fragment, and its query as the params sent with every request, as the MCP
+    bridges send theirs (c4's report): httpx put a request's path after a base URL's query (``/?key=value/sessions``),
+    a GET with params of its own lost the query and the path, and the event stream's URL put its path after the
+    fragment, which no request sends. A URL httpx cannot read is kept as it is, for the first request's error."""
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, UnicodeError):
+        return base_url, httpx.QueryParams()
+    return str(url.copy_with(query=None, fragment=None)).rstrip("/"), url.params
+
+
+def _as_sent(base_url: str) -> tuple[str, ...]:
+    """``base_url`` as configured and as httpx sends it, whose secrets an error leaves out (review of c3's fixes):
+    httpx percent-encodes a space or a character outside ASCII in the userinfo and the query, and writes the query
+    again as the params it sends (a space as ``+``), so an echo of the request quotes a form the configured text does
+    not hold. Only the first when httpx cannot read it (a lone surrogate fails its encoding), as this runs while
+    another error is shown.
+
+    Each ``name=value`` pair of the query counts on its own too, as a form ``?name=value`` (review of c5): a request's
+    own params replace the base URL's of the same name, so for ``?key=s3c&limit=20`` list_audit_events(limit=5) sends
+    ``key=s3c&limit=5``, which holds neither the query as configured nor a value long enough to count alone."""
+    try:
+        url = httpx.URL(base_url)
+        forms = (base_url, str(url), str(url.copy_with(query=None).copy_merge_params(url.params)))
+    except (httpx.InvalidURL, UnicodeError):
+        return (base_url,)
+    queries = (form.partition("?")[2].partition("#")[0] for form in forms)
+    pairs = {pair for query in queries for pair in query.split("&") if "=" in pair and pair != "="}
+    return (*forms, *(f"?{pair}" for pair in sorted(pairs)))
+
+
+def _with_text(error: Exception, text: str) -> Exception:
+    """``error`` again, of its type and with its attributes (an httpx error's request), its text ``text``."""
+    shown = type(error).__new__(type(error))
+    shown.__dict__.update(error.__dict__)
+    shown.args = (text,)
+    return shown.with_traceback(error.__traceback__)
 
 
 class AutoBrowserError(Exception):
@@ -95,15 +192,30 @@ class AutoBrowserClient:
         operator_id: sent as X-Operator-Id. A controller with REQUIRE_OPERATOR_ID=true
                      needs it unless the token is a named credential. For a renamed
                      OPERATOR_ID_HEADER, pass the header in ``headers`` instead.
-        headers:     extra headers sent with every request.
+        headers:     extra headers sent with every request. A token (``token`` or ``token_file``)
+                     replaces any Authorization header here; without one, at most one may be given.
         """
         self.base_url = base_url.rstrip("/")
+        # What the requests go to: the base URL's query goes as params, its fragment nowhere.
+        self._base, self._params = _split_query(base_url)
         self._headers: dict[str, str] = dict(headers or {})
         token = token.strip() if token else None
+        if token:
+            _refuse_unsendable(token, "token")
+        if token or token_file is not None:
+            _refuse_userinfo_with(base_url, "token")
+        elif any(name.lower() == "authorization" for name in self._headers):
+            _refuse_userinfo_with(base_url, "Authorization header in headers")
         if not token and token_file is not None:
             token = _read_token_file(token_file)
         if token:
+            # The token's alone (review of c3's fixes): one given in ``headers`` whose name differed in case from
+            # "Authorization" was sent beside it.
+            self._headers = {name: value for name, value in self._headers.items() if name.lower() != "authorization"}
             self._headers["Authorization"] = f"Bearer {token}"
+        # An error's detail never shows it, nor the base URL's secrets (R5C-20), nor an Authorization header's
+        # credentials given in ``headers`` in its place (review of c3).
+        self._token = token or _header_credentials(self._headers)
         if operator_id:
             self._headers["X-Operator-Id"] = operator_id
         self._sync_client: httpx.Client | None = None
@@ -149,12 +261,14 @@ class AutoBrowserClient:
 
     def _new_sync_client(self) -> httpx.Client:
         transport = httpx.HTTPTransport() if self._direct() else None
-        return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=self._timeout, transport=transport)
+        return httpx.Client(
+            base_url=self._base, params=self._params, headers=self._headers, timeout=self._timeout, transport=transport
+        )
 
     def _new_async_client(self) -> httpx.AsyncClient:
         transport = httpx.AsyncHTTPTransport() if self._direct() else None
         return httpx.AsyncClient(
-            base_url=self.base_url, headers=self._headers, timeout=self._timeout, transport=transport
+            base_url=self._base, params=self._params, headers=self._headers, timeout=self._timeout, transport=transport
         )
 
     def _client(self) -> httpx.Client:
@@ -167,8 +281,21 @@ class AutoBrowserClient:
             self._async_client = self._new_async_client()
         return self._async_client
 
-    @staticmethod
-    def _raise(r: httpx.Response) -> None:
+    @contextmanager
+    def _errors_shown(self) -> Iterator[None]:
+        """Raise httpx's error for a request again without the base URL's secrets or the token in its text, its type
+        and attributes kept, as AutoBrowserError's detail leaves them out (review of c3, R5C-20): httpx's error for an
+        answer it cannot read quotes what the server sent, which can echo the request line or a header."""
+        try:
+            yield
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
+            text = str(error)
+            shown = _redacted(text, _as_sent(self.base_url), self._token)
+            if shown == text:
+                raise
+            raise _with_text(error, shown) from None
+
+    def _raise(self, r: httpx.Response) -> None:
         if r.status_code >= 400:
             try:
                 detail = r.json()
@@ -181,35 +308,43 @@ class AutoBrowserClient:
                     # of a streaming endpoint are expected to read the body first
                     # (see stream_events), but fall back cleanly if one doesn't.
                     detail = f"<unreadable response body, status {r.status_code}>"
-            raise AutoBrowserError(r.status_code, detail)
+            # A proxy's or a gateway's detail can quote the URL or the token: kept from the error as the MCP bridges
+            # keep them from an answer, its shape kept (R5C-20).
+            raise AutoBrowserError(r.status_code, _redacted_value(detail, _as_sent(self.base_url), self._token))
 
     def _get(self, path: str, **params) -> Any:
-        r = self._client().get(path, params=params)
+        with self._errors_shown():
+            r = self._client().get(path, params=params)
         self._raise(r)
         return r.json()
 
     def _post(self, path: str, body: dict | None = None) -> Any:
-        r = self._client().post(path, json=body or {})
+        with self._errors_shown():
+            r = self._client().post(path, json=body or {})
         self._raise(r)
         return r.json()
 
     def _delete(self, path: str) -> Any:
-        r = self._client().delete(path)
+        with self._errors_shown():
+            r = self._client().delete(path)
         self._raise(r)
         return r.json()
 
     async def _aget(self, path: str, **params) -> Any:
-        r = await self._aclient().get(path, params=params)
+        with self._errors_shown():
+            r = await self._aclient().get(path, params=params)
         self._raise(r)
         return r.json()
 
     async def _apost(self, path: str, body: dict | None = None) -> Any:
-        r = await self._aclient().post(path, json=body or {})
+        with self._errors_shown():
+            r = await self._aclient().post(path, json=body or {})
         self._raise(r)
         return r.json()
 
     async def _adelete(self, path: str) -> Any:
-        r = await self._aclient().delete(path)
+        with self._errors_shown():
+            r = await self._aclient().delete(path)
         self._raise(r)
         return r.json()
 
@@ -486,7 +621,7 @@ class AutoBrowserClient:
         """Yield parsed event dicts from the SSE stream. Blocks until disconnected."""
         import json as _json
 
-        url = f"{self.base_url}/sessions/{_seg(session_id)}/events"
+        url = f"{self._base}/sessions/{_seg(session_id)}/events"
         # No read timeout — the stream is meant to stay open — but a bounded
         # connect. `timeout=None` disabled both, so an unreachable controller
         # hung this generator forever instead of raising.
@@ -494,25 +629,26 @@ class AutoBrowserClient:
         # A client of its own, built by the rule _new_sync_client follows (W8-8): module-level httpx.stream used no
         # transport, so a loopback controller's Authorization header went to an environment proxy. Both the client
         # and the stream close when the generator ends or is closed early.
-        transport = httpx.HTTPTransport() if self._direct() else None
-        with (
-            httpx.Client(transport=transport) as http,
-            http.stream("GET", url, headers=self._headers, timeout=timeout) as r,
-        ):
-            if r.status_code >= 400:
-                r.read()
-            self._raise(r)
-            buffer = ""
-            for chunk in r.iter_text():
-                buffer += chunk
-                while "\n\n" in buffer:
-                    block, buffer = buffer.split("\n\n", 1)
-                    for line in block.splitlines():
-                        if line.startswith("data: "):
-                            try:
-                                yield _json.loads(line[6:])
-                            except Exception:
-                                pass
+        with self._errors_shown():
+            transport = httpx.HTTPTransport() if self._direct() else None
+            with (
+                httpx.Client(transport=transport) as http,
+                http.stream("GET", url, params=self._params, headers=self._headers, timeout=timeout) as r,
+            ):
+                if r.status_code >= 400:
+                    r.read()
+                self._raise(r)
+                buffer = ""
+                for chunk in r.iter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        block, buffer = buffer.split("\n\n", 1)
+                        for line in block.splitlines():
+                            if line.startswith("data: "):
+                                try:
+                                    yield _json.loads(line[6:])
+                                except Exception:
+                                    pass
 
     # ── Audit ────────────────────────────────────────────────────────────────
 

@@ -27,6 +27,7 @@ from app.browser_scripts import PAGE_SUMMARY_SCRIPT, PAGE_TEXT_SCRIPT
 from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway
 from tests._chromium import chromium_executable, requires_chromium
+from tests._fake_element_ids import FakePageElementIds
 
 NODE = shutil.which("node")
 
@@ -111,6 +112,7 @@ class GetHtmlPagingTests(unittest.IsolatedAsyncioTestCase):
             _assert_page_allowed=Mock(),
             _page_refused=Mock(return_value=False),
             page_provenance=PageProvenance(),
+            element_ids=FakePageElementIds(),
         )
         self.gateway = McpToolGateway(
             manager=self.manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace(), tool_profile="full"

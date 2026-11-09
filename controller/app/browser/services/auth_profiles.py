@@ -9,6 +9,7 @@ import secrets
 import shutil
 import tarfile
 import tempfile
+import weakref
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -189,6 +190,14 @@ def _remove_quietly(path: Path, what: str) -> None:
 class BrowserAuthProfileService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+        # One lock per profile name being saved, dropped once no save holds it.
+        self._save_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _save_lock(self, normalized: str) -> asyncio.Lock:
+        lock = self._save_locks.get(normalized)
+        if lock is None:
+            lock = self._save_locks[normalized] = asyncio.Lock()
+        return lock
 
     async def _record_profile_receipt(
         self,
@@ -330,7 +339,7 @@ class BrowserAuthProfileService:
                 metadata={"saved_to": auth_info["path"], "encrypted": auth_info["encrypted"]},
             )
             payload["session"] = await self.manager._session_summary(session)
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "save_storage_state")
             return payload
 
     async def save_for_session(
@@ -341,6 +350,16 @@ class BrowserAuthProfileService:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
+        # One save of a name at a time, from its owner check until its files are in place (ACT-22): a save held only
+        # its own session's lock, so a second operator's save of a name the first was saving passed the check (no
+        # owner yet) and one replaced the profile the other had just been given. Keyed as the filesystem compares
+        # names: Windows and macOS find "Shop", "shop" and (Windows) "shop." in one folder (review of c5).
+        async with self._save_lock(normalized.rstrip(".").casefold()):
+            return await self._save_for_session(session, normalized, metadata)
+
+    async def _save_for_session(
+        self, session: "BrowserSession", normalized: str, metadata: dict[str, Any] | None
+    ) -> dict[str, Any]:
         # Before writing anything: saving over a profile you do not own is the
         # same takeover as reading it, and this method rewrites the metadata
         # file wholesale, so the owner has to be carried across explicitly.
@@ -464,7 +483,7 @@ class BrowserAuthProfileService:
                 metadata={"saved_to": payload["saved_to"]},
             )
             payload["session"] = await self.manager._session_summary(session)
-            await self.manager._persist_session(session, status="active")
+            await self.manager._persist_session_after_action(session, "save_auth_profile")
             return payload
 
     async def get(self, profile_name: str) -> dict[str, Any]:

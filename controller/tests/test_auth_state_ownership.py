@@ -10,6 +10,7 @@ the state, so the answer survives the session closing and a controller restart.
 
 from __future__ import annotations
 
+import errno
 import json
 import tempfile
 import unittest
@@ -175,6 +176,42 @@ class SessionAuthStateOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
         created = await self._create_from(BOB, f"{session_id}/state.json")
         self.assertEqual(created["owner"], "bob")
+
+
+class SaveWithAnUnsavableSessionRecordTests(unittest.IsolatedAsyncioTestCase):
+    """As for an action (R5C-13): the state or profile was saved and recorded, then saving the session's record failed
+    (a full disk), and that error reached the caller as the save's."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.manager, _ = build_manager(self.root)
+
+    async def asyncTearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def test_a_saved_state_or_profile_is_returned_when_the_session_record_cannot_be_saved(self) -> None:
+        with acting_as(None):
+            session_id = (await self.manager.create_session(name="saver"))["id"]
+            session = self.manager.sessions[session_id]
+            session.context = StateContext(session.page)
+            session.page.url = "https://example.com/"
+            self.manager.session_store.upsert = AsyncMock(  # type: ignore[method-assign]
+                side_effect=OSError(errno.ENOSPC, "No space left on device")
+            )
+            calls = (
+                ("save_storage_state", lambda: self.manager.auth_profiles.save_storage_state(session_id, "state.json")),
+                ("save_auth_profile", lambda: self.manager.auth_profiles.save(session_id, "saver-profile")),
+            )
+            for action, call in calls:
+                with self.subTest(action=action):
+                    with self.assertLogs("app.browser.services.sessions", level="WARNING") as logs:
+                        saved = await call()
+                    self.assertTrue(Path(saved["saved_to"]).is_file())
+                    self.assertTrue(
+                        any(action in line and session_id in line and "No space left" in line for line in logs.output),
+                        logs.output,
+                    )
 
 
 if __name__ == "__main__":

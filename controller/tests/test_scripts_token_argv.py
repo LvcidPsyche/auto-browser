@@ -26,27 +26,11 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+from tests._bash import BASH, path_after  # one resolution of bash for every script test (R5C-27)
+
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
 TOKEN = "tok3n-" + "Q" * 37
-
-
-def _find_bash() -> str | None:
-    """bash to run the scripts with. On Windows, Git for Windows' bash (the one the
-    scripts are run with there), not System32's bash.exe, which is WSL's."""
-    if os.name != "nt":
-        return shutil.which("bash")
-    git = shutil.which("git")
-    if git:
-        # git.exe lives in Git\cmd or Git\mingw64\bin depending on the PATH entry.
-        for root in Path(git).parents:
-            for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
-                if candidate.is_file():
-                    return str(candidate)
-    return None
-
-
-BASH = _find_bash()
 
 # A token-bearing header on a command line: in a script, -H/--header with a
 # Bearer value built from a variable, or such a header string assigned for later use.
@@ -105,6 +89,7 @@ class BearerCurlTests(unittest.TestCase):
             )
             curl.chmod(0o755)
             env = {key: value for key, value in os.environ.items() if key != "API_BEARER_TOKEN"}
+            env["PATH"] = path_after()  # the stub's #!/usr/bin/env bash finds this bash (review of c5)
             if token is not None:
                 env["API_BEARER_TOKEN"] = token
             script = (
@@ -380,6 +365,10 @@ UNPLAIN_BASE_URLS = (
     "http://[::ffff:127.0.0.2]:{port}/",
     "http://[::ffff:7f00:2]:{port}/",
     "http://[0:0:0:0:0:ffff:7f00:2]:{port}/",
+    # R5C-24: an empty bracketed host, left to curl, which refuses the first two and globs the third.
+    "http://[]:{port}/",
+    "http://[]/",
+    "http://[/",
 )
 PLAIN_HOST_MESSAGE = (
     "write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as a plain host name or address, such "

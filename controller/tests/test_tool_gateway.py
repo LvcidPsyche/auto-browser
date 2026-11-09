@@ -5,16 +5,19 @@ import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError, ExecutionHold
 from app.browser.page_provenance import PageProvenance
+from app.browser_scripts import FIND_ELEMENTS_SELECTOR_SCRIPT, FIND_ELEMENTS_TEXT_SCRIPT, PAGE_TEXT_SCRIPT
 from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.tool_gateway import CreateSessionRequest, McpToolGateway, ToolRegistry, ToolSpec
 from app.tool_inputs import EmptyInput
+from tests._fake_element_ids import FakePageElementIds
 
 
 class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -63,6 +66,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             _partition_off_list=Mock(return_value=False),
             _page_refused=Mock(return_value=False),
             page_provenance=PageProvenance(),
+            element_ids=FakePageElementIds(),
             get_session=AsyncMock(return_value={"id": "session-1"}),
             verify_witness_chain=AsyncMock(
                 return_value={
@@ -1267,6 +1271,77 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent.get("code"), "invalid_regex")
         self.assertIn("Invalid regular expression", response.content[0].text)
         self.assertIn("Unterminated group", response.content[0].text)
+
+    async def test_find_elements_invalid_selector_surfaces_structured_error(self) -> None:
+        reason = "Failed to execute 'querySelectorAll' on 'Document': '###' is not a valid selector."
+        page = SimpleNamespace(evaluate=AsyncMock(return_value={"__invalid_selector": reason}))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.find_elements", arguments={"session_id": "session-1", "selector": "###"})
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent.get("code"), "invalid_selector")
+        self.assertIn(f"Invalid selector: {reason}", response.content[0].text)
+
+    async def test_the_isolated_worlds_deadline_never_cuts_a_page_read_off_before_its_own_bound(self) -> None:
+        # Review of c5 (GLM): get_html(text_only) and find_elements by selector, moved into the isolated world (NAV-12),
+        # ran on its deadline (ACTION_TIMEOUT_MS, 15 s by default), so a page slower than that failed as a page not
+        # answering, where they had the 30 s every page read is bounded by. The query's walk had its own pad already.
+        from app.browser.page_read import PAGE_READ_TIMEOUT_SECONDS
+        from app.tool_gateway import gateway as gateway_module
+
+        deadlines: dict[str, int | None] = {}
+        setup_deadlines: dict[str, int | None] = {}
+
+        class RecordingElementIds:
+            async def evaluate(
+                self,
+                page: Any,
+                script: str,
+                arg: Any = None,
+                *,
+                timeout_ms: int | None = None,
+                setup_timeout_ms: int | None = None,
+            ) -> Any:
+                deadlines[script] = timeout_ms
+                setup_deadlines[script] = setup_timeout_ms
+                return "text" if script is PAGE_TEXT_SCRIPT else []
+
+        self.manager.element_ids = RecordingElementIds()
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=SimpleNamespace(), lock=asyncio.Lock()))
+        for arguments in ({"text_only": True}, {"selector": "#real"}, {"query": "real"}):
+            name = "browser.get_html" if "text_only" in arguments else "browser.find_elements"
+            response = await self.full_gateway.call_tool(
+                McpToolCallRequest(name=name, arguments={"session_id": "session-1", **arguments})
+            )
+            self.assertFalse(response.isError, response.content[0].text)
+
+        bounds = {
+            PAGE_TEXT_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
+            FIND_ELEMENTS_SELECTOR_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
+            FIND_ELEMENTS_TEXT_SCRIPT: gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS,
+        }
+        self.assertEqual(set(deadlines), set(bounds))
+        for script, bound in bounds.items():
+            with self.subTest(script=script[:40]):
+                self.assertIsNotNone(deadlines[script])
+                self.assertGreater(deadlines[script], bound * 1000)
+        # The setup's bound is below each read's own, so a hung setup is the world's to report, not the read's.
+        self.assertLess(gateway_module.PAGE_READ_SETUP_TIMEOUT_MS, PAGE_READ_TIMEOUT_SECONDS * 1000)
+        self.assertLess(
+            gateway_module.FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
+            gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS * 1000,
+        )
+        self.assertEqual(
+            setup_deadlines,
+            {
+                PAGE_TEXT_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
+                FIND_ELEMENTS_SELECTOR_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
+                FIND_ELEMENTS_TEXT_SCRIPT: gateway_module.FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
+            },
+        )
 
     async def test_invalid_arguments_message_reaches_the_caller(self) -> None:
         # drag_drop with neither selectors nor coordinates fails validation with an

@@ -13,20 +13,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import get_settings
-from ..network_inspector import scrub_url
+from ..network_inspector import URL_SCRUB_MAX_BYTES, scrub_url
 from ..pii_scrub import PiiScrubber
 from ..sqlite_utils import connect_sqlite
+from ..utils import SECRET_KEY_FRAGMENTS
 
-_SENSITIVE_KEY_FRAGMENTS = (
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "api-key",
-    "api_key",
-    "token",
-    "password",
-    "secret",
-)
 _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
 # They are redacted when the action is marked sensitive.
@@ -47,7 +38,6 @@ _URL_PATTERN = re.compile(
     r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|[.!?](?:\s|\Z)|\Z))*[^\s"'<>,;)\]}]""",
     re.IGNORECASE,
 )
-_URL_SCRUB_MAX_BYTES = 16384
 
 
 def canonical_json(payload: Any) -> str:
@@ -408,7 +398,7 @@ def _scrub_urls_only(value: str) -> str:
 
 
 def _scrub_url(url: str) -> str:
-    return scrub_url(url, _pii_scrubber(), _URL_SCRUB_MAX_BYTES)[0]
+    return scrub_url(url, _pii_scrubber(), URL_SCRUB_MAX_BYTES)[0]
 
 
 def _scrub_url_and_path(url: str) -> str:
@@ -449,7 +439,7 @@ def _redact_sensitive(
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
-            if any(fragment in key_text for fragment in _SENSITIVE_KEY_FRAGMENTS):
+            if any(fragment in key_text for fragment in SECRET_KEY_FRAGMENTS):
                 redacted[key] = _REDACTED
             elif flagged and key_text in typed_keys:
                 redacted[key] = _REDACTED

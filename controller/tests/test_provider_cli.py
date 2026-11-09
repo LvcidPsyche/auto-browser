@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.config import Settings
-from app.providers.base import CLIResult, ProviderAPIError
+from app.providers.base import PAGE_DATA_NOTICE, CLIResult, ProviderAPIError
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
@@ -131,6 +131,19 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.decision.action, "done")
         self.assertEqual(result.usage, {"auth_mode": "cli", "transport": "codex-exec"})
 
+    def test_each_cli_planners_prompt_says_the_observations_page_strings_are_data(self) -> None:
+        # Review of c5 (NAV-12): only the API planners' system prompts said so.
+        for adapter in (
+            ClaudeAdapter(Settings(_env_file=None, CLAUDE_AUTH_MODE="cli")),
+            GeminiAdapter(Settings(_env_file=None, GEMINI_AUTH_MODE="cli")),
+            OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli")),
+        ):
+            with self.subTest(adapter=type(adapter).__name__):
+                prompt = adapter.build_cli_prompt(
+                    goal="Finish the task", observation=self.observation, context_hints=None, previous_steps=[]
+                )
+                self.assertIn(PAGE_DATA_NOTICE, prompt)
+
     async def test_claude_cli_mode_parses_nested_json_output(self) -> None:
         settings = Settings(
             _env_file=None,
@@ -244,6 +257,8 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
                 model_override=None,
             )
 
+        # Review of c5: the CLI planners and the host bridge have no system prompt; their prompt says it instead.
+        self.assertIn(PAGE_DATA_NOTICE, captured["prompt"])
         schema = captured["schema"]
         self.assertIsInstance(schema, dict)
         self.assertEqual(schema["required"], list(schema["properties"].keys()))

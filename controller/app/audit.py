@@ -299,7 +299,8 @@ class SQLiteAuditStore:
         return [AuditEvent.model_validate_json(row[0]) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self.db_path, timeout=10, row_factory=sqlite3.Row)
+        # FULL: an audit event's commit must survive a power loss, which with WAL and NORMAL it need not (STORE-38).
+        return connect_sqlite(self.db_path, timeout=10, row_factory=sqlite3.Row, synchronous="FULL")
 
 
 class AuditStore:

@@ -31,6 +31,7 @@ from .browser_sandbox import (
     refusal,
     verified_on,
 )
+from .utils import spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,10 @@ _SESSION_DIR_NAME = re.compile(r"[A-Za-z0-9._-]+")
 # _join_session_network). The field exists from Docker Engine 28, API 1.48; older daemons ignore it.
 GATEWAY_PRIORITY_OF_SESSION_NETWORKS = -1
 GW_PRIORITY_MIN_API_VERSION = (1, 48)
+
+# How long a provision cancelled while its worker thread creates the container and network waits for the thread, so
+# what it made is released before the cancellation goes on; a thread that takes longer releases it itself when it ends.
+CANCELLED_PROVISION_WAIT_SECONDS = 10.0
 
 
 def _api_version(text: str) -> tuple[int, int]:
@@ -160,6 +165,34 @@ class PendingBrowserProvision:
     ws_endpoint_file: Path
     network_owned: bool = False
     vnc_password: str = field(default="", repr=False)
+
+
+@dataclass
+class _ProvisionHandoff:
+    """How a provision's worker thread hands what it made to the provision awaiting it, or releases it itself.
+
+    One lock decides which side releases it: the thread keeps its result here unless the provision was abandoned
+    (cancelled) first, and a cancelled provision takes the result kept here. Kept here, not only returned: a shutdown
+    cancels the task awaiting the thread too, and a result that had not reached that task was dropped with it."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    abandoned: bool = False
+    pending: PendingBrowserProvision | None = None
+
+    def keep(self, pending: PendingBrowserProvision) -> bool:
+        """In the thread: keep the result for the provision; False when it was abandoned first."""
+        with self.lock:
+            if self.abandoned:
+                return False
+            self.pending = pending
+            return True
+
+    def abandon(self) -> PendingBrowserProvision | None:
+        """In the cancelled provision: keep nothing from now on, and take what was kept already."""
+        with self.lock:
+            self.abandoned = True
+            pending, self.pending = self.pending, None
+            return pending
 
 
 class DockerBrowserNodeProvisioner:
@@ -368,7 +401,24 @@ class DockerBrowserNodeProvisioner:
             logger.info("Reaped orphaned browser session network %s", name)
 
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
-        pending = await asyncio.to_thread(self._provision_container_sync, session_id)
+        # A task the caller's cancellation does not reach: cancelling the await itself let the thread go on to create
+        # the container and network and dropped what it returned, so nothing released them until the startup sweep.
+        handoff = _ProvisionHandoff()
+        provisioning = asyncio.ensure_future(asyncio.to_thread(self._provision_unless_abandoned, session_id, handoff))
+        try:
+            pending = await asyncio.shield(provisioning)
+        except asyncio.CancelledError:
+            kept = handoff.abandon()
+            if kept is None:  # the thread is still at work, and now releases what it makes itself
+                releasing = spawn_background_task(self._report_abandoned_provision(provisioning, session_id))
+            else:
+                # Handed back before the cancel, whether or not it reached `provisioning`: released in a thread
+                # started here and now, which the end of a shutting-down event loop waits for.
+                releasing = asyncio.get_running_loop().run_in_executor(None, self._release_cancelled_provision, kept)
+            await asyncio.wait({releasing}, timeout=CANCELLED_PROVISION_WAIT_SECONDS)
+            raise
+        if pending is None:  # only a provision whose caller was cancelled returns none, and that raised above
+            raise RuntimeError(f"isolated session {session_id}: provisioning was abandoned")
         try:
             ws_endpoint = await self._wait_for_ws_endpoint(pending.container, pending.ws_endpoint_file)
             # Written before the endpoint file, so it is there now (absent only from an image older than 1.14.0).
@@ -417,6 +467,40 @@ class DockerBrowserNodeProvisioner:
                     "Could not release browser container %s after a failed provision: %s", pending.container_name, exc
                 )
             raise
+
+    def _provision_unless_abandoned(
+        self, session_id: str, handoff: _ProvisionHandoff
+    ) -> PendingBrowserProvision | None:
+        """_provision_container_sync, releasing what it made itself when its caller was cancelled meanwhile.
+
+        In the thread, not on the event loop: a loop that ends first (a shutdown cancels the tasks left, then waits
+        for the executor's threads) would drop the result again. None when it released them; a result kept before
+        the cancel is released by the cancelled provision (_ProvisionHandoff).
+        """
+        pending = self._provision_container_sync(session_id)
+        if handoff.keep(pending):
+            return pending
+        self._release_cancelled_provision(pending)
+        return None
+
+    def _release_cancelled_provision(self, pending: PendingBrowserProvision) -> None:
+        try:
+            self._cleanup_pending_container(pending)
+        except Exception as exc:  # its caller is gone, so this is logged, not raised
+            logger.warning(
+                "Could not release browser container %s after a cancelled provision: %s", pending.container_name, exc
+            )
+
+    async def _report_abandoned_provision(
+        self, provisioning: asyncio.Future[PendingBrowserProvision | None], session_id: str
+    ) -> None:
+        """Wait for a cancelled provision's worker thread, which releases what it makes, and log its failure."""
+        try:
+            await provisioning
+        except Exception as exc:  # it removed what it had made (_provision_container_sync), and its caller is gone
+            logger.warning(
+                "isolated session %s: provisioning failed after its create was cancelled: %s", session_id, exc
+            )
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
         with self._sandbox_lock:
@@ -830,43 +914,68 @@ class DockerBrowserNodeProvisioner:
 
     def _release_sync(self, runtime: IsolatedBrowserRuntime) -> None:
         client = self._ensure_context()
-        container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(
-            client, runtime.container_name
-        )
-        if container is not None:
-            try:
-                container.stop(timeout=5)
-            except Exception as exc:
-                logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
-        stranded = None
-        removal_error: Exception | None = None
-        not_found = (docker.errors.NotFound,) if docker is not None else ()
-        if not self.settings.isolated_browser_keep_containers:
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except not_found:
-                    pass  # gone already: nothing holds the profile
-                except Exception as exc:
-                    logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
-                    # It still holds an endpoint on the session network.
-                    stranded = container
-                    removal_error = exc
+        problem, cause, stranded = self._release_container(client, runtime)
         if runtime.network_owned:
-            self._release_session_network(client, runtime, stranded=stranded)
-        if removal_error is not None:
+            try:
+                self._release_session_network(client, runtime, stranded=stranded)
+            except Exception as exc:
+                if problem is None:
+                    raise
+                # The container's failure is the one reported (R5C-10); the network's is logged beside it.
+                logger.warning("Could not release session network %s: %s", runtime.network_name, exc)
+        if problem is not None:
             # The container may still run with the profile and downloads mounted: emptying them under it is not a
             # release. They stay, as the startup sweep leaves a container's that it could not remove.
             logger.warning(
-                "Keeping %s: browser container %s could not be removed",
+                "Keeping %s: browser container %s %s",
                 self._local_runtime_root(runtime.session_id),
                 runtime.container_name,
+                problem,
             )
-            raise RuntimeError(f"browser container {runtime.container_name} could not be removed") from removal_error
+            raise RuntimeError(f"browser container {runtime.container_name} {problem}") from cause
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
             self._remove_runtime_dirs(runtime.session_id, client=client)
+
+    def _release_container(self, client, runtime: IsolatedBrowserRuntime) -> tuple[str | None, Exception | None, Any]:
+        """Stop the session's browser container and, unless containers are kept, remove it.
+
+        (None, None, None) when it is gone, or stopped and kept. Otherwise what went wrong ("could not be looked
+        up", "could not be stopped", "could not be removed"), so the container may still run; the daemon's error; and
+        the container when it still holds an endpoint on the session network. Each failure is logged at WARNING with
+        the daemon's reason, and none raises, so the session network's release is still attempted.
+        """
+        name = runtime.container_name
+        try:
+            container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(client, name)
+        except Exception as exc:  # an unreachable daemon is not a gone container (NAV-16)
+            logger.warning("Could not look up browser container %s: %s", name, exc)
+            return "could not be looked up", exc, None
+        if container is None:
+            return None, None, None
+        not_found = (docker.errors.NotFound,) if docker is not None else ()
+        keep = self.settings.isolated_browser_keep_containers
+        try:
+            container.stop(timeout=5)
+        except not_found:
+            return None, None, None  # gone already
+        except Exception as exc:
+            if keep:
+                # Nothing removes a kept container, so it may still run: a partial teardown, not a release (R5C-4).
+                logger.warning("Could not stop browser container %s: %s", name, exc)
+                return "could not be stopped", exc, None
+            logger.debug("Could not stop browser container %s: %s", name, exc)  # the forced removal below stops it
+        if keep:
+            return None, None, None
+        try:
+            container.remove(force=True)
+        except not_found:
+            return None, None, None  # gone already: nothing holds the profile
+        except Exception as exc:
+            logger.warning("Could not remove browser container %s: %s", name, exc)
+            return "could not be removed", exc, container
+        return None, None, None
 
     def _release_session_network(self, client, runtime: IsolatedBrowserRuntime, *, stranded: Any = None) -> None:
         """Leave this session's network, and remove it unless containers are kept.

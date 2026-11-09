@@ -14,6 +14,9 @@ MESH_TIMESTAMP_WINDOW=30                # seconds an envelope's timestamp may di
 MESH_MAX_BODY_BYTES=1048576             # largest /mesh/receive body in bytes; over it gets 413 unparsed
 ```
 
+`MESH_TIMESTAMP_WINDOW` must be more than 0 and at most 250 seconds: any other value stops startup, with the mesh
+off too.
+
 `GET /mesh/identity` returns this node's `node_id` (the SHA-256 of its public key, hex) and
 `pubkey_b64`. Give those two values to the operator of any node that should call this one.
 
@@ -118,15 +121,18 @@ remembered until the latest time this node's clock has shown is more than one wi
 timestamp, then forgotten (a clock stepped back does not free it early). The cache remembers at most 10,000 nonces
 at once, and nothing it remembers is dropped before it expires: when it is full of nonces still inside their
 window, a new envelope is refused with `503` ("mesh replay cache is full; retry later") and not recorded, and a
-retry passes once older nonces expire. The limit: a nonce is recorded once the envelope's signature checks out,
-before the request is decoded or granted, so registered peers that get 10,000 signed envelopes through inside a
-window fill the cache, and every peer is refused (`503`) until they expire (`/mesh/receive` takes no bearer token,
-so the request rate limit, on by default at 120 requests a minute, counts it per client address; since a nonce is
-kept for up to two windows, one address can hold about four times as many nonces as the window has seconds (120 at
-the default 30-second `MESH_TIMESTAMP_WINDOW`), so alone it cannot fill the cache unless that limit is raised or
-off or the window is about 2,500 seconds or more; when the controller serves without a token
-(`API_ALLOW_TOKENLESS_LOOPBACK`), the limit counts each `Authorization` or `X-Operator-Id` value apart, so a
-sender that varies one is not limited). The timestamp window is checked against that same latest time, never the
+retry passes once older nonces expire. A nonce is recorded once the envelope's signature checks out and its request
+decodes (an envelope whose request does not decode runs nothing, and is refused without being recorded), before the
+request is granted, and it counts against its sender's share: each peer holds at most 1,000 unexpired nonces, and a
+peer at its share is refused with the same `503` while other peers' envelopes still pass, so filling the cache
+takes ten or more peers at once (`/mesh/receive` takes no bearer token, so the request rate limit, on by default at
+120 requests a minute, counts it per client address; since a nonce is kept for up to two windows, one address can
+hold about four times as many nonces as the window has seconds (120 at the default 30-second
+`MESH_TIMESTAMP_WINDOW`), so a peer behind one address reaches its share only if that limit is raised or off, or
+the window is near its largest (250 seconds) and the peer stamps its envelopes about a window ahead of this node's
+clock (one whose clock agrees holds about half as many); a controller serving without a token
+(`API_ALLOW_TOKENLESS_LOOPBACK`) counts every request per client address too, whatever `Authorization` or
+`X-Operator-Id` it sends). The timestamp window is checked against that same latest time, never the
 raw clock, so a clock stepped back cannot put an envelope whose nonce is already forgotten inside the window
 again. A peer's reply to a delegation this node sent is checked against the same clock and nonce cache, and
 refused unless it names the request's id. The cost: after a large backward step of the clock, fresh envelopes are

@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.browser_manager import BrowserManager
 from app.browser_scripts import apply_stealth
 from app.stealth.fingerprint import FingerprintConfig
@@ -32,9 +34,61 @@ BASE_PATCHES = """() => ({
   hardwareConcurrency: navigator.hardwareConcurrency,
   deviceMemory: navigator.deviceMemory,
   colorDepth: screen.colorDepth,
-  toDataURLPatched: !HTMLCanvasElement.prototype.toDataURL.toString().includes('[native code]'),
   glGetParameterPatched: !WebGLRenderingContext.prototype.getParameter.toString().includes('[native code]'),
 })"""
+
+# One pixel drawn, exported and read back from the PNG: the export noise flips the low bit of its red channel. The
+# patched toDataURL reads as native code (NAV-25), so this is how a page tells it is patched.
+EXPORTED_PIXEL = """async () => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 1, 1);
+  const image = new Image();
+  image.src = canvas.toDataURL();
+  await image.decode();
+  const copy = document.createElement('canvas');
+  copy.width = 1; copy.height = 1;
+  const copyContext = copy.getContext('2d');
+  copyContext.drawImage(image, 0, 0);
+  return Array.from(copyContext.getImageData(0, 0, 1, 1).data);
+}"""
+EXPORT_NOISED_PIXEL = [101, 100, 100, 255]
+
+# A canvas exported before anything asked for its context: whether it can still take each kind of context.
+CONTEXT_AFTER_EXPORT = """() => Object.fromEntries(['webgl', 'bitmaprenderer'].map((kind) => {
+  const canvas = document.createElement('canvas');
+  canvas.toDataURL();
+  return [kind, Boolean(canvas.getContext(kind))];
+}))"""
+
+# What the canvas patches show of themselves, read the ways a detection script reads a function's source.
+CANVAS_PATCH_SOURCES = """() => [
+  HTMLCanvasElement.prototype.toDataURL.toString(),
+  Function.prototype.toString.call(HTMLCanvasElement.prototype.getContext),
+  Function.prototype.toString.toString(),
+  HTMLCanvasElement.prototype.toDataURL.length,
+  HTMLCanvasElement.prototype.getContext.length,
+  'prototype' in HTMLCanvasElement.prototype.toDataURL,
+]"""
+
+# An export that throws as it reads its type: how often the type was read, and the canvas's pixel afterwards.
+THROWING_EXPORT = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 1, 1);
+  let calls = 0;
+  let error = null;
+  try {
+    canvas.toDataURL({ toString() { calls += 1; throw new Error('bad type'); } });
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, calls, pixel: Array.from(ctx.getImageData(0, 0, 1, 1).data) };
+}"""
 
 NOTIFICATIONS_QUERY = """async () => {
   const result = await navigator.permissions.query({ name: 'notifications' });
@@ -50,18 +104,22 @@ async def _launch(playwright):
 def test_apply_stealth_patches_a_real_page() -> None:
     from playwright.async_api import async_playwright
 
-    async def run() -> tuple[dict, dict]:
+    async def run() -> tuple[dict, dict, list[int]]:
         async with async_playwright() as playwright:
             browser = await _launch(playwright)
             try:
                 page = await browser.new_page()
                 await apply_stealth(page)
                 await page.goto(BLANK)
-                return await page.evaluate(BASE_PATCHES), await page.evaluate(NOTIFICATIONS_QUERY)
+                return (
+                    await page.evaluate(BASE_PATCHES),
+                    await page.evaluate(NOTIFICATIONS_QUERY),
+                    await page.evaluate(EXPORTED_PIXEL),
+                )
             finally:
                 await browser.close()
 
-    patches, notifications = asyncio.run(run())
+    patches, notifications, exported = asyncio.run(run())
 
     assert patches["webdriver"] is None, patches
     assert patches["chromeRuntime"] is True, patches
@@ -70,9 +128,278 @@ def test_apply_stealth_patches_a_real_page() -> None:
     assert patches["hardwareConcurrency"] == 8, patches
     assert patches["deviceMemory"] == 8, patches
     assert patches["colorDepth"] == 24, patches
-    assert patches["toDataURLPatched"] is True, patches
+    assert exported == EXPORT_NOISED_PIXEL
     assert patches["glGetParameterPatched"] is True, patches
     assert notifications["plainObject"] is True, notifications
+
+
+async def _native_and_stealthy(script: str) -> tuple[object, object]:
+    """`script`'s answer on a page without the base stealth script, then on one with it, in one browser."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await _launch(playwright)
+        try:
+            native = await browser.new_page()
+            await native.goto(BLANK)
+            stealthy = await browser.new_page()
+            await apply_stealth(stealthy)
+            await stealthy.goto(BLANK)
+            return await native.evaluate(script), await stealthy.evaluate(script)
+        finally:
+            await browser.close()
+
+
+@requires_chromium
+def test_exporting_a_canvas_leaves_it_free_to_take_any_context() -> None:
+    """NAV-25: toDataURL asked for the canvas's 2d context to add its noise, which gives a canvas that has no context
+    yet a 2d one, so a later getContext('webgl') or getContext('bitmaprenderer') on it returned null."""
+    native, stealthy = asyncio.run(_native_and_stealthy(CONTEXT_AFTER_EXPORT))
+
+    assert native["bitmaprenderer"] is True, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_the_canvas_patches_read_as_native_code() -> None:
+    """NAV-25: the patched toDataURL showed its source to any script that called toString on it."""
+    native, stealthy = asyncio.run(_native_and_stealthy(CANVAS_PATCH_SOURCES))
+
+    assert native[:3] == [
+        "function toDataURL() { [native code] }",
+        "function getContext() { [native code] }",
+        "function toString() { [native code] }",
+    ], native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_an_export_that_throws_is_made_once_and_leaves_the_canvas_as_it_was() -> None:
+    """Review of c5 (Codex): toDataURL put its noise on the canvas, and an export that threw (a type whose toString
+    throws) was made again from its catch with the noise still there, so the page saw its type read twice and kept
+    a changed pixel."""
+    native, stealthy = asyncio.run(_native_and_stealthy(THROWING_EXPORT))
+
+    assert native == {"error": "bad type", "calls": 1, "pixel": [100, 100, 100, 255]}, native
+    assert stealthy == native
+
+
+# Shared by the exports below: a 1x1 canvas holding rgb(100, 100, 100), a red of 200 drawn at its one pixel, and the
+# pixel an exported URL holds, read back from the PNG.
+EXPORT_HELPERS = """
+  const newCanvas = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgb(100, 100, 100)';
+    ctx.fillRect(0, 0, 1, 1);
+    return { canvas, ctx };
+  };
+  const drawRed200 = (ctx) => { ctx.fillStyle = 'rgb(200, 100, 100)'; ctx.fillRect(0, 0, 1, 1); };
+  const pixelOf = (ctx) => Array.from(ctx.getImageData(0, 0, 1, 1).data);
+  const exportedPixel = async (url) => {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const copy = document.createElement('canvas');
+    copy.width = 1; copy.height = 1;
+    const copyContext = copy.getContext('2d');
+    copyContext.drawImage(image, 0, 0);
+    return Array.from(copyContext.getImageData(0, 0, 1, 1).data);
+  };
+"""
+
+# A type whose toString draws at (0, 0) and then throws: the page's error, and what it drew is kept.
+EXPORT_TYPE_DRAWS_THEN_THROWS = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  let error = null;
+  try {
+    canvas.toDataURL({ toString() { drawRed200(ctx); throw new Error('bad type'); } });
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, pixel: pixelOf(ctx) };
+}"""
+)
+
+# A type whose toString draws at (0, 0) and returns a type: what it drew is kept, and the export shows it.
+EXPORT_TYPE_DRAWS_THEN_ANSWERS = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  const url = canvas.toDataURL({ toString() { drawRed200(ctx); return 'image/png'; } });
+  return { pixel: pixelOf(ctx), exported: await exportedPixel(url) };
+}"""
+)
+
+# A type that is a Symbol: a TypeError, as for any DOMString, and the canvas as it was.
+EXPORT_SYMBOL_TYPE = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  let error = null;
+  let message = null;
+  try {
+    canvas.toDataURL(Symbol('type'));
+  } catch (e) {
+    error = e.name;
+    message = e.message;
+  }
+  return { error, message, pixel: pixelOf(ctx) };
+}"""
+)
+
+# A quality that is an object: `any` in the native's signature, so it is only read if it is a number, and its valueOf
+# never runs.
+EXPORT_QUALITY_OBJECT = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas } = newCanvas();
+  let calls = 0;
+  const url = canvas.toDataURL('image/jpeg', { valueOf() { calls += 1; return 0.5; } });
+  return { calls, jpeg: url.startsWith('data:image/jpeg') };
+}"""
+)
+
+# A type whose toString empties the canvas: the size the export goes by is the one after the conversion.
+EXPORT_TYPE_EMPTIES_THE_CANVAS = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas } = newCanvas();
+  return canvas.toDataURL({ toString() { canvas.width = 0; return 'image/png'; } });
+}"""
+)
+
+# A canvas 0 wide when toDataURL is called, whose type's toString gives it a size and draws: the size the noise goes by
+# is the one after the conversion, so the export carries the noise (a read before it would skip the noise).
+EXPORT_TYPE_GIVES_AN_EMPTY_CANVAS_A_SIZE = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas, ctx } = newCanvas();
+  canvas.width = 0;
+  const url = canvas.toDataURL({
+    toString() { canvas.width = 1; canvas.height = 1; drawRed200(ctx); return 'image/png'; },
+  });
+  return await exportedPixel(url);
+}"""
+)
+
+# A canvas with width and height accessors of its own that throw, which the native export never reads.
+EXPORT_WITH_OWN_THROWING_SIZE = (
+    "async () => {"
+    + EXPORT_HELPERS
+    + """
+  const { canvas } = newCanvas();
+  for (const name of ['width', 'height']) {
+    Object.defineProperty(canvas, name, { get() { throw new Error('own ' + name); } });
+  }
+  let error = null;
+  let exported = null;
+  try {
+    exported = await exportedPixel(canvas.toDataURL());
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, exported };
+}"""
+)
+
+# Not a canvas the patch gave a 2d context: the native's brand check comes before it converts the type.
+EXPORT_ON_A_NON_CANVAS = """() => {
+  let calls = 0;
+  let error = null;
+  try {
+    HTMLCanvasElement.prototype.toDataURL.call({}, { toString() { calls += 1; return 'image/png'; } });
+  } catch (e) {
+    error = e.name;
+  }
+  return { error, calls };
+}"""
+
+
+@requires_chromium
+def test_a_type_that_draws_then_throws_leaves_what_it_drew_and_the_pages_error() -> None:
+    """Review of c5 (Codex): the type's toString ran inside the native export, after the pixel was noised, and the
+    finally then put the old pixel back over what the page had drawn. The type is converted before the canvas is
+    touched now, so no page code runs between the change and its undoing."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_DRAWS_THEN_THROWS))
+
+    assert native == {"error": "bad type", "pixel": [200, 100, 100, 255]}, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_a_type_that_draws_then_answers_leaves_what_it_drew_and_the_export_shows_it() -> None:
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_DRAWS_THEN_ANSWERS))
+
+    assert native == {"pixel": [200, 100, 100, 255], "exported": [200, 100, 100, 255]}, native
+    # The export is noised as any other is, and the canvas is not.
+    assert stealthy == {"pixel": [200, 100, 100, 255], "exported": [201, 100, 100, 255]}, stealthy
+
+
+@requires_chromium
+def test_a_symbol_type_is_the_natives_type_error_and_leaves_the_canvas_alone() -> None:
+    """The error's message is compared as well as its name: a page can read either."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_SYMBOL_TYPE))
+
+    assert (native["error"], native["pixel"]) == ("TypeError", [100, 100, 100, 255]), native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_a_quality_object_is_passed_on_without_calling_its_value_of() -> None:
+    """Review of c6: the quality is `any`, which the native reads only if it is a number; converting it would run the
+    page's valueOf, where the native does not."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_QUALITY_OBJECT))
+
+    assert native == {"calls": 0, "jpeg": True}, native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_a_type_that_empties_the_canvas_exports_what_the_native_exports() -> None:
+    """Review of c6: this pins the export's result (the wrapped export is the native's "data:,"). The order of the size
+    check is pinned by the test below."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_EMPTIES_THE_CANVAS))
+
+    assert native == "data:,", native
+    assert stealthy == native
+
+
+@requires_chromium
+def test_the_noise_goes_by_the_canvas_size_after_the_type_is_converted() -> None:
+    """Review of c6b: a canvas 0 wide whose type's toString sizes it and draws is exported with the noise. A size read
+    before the conversion saw 0, skipped the noise, and exported what the native page does."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_TYPE_GIVES_AN_EMPTY_CANVAS_A_SIZE))
+
+    assert native == [200, 100, 100, 255], native
+    assert stealthy == [201, 100, 100, 255], stealthy
+
+
+@requires_chromium
+def test_an_own_size_accessor_that_throws_does_not_stop_the_export() -> None:
+    """Review of c5 (Codex): the patch read this.width and this.height, which a page's own accessor can make throw
+    where the native export, which reads neither, does not. They are read through the prototype's getters now."""
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_WITH_OWN_THROWING_SIZE))
+
+    assert native == {"error": None, "exported": [100, 100, 100, 255]}, native
+    assert stealthy == {"error": None, "exported": [101, 100, 100, 255]}, stealthy
+
+
+@requires_chromium
+def test_an_export_on_a_non_canvas_is_refused_before_its_type_is_read() -> None:
+    native, stealthy = asyncio.run(_native_and_stealthy(EXPORT_ON_A_NON_CANVAS))
+
+    assert native == {"error": "TypeError", "calls": 0}, native
+    assert stealthy == native
 
 
 # A locator wait on an element that never appears fails after the default timeout.
@@ -171,13 +498,254 @@ READ_AFTER_TO_DATA_URL = """(calls) => {
 }"""
 
 
-def _expected_noised_pixels(config: FingerprintConfig) -> list[int]:
-    """What one pass of the noise makes of a 2x2 block of rgb(100, 100, 100)."""
-    pixels = []
-    for index in range(0, 16, 4):
-        noise = 1 if (config.canvas_noise_seed ^ index) & 1 else -1
-        pixels += [100 + noise, 100, 100, 255]
-    return pixels
+def _noised_once(pixels: list[int]) -> bool:
+    """Whether a read of rgb(100, 100, 100) is as one pass of the noise leaves it: R, G and B one off, alpha kept."""
+    colours = [value for index, value in enumerate(pixels) if index % 4 != 3]
+    return all(abs(value - 100) == 1 for value in colours) and pixels[3::4] == [255] * (len(pixels) // 4)
+
+
+# An 8x8 canvas of one colour read whole, then some of its pixels read again: one alone, a 2x2 block, and the same
+# block from its far corner (a negative width and height read up and to the left).
+READ_PIXELS_SEVERAL_WAYS = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8; canvas.height = 8;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 8, 8);
+  const read = (...rect) => Array.from(ctx.getImageData(...rect).data);
+  return { whole: read(0, 0, 8, 8), single: read(5, 3, 1, 1), block: read(4, 2, 2, 2), flipped: read(6, 4, -2, -2) };
+}"""
+OTHER_SESSION_ID = "another-canvas-noise-session"
+
+# A pixel read with coordinates that are objects, each answering its number once and throwing after, as a value read
+# twice would; then the same pixel read with numbers.
+READ_WITH_COORDINATE_OBJECTS = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8; canvas.height = 8;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 8, 8);
+  const calls = [0, 0, 0, 0];
+  const once = (index, value) => ({ valueOf() {
+    calls[index] += 1;
+    if (calls[index] > 1) throw new Error('read twice');
+    return value;
+  } });
+  let objects;
+  try {
+    objects = Array.from(ctx.getImageData(once(0, 5), once(1, 3), once(2, 1), once(3, 1)).data);
+  } catch (e) {
+    objects = e.message;
+  }
+  return { objects, numbers: Array.from(ctx.getImageData(5, 3, 1, 1).data), calls };
+}"""
+
+# A canvas of one grey read as float16 values, and the kind of array they came in.
+READ_FLOAT16 = """() => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2; canvas.height = 2;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(128, 128, 128)';
+  ctx.fillRect(0, 0, 2, 2);
+  const image = ctx.getImageData(0, 0, 2, 2, { pixelFormat: 'rgba-float16' });
+  return { kind: Object.prototype.toString.call(image.data), values: Array.from(image.data) };
+}"""
+GREY_128_AS_FLOAT16 = 0.501953125
+
+
+async def _read_on_fingerprinted_pages(script: str, *configs: FingerprintConfig) -> list:
+    """`script`'s answer on a page with each config's fingerprint script, one context each."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await _launch(playwright)
+        try:
+            seen = []
+            for config in configs:
+                context = await browser.new_context()
+                await context.add_init_script(config.init_script())
+                page = await context.new_page()
+                await page.goto(BLANK)
+                seen.append(await page.evaluate(script))
+                await context.close()
+            return seen
+        finally:
+            await browser.close()
+
+
+@requires_chromium
+def test_canvas_noise_differs_by_pixel_channel_and_seed_and_holds_for_a_pixel_however_it_is_read() -> None:
+    """NAV-24: the noise came from the seed and the byte index, a multiple of 4 at every red byte, so every pixel got
+    the same shift and only red changed: two possible outputs in all. Each of R, G and B now gets its own one-off shift
+    from a hash of the pixel's place on the canvas and the seed, so a pixel reads the same in any rectangle."""
+    config, other = FingerprintConfig(CANVAS_SESSION_ID, "light"), FingerprintConfig(OTHER_SESSION_ID, "light")
+    assert config.canvas_noise_seed != other.canvas_noise_seed
+
+    seen, seen_other = asyncio.run(_read_on_fingerprinted_pages(READ_PIXELS_SEVERAL_WAYS, config, other))
+
+    whole = seen["whole"]
+    assert _noised_once(whole), whole
+    shifts = [tuple(whole[index + channel] - 100 for index in range(0, len(whole), 4)) for channel in range(3)]
+    assert all(set(channel) == {-1, 1} for channel in shifts), shifts
+    assert len(set(shifts)) == 3, shifts
+
+    def pixel(x: int, y: int) -> list[int]:
+        start = (y * 8 + x) * 4
+        return whole[start : start + 4]
+
+    assert seen["single"] == pixel(5, 3)
+    assert seen["block"] == pixel(4, 2) + pixel(5, 2) + pixel(4, 3) + pixel(5, 3)
+    assert seen["flipped"] == seen["block"]
+    assert seen_other["whole"] != whole
+
+
+@requires_chromium
+def test_the_noise_reads_each_coordinate_once_as_the_native_read_does() -> None:
+    """Review of c5 (Codex): the noise read the coordinates again after the native getImageData had, so a coordinate
+    object's valueOf ran twice: one that answers once failed the read, and one that answers differently could put the
+    noise at another place."""
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_WITH_COORDINATE_OBJECTS, FingerprintConfig("s", "light")))
+
+    assert seen["calls"] == [1, 1, 1, 1], seen
+    assert seen["objects"] == seen["numbers"], seen
+    assert _noised_once(seen["numbers"]), seen
+
+
+# getImageData called on something that is not a 2d context, with a coordinate that throws if it is converted: the
+# native refuses the receiver first, converting nothing. Then on a real context, where the page's own error comes out.
+READ_ON_A_NON_CONTEXT = """() => {
+  const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+  const attempt = (receiver) => {
+    let calls = 0;
+    const coordinate = { valueOf() { calls += 1; throw new Error('coerced'); } };
+    try {
+      getImageData.call(receiver, coordinate, 0, 1, 1);
+      return { error: null, calls };
+    } catch (e) {
+      return { error: e.name === 'TypeError' ? 'TypeError' : e.message, calls };
+    }
+  };
+  const real = document.createElement('canvas').getContext('2d');
+  return { nonContext: attempt({}), noReceiver: attempt(undefined), context: attempt(real) };
+}"""
+
+
+@requires_chromium
+def test_the_read_refuses_a_receiver_that_is_not_a_context_before_it_converts_a_coordinate() -> None:
+    """Review of c5 (Codex): the wrapper converted its coordinates before the native call checked its receiver, so
+    getImageData.call({}, {valueOf() { throw ... }}, 0, 1, 1) threw the page's error where the native throws a
+    TypeError and calls no valueOf."""
+    native, _stealthy = asyncio.run(_native_and_stealthy(READ_ON_A_NON_CONTEXT))
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_ON_A_NON_CONTEXT, FingerprintConfig("s", "light")))
+
+    assert native == {
+        "nonContext": {"error": "TypeError", "calls": 0},
+        "noReceiver": {"error": "TypeError", "calls": 0},
+        "context": {"error": "coerced", "calls": 1},
+    }, native
+    assert seen == native
+
+
+# getImageData with a coordinate its [EnforceRange] refuses (not finite, or past a long's range): the native throws at
+# that coordinate and converts nothing after it, so the later coordinate's valueOf, which throws, never runs. Then valid
+# coordinates, each converted once, in order.
+READ_WITH_A_REFUSED_COORDINATE = """() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const attempt = (args) => {
+    let later = 0;
+    const thrower = { valueOf() { later += 1; throw new Error('read past the refused coordinate'); } };
+    try {
+      ctx.getImageData(...args.map((arg) => (arg === 'later' ? thrower : arg)));
+      return { error: null, later };
+    } catch (e) {
+      return { error: e.name, message: e.message, later };
+    }
+  };
+  const calls = [];
+  const once = (index, value) => ({ valueOf() { calls.push(index); return value; } });
+  const valid = ctx.getImageData(once(0, 0), once(1, 0), once(2, 1), once(3, 1)).data.length;
+  const read = (args) => {
+    try {
+      const image = ctx.getImageData(...args);
+      return { error: null, width: image.width, height: image.height };
+    } catch (e) {
+      return { error: e.name, message: e.message };
+    }
+  };
+  const throwing = { valueOf() { throw new Error('the page'); } };
+  const extra = {
+    bigint: attempt([1n, 'later', 1, 1]),
+    bigintLater: attempt([0, 1n, 'later', 1]),
+    symbol: attempt([Symbol('s'), 'later', 1, 1]),
+    symbolLater: attempt([0, 0, Symbol('s'), 'later']),
+    throwsAtFirst: attempt([throwing, 'later', 1, 1]),
+    throwsAtSecond: attempt([0, throwing, 'later', 1]),
+    negativeZero: read([-0, -0, 1, 1]),
+    longMax: read([2147483647, 0, 1, 1]),
+    longMaxFraction: read([2147483647.9, 0, 1, 1]),
+    longMin: read([-2147483648, 0, 1, 1]),
+    longMinFraction: read([-2147483648.9, 0, 1, 1]),
+    numericString: read(['0', '0', '1', '1']),
+  };
+  return {
+    extra,
+    nan: attempt([NaN, 'later', 1, 1]),
+    tooLarge: attempt([2 ** 31, 'later', 1, 1]),
+    tooSmall: attempt([-(2 ** 31) - 1, 'later', 1, 1]),
+    infinity: attempt([Infinity, 'later', 1, 1]),
+    secondCoordinate: attempt([0, NaN, 'later', 1]),
+    valid: { length: valid, calls },
+  };
+}"""
+
+
+@requires_chromium
+def test_the_read_converts_its_coordinates_one_at_a_time_and_stops_at_the_one_the_native_refuses() -> None:
+    """Review of c6: the wrapper converted all four coordinates before the native call, so after a non-finite or
+    out-of-range one the later ones' valueOf still ran, and could replace the native's TypeError with the page's."""
+    native, _stealthy = asyncio.run(_native_and_stealthy(READ_WITH_A_REFUSED_COORDINATE))
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_WITH_A_REFUSED_COORDINATE, FingerprintConfig("s", "light")))
+
+    refused = {name: case for name, case in native.items() if name not in ("valid", "extra")}
+    assert all(case["error"] == "TypeError" and case["later"] == 0 for case in refused.values()), native
+    assert native["valid"] == {"length": 4, "calls": [0, 1, 2, 3]}, native
+    assert seen == native
+
+
+# The page replaces Math.trunc after the init script ran: the wrapper's loop called the live global, and a trunc
+# that returns NaN made it hand every read to the native, with no noise.
+READ_AFTER_MATH_TRUNC_IS_REPLACED = """() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 4, 4);
+  const before = Array.from(ctx.getImageData(0, 0, 4, 4).data);
+  Math.trunc = () => NaN;
+  const after = Array.from(ctx.getImageData(0, 0, 4, 4).data);
+  return { before, after };
+}"""
+
+
+@requires_chromium
+def test_a_page_replacing_math_trunc_does_not_turn_the_noise_off() -> None:
+    """Review of c6b: the loop called the live Math.trunc, which a page can replace to make the wrapper pass every read
+    to the native unchanged."""
+    (seen,) = asyncio.run(
+        _read_on_fingerprinted_pages(READ_AFTER_MATH_TRUNC_IS_REPLACED, FingerprintConfig("s", "light"))
+    )
+
+    assert seen["before"] != [100, 100, 100, 255] * 16, seen
+    assert seen["after"] == seen["before"], seen
+
+
+@requires_chromium
+def test_a_read_of_float_values_is_left_as_it_is() -> None:
+    """Review of c5 (Codex): the noise shifted each channel by one, a step in a read of bytes; in a read of float16
+    values (pixelFormat "rgba-float16") that is the whole 0-1 range, and grey read as -0.5 or 1.5."""
+    (seen,) = asyncio.run(_read_on_fingerprinted_pages(READ_FLOAT16, FingerprintConfig("s", "light")))
+
+    if seen["kind"] != "[object Float16Array]":
+        pytest.skip(f"this Chromium reads no float16 pixels: {seen['kind']}")
+    assert seen["values"] == [GREY_128_AS_FLOAT16, GREY_128_AS_FLOAT16, GREY_128_AS_FLOAT16, 1] * 4, seen
 
 
 @requires_chromium
@@ -204,11 +772,10 @@ def test_canvas_noise_is_applied_once_however_often_getcontext_is_called() -> No
                 await browser.close()
 
     seen = asyncio.run(run())
-    expected = _expected_noised_pixels(config)
 
-    assert seen["after 1 call"] == expected
-    assert seen["after 1000 calls"] == expected
-    assert seen["after 25000 calls"] == expected
+    assert _noised_once(seen["after 1 call"]), seen
+    assert seen["after 1000 calls"] == seen["after 1 call"]
+    assert seen["after 25000 calls"] == seen["after 1 call"]
 
 
 @requires_chromium
@@ -267,4 +834,4 @@ def test_both_stealth_scripts_on_one_page_do_not_fight() -> None:
     assert patches["pluginCount"] == 3, patches
     assert patches["hardwareConcurrency"] == 8, patches
     # toDataURL must leave the canvas as it found it: one noise pass on read, no more.
-    assert canvas_after_exports == _expected_noised_pixels(config)
+    assert _noised_once(canvas_after_exports), canvas_after_exports

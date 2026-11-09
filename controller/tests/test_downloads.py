@@ -44,7 +44,7 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
 
             download.cancel.assert_awaited_once_with()
             self.assertEqual((record["status"], record["source_url"]), ("blocked", "https://refused.example:8443"))
-            self.assertEqual((record["path"], record["filename"]), (None, None))
+            self.assertEqual((record.get("path"), record["filename"]), (None, None))
 
     async def test_capture_saves_file_and_jsonl_record(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -57,9 +57,9 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             second = await service.capture(session, FakeDownload("report.csv", failure="network"))
 
             self.assertEqual(first["filename"], "report.csv")
-            self.assertTrue(Path(first["path"]).is_file())
+            self.assertTrue((artifact_dir / "downloads" / first["filename"]).is_file())
             self.assertEqual(second["status"], "failed")
-            self.assertEqual((second["filename"], second["path"], second["url"]), (None, None, None))
+            self.assertEqual((second["filename"], second.get("path"), second["url"]), (None, None, None))
             self.assertEqual(second["suggested_filename"], "report.csv")
             self.assertEqual(len(session.downloads), 2)
 
@@ -89,9 +89,9 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 service.capture(session, SlowDownload("second")),
             )
 
-            self.assertNotEqual(records[0]["path"], records[1]["path"])
+            self.assertNotEqual(records[0]["filename"], records[1]["filename"])
             self.assertEqual(
-                sorted(Path(r["path"]).read_text(encoding="utf-8") for r in records),
+                sorted((artifact_dir / "downloads" / r["filename"]).read_text(encoding="utf-8") for r in records),
                 ["first", "second"],
             )
 
@@ -106,8 +106,58 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(name=name):
                     record = await service.capture(session, FakeDownload(name))
                     self.assertEqual(record["status"], "completed")
-                    self.assertEqual(Path(record["path"]).parent, artifact_dir / "downloads")
+                    self.assertTrue((artifact_dir / "downloads" / record["filename"]).is_file())
                     self.assertTrue(record["filename"].startswith("download-"))
+
+
+class DownloadRecordTests(unittest.IsolatedAsyncioTestCase):
+    """STORE-40: a record names its file by name and artifact URL, never by server path, and a failed save is logged."""
+
+    def _session(self, tempdir: str):
+        artifacts = SessionArtifactService(tempdir)
+        artifact_dir = artifacts.prepare_session_dir("session-1")
+        return artifacts, SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+
+    async def test_a_failed_save_is_logged_with_its_session(self) -> None:
+        class Broken(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                raise PlaywrightError("Download.saveAs: canceled")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            with self.assertLogs("app.downloads", level="WARNING") as logs:
+                record = await DownloadCaptureService(artifacts).capture(session, Broken("report.csv"))
+
+        self.assertEqual((record["status"], record["failure"]), ("failed", "download_save_failed"))
+        self.assertIn("session-1", logs.output[0])
+        self.assertIn("Download.saveAs: canceled", logs.output[0])
+
+    async def test_a_downloads_url_quotes_its_file_name(self) -> None:
+        # Unquoted, "#" starts a fragment and "%" an escape, so the URL named another path or none.
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            record = await DownloadCaptureService(artifacts).capture(session, FakeDownload("report #1 100%.csv"))
+
+        self.assertEqual(record["filename"], "report #1 100%.csv")
+        self.assertEqual(record["url"], "/artifacts/session-1/downloads/report%20%231%20100%25.csv")
+
+    async def test_no_download_record_holds_a_server_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts)
+            turned_away = FakeDownload("x.txt")
+            turned_away.cancel = mock.AsyncMock()
+            records = [
+                await service.capture(session, FakeDownload("kept.csv")),
+                await service.capture(session, FakeDownload("bad.csv", failure="network")),
+                await service.block(session, turned_away, "from a host ALLOWED_HOSTS does not allow"),
+                await service.refuse(session, turned_away, "a cap"),
+            ]
+            lines = (session.artifact_dir / "downloads.jsonl").read_text(encoding="utf-8").splitlines()
+
+        for record in [*records, *(json.loads(line) for line in lines)]:
+            self.assertNotIn("path", record)
+            self.assertFalse([value for value in record.values() if isinstance(value, str) and tempdir in value])
 
 
 class DownloadCapTests(unittest.IsolatedAsyncioTestCase):
@@ -130,7 +180,7 @@ class DownloadCapTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(record["status"], "refused")
             self.assertIn("DOWNLOAD_MAX_BYTES", record["failure"])
-            self.assertEqual((record["path"], record["filename"], record["url"]), (None, None, None))
+            self.assertEqual((record.get("path"), record["filename"], record["url"]), (None, None, None))
             self.assertEqual(small["status"], "completed")
             kept = sorted(path.name for path in (session.artifact_dir / "downloads").iterdir())
             self.assertEqual(kept, ["small.txt"])

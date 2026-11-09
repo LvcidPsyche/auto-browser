@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
@@ -62,7 +63,9 @@ class DownloadCaptureService:
             await download.save_as(str(destination))
             if hasattr(download, "failure"):
                 failure = await download.failure()
-        except Exception:
+        except Exception as exc:
+            # The record says only that the save failed; why (a disk error, the browser's word) is the operator's.
+            logger.warning("could not save a download of session %s: %s", session.id, exc)
             failure = "download_save_failed"
         except BaseException as exc:
             # Whatever ended the save, the reserved name would count toward the cap for good.
@@ -97,14 +100,15 @@ class DownloadCaptureService:
             )
         await self._discard(download)
 
+        # The file is named, never located: its server path stays on the server (read_download_text finds it by
+        # name), and the name is quoted in its URL, where a "#" or "%" in it named another path.
         record = {
             "id": uuid4().hex[:12],
             "timestamp": utc_now(),
             "status": "failed" if failure else "completed",
             "filename": None if failure else destination.name,
             "suggested_filename": suggested,
-            "path": None if failure else str(destination),
-            "url": None if failure else f"/artifacts/{session.id}/downloads/{destination.name}",
+            "url": None if failure else f"/artifacts/{session.id}/downloads/{quote(destination.name)}",
             "source_url": getattr(download, "url", None),
             "failure": failure,
         }
@@ -128,7 +132,6 @@ class DownloadCaptureService:
             "status": "blocked",
             "filename": None,
             "suggested_filename": None,
-            "path": None,
             "url": None,
             "source_url": url_origin(str(getattr(download, "url", "") or "")),
             "failure": reason,
@@ -151,7 +154,6 @@ class DownloadCaptureService:
             "status": "refused",
             "filename": None,
             "suggested_filename": None,
-            "path": None,
             "url": None,
             "source_url": url_origin(str(getattr(download, "url", "") or "")),
             "failure": reason,

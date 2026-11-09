@@ -334,9 +334,9 @@ base_url_loopback_host() {
 # - an IPv4 address written another way than four dotted decimals: one to four dot-separated parts, each all decimal
 #   digits or 0x and at least one hex digit, that are not four decimal numbers from 0 to 255 without leading zeros
 #   (127.2, 0x7f.0.0.2, 2130706434, 0177.0.0.1); a name (cafe.bad, 0x) is not refused;
-# - a bracketed host holding anything but hex digits and :, or whose first group is empty or all zeros, other than
-#   exactly ::1: every IPv4-mapped and IPv4-compatible form ([::ffff:127.0.0.2]) is in ::/96, while a global IPv6
-#   literal ([2001:db8::5]) passes.
+# - a bracketed host that is empty ([], and [ with no ] read as []), holds anything but hex digits and :, or whose
+#   first group is empty or all zeros, other than exactly ::1: every IPv4-mapped and IPv4-compatible form
+#   ([::ffff:127.0.0.2]) is in ::/96, while a global IPv6 literal ([2001:db8::5]) passes.
 # Refused before that, as a form curl reads another host from than base_url_host does (W9-4): a set base URL that
 # starts with a scheme and a colon but not with that scheme, // and a character other than / (curl connects to
 # 127.0.0.2 for http:///127.0.0.2:9/ and http:/127.0.0.2:9/), or whose host reads empty (http://:9/). Only an unset or
@@ -356,7 +356,7 @@ refuse_other_ipv4_spelling() {
     local inner="${host#\[}"
     inner="${inner%\]}"
     if [[ "$inner" != "::1" ]]; then
-      if [[ "$inner" =~ [^0123456789abcdefABCDEF:] || "$inner" == ::* || "$inner" =~ ^0+: ]]; then
+      if [[ -z "$inner" || "$inner" =~ [^0123456789abcdefABCDEF:] || "$inner" == ::* || "$inner" =~ ^0+: ]]; then
         plain=0
       fi
     fi

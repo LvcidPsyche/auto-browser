@@ -120,7 +120,7 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
             await self._type_past_the_deadline("\n\nx"), [("press", "Enter"), ("press", "Enter"), ("insert", "x")]
         )
 
-    async def test_a_keystroke_the_page_never_answers_is_a_retryable_error_not_a_hang(self) -> None:
+    async def test_a_keystroke_the_page_never_answers_is_an_error_not_to_retry_not_a_hang(self) -> None:
         async def never(*_args) -> None:
             await asyncio.Event().wait()
 
@@ -146,7 +146,8 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
                         )
                 self.assertLess(time.monotonic() - started, 2.0)
                 self.assertEqual(raised.exception.code, "typing_timeout")
-                self.assertTrue(raised.exception.retryable)
+                # D3a-7: part of the text may be in the field, so typing it again could enter it twice.
+                self.assertFalse(raised.exception.retryable)
 
     async def test_past_the_deadline_every_step_shares_one_cutoff(self) -> None:
         # Each press answers in time on its own, but a hundred of them must not run a hundred floors past the budget.
@@ -173,7 +174,7 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 1.0)  # the cutoff is 0.2 s past the deadline
         self.assertLess(len(presses), 20)
         self.assertEqual(raised.exception.code, "typing_timeout")
-        self.assertTrue(raised.exception.retryable)
+        self.assertFalse(raised.exception.retryable)
 
     async def test_the_budget_is_twenty_seconds(self) -> None:
         self.assertEqual(actions_module.HUMAN_TYPING_BUDGET_SECONDS, 20.0)

@@ -390,6 +390,7 @@ class BrowserNodeWiringTests(unittest.TestCase):
     def test_a_directory_named_like_the_endpoint_or_state_file_is_removed(self) -> None:
         # D11: rm -f fails on a directory of that name, and browser-node could then never start again. The
         # entrypoint's own line, run under bash against planted directories.
+        from tests._bash import path_after
         from tests.test_scripts_token_argv import BASH, _bash_path
 
         line = next(
@@ -407,7 +408,9 @@ class BrowserNodeWiringTests(unittest.TestCase):
                 f'set -euo pipefail; WS_ENDPOINT_FILE="{_bash_path(endpoint)}"; '
                 f'SANDBOX_STATE_FILE="{_bash_path(state)}"; {line}'
             )
-            result = subprocess.run([BASH, "-c", script], capture_output=True, text=True)
+            # rm is found beside this bash (review of c5).
+            env = {**os.environ, "PATH": path_after()}
+            result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(endpoint.exists() or state.exists())
 

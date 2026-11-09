@@ -64,7 +64,7 @@ def _write_frame(directory: Path, name: str, *, age_seconds: float = 0.0) -> Pat
 def _manager(session: SimpleNamespace, *, scrubbing: bool = False) -> SimpleNamespace:
     counter = {"n": 0}
 
-    async def capture(target: SimpleNamespace, label: str) -> dict[str, str]:
+    async def capture(target: SimpleNamespace, label: str, *, staged: bool = False) -> dict[str, str]:
         assert target.lock.locked(), "the capture must run under the session lock"
         counter["n"] += 1
         path = _write_frame(target.artifact_dir, f"20260101T0000{counter['n']:02d}Z-{label}.png")

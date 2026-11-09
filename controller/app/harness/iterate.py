@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
+from ..utils import run_to_completion
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -33,6 +34,9 @@ _RUN_ID_RE = re.compile(RUN_ID_PATTERN)
 # The event loop may fire a wait_for timer a clock tick early (15 ms on Windows); within this much of the deadline the
 # wall-clock budget is what ran out.
 _DEADLINE_SLACK_SECONDS = 0.05
+# How often a converged run tries the staging lock again while retention's prune holds it (one candidate's removal):
+# it waits on the event loop without holding the loop.
+_STAGING_LOCK_RETRY_SECONDS = 0.01
 
 
 class HarnessAttempt(BaseModel):
@@ -109,8 +113,10 @@ class HarnessRunStore:
         self._active: dict[str, str | None] = {}
         self._active_lock = threading.Lock()
         self.generation = uuid.uuid4().hex
-        # Shared with the SkillInducer: prune holds it from a candidate's age check through its removal, staging
-        # around its rename into place, so a candidate re-staged in between is never removed as old.
+        # Shared with the SkillInducer: prune holds it from a candidate's age check through its rename to a hidden name,
+        # staging around its rename into place, so a candidate re-staged in between is never removed as old, and
+        # candidate reads (HarnessService, the drift monitor) around theirs, so none meets a candidate half replaced or
+        # half removed. Never held for a removal, so a read on the event loop waits at most for one rename.
         self.staging_lock = threading.Lock()
 
     def begin_run(self, run_id: str, owner: str | None, *, max_owned: int = 0) -> bool:
@@ -378,12 +384,15 @@ class HarnessRunStore:
         for directory, marker, staged in candidates:
             if directory.name in self._active:
                 continue
+            doomed = directory
             try:
                 # Inside the try (W9-7): is_dir() raises for EACCES or EIO, and one such entry ended the prune.
                 if not directory.is_dir():
                     continue
-                # A staged entry's age check and removal are one step against staging's rename into place; staging
-                # never replaces a run directory, so removing one does not hold staging up.
+                # A staged entry's age check and its rename to a hidden `.tmp-` name are one step against staging's
+                # rename into place and against candidate reads, which hold the lock too; it is removed after, under
+                # that name, which nothing serves (and startup recovery removes), so no read meets a candidate half
+                # removed or waits for its removal. Staging never replaces a run directory: removing one takes no lock.
                 with self.staging_lock if staged else contextlib.nullcontext():
                     marker_path = directory / marker
                     newest = max(
@@ -391,10 +400,14 @@ class HarnessRunStore:
                     )
                     if newest >= cutoff:
                         continue
-                    shutil.rmtree(directory)
+                    if staged:
+                        hidden = directory.with_name(f".tmp-{uuid.uuid4().hex[:12]}")
+                        os.replace(directory, hidden)
+                        doomed = hidden  # once renamed: a failed rename is logged for the candidate it left
+                shutil.rmtree(doomed)
                 removed += 1
             except OSError as exc:
-                logger.warning("harness prune could not remove %s: %s", directory, exc)
+                logger.warning("harness prune could not remove %s: %s", doomed, exc)
         return removed
 
     def run_dir(self, run_id: str) -> Path:
@@ -481,7 +494,7 @@ class HarnessService:
         # Signing without a matching check is decoration; the registry gets the
         # counterpart to whatever the inducer signs with.
         self.registry = SkillStagingRegistry(self.store.staging_root, verifier=envelope_verifier)
-        self.drift_monitor = SkillDriftMonitor(self.registry, verifier=self.verifier)
+        self.drift_monitor = SkillDriftMonitor(self.registry, verifier=self.verifier, lock=self.store.staging_lock)
 
     async def start_convergence(
         self,
@@ -626,32 +639,60 @@ class HarnessService:
                 break
 
         if record.status == "converged" and latest_trace is not None and results:
+            # Run to its end: the candidate is staged in a worker thread, which a cancel cannot stop, so a cancel waits
+            # for it, and the record names what it staged, before the cancel goes on.
+            await run_to_completion(self._stage_candidate(record, contract, latest_trace, results[-1]))
+
+    async def _stage_candidate(
+        self, record: HarnessRunRecord, contract: TaskContract, trace: TraceEnvelope, verification: VerificationResult
+    ) -> None:
+        """Stage a converged run's skill candidate and record it.
+
+        Built and signed in a worker thread, then placed on the event loop once the staging lock is free, which the loop
+        does not wait for (R5C-12): retention's prune holds that lock in a thread from a candidate's age check through
+        its rename aside (it held it through the removal), and waiting for it stalled every task. Placed on the loop,
+        not in the thread: a re-stage's two renames ran between candidate reads on the loop, and a read found no
+        candidate or the new files under the old one's signature. The record is saved right after, with no await
+        between, so a shutdown that cancels this places nothing its record does not name. The candidate it replaced is
+        removed after that, in a worker thread: removed on the loop, a slow removal stalled every task.
+        """
+        try:
+            candidate, build_dir, target_dir = await asyncio.to_thread(
+                self.inducer.build,
+                contract=contract,
+                trace=trace,
+                verification=verification,
+                attempts=len(record.attempts),
+                model_tiers=self.model_tiers,
+                owner=record.owner,
+            )
+            placed = False
             try:
-                record.candidate = self.inducer.induce(
-                    contract=contract,
-                    trace=latest_trace,
-                    verification=results[-1],
-                    attempts=len(record.attempts),
-                    model_tiers=self.model_tiers,
-                    owner=record.owner,
-                )
-            except Exception as exc:
-                # The inducer cleans up after itself; the run must not stay "converged" with no candidate.
-                logger.exception("harness run %s: staging the skill candidate failed", run_id)
-                record.status = "failed"
-                record.decision = ConvergenceDecision(
-                    status="failed",
-                    converged=False,
-                    should_continue=False,
-                    reason=f"staging the skill candidate failed: {type(exc).__name__}",
-                    successful_attempts=record.decision.successful_attempts if record.decision else 0,
-                    total_attempts=len(record.attempts),
-                )
-                record.notes.append(f"Skill candidate staging failed: {type(exc).__name__}")
-                self.store.save(record)
-                return
-            record.notes.append("Staged skill candidate emitted; promotion requires review.")
+                while not self.inducer.try_place(build_dir, target_dir):
+                    await asyncio.sleep(_STAGING_LOCK_RETRY_SECONDS)
+                placed = True
+            finally:
+                if not placed:
+                    shutil.rmtree(build_dir, ignore_errors=True)
+            record.candidate = candidate
+        except Exception as exc:
+            # The inducer cleans up after itself; the run must not stay "converged" with no candidate.
+            logger.exception("harness run %s: staging the skill candidate failed", record.id)
+            record.status = "failed"
+            record.decision = ConvergenceDecision(
+                status="failed",
+                converged=False,
+                should_continue=False,
+                reason=f"staging the skill candidate failed: {type(exc).__name__}",
+                successful_attempts=record.decision.successful_attempts if record.decision else 0,
+                total_attempts=len(record.attempts),
+            )
+            record.notes.append(f"Skill candidate staging failed: {type(exc).__name__}")
             self.store.save(record)
+            return
+        record.notes.append("Staged skill candidate emitted; promotion requires review.")
+        self.store.save(record)
+        await asyncio.to_thread(self.inducer.remove_aside, build_dir)
 
     def _close_unfinished(self, record: HarnessRunRecord, error: BaseException) -> None:
         if record.status != "running":
@@ -757,10 +798,13 @@ class HarnessService:
         return trace.model_dump(mode="json")
 
     def list_candidates(self) -> list[dict[str, Any]]:
-        return self.registry.list_candidates()
+        # Under the staging lock: retention removes a candidate in a worker thread (HarnessRunStore.staging_lock).
+        with self.store.staging_lock:
+            return self.registry.list_candidates()
 
     def get_candidate(self, skill_id: str) -> dict[str, Any]:
-        return self.registry.get_candidate(skill_id).model_dump(mode="json")
+        with self.store.staging_lock:
+            return self.registry.get_candidate(skill_id).model_dump(mode="json")
 
     async def check_drift(self, skill_id: str) -> dict[str, Any]:
         return (await self.drift_monitor.check_candidate(skill_id)).model_dump(mode="json")

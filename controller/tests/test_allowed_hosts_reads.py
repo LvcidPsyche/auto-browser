@@ -46,6 +46,7 @@ from app.tool_inputs import (
     WaitForSelectorInput,
 )
 from app.utils import UTC
+from tests._fake_element_ids import FakePageElementIds
 from tests.test_allowed_hosts_rechecks import ALLOWED, REFUSED, RecordingLock, manager_for
 
 LEAKED = "REFUSED-CONTENT"
@@ -170,6 +171,8 @@ def read_session(manager, kind: str, tmp_path: Path, *, evaluated: object = LEAK
     page.move = lambda: MOVES[kind](manager, session, page)
     manager.get_session = AsyncMock(return_value=session)
     manager.sessions["s1"] = session
+    # A fake page has no isolated world: the scripts that run there go to its own evaluate.
+    manager.element_ids = FakePageElementIds()
     return session
 
 

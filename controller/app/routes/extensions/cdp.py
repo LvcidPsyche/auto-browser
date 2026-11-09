@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from ...browser.page_read import start_read
-from ...cdp.passthrough import CDPPassthrough
+from ...cdp.passthrough import CDPParamsError, CDPPassthrough
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -33,10 +33,17 @@ async def cdp_element_intelligence(session_id: str, selector: str, request: Requ
 @cdp_router.post("/raw")
 async def cdp_raw_command(session_id: str, body: dict[str, Any], request: Request):
     method = body.get("method", "")
-    params = body.get("params", {})
+    params = body.get("params")
+    params = {} if params is None else params
+    # Before the session is touched (NAV-31): a method that was no string reached the allowlist's `in` (a list raised
+    # TypeError there, a 500), and params that were no object went to the browser as they came.
+    if not isinstance(method, str) or not isinstance(params, dict):
+        raise HTTPException(422, "method must be a string, and params an object")
     async with _allowed_cdp(request.app, session_id) as cdp:
         try:
             return await _answered(cdp.raw_cdp_command(method, params))
+        except CDPParamsError as exc:
+            raise HTTPException(422, str(exc)) from None
         except ValueError:
             raise HTTPException(403, "CDP command is not permitted")
 

@@ -115,6 +115,12 @@ _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   autocomplete: el.getAttribute('autocomplete') || '',
 })"""
 
+# What an action's result says of a tab the action opened (NAV-08): a page's new tab does not become the active one.
+NEW_TAB_MESSAGE = (
+    "The action opened this tab. Observations and actions stay on the active tab until browser.activate_tab (REST: "
+    "POST /sessions/{session_id}/tabs/activate) moves to this index."
+)
+
 
 # Actions that are in ActionName but that nothing executes, with why.
 _NOT_EXECUTABLE = {
@@ -147,6 +153,15 @@ def is_one_time_code_field(attributes: Mapping[str, Any]) -> bool:
         str(attributes.get(key) or "") for key in ("name", "id", "placeholder", "aria-label", "autocomplete")
     )
     return not _NOT_A_ONE_TIME_CODE.search(described)
+
+
+def _tab_count(snapshot: dict[str, Any]) -> int | None:
+    """How many tabs a snapshot saw: an action snapshot counts them, an observation lists them; None if neither."""
+    count = snapshot.get("tab_count")
+    if isinstance(count, int):
+        return count
+    tabs = snapshot.get("tabs")
+    return len(tabs) if isinstance(tabs, list) else None
 
 
 class BrowserActionService:
@@ -314,14 +329,12 @@ class BrowserActionService:
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
                 if self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
-                    payload.pop("text_preview", None)
-                    payload["text_redacted"] = True
+                    self.withhold_text_preview(payload)
                 await self.elements.focus(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
                 if await self.locator_is_sensitive_input(locator):
-                    payload.pop("text_preview", None)
-                    payload["text_redacted"] = True
+                    self.withhold_text_preview(payload)
                 await locator.scroll_into_view_if_needed()
                 await self.focus_verified(session, locator, action="type")
             if clear_first:
@@ -656,6 +669,7 @@ class BrowserActionService:
                     **approval_provenance(approval),
                 },
                 metadata={"reason": approval.reason},
+                approved_action=decision,
             )
             _events.emit_approval(
                 session_id,
@@ -771,7 +785,17 @@ class BrowserActionService:
             # Scrubbed whole, then cut: a secret that straddles the limit would survive the other way round.
             preview = scrubber.text(text).text if scrubber is not None else text
             payload["text_preview"] = preview[:preview_chars]
+            if len(preview) > preview_chars:
+                # So a script exported from the audit log says it types only the start of the text (ACT-31).
+                payload["text_truncated"] = True
         return payload
+
+    @staticmethod
+    def withhold_text_preview(payload: dict[str, Any]) -> None:
+        """For a field found secret once typing starts: its preview goes, and the mark that the preview was cut."""
+        payload.pop("text_preview", None)
+        payload.pop("text_truncated", None)
+        payload["text_redacted"] = True
 
     async def locator_is_sensitive_input(self, locator: Any) -> bool:
         try:
@@ -952,8 +976,8 @@ class BrowserActionService:
             delays_ms.append(delay_ms)
         # Scale every delay down together when the pauses alone would overrun the budget. Each keystroke is a round
         # trip to a browser node, outside the pauses, so the deadline is what bounds the total: once it passes, the
-        # rest is inserted in one call (one message however long it is, but with no key events, which is fine after
-        # the human-like pacing has already run its course).
+        # rest is inserted as plain text, with each newline, carriage return or tab in it still pressed as Enter or
+        # Tab (_insert_rest), all within one shared cutoff.
         scale = min(1.0, HUMAN_TYPING_BUDGET_SECONDS * 1000 / max(sum(delays_ms), 1))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
@@ -993,7 +1017,8 @@ class BrowserActionService:
             code="typing_timeout",
             action="type",
             status_code=504,
-            retryable=True,
+            # Not retryable (D3a-7): typing the text again could enter the part already in the field twice.
+            retryable=False,
         )
 
     @classmethod
@@ -1135,6 +1160,10 @@ class BrowserActionService:
         if before_accessibility != after_accessibility:
             signals.append("accessibility_focus_changed")
 
+        before_tabs, after_tabs = _tab_count(before), _tab_count(after)
+        if before_tabs is not None and after_tabs is not None and before_tabs != after_tabs:
+            signals.append("tabs_changed")
+
         interacted_element = target.get("element_id")
         selector = target.get("selector")
         interactables = after.get("interactables") or []
@@ -1153,7 +1182,7 @@ class BrowserActionService:
         if delivery is not None:
             signals.append(f"upload_{delivery['outcome']}")
 
-        verified = bool(signals)
+        verified: bool | None = bool(signals)
         if action_name == "navigate":
             verified = "url_changed" in signals or "title_changed" in signals
         elif action_name in {"go_back", "go_forward"}:
@@ -1172,7 +1201,7 @@ class BrowserActionService:
                     "accessibility_focus_changed",
                 }
                 & set(signals)
-            )
+            ) or (action_name != "scroll" and "tabs_changed" in signals)
         elif action_name == "hover":
             verified = (
                 bool({"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals))
@@ -1183,7 +1212,9 @@ class BrowserActionService:
                 {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)
             )
         elif action_name in {"wait", "reload"}:
-            verified = True
+            # Neither is verified either way (ACT-30): a wait has nothing to verify, and a reload of a page that did
+            # not change leaves nothing to compare. They read true before, whatever the page did.
+            verified = None
         elif action_name == "upload":
             # By element_id, whether the registered input holds the file; by selector, Playwright's word.
             verified = delivery is None or delivery["outcome"] == "confirmed"
@@ -1193,6 +1224,17 @@ class BrowserActionService:
             "signals": signals,
             "target_seen_after": target_seen_after,
         }
+
+    @staticmethod
+    def new_tab(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
+        """The tab an action opened, for its result (NAV-08): the newest, which the tab list puts last.
+
+        Only while it is not the active tab, as NEW_TAB_MESSAGE says it is not.
+        """
+        before_tabs, tabs = _tab_count(before), after.get("tabs")
+        if before_tabs is None or not isinstance(tabs, list) or len(tabs) <= before_tabs or tabs[-1].get("active"):
+            return None
+        return {"index": tabs[-1]["index"], "message": NEW_TAB_MESSAGE}
 
     @staticmethod
     def resolve_target(

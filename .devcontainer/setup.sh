@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "Installing Python dev dependencies..."
-pip install --quiet -e ./controller[dev]
+pip install --quiet -e ./controller[dev] -c controller/constraints.txt
 
 # The Codespaces overlay publishes the API on 0.0.0.0, so it refuses to start
 # without API_BEARER_TOKEN — and nothing created one, so a fresh Codespace never

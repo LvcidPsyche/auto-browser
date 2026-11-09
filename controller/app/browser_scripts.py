@@ -70,29 +70,81 @@ STEALTH_INIT_SCRIPT = r"""
     };
   } catch (_) {}
 
-  // Canvas fingerprint noise
+  // Canvas fingerprint noise, on an export of a canvas that already has a 2d
+  // context only. Asking for one gives a canvas that has no context yet a 2d
+  // context, after which getContext('webgl') or ('bitmaprenderer') returned null
+  // (NAV-25); so getContext records the canvases it gave a 2d context. Both
+  // patched functions, and toString itself, read as native code through
+  // Function.prototype.toString, with the native name and length.
   try {
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
     // The pixel is read with the native getImageData, captured here. The
     // fingerprint script (STEALTH_PROFILE=light) wraps getImageData with its own
     // noise; reading through that and writing the result back would change the
     // canvas a little more on every export.
     const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-    HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
-      const ctx = this.getContext('2d');
-      if (ctx && this.width > 0 && this.height > 0) {
+    // And written back with the native putImageData. Capturing the methods fixes which functions the export calls: a
+    // page that replaces getImageData, putImageData or toDataURL afterwards does not change what it runs.
+    const origPutImageData = CanvasRenderingContext2D.prototype.putImageData;
+    // The size is read through the prototype's getters: a canvas's own width accessor can throw where the native
+    // export, which reads no property of the canvas, does not.
+    const widthOf = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width').get;
+    const heightOf = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'height').get;
+    const context2d = CanvasRenderingContext2D.prototype;
+    const getPrototypeOf = Object.getPrototypeOf;
+    const nativeToString = Function.prototype.toString;
+    const with2d = new WeakSet();
+    const nativeSources = new WeakMap();
+    // Methods, not function expressions: like the native ones, they have no prototype.
+    const patched = {
+      toString() {
+        return nativeSources.has(this) ? nativeSources.get(this) : nativeToString.call(this);
+      },
+      getContext(contextId) {
+        const ctx = origGetContext.apply(this, arguments);
+        if (ctx !== null && getPrototypeOf(ctx) === context2d) with2d.add(this);
+        return ctx;
+      },
+      toDataURL() {
+        // A receiver that is not a canvas given a 2d context goes straight to the native, whose brand check comes
+        // before it converts any argument. So does a Symbol type: the native's TypeError names the method it came
+        // from, and nothing has touched the canvas yet.
+        if (!with2d.has(this) || typeof arguments[0] === 'symbol') return origToDataURL.apply(this, arguments);
+        // The arguments are converted before the canvas is changed, so no argument conversion runs between the noise
+        // and its removal (a type's toString can draw, resize or throw), and the pixel is read after what it did. A
+        // template literal converts as the native's DOMString does, once; an absent type stays absent; the quality is
+        // `any`, which the native does not convert.
+        const type = arguments[0] === undefined ? undefined : `${arguments[0]}`;
+        const quality = arguments[1];
+        let ctx = null;
+        let img = null;
+        if (widthOf.call(this) > 0 && heightOf.call(this) > 0) {
+          try {
+            ctx = origGetContext.call(this, '2d');
+            img = origGetImageData.call(ctx, 0, 0, 1, 1);
+            img.data[0] ^= 1;
+            origPutImageData.call(ctx, img, 0, 0);
+          } catch (_) {
+            img = null;
+          }
+        }
+        if (img === null) return origToDataURL.call(this, type, quality);
+        // Exported once, and the pixel put back whether that returns or throws.
         try {
-          const img = origGetImageData.call(ctx, 0, 0, 1, 1);
+          return origToDataURL.call(this, type, quality);
+        } finally {
           img.data[0] ^= 1;
-          ctx.putImageData(img, 0, 0);
-          const result = origToDataURL.call(this, type, quality);
-          img.data[0] ^= 1;
-          ctx.putImageData(img, 0, 0);
-          return result;
-        } catch (_) {}
-      }
-      return origToDataURL.call(this, type, quality);
+          origPutImageData.call(ctx, img, 0, 0);
+        }
+      },
     };
+    nativeSources.set(patched.toString, nativeToString.call(nativeToString));
+    nativeSources.set(patched.getContext, nativeToString.call(origGetContext));
+    nativeSources.set(patched.toDataURL, nativeToString.call(origToDataURL));
+    Function.prototype.toString = patched.toString;
+    HTMLCanvasElement.prototype.getContext = patched.getContext;
+    HTMLCanvasElement.prototype.toDataURL = patched.toDataURL;
   } catch (_) {}
 
   // WebGL vendor / renderer — realistic Intel values
@@ -241,8 +293,9 @@ def _cap_field(field: Any) -> dict[str, Any] | None:
 def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[Mapping[str, Any]], bool]) -> Any:
     """What find_elements returns, made safe again on the Python side.
 
-    The scripts cap their strings, but they run in the page's own JS world, where a page can replace
-    String.prototype.slice and get a megabyte through; so every string is cut again here. A field's `value` is
+    The scripts cap their strings, in the controller's isolated world, where the page's own JS cannot replace
+    String.prototype.slice to get a megabyte through as it could in its own (NAV-12); every string is cut again here
+    all the same, a second bound that holds whatever world ran them. A field's `value` is
     withheld (null, `value_redacted: true`) when `is_secret_field` says its attributes (sent by the script as `field`,
     which is removed) name a password, a one-time code and the like, or when one was too long to read whole; the type
     action does not echo such values either.
@@ -492,8 +545,11 @@ _READABLE_TEXT_JS = r"""
       .trim();
 """
 
+# Run in the controller's isolated world (element_ids.evaluate), as its caller's other observation scripts are.
 PAGE_TEXT_SCRIPT = (
-    "() => {\n" + _READABLE_TEXT_JS + "  return readable(document.body ? document.body.innerText : '');\n}"
+    "(_unused, _elementIds) => {\n"
+    + _READABLE_TEXT_JS
+    + "  return readable(document.body ? document.body.innerText : '');\n}"
 )
 
 PAGE_SUMMARY_SCRIPT = _with_element_naming(
@@ -658,9 +714,10 @@ def _with_find_fields(source: str) -> str:
     return with_ab_cap(source).replace("/*__FIND_FIELDS__*/", _FIND_FIELDS_JS)
 
 
-# find_elements: text search and selector modes. Each returns page-controlled strings, so each is capped.
+# find_elements: text search and selector modes. Each returns page-controlled strings, so each is capped. Both run in
+# the controller's isolated world (element_ids.evaluate, NAV-12), which calls them as ``(arg, elementIds)``.
 FIND_ELEMENTS_TEXT_SCRIPT = _with_find_fields(
-    r"""([query, isRegex, context, limit]) => {
+    r"""([query, isRegex, context, limit], _elementIds) => {
 /*__AB_CAP__*/
 /*__FIND_FIELDS__*/
     let matcher = null;
@@ -715,10 +772,17 @@ FIND_ELEMENTS_TEXT_SCRIPT = _with_find_fields(
 )
 
 FIND_ELEMENTS_SELECTOR_SCRIPT = _with_find_fields(
-    r"""([selector, limit]) => {
+    r"""([selector, limit], _elementIds) => {
 /*__AB_CAP__*/
 /*__FIND_FIELDS__*/
-    const els = [...document.querySelectorAll(selector)].slice(0, limit);
+    let found;
+    try {
+        found = document.querySelectorAll(selector);
+    } catch (e) {
+        // Reported here, as the regex is: the world reports a script that threw as a stale element.
+        return {__invalid_selector: String((e && e.message) || e)};
+    }
+    const els = [...found].slice(0, limit);
     return els.map(el => {
         const r = el.getBoundingClientRect();
         return {

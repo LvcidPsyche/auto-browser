@@ -30,6 +30,7 @@ from app.routes.operations import create_operations_router
 from app.routes.sessions import create_sessions_router
 from app.session_isolation import DockerBrowserNodeProvisioner
 from app.tool_gateway.gateway import McpToolGateway
+from tests._bash import BASH, NO_BASH_REASON
 from tests.test_auth_state_ownership import StateContext
 from tests.test_browser_manager_create_session import FakeBrowser, FakePage
 from tests.test_session_isolation import FakeDockerClient, FakeDockerContainer
@@ -39,6 +40,8 @@ SENTINEL = "Snt9Pw7Q"
 TAKEOVER = "takeover-sentinel-0123456789abcdefghijklmnop"
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "takeover_link.sh"
+# The tests that run the script itself give it /usr/bin and /bin's tools on PATH, which Windows does not have.
+POSIX_SCRIPT_REASON = "scripts/ is not here, the test " + NO_BASH_REASON + ", or this is Windows (no /usr/bin)"
 _PAGE_SUMMARY = {
     "title": "Fixture Page",
     "active_element": None,
@@ -332,9 +335,9 @@ class DashboardAndScriptTests(unittest.TestCase):
             self.skipTest("scripts/ is not shipped in the image")
         self.assertTrue(SCRIPT.is_file(), SCRIPT)
 
-    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash"), "scripts/ or bash is not here")
+    @unittest.skipUnless(SCRIPT.is_file() and BASH, "scripts/ is not here, or the test " + NO_BASH_REASON)
     def test_the_script_parses(self) -> None:
-        subprocess.run([shutil.which("bash"), "-n", str(SCRIPT)], check=True)
+        subprocess.run([BASH, "-n", str(SCRIPT)], check=True)
 
     def _tree(self, *, takeover_in_env: bool = True) -> Path:
         tmp = tempfile.TemporaryDirectory()
@@ -363,14 +366,14 @@ class DashboardAndScriptTests(unittest.TestCase):
             "REAL_PYTHON3": shutil.which("python3") or "/usr/bin/python3",
         }
         return subprocess.run(
-            [shutil.which("bash"), str(root / "scripts" / "takeover_link.sh"), *args],
+            [BASH, str(root / "scripts" / "takeover_link.sh"), *args],
             env=env,
             capture_output=True,
             text=True,
             timeout=30,
         )
 
-    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    @unittest.skipUnless(SCRIPT.is_file() and BASH and os.name != "nt", POSIX_SCRIPT_REASON)
     def test_the_script_reads_env_sends_both_tokens_on_stdin_and_prints_the_link(self) -> None:
         root = self._tree()
         result = self._run(root, "abc123")
@@ -387,7 +390,7 @@ class DashboardAndScriptTests(unittest.TestCase):
         self.assertIn(f'header = "Authorization: Bearer {API_SENTINEL}"', config)
         self.assertIn(f'header = "X-Takeover-Token: {TAKEOVER}"', config)
 
-    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    @unittest.skipUnless(SCRIPT.is_file() and BASH and os.name != "nt", POSIX_SCRIPT_REASON)
     def test_w2_25_without_takeover_token_the_script_reads_data_takeover_token(self) -> None:
         root = self._tree(takeover_in_env=False)
         (root / "data").mkdir()
@@ -402,7 +405,7 @@ class DashboardAndScriptTests(unittest.TestCase):
         config = (root / "log" / "curl-stdin").read_text(encoding="utf-8").splitlines()
         self.assertIn(f'header = "X-Takeover-Token: {TAKEOVER}"', config)
 
-    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    @unittest.skipUnless(SCRIPT.is_file() and BASH and os.name != "nt", POSIX_SCRIPT_REASON)
     def test_w2_24_without_a_takeover_token_the_script_warns_and_names_where_it_looks(self) -> None:
         root = self._tree(takeover_in_env=False)
         result = self._run(root, "abc123")
@@ -412,7 +415,7 @@ class DashboardAndScriptTests(unittest.TestCase):
         self.assertIn("data/takeover-token", result.stderr)
         self.assertNotIn(API_SENTINEL, result.stderr)
 
-    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    @unittest.skipUnless(SCRIPT.is_file() and BASH and os.name != "nt", POSIX_SCRIPT_REASON)
     def test_w2_24_a_refused_request_says_what_a_403_means(self) -> None:
         root = self._tree()
         result = self._run(root, "abc123", STUB_CURL_STATUS="403")
@@ -422,7 +425,7 @@ class DashboardAndScriptTests(unittest.TestCase):
         for secret in (API_SENTINEL, TAKEOVER):
             self.assertNotIn(secret, result.stderr)
 
-    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    @unittest.skipUnless(SCRIPT.is_file() and BASH and os.name != "nt", POSIX_SCRIPT_REASON)
     def test_the_script_refuses_an_id_that_does_not_start_with_a_letter_or_digit(self) -> None:
         root = self._tree()
         for bad in (".", "..", "-x", "_a", "a/b", "a b"):

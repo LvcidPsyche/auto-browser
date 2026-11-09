@@ -112,6 +112,18 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
         )
         self.assertEqual(visible["text_preview"], "playwright")
 
+    def test_text_target_payload_says_when_the_preview_is_cut(self) -> None:
+        # ACT-31: the exported script typed the preview as if it were the whole text.
+        def payload(text: str) -> dict:
+            return BrowserActionService.text_target_payload(
+                {"selector": "#note"}, text, clear_first=True, sensitive=False, preview_chars=80
+            )
+
+        cut, whole = payload("x" * 81), payload("x" * 80)
+
+        self.assertEqual((cut["text_preview"], cut.get("text_truncated")), ("x" * 80, True))
+        self.assertNotIn("text_truncated", whole)
+
 
 class FakeDownload:
     def __init__(self, suggested_filename: str, url: str, content: str = "downloaded") -> None:
@@ -173,7 +185,7 @@ class BrowserDownloadCaptureTests(unittest.IsolatedAsyncioTestCase):
         downloads = await self.manager.list_downloads(self.session.id)
         self.assertEqual(len(downloads), 1)
         self.assertEqual(downloads[0]["status"], "completed")
-        self.assertTrue(Path(downloads[0]["path"]).is_file())
+        self.assertTrue((self.session.artifact_dir / "downloads" / downloads[0]["filename"]).is_file())
         self.assertEqual(downloads[0]["filename"], "report.csv")
         self.assertEqual(downloads[0]["url"], "/artifacts/session-1/downloads/report.csv")
         self.manager._persist_session.assert_awaited_once()

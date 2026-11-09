@@ -16,12 +16,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.action_errors import SessionNotFoundError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import McpToolCallRequest, SessionRecord
+from app.pii_scrub import PiiScrubber
 from app.tool_gateway import McpToolGateway
 
 SESSION_ID = "sess-dl"
@@ -49,27 +50,32 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.downloads_dir.mkdir(parents=True)
         self.records: list[dict[str, Any]] = []
 
-    def _add(self, name: str, data: bytes, *, status: str = "completed", path: Path | None = None) -> str:
-        target = path or self.downloads_dir / name
-        if path is None:
-            target.write_bytes(data)
+    def _add(self, name: str, data: bytes, *, status: str = "completed", stored_path: Path | None = None) -> str:
+        """A record as capture() writes it, its file written under ``name`` in the session's downloads directory.
+
+        ``stored_path`` gives it the server path a record kept before STORE-40 instead, and writes no file.
+        """
+        if stored_path is None:
+            (self.downloads_dir / name).write_bytes(data)
         download_id = f"dl{len(self.records):03d}"
-        self.records.append(
-            {
-                "id": download_id,
-                "status": status,
-                "filename": name,
-                "path": str(target),
-                "url": f"/artifacts/{SESSION_ID}/downloads/{name}",
-                "source_url": f"https://example.com/{name}",
-                "failure": None if status == "completed" else "canceled",
-            }
-        )
+        record = {
+            "id": download_id,
+            "status": status,
+            "filename": name,
+            "url": f"/artifacts/{SESSION_ID}/downloads/{name}",
+            "source_url": f"https://example.com/{name}",
+            "failure": None if status == "completed" else "canceled",
+        }
+        if stored_path is not None:
+            record["path"] = str(stored_path)
+        self.records.append(record)
         return download_id
 
     async def _persist(self) -> None:
+        # Constructed as a version before 1.17.0 wrote it, unvalidated: SessionRecord now drops a download's
+        # server path whenever a record is read or built (STORE-40), and a test's record from before must keep it.
         await self.manager.session_store.upsert(
-            SessionRecord(
+            SessionRecord.model_construct(
                 id=SESSION_ID,
                 name="downloads",
                 created_at="2026-01-01T00:00:00Z",
@@ -125,20 +131,54 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(f"/artifacts/{SESSION_ID}/downloads/{name}", str(caught.exception))
 
     async def test_nothing_outside_the_sessions_downloads_directory_is_read(self) -> None:
+        # The file is found by its name in the session's downloads directory (STORE-40), so a name that leaves it
+        # is refused, and the server path a record kept before is not followed.
         secret = self.root / "secret.txt"
         secret.write_text("do not read")
         other = self.root / "artifacts" / "other-session" / "downloads" / "theirs.csv"
         other.parent.mkdir(parents=True)
         other.write_text("not yours")
         cases = {
-            "outside": self._add("secret.txt", b"", path=secret),
-            "other session": self._add("theirs.csv", b"", path=other),
-            "traversal": self._add("x.csv", b"", path=self.downloads_dir / ".." / ".." / ".." / "secret.txt"),
+            "outside": self._add(str(secret), b"", stored_path=secret),
+            "other session": self._add("../../other-session/downloads/theirs.csv", b"", stored_path=other),
+            "traversal": self._add("../../../secret.txt", b"", stored_path=secret),
         }
         for label, download_id in cases.items():
             with self.subTest(label):
                 with self.assertRaisesRegex(ValueError, "not in this session's downloads directory"):
                     await self._read(download_id)
+        stored_only = self._add("secret.txt", b"", stored_path=secret)
+        with self.assertRaisesRegex(ValueError, "no longer on disk"):
+            await self._read(stored_only)
+
+    async def test_a_listed_download_holds_no_server_path(self) -> None:
+        # A record saved before STORE-40 keeps its path in the session's stored record; the list leaves it out.
+        self._add("report.csv", b"", stored_path=self.downloads_dir / "report.csv")
+        await self._persist()
+
+        listed = await self.manager.list_downloads(SESSION_ID)
+
+        self.assertEqual([item["filename"] for item in listed], ["report.csv"])
+        self.assertNotIn("path", listed[0])
+
+    async def test_a_stopped_sessions_record_holds_no_server_path(self) -> None:
+        # c4's report: the stored record of a session that saved a download before STORE-40 kept its server path, and
+        # GET /sessions/{id} and the session listing returned it, though list_downloads left it out.
+        self._add("report.csv", b"", stored_path=self.downloads_dir / "report.csv")
+        await self._persist()
+        stored = "".join(path.read_text(encoding="utf-8") for path in (self.root / "sessions").glob("*.json"))
+        self.assertIn('"path"', stored)  # the record on disk is one from before
+
+        listing = await self.manager.list_sessions()
+        returned = {
+            "GET /sessions/{id}": (await self.manager.get_session_record(SESSION_ID))["downloads"],
+            "GET /sessions": next(item for item in listing if item["id"] == SESSION_ID)["downloads"],
+            "list_downloads": await self.manager.list_downloads(SESSION_ID),
+        }
+        for where, downloads in returned.items():
+            with self.subTest(where):
+                self.assertEqual([item["filename"] for item in downloads], ["report.csv"])
+                self.assertNotIn("path", downloads[0])
 
     async def test_unusable_downloads_say_why(self) -> None:
         failed = self._add("partial.csv", b"", status="failed")
@@ -155,6 +195,38 @@ class ReadDownloadTests(unittest.IsolatedAsyncioTestCase):
                 await self._read(big)
         with self.assertRaisesRegex(ValueError, f"No download nope in session {SESSION_ID}.*{failed}"):
             await self._read("nope")
+
+    async def test_pii_in_a_download_is_scrubbed_counted_and_audited(self) -> None:
+        # STORE-41: the text came back as the file held it, while the scrubber's other text outputs were scrubbed.
+        self._add("customers.csv", b"id,email,ssn\n1,jane.doe@example.com,123-45-6789\n")
+        self.manager.audit.append = AsyncMock()
+
+        result = await self._read()
+
+        self.assertEqual(result["text"], "id,email,ssn\n1,[REDACTED],[REDACTED]\n")
+        self.assertEqual(result["pii_scrub"], {"applied": True, "redactions": 2})
+        audited = self.manager.audit.append.await_args.kwargs
+        self.assertEqual((audited["event_type"], audited["action"]), ("pii_redaction", "download_scrub"))
+        self.assertEqual((audited["details"]["layer"], audited["details"]["hit_count"]), ("download", 2))
+        self.assertEqual((self.downloads_dir / "customers.csv").read_bytes()[-12:], b"123-45-6789\n")
+
+    async def test_a_json_download_is_scrubbed_by_its_members_names_as_a_network_body_is(self) -> None:
+        # Plain text matching leaves an opaque token alone; by its type, the member's name marks it.
+        self._add("token.json", b'{"access_token": "opaque-value-1", "user": "ok"}')
+
+        result = await self._read()
+
+        self.assertEqual(json.loads(result["text"]), {"access_token": "[REDACTED]", "user": "ok"})
+        self.assertEqual(result["pii_scrub"], {"applied": True, "redactions": 1})
+
+    async def test_with_scrubbing_off_a_download_is_read_as_it_is_and_says_so(self) -> None:
+        self.manager.diagnostics.pii_scrubber = PiiScrubber(enabled=False)
+        self._add("customers.csv", b"1,jane.doe@example.com\n")
+
+        result = await self._read()
+
+        self.assertEqual(result["text"], "1,jane.doe@example.com\n")
+        self.assertEqual(result["pii_scrub"], {"applied": False, "redactions": 0})
 
     async def test_no_completed_download(self) -> None:
         self._add("partial.csv", b"", status="failed")

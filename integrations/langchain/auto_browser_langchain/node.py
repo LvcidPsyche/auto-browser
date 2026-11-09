@@ -6,8 +6,8 @@ from typing import Any, TypedDict
 
 import httpx
 
-from .auth import loopback_transport, resolve_bearer_token
-from .errors import AutoBrowserToolError
+from .auth import loopback_transport, refuse_userinfo_with_token, resolve_bearer_token, split_base_url
+from .errors import AutoBrowserToolError, errors_shown, raise_for_status
 
 
 class BrowserState(TypedDict, total=False):
@@ -62,7 +62,12 @@ class AutoBrowserNode:
         operator_id: str | None = None,
         token_file: str | os.PathLike[str] | None = None,
     ):
+        refuse_userinfo_with_token(base_url, bearer_token, token_file)
         self.base_url = base_url.rstrip("/")
+        # What the requests go to, split from the base URL as given (review of c5): a query's trailing slashes are its
+        # value's, and only the path's go.
+        base, self._params = split_base_url(base_url)
+        self._base = base.rstrip("/")
         self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout = timeout
         self.operator_id = operator_id
@@ -79,15 +84,20 @@ class AutoBrowserNode:
         return headers
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        transport = loopback_transport(self.base_url, asynchronous=True)
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
-            response = await client.post(
-                "/mcp/tools/call",
-                json={"name": name, "arguments": arguments},
-                headers=self._headers(),
-            )
-            response.raise_for_status()
-            return response.json()
+        headers = self._headers()
+        token = headers.get("Authorization", "").removeprefix("Bearer ") or None
+        with errors_shown(self.base_url, token):
+            transport = loopback_transport(self.base_url, asynchronous=True)
+            async with httpx.AsyncClient(
+                base_url=self._base, params=self._params, timeout=self.timeout, transport=transport
+            ) as client:
+                response = await client.post(
+                    "/mcp/tools/call",
+                    json={"name": name, "arguments": arguments},
+                    headers=headers,
+                )
+                raise_for_status(response)
+                return response.json()
 
     async def create_session(self, start_url: str | None = None) -> str:
         arguments: dict[str, Any] = {}

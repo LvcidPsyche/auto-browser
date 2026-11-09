@@ -326,7 +326,9 @@ class NetworkInspector:
         if self.capture_bodies and method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             try:
                 raw = request.post_data
-                if raw and len(raw) <= self.body_max_bytes:
+                # In bytes, as the response body's cap is: counted in characters, a body of multibyte text passed at
+                # up to four times the cap (ACT-35). Characters first, so a body far over it is not encoded to tell.
+                if raw and len(raw) <= self.body_max_bytes and _byte_length(raw) <= self.body_max_bytes:
                     req_body = raw
             except Exception as exc:
                 logger.debug("could not read request body for %s: %s", url, exc)
@@ -514,6 +516,11 @@ def _mask_sensitive_headers(
     return masked, redacted
 
 
+# scrub_url's cap for a URL that is not a request's, which the inspector caps by its body size: the run trace's URLs
+# and a restricted witness receipt's.
+URL_SCRUB_MAX_BYTES = 16384
+
+
 def scrub_url(url: str, scrubber: "PiiScrubber | None", max_bytes: int) -> tuple[str, bool]:
     """Scrub a URL's query string and fragment. A scrub that fails, or a part too long to scrub, costs the part.
 
@@ -586,6 +593,9 @@ def _elapsed_ms(entry: dict[str, Any]) -> float | None:
 
 
 _TEXT_CONTENT_MARKERS = ("json", "text", "html", "xml", "javascript")
+# Responses that need not end: response.body() waits for the end, so reading one held its task for as long as the
+# page kept the stream open (ACT-35).
+_STREAMING_MEDIA_TYPES = ("text/event-stream", "multipart/x-mixed-replace")
 
 
 def _worth_reading_body(content_type: str, headers: dict[str, str], max_bytes: int) -> bool:
@@ -596,6 +606,8 @@ def _worth_reading_body(content_type: str, headers: dict[str, str], max_bytes: i
     call, not after.
     """
     if not any(marker in content_type.lower() for marker in _TEXT_CONTENT_MARKERS):
+        return False
+    if content_type.split(";", 1)[0].strip().lower() in _STREAMING_MEDIA_TYPES:
         return False
     declared = {k.lower(): v for k, v in headers.items()}.get("content-length")
     try:

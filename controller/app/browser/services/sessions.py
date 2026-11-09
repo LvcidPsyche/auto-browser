@@ -24,7 +24,7 @@ from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
-from ...utils import UTC, utc_now
+from ...utils import UTC, run_to_completion, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -57,6 +57,13 @@ _LOAD_FAILED = {
     "closed. Try again, or navigate the session first.",
 }
 _TIMED_OUT = re.compile(r"Timeout \d+ms exceeded")
+
+
+def _task_cancelled() -> bool:
+    """Whether the running task has been asked to cancel: a CancelledError raised without that came from an
+    awaitable cancelled on its own (a close or hook future), which a teardown treats as that step's failure (R5C-15)."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
@@ -203,7 +210,7 @@ class BrowserSessionService(SessionCreation):
         # One protected unit from here: the busy path of _lock_for_close already closes the context, so a cancel
         # between it and _close_locked left a registered session with no close record, audit event or receipt.
         # Every wait inside is bounded.
-        return await self._run_to_completion(self._close(session, reason))
+        return await run_to_completion(self._close(session, reason))
 
     async def _close(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         locked = await self._lock_for_close(session)
@@ -219,22 +226,6 @@ class BrowserSessionService(SessionCreation):
         finally:
             if locked:
                 session.lock.release()
-
-    @staticmethod
-    async def _run_to_completion(work: Any) -> Any:
-        """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised
-        once the work has finished (as the tunnel release does)."""
-        task = asyncio.create_task(work)
-        cancelled: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-        result = task.result()
-        if cancelled is not None:
-            raise cancelled
-        return result
 
     async def _close_locked(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         session_id = session.id
@@ -263,11 +254,11 @@ class BrowserSessionService(SessionCreation):
             # the same way, and it held a MAX_SESSIONS slot until restart.
             self.manager.sessions.pop(session_id, None)
             _events.emit_session(session_id, "closed")
-        if self.manager._session_closed_hook is not None:
-            try:
-                await self.manager._session_closed_hook(session_id)
-            except Exception as exc:
-                logger.warning("session closed hook failed for %s: %s", session_id, exc)
+        hook = self.manager._session_closed_hook
+        if hook is not None:
+            # A teardown step, but not one of the session's (its failure is logged, not a partial teardown): bounded,
+            # and its own cancellation does not end the close before its record (R5C-15).
+            await self._teardown_step(session_id, "run the session-closed hook", lambda: hook(session_id))
         status = "partial" if failed_steps else "ok"
         details: dict[str, Any] = {
             "trace_path": str(session.trace_path),
@@ -291,9 +282,18 @@ class BrowserSessionService(SessionCreation):
             action_class="control",
             metadata=dict(details),
         )
+        # The hosted copy of the close receipt goes in the background; the closed record shows how it went (bounded).
+        delivered = await self.manager.witness_bridge.wait_for_delivery(session.id)
         summary["witness_remote"] = session.witness_remote_state.model_dump()
         summary["close_reason"] = reason
-        await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
+        record = SessionRecord.model_validate(summary)
+        try:
+            await self.manager.session_store.upsert(record)
+        finally:
+            # How its receipts went reaches the record when they end; also when this write raised, since it may have
+            # landed in part (the file copy, and not Redis) and the outcome still on its way would never be saved.
+            if not delivered:
+                self.manager.witness_bridge.save_when_delivered(session, record)
         return {
             # The session is gone by now, whatever failed: `closed` says so. A step that failed is named in
             # failed_steps and makes the teardown partial (the audit event and receipt say partial too).
@@ -388,31 +388,60 @@ class BrowserSessionService(SessionCreation):
     async def _close_owned_browser(self, browser: Any, session_id: str) -> bool:
         """Close a browser the session owns, then release its gate; False when the close failed. Until the close has
         succeeded the gate stays attached, still gating whatever runs there, and the close taking the gate's session
-        down is no loss."""
+        down is no loss. The steps around the close are bounded and logged and never raise (R5C-11): a failed create's
+        or shadow browse's rollback runs this, and the rest of it, and its caller's own error, came after."""
         gates = self.manager.request_gates
-        gates.ending(browser)
+        self._mark_gate_ending(browser, session_id, True)
         try:
             await asyncio.wait_for(browser.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
-        except Exception as exc:
-            gates.ending(browser, False)
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and _task_cancelled():
+                raise
+            self._mark_gate_ending(browser, session_id, False)
             logger.error(
                 "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
                 session_id,
                 f"{type(exc).__name__}: {exc}"[:200],
             )
             return False
-        await gates.release(browser)
-        await self.manager.window_births.release(browser)
+        await self._teardown_step(
+            session_id, "release the pre-request gate of its browser", lambda: gates.release(browser)
+        )
+        await self._teardown_step(
+            session_id,
+            "release the window-birth watcher of its browser",
+            lambda: self.manager.window_births.release(browser),
+        )
         return True
+
+    def _mark_gate_ending(self, browser: Any, session_id: str, ending: bool) -> None:
+        """request_gates.ending, logged instead of raised: it only marks the gate, and the close goes on either way."""
+        try:
+            self.manager.request_gates.ending(browser, ending)
+        except Exception as exc:
+            logger.warning(
+                "could not mark the pre-request gate of session %s's browser as %s: %s",
+                session_id,
+                "ending" if ending else "still in use",
+                exc,
+            )
 
     @staticmethod
     async def _teardown_step(session_id: str, label: str, step: Any, failed_steps: list[str] | None = None) -> bool:
         """Run one teardown step, bounded; on failure log it and append ``label`` to ``failed_steps``. Used by
-        close_session's teardown and by a failed create's rollback, whose session may not exist yet."""
+        close_session's teardown and by a failed create's rollback, whose session may not exist yet.
+
+        A step whose own awaitable was cancelled while the task running it was not (a close or hook future cancelled
+        on its own) is a failed step like any other (R5C-15): raised, it ended the rollback there, and a caller that
+        was never cancelled got a CancelledError. A cancel of the task itself is still raised."""
         try:
             await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("gave up waiting to %s for session %s", label, session_id)
+        except asyncio.CancelledError:
+            if _task_cancelled():
+                raise
+            logger.warning("the step to %s for session %s was cancelled on its own", label, session_id)
         except Exception as exc:
             logger.warning("failed to %s for session %s: %s", label, session_id, exc)
         else:
@@ -625,9 +654,12 @@ class BrowserSessionService(SessionCreation):
                 manager.window_births.forget_session(shadow_session)
             # One protected unit, as cleanup_failed's (W9-11): a cancel at any step left the browser, the directories
             # or a record the persist already wrote reading active; the cancel is raised once the rollback is done.
-            await self._run_to_completion(
-                self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
-            )
+            try:
+                await run_to_completion(
+                    self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
+                )
+            except Exception as exc:  # the error to raise is the one that started the rollback (R5C-11)
+                logger.error("the rollback of shadow session %s failed: %s", shadow_session_id, exc)
             raise
 
         await manager.audit.append(
@@ -651,12 +683,9 @@ class BrowserSessionService(SessionCreation):
         """enable_shadow_browse's rollback, run to completion by its caller."""
         # As create's rollback: the context first, then the browser, and its gate only once that has closed.
         if context is not None:
-            # Bounded as each teardown step is: a stalled close must not keep the original error from
-            # returning, nor the browser from being closed.
-            try:
-                await asyncio.wait_for(context.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
-            except Exception as exc:
-                logger.warning("failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}")
+            # A teardown step: a stalled close must not keep the original error from returning, nor the browser from
+            # being closed, and neither may a close cancelled on its own (R5C-15).
+            await self._teardown_step(shadow_session_id, "close the context of a failed shadow browse", context.close)
         await self._close_owned_browser(headed_browser, shadow_session_id)
         # The directories, and the record a persist may already have written, closed as create_failed.
         await self._forget_failed_session_state(shadow_session, shadow_session_id)
@@ -766,6 +795,17 @@ class BrowserSessionService(SessionCreation):
         if status == "active" and self.manager.sessions.get(session.id) is not session:
             return
         await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
+
+    async def persist_after_action(self, session: "BrowserSession", action: str) -> None:
+        """Save the session's record once `action` has taken effect. A failed save (a full disk, Redis failing the
+        write) is logged with the session id, not raised: raised, it read as a failed action, and an agent that retried
+        acted twice (R5C-13). The stored record catches up at the session's next save."""
+        try:
+            await self.manager._persist_session(session, status="active")
+        except Exception as exc:
+            logger.warning(
+                "%s in session %s ran, but its session record could not be saved: %s", action, session.id, exc
+            )
 
     def isolation_payload(self, session: "BrowserSession") -> dict[str, Any]:
         payload: dict[str, Any] = {

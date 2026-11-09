@@ -95,14 +95,21 @@ def _split(url: str) -> tuple[str, str]:
 
 
 def _origin_and_path(src: str) -> str:
-    """scheme://host[:port]/path of a frame address: no credentials, query or fragment, which can carry tokens."""
+    """scheme://host[:port]/path of an address: no credentials, query or fragment, which can carry tokens.
+
+    An address with no host part (data:, about:) keeps its scheme and path as they are written.
+    """
     try:
         parts = urlsplit(src)
         host = parts.hostname or ""
-        port = f":{parts.port}" if parts.port else ""
+        port = f":{parts.port}" if parts.port is not None else ""
     except ValueError:
         return ""
-    return cap_url(f"{parts.scheme}://{host}{port}{parts.path}")
+    if ":" in host:
+        # An IPv6 address: urlsplit's hostname drops its brackets, which the address needs beside a port.
+        host = f"[{host}]"
+    authority = f"//{host}{port}" if parts.netloc else ""
+    return cap_url(f"{parts.scheme}:{authority}{parts.path}")
 
 
 def _frame_signal(src: str) -> str | None:
@@ -139,7 +146,10 @@ class BrowserBotChallengeService:
         visible_frames: list[str] = []
         try:
             # One evaluate, not three: this probe runs after every action. Bounded, under the session
-            # lock: a probe that times out is checked by the URL alone, like one that failed.
+            # lock: a probe that times out is checked by the URL alone, like one that failed. In the page's own
+            # world, not the controller's isolated one (NAV-12): it reads only the page's title, text and frames,
+            # which the page writes as it likes in either world, takes nothing of the agent's, and runs after
+            # every action, where the isolated world's extra round trip would be paid each time.
             probe = await bounded(session.page.evaluate(CHALLENGE_PROBE_SCRIPT))
             title = str(probe.get("title") or "").lower()
             body_text = str(probe.get("text") or "").lower()
@@ -168,7 +178,8 @@ class BrowserBotChallengeService:
         return {
             "bot_challenge_detected": True,
             "signal": signal,
-            "url": session.page.url,
+            # As a frame's is (D3a-10): the page's query, fragment and credentials can carry tokens.
+            "url": _origin_and_path(session.page.url),
             "title": cap_title(title),
             "iframes": matched_frames[:10],
         }

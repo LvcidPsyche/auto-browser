@@ -8,6 +8,7 @@ no record, or part of one.
 """
 
 import asyncio
+import errno
 import tempfile
 import unittest
 from datetime import datetime
@@ -104,6 +105,27 @@ class PipelineUnexpectedExceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([receipt.status for receipt in receipts], ["error"])
         self.assertEqual(audited, ["error"])
         self.assertIn("cancelled", str(receipts[0].metadata["error"]))
+
+    async def test_r5c_13_an_action_that_ran_returns_its_result_when_its_session_record_cannot_be_saved(self) -> None:
+        # The action ran and was recorded, then the save of the session's record failed (a full disk), and that error
+        # reached the caller, which read a failed action: an agent that retried acted twice.
+        del self.manager._persist_session  # the real one, over a store that cannot write
+        self.manager.session_store.upsert = AsyncMock(side_effect=OSError(errno.ENOSPC, "No space left on device"))
+        ran: list[int] = []
+
+        async def operation():
+            ran.append(1)
+
+        # Logged by the save every call that took effect shares (BrowserSessionService.persist_after_action).
+        with self.assertLogs("app.browser.services.sessions", level="WARNING") as logs:
+            result = await self.manager._run_action(self.session, "click", {"selector": "#b"}, operation)
+
+        self.assertEqual(ran, [1])
+        self.assertEqual(result["action"], "click")
+        self.manager.session_store.upsert.assert_awaited_once()
+        receipts, audited = await self._receipts_and_audit_statuses()
+        self.assertEqual(([receipt.status for receipt in receipts], audited), (["ok"], ["ok"]))
+        self.assertTrue(any("s1" in line and "No space left on device" in line for line in logs.output), logs.output)
 
     async def test_a_failing_record_does_not_replace_the_original_exception(self) -> None:
         self.manager.audit.append = AsyncMock(side_effect=OSError("disk full"))

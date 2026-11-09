@@ -376,6 +376,7 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         if name != "TAKEOVER_TOKEN_FILE":
             raise
         raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
+    kept: int | None = None
     try:
         try:
             mode = stat.S_IMODE(os.fstat(fd).st_mode)
@@ -384,20 +385,28 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
             if name != "TAKEOVER_TOKEN_FILE":
                 raise
             raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
-        if not mode & _GROUP_OR_OTHER_BITS:
-            return
-        os.fchmod(fd, PRIVATE_FILE_MODE)
-        # Some filesystems accept a chmod and keep the mode (a Windows drive under Docker Desktop, some FUSE or SMB
-        # mounts, W5-4): check that it held. Nobody can tighten such a file, so the token is still used.
+        if mode & _GROUP_OR_OTHER_BITS:
+            os.fchmod(fd, PRIVATE_FILE_MODE)
+            # Some filesystems accept a chmod and keep the mode (a Windows drive under Docker Desktop, some FUSE or
+            # SMB mounts, W5-4): check that it held. Nobody can tighten such a file, so the token is still used.
+            try:
+                kept = stat.S_IMODE(os.fstat(fd).st_mode)
+            except OSError as exc:
+                # The chmod went through but the mode could not be read back (W11-6): handled as the first read is.
+                if name != "TAKEOVER_TOKEN_FILE":
+                    raise
+                raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
+    except BaseException:
+        # A close that fails too (EIO) is logged, not raised: in a finally it replaced the error raised here, and the
+        # takeover token's check logged the generic cause instead of the read that failed (R5C-19).
         try:
-            kept = stat.S_IMODE(os.fstat(fd).st_mode)
+            os.close(fd)
         except OSError as exc:
-            # The chmod went through but the mode could not be read back (W11-6): handled as the first read is.
-            if name != "TAKEOVER_TOKEN_FILE":
-                raise
-            raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
-    finally:
-        os.close(fd)
+            logger.warning("could not close %s %s after its mode check failed: %s", name, path, exc)
+        raise
+    os.close(fd)
+    if kept is None:  # nothing to tighten
+        return
     if kept & _GROUP_OR_OTHER_BITS:
         logger.warning(
             "%s %s is readable beyond its owner (mode %o) and its filesystem did not keep a change to 0600, so it "

@@ -60,5 +60,5 @@ class BrowserTakeoverService:
         # behind its cancellation), as an action's record is.
         await write_record(session, writes)
         payload["session"] = await manager._session_summary(session)
-        await manager._persist_session(session, status="active")
+        await manager._persist_session_after_action(session, "request_human_takeover")
         return payload

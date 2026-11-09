@@ -92,6 +92,59 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["teardown"], "partial")
         self.assertEqual(result["failed_steps"], ["close isolated browser"])
 
+    async def test_r5c_11_a_gate_release_that_raises_after_the_browser_closed_does_not_stop_the_close(self) -> None:
+        # The gate release after the owned browser's close sat outside every try: its error escaped the close, and the
+        # audit event, the witness receipt and the closed record that follow the teardown were never written.
+        self.session.owns_browser = True
+        self.session.browser = SimpleNamespace(close=AsyncMock())
+        self.manager.request_gates.release = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("detach failed")
+        )
+
+        result = await self.close()
+
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "complete")  # the browser closed; its gate's session went with it
+        self.assertEqual(self.closed_audit()["status"], "ok")
+        self.receipt.assert_awaited_once()
+        self.assertEqual((await self.manager.session_store.get(self.session_id)).status, "closed")
+
+    async def test_r5c_15_a_closed_hook_cancelled_on_its_own_does_not_stop_the_close_being_recorded(self) -> None:
+        # Codex review of R5C-15: the session-closed hook was awaited with `except Exception` only, so a hook whose own
+        # future was cancelled ended the close before its audit event, receipt and closed record.
+        self.manager._session_closed_hook = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with self.assertLogs("app.browser.services", "WARNING") as logs:
+            result = await self.close()
+
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "complete")  # the hook is the extensions', not the session's teardown
+        self.closed_audit()
+        self.receipt.assert_awaited_once()
+        self.assertEqual((await self.manager.session_store.get(self.session_id)).status, "closed")
+        self.assertIn("session-closed hook", "\n".join(logs.output))
+
+    async def test_r5c_15_a_closed_hook_that_never_returns_does_not_hold_the_close(self) -> None:
+        # The hook was awaited unbounded, and a close runs to completion whatever happens to its caller, so a hook that
+        # never returned held the close (and its audit event, receipt and record) for ever.
+        let_go = asyncio.Event()
+
+        async def stalled(_session_id: str) -> None:
+            await let_go.wait()
+
+        self.manager._session_closed_hook = stalled
+
+        with patch.object(sessions_module, "TEARDOWN_STEP_TIMEOUT_SECONDS", 0.2), acting_as(ALICE):
+            task = asyncio.create_task(self.manager.close_session(self.session_id))
+            done, _ = await asyncio.wait({task}, timeout=5)  # not wait_for: a cancel does not stop a close
+            let_go.set()
+            result = await task
+
+        self.assertIn(task, done, "the close waited for the hook")
+        self.assertTrue(result["closed"])
+        self.receipt.assert_awaited_once()
+        self.assertEqual((await self.manager.session_store.get(self.session_id)).status, "closed")
+
     async def test_nav36_a_cancel_mid_teardown_still_records_the_close(self) -> None:
         started = asyncio.Event()
         proceed = asyncio.Event()

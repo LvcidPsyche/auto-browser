@@ -77,7 +77,7 @@ def _make_manager(
         _page_refused=MagicMock(return_value=False),
         page_provenance=PageProvenance(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
-        tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
+        tabs=SimpleNamespace(summaries=AsyncMock(return_value=[]), pages=MagicMock(return_value=[])),
         element_ids=FakePageElementIds(),
         ocr=SimpleNamespace(extract_from_image=AsyncMock(return_value={"available": True, "blocks": []})),
     )

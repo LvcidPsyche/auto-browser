@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.browser.page_provenance import PageProvenance
+from app.cdp.passthrough import CDPParamsError
 from app.mesh.models import PeerRecord
 from app.routes.extensions import register_all_routers
 
@@ -63,6 +64,8 @@ class FakeCdp:
     async def raw_cdp_command(self, method: str, params: dict):
         if method == "Forbidden.command":
             raise ValueError("blocked")
+        if method == "Bad.params":
+            raise CDPParamsError("parameter 'x' is not taken")
         return {"method": method, "params": params}
 
 
@@ -104,6 +107,31 @@ class RoutesExtensionsTests(unittest.TestCase):
         removed = client.delete("/sessions/session-1/network/hooks/*.json")
         self.assertTrue(removed.json()["removed"])
         self.assertEqual(client.get("/sessions/missing/network/requests").status_code, 404)
+
+    def test_a_raw_cdp_command_that_is_not_a_string_or_whose_params_are_not_an_object_is_refused(self) -> None:
+        # NAV-31: a method that is no string reached the allowlist's `in` (a list raised TypeError: a 500), and params
+        # that are no object went to the browser as they were.
+        client = self.make_client()
+        cases = {
+            "a list for the method": {"method": ["DOM.getDocument"]},
+            "a number for the method": {"method": 7},
+            "a list for the params": {"method": "DOM.getDocument", "params": [1]},
+            "a string for the params": {"method": "DOM.getDocument", "params": "depth=1"},
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                self.assertEqual(client.post("/sessions/session-1/cdp/raw", json=body).status_code, 422)
+
+        missing = client.post("/sessions/session-1/cdp/raw", json={"method": "DOM.getDocument", "params": None})
+        self.assertEqual(missing.json(), {"method": "DOM.getDocument", "params": {}})
+
+    def test_a_raw_cdp_parameter_the_command_does_not_take_answers_422_with_the_reason(self) -> None:
+        client = self.make_client()
+
+        response = client.post("/sessions/session-1/cdp/raw", json={"method": "Bad.params", "params": {"x": 1}})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"], "parameter 'x' is not taken")
 
     def test_hooks_whose_pattern_contains_a_slash_can_be_removed(self) -> None:
         from urllib.parse import quote

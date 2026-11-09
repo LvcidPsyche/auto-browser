@@ -82,7 +82,7 @@ def _service(tmp_path: Path, *, ocr_enabled: bool = True, strict: bool = False) 
         _page_refused=MagicMock(return_value=False),
         page_provenance=PageProvenance(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
-        tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
+        tabs=SimpleNamespace(summaries=AsyncMock(return_value=[]), pages=MagicMock(return_value=[])),
         get_session=AsyncMock(return_value=session),
         element_ids=FakePageElementIds(),
     )

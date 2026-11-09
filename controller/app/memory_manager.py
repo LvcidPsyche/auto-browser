@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -9,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .session_ownership import may_use, verified_operator
-from .utils import atomic_write_text, utc_now
+from .utils import atomic_write_text, run_to_completion, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +118,9 @@ class MemoryManager:
                 )
 
             path = self._profile_path(name)
-            await asyncio.to_thread(atomic_write_text, path, profile.model_dump_json(indent=2))
+            # Awaited to its end however often the save is cancelled, so the lock goes only once the write has landed:
+            # let go at a cancel, a delete that took the lock next was undone by the write (reviews of c4 and c4b).
+            await run_to_completion(asyncio.to_thread(atomic_write_text, path, profile.model_dump_json(indent=2)))
             logger.info("memory profile saved: %s", name)
             return profile
 
@@ -134,19 +135,26 @@ class MemoryManager:
                 return []
             profiles: list[dict[str, Any]] = []
             for path in sorted(self.root.glob("*.json")):
+                # Only a file that loads as a profile, as get() loads one; any other is skipped and logged. One that
+                # held a JSON list failed the whole listing, one that did not parse was skipped unsaid (STORE-36),
+                # and other objects were listed though no get could load them (review of c4). The type only: a
+                # parser's message quotes the file.
                 try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
+                    profile = MemoryProfile.model_validate_json(path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    logger.warning(
+                        "memory profile file %s skipped: it is not a valid profile (%s)", path.name, type(exc).__name__
+                    )
                     continue
-                if not may_use(data.get("owner")):
+                if not may_use(profile.owner):
                     continue
                 profiles.append(
                     {
-                        "name": data.get("name", path.stem),
-                        "created_at": data.get("created_at"),
-                        "updated_at": data.get("updated_at"),
-                        "goal_summary": data.get("goal_summary", ""),
-                        "step_count": len(data.get("completed_steps", [])),
+                        "name": profile.name,
+                        "created_at": profile.created_at,
+                        "updated_at": profile.updated_at,
+                        "goal_summary": profile.goal_summary,
+                        "step_count": len(profile.completed_steps),
                     }
                 )
             return profiles
@@ -154,12 +162,15 @@ class MemoryManager:
         return await asyncio.to_thread(_list_sync)
 
     async def delete(self, name: str) -> bool:
-        profile = await self._load(name)
-        if profile is None:
-            return False
-        self._require_access(name, profile)
-        await asyncio.to_thread(self._profile_path(name).unlink)
-        return True
+        # Under the lock a save holds: a delete between a save's read and its write was undone by that write.
+        async with self._lock:
+            profile = await self._load(name)
+            if profile is None:
+                return False
+            self._require_access(name, profile)
+            # To its end, as a save's write is: an unlink that landed after the lock went removed the next save's file.
+            await run_to_completion(asyncio.to_thread(self._profile_path(name).unlink))
+            return True
 
     @staticmethod
     def _require_access(name: str, profile: MemoryProfile | None) -> None:
@@ -183,6 +194,14 @@ class MemoryManager:
         def _read_sync() -> MemoryProfile | None:
             if not path.exists():
                 return None
-            return MemoryProfile.model_validate_json(path.read_text(encoding="utf-8"))
+            try:
+                return MemoryProfile.model_validate_json(path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                # Not the parser's message, which quotes the file, and the file can be another operator's (STORE-36).
+                logger.warning("memory profile file %s cannot be read: %s", path.name, type(exc).__name__)
+                raise ValueError(
+                    f"memory profile {name!r} cannot be read: its file is not a valid profile; fix or remove it "
+                    "in MEMORY_ROOT"
+                ) from None
 
         return await asyncio.to_thread(_read_sync)

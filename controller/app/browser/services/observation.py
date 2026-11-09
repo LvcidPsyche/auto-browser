@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import secrets
 import shutil
 import time
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from ... import events as _events
 from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
+from ...artifacts import in_thread_writing
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
 from ...pii_scrub import pii_words
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
@@ -89,12 +92,58 @@ def _prune_share_frames(directory: Path, *, keep: Path) -> None:
         logger.warning("failed to prune share frames in %s: %s", directory, exc)
 
 
+def _staging_path(path: str) -> str:
+    """A hidden name beside ``path`` for an image not yet redacted (ACT-33): random, so no request names it, and not
+    ``.png``, so no listing of a session's screenshots (the replay page's) finds it."""
+    target = Path(path)
+    return str(target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp"))
+
+
+def _write_through_temporary(path: str, data: bytes) -> None:
+    """``data`` written over ``path`` through a hidden sibling and os.replace, so a write cut short never leaves a
+    partly written image at ``path`` (ACT-33)."""
+    temporary = Path(_staging_path(path))
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _publish(screenshot: dict[str, str]) -> dict[str, str]:
+    """A staged screenshot (``capture_session_screenshot(staged=True)``) moved onto its published name with os.replace
+    once its redaction is done, or left as it was (ACT-33). A capture's caller then makes it the session's
+    last_screenshot (review of c4). Its marker goes only once it is moved, so a caller's _discard still finds a hidden
+    file whose move failed (review of c4)."""
+    published = screenshot.get("published_path")
+    if published:
+        os.replace(screenshot["path"], published)
+        del screenshot["published_path"]
+        screenshot["path"] = published
+    return screenshot
+
+
+def _discard(screenshot: dict[str, str]) -> None:
+    """A staged screenshot whose redaction did not finish: its hidden file goes, and nothing is published."""
+    if screenshot.pop("published_path", None):
+        Path(screenshot["path"]).unlink(missing_ok=True)
+
+
+def _discard_finished(capture: asyncio.Future) -> None:
+    """The staged screenshot of a capture that finished while a read beside it failed."""
+    if capture.done() and not capture.cancelled() and capture.exception() is None:
+        _discard(capture.result())
+
+
 def _delete_when_done(capture: asyncio.Future, path: str) -> None:
-    """A capture whose read was cancelled: nothing checked what it writes, so the file goes once it is written."""
+    """A capture whose read was cancelled: nothing checked what it writes, so the file goes once the capture is done. A
+    capture that is cancelled itself (a shutdown) ends before its write does, which then removes the file itself
+    (artifacts.in_thread_writing)."""
 
     def delete(finished: asyncio.Future) -> None:
         if not finished.cancelled() and finished.exception() is not None:
-            logger.debug("a cancelled read's screenshot capture failed: %s", type(finished.exception()).__name__)
+            logger.debug("a cancelled read's screenshot write failed: %s", type(finished.exception()).__name__)
         Path(path).unlink(missing_ok=True)
 
     if capture.done():
@@ -280,12 +329,21 @@ class BrowserObservationService:
             found = await self.manager.element_ids.evaluate(session.page, INTERACTABLES_SCRIPT, effective_limit)
             return found, await self.page_summary(session.page, text_limit=text_limit)
 
-        screenshot, (interactables, summary) = await _gather_settled(
-            self.manager._capture_screenshot(session, screenshot_label),
-            read_dom(),
-        )
-        ocr = await self._extract_ocr_if_needed(session, screenshot, summary)
-        await self._scrub_screenshot_if_needed(session, screenshot, ocr)
+        # Staged when it is to be redacted, and published once redacted (ACT-33).
+        staged = self.manager.pii_scrubber.screenshot_enabled
+        capture = asyncio.ensure_future(self.manager._capture_screenshot(session, screenshot_label, staged=staged))
+        try:
+            screenshot, (interactables, summary) = await _gather_settled(capture, read_dom())
+        except BaseException:
+            _discard_finished(capture)
+            raise
+        try:
+            ocr = await self._extract_ocr_if_needed(session, screenshot, summary)
+            await self._scrub_screenshot_if_needed(session, screenshot, ocr)
+            session.last_screenshot = _publish(screenshot)
+        except BaseException:
+            _discard(screenshot)
+            raise
         tabs = await self.manager.tabs.summaries(session)
         return {
             "session": await self.manager._session_summary(session),
@@ -295,7 +353,7 @@ class BrowserObservationService:
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
             "accessibility_outline": summary["accessibility_outline"],
-            "ocr": await asyncio.to_thread(self._ocr_for_caller, ocr),
+            "ocr": await asyncio.to_thread(self._ocr_for_caller, ocr, screenshot["path"]),
             "interactables": interactables,
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
@@ -310,16 +368,19 @@ class BrowserObservationService:
             "preset": preset,
         }
 
-    def _ocr_for_caller(self, ocr: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _ocr_for_caller(self, ocr: dict[str, Any] | None, image_path: str) -> dict[str, Any] | None:
         """The OCR result as observe returns it.
 
         `redaction_blocks` is the screenshot redaction's own input: every word with its box, including the
         words that redaction blacks out, so the caller never gets it. The text the caller does get goes
-        through the PII scrubber, since the pixels it came from are redacted too.
+        through the PII scrubber, since the pixels it came from are redacted too. Its `image_path` is the
+        screenshot's published one: OCR read it under its hidden name, gone once it is published (review of c4).
         """
         if not ocr:
             return ocr
         returned = {key: value for key, value in ocr.items() if key != "redaction_blocks"}
+        if "image_path" in returned:
+            returned["image_path"] = image_path
         scrubber = self.manager.pii_scrubber
         if not scrubber.enabled:
             return returned
@@ -373,12 +434,21 @@ class BrowserObservationService:
         honouring that setting for some screenshots and not others is the worse
         trade. The before/after snapshots of actions can opt out separately with
         PII_SCRUB_ACTION_SCREENSHOTS=false; see light_snapshot.
+
+        The capture is staged under a hidden name and published once redacted (ACT-33): written at its published
+        name, the raw image was served there while OCR ran.
         """
-        screenshot = await self.manager._capture_screenshot(session, label)
-        if self.manager.pii_scrubber.screenshot_enabled:
+        if not self.manager.pii_scrubber.screenshot_enabled:
+            return await self.manager._capture_screenshot(session, label)
+        screenshot = await self.manager._capture_screenshot(session, label, staged=True)
+        try:
             ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
             await self._scrub_screenshot_if_needed(session, screenshot, ocr)
-        return screenshot
+            session.last_screenshot = _publish(screenshot)
+        except BaseException:
+            _discard(screenshot)
+            raise
+        return session.last_screenshot
 
     async def redacted_copy(self, session: "BrowserSession", screenshot: dict[str, str], label: str) -> dict[str, str]:
         """A PII-redacted copy of a screenshot already on disk, for reading it without trusting how it was taken.
@@ -389,11 +459,17 @@ class BrowserObservationService:
         """
         if not self.manager.pii_scrubber.screenshot_enabled or not Path(screenshot["path"]).is_file():
             return screenshot
-        copy = self.manager.artifacts.screenshot_target(session, label)
-        await asyncio.to_thread(shutil.copyfile, screenshot["path"], copy["path"])
-        ocr = await self.manager.ocr.extract_from_image(copy["path"])
-        await self._scrub_screenshot_if_needed(session, copy, ocr)
-        return copy
+        target = self.manager.artifacts.screenshot_target(session, label)
+        # Staged, as a capture to be redacted is (ACT-33).
+        copy = {**target, "path": _staging_path(target["path"]), "published_path": target["path"]}
+        try:
+            await in_thread_writing(copy["path"], shutil.copyfile, screenshot["path"], copy["path"])
+            ocr = await self.manager.ocr.extract_from_image(copy["path"])
+            await self._scrub_screenshot_if_needed(session, copy, ocr)
+            return _publish(copy)
+        except BaseException:
+            _discard(copy)
+            raise
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
         read = start_read(self.manager, session)
@@ -417,31 +493,51 @@ class BrowserObservationService:
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
             "accessibility_outline": summary["accessibility_outline"],
+            # Counted, not listed (a tab's title costs a round trip): what the action's verification compares with
+            # the tabs the observation after it lists (NAV-08).
+            "tab_count": len(self.manager.tabs.pages(session)),
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
             **_scrub_disclosure(screenshot),
         }
 
-    async def capture_session_screenshot(self, session: "BrowserSession", label: str) -> dict[str, str]:
-        # Every screenshot (observe, capture, diff, the action snapshots) comes through here.
+    async def capture_session_screenshot(
+        self, session: "BrowserSession", label: str, *, staged: bool = False
+    ) -> dict[str, str]:
+        # Every screenshot (observe, capture, diff, the action snapshots) comes through here. One to be redacted is
+        # ``staged``: written under a hidden name, its published one kept as "published_path" until _publish moves
+        # it there (ACT-33).
         read = start_read(self.manager, session)
         target = self.manager.artifacts.screenshot_target(session, label)
-        # A task, shielded from the read's cancellation: Playwright writes the image in a thread once it
-        # arrives, and cancelling the await does not stop that write.
-        capture = asyncio.ensure_future(self.manager.artifacts.capture_screenshot(session, label, target=target))
+        written = {**target, "path": _staging_path(target["path"])} if staged else target
+        # A task, shielded from the read's cancellation: the image is written in a worker thread once it arrives
+        # (artifacts.capture_screenshot), and cancelling the await does not stop that write.
+        capture = asyncio.ensure_future(self.manager.artifacts.capture_screenshot(session, label, target=written))
         try:
             screenshot = await asyncio.shield(capture)
         except BaseException as exc:
             # Cut off (cancelled, or failed) while the file was written: nothing checked it.
             if isinstance(exc, Exception):
-                read.refuse_raised(target["path"])
+                # Failed, so its write has ended, with whatever part of the image it wrote (a full disk): that part
+                # goes, as nobody gets a screenshot to discard (review of c4b). A delete that fails is logged, so the
+                # capture's error, or the refusal of a page that moved, is still what is raised (review of c5).
+                try:
+                    Path(written["path"]).unlink(missing_ok=True)
+                except OSError as error:
+                    logger.warning("could not delete the part a failed capture wrote, %s: %s", written["path"], error)
+                read.refuse_raised()
             else:
-                _delete_when_done(capture, target["path"])
+                _delete_when_done(capture, written["path"])
             raise
         read.check(screenshot["path"])
-        # The screenshot tools that reuse an earlier one (compare, vision) take this one, which
-        # was checked, rather than whatever PNG is newest in the artifact directory.
-        session.last_screenshot = screenshot
+        if staged:
+            # Not the session's last screenshot yet, which vision reads unlocked: its caller makes it that once it
+            # is redacted and published (review of c4).
+            screenshot["published_path"] = target["path"]
+        else:
+            # The screenshot tools that reuse an earlier one (compare, vision) take this one, which
+            # was checked, rather than whatever PNG is newest in the artifact directory.
+            session.last_screenshot = screenshot
         return screenshot
 
     def trace_payload(self, session: "BrowserSession") -> dict[str, Any]:
@@ -462,8 +558,9 @@ class BrowserObservationService:
         # it runs alongside the ARIA snapshot rather than after it: this is paid
         # before and after every action, and each round trip costs more when the
         # browser is a remote node. It runs in the controller's isolated world,
-        # which holds the focused element's id.
-        summary, accessibility_outline = await asyncio.gather(
+        # which holds the focused element's id. Settled together (ACT-29): plain gather raised the first error at
+        # once and left the other read running against the page after the caller let go of the session lock.
+        summary, accessibility_outline = await _gather_settled(
             self.manager.element_ids.evaluate(page, PAGE_SUMMARY_SCRIPT, text_limit),
             self.accessibility_outline(page),
         )
@@ -540,7 +637,10 @@ class BrowserObservationService:
             # session.lock; keep it off the event loop.
             scrubbed_bytes, hits = await asyncio.to_thread(pii_scrubber.screenshot, raw_bytes, blocks)
             if hits:
-                scrubbed_path.write_bytes(scrubbed_bytes)
+                # Not over the capture in place, which a write cut short left partly written (ACT-33).
+                await in_thread_writing(
+                    screenshot["path"], _write_through_temporary, screenshot["path"], scrubbed_bytes
+                )
         except Exception as exc:
             # The file on disk is still the unredacted capture. Say so in the
             # result, the way the OCR-unavailable path does, and audit a failure,

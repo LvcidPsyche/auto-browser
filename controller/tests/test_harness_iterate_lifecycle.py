@@ -17,8 +17,10 @@ from app.audit import reset_current_operator, set_current_operator
 from app.config import Settings
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessRunRecord, HarnessService
+from app.harness.register import mesh_identity_signer, mesh_identity_verifier
 from app.harness.trace import TraceIntegrityError
 from app.harness.verifier.base import VerificationResult
+from app.mesh.identity import NodeIdentity
 
 DONE = {"url": "https://example.com/done", "text": "done"}
 
@@ -292,6 +294,205 @@ class StagingFailureTests(_Base):
         self.assertEqual([item["skill_id"] for item in service.list_candidates()], [record.candidate.skill_id])
 
 
+# How long the gated prune holds the staging lock unless the test lets it go first: a loop stuck behind the lock
+# gets it back after this, so a regression fails instead of hanging.
+PRUNE_HOLD_SECONDS = 2.0
+
+
+class StagingLockTests(_Base):
+    """R5C-12: placing a candidate takes the staging lock, which retention's prune holds (in a worker thread) from a
+    candidate's age check through its removal. Staged on the event loop, a run that met a prune stalled the loop."""
+
+    def _gated_prune(self, service: HarnessService) -> tuple[threading.Event, threading.Event]:
+        """A prune holding the staging lock in its own thread: (the event that lets it go, the one set once it has)."""
+        held, release, released = threading.Event(), threading.Event(), threading.Event()
+
+        def prune() -> None:
+            with service.store.staging_lock:
+                held.set()
+                release.wait(PRUNE_HOLD_SECONDS)
+            released.set()
+
+        thread = threading.Thread(target=prune, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        return release, released
+
+    @staticmethod
+    def _watch_place(service: HarnessService) -> threading.Event:
+        """Set once the run first tries to place its candidate (it then waits for the staging lock)."""
+        entered = threading.Event()
+        try_place = service.inducer.try_place
+
+        def watched(build_dir: Path, target_dir: Path) -> bool:
+            entered.set()
+            return try_place(build_dir, target_dir)
+
+        service.inducer.try_place = watched  # type: ignore[method-assign]
+        return entered
+
+    async def test_r5c_12_the_event_loop_runs_while_a_prune_holds_the_staging_lock(self) -> None:
+        service = HarnessService(self.root)
+        release, released = self._gated_prune(service)
+        entered = self._watch_place(service)
+        run = asyncio.create_task(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+
+        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+        self.assertFalse(released.is_set(), "the event loop waited for the prune's staging lock")
+        release.set()
+        record = await asyncio.wait_for(run, 10)
+
+        self.assertEqual(record.status, "converged")
+        self.assertTrue(Path(record.candidate.files["candidate.json"]).is_file())
+
+    async def test_r5c_12_a_cancel_while_the_candidate_is_placed_waits_for_it_and_records_it(self) -> None:
+        # The worker thread cannot be stopped: the cancel waits for it, so the run names the candidate it staged.
+        service = HarnessService(self.root)
+        release, _ = self._gated_prune(service)
+        entered = self._watch_place(service)
+        run = asyncio.create_task(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+
+        run.cancel()
+        await asyncio.sleep(0.05)
+        self.assertFalse(run.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 10)
+
+        (stored,) = service.store.list()
+        self.assertEqual(stored.status, "converged")
+        self.assertTrue(Path(stored.candidate.files["candidate.json"]).is_file())
+
+    async def test_a_candidate_read_on_the_event_loop_during_a_restage_finds_a_whole_candidate(self) -> None:
+        # Review of c2 (Codex 2): placed in a worker thread, a re-stage's two renames (the staged candidate aside, the
+        # new build into its place) ran between candidate reads on the event loop, which take no lock: a read between
+        # them found no candidate, or the new files under the old candidate's signature.
+        from app.harness import induce
+
+        service = HarnessService(self.root)
+        first = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        skill_id = first.candidate.skill_id
+        staged = Path(first.candidate.files["candidate.json"]).parent
+        loop_thread = threading.get_ident()
+        set_aside, resume = threading.Event(), threading.Event()
+        self.addCleanup(resume.set)
+        real_replace = induce.os.replace
+
+        def replace(src, dst) -> None:
+            real_replace(src, dst)
+            if Path(src) == staged:  # the staged candidate is set aside; the new one is not in its place yet
+                set_aside.set()
+                if threading.get_ident() != loop_thread:
+                    resume.wait(PRUNE_HOLD_SECONDS)  # a read on the event loop runs here
+
+        with patch.object(induce.os, "replace", replace):
+            run = asyncio.create_task(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+            self.assertTrue(await asyncio.to_thread(set_aside.wait, 5))
+            try:
+                read: object = service.get_candidate(skill_id)
+            except (KeyError, PermissionError) as exc:
+                read = exc
+            finally:
+                resume.set()
+            record = await asyncio.wait_for(run, 10)
+
+        self.assertIsInstance(read, dict, f"a read during the re-stage failed: {read!r}")
+        self.assertEqual(read["skill_id"], skill_id)
+        self.assertEqual(record.candidate.skill_id, skill_id)
+
+    async def test_a_restage_removes_the_candidate_it_replaced_off_the_event_loop(self) -> None:
+        # Review of c2's fix (Codex): placed on the event loop, a re-stage also removed the candidate it replaced
+        # there (its aside), so a slow removal stalled every task even with the staging lock free.
+        from app.harness import induce
+
+        service = HarnessService(self.root)
+        await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        removing, loop_ran = threading.Event(), threading.Event()
+        self.addCleanup(loop_ran.set)
+        seen: list[bool] = []
+        real_rmtree = shutil.rmtree
+
+        def rmtree(path, *args, **kwargs):
+            if Path(path).name.endswith(".old"):
+                removing.set()
+                seen.append(loop_ran.wait(PRUNE_HOLD_SECONDS))  # set by a task on the event loop
+            return real_rmtree(path, *args, **kwargs)
+
+        async def on_the_loop() -> None:
+            await asyncio.to_thread(removing.wait, PRUNE_HOLD_SECONDS)
+            loop_ran.set()
+
+        with patch.object(induce.shutil, "rmtree", rmtree):
+            watcher = asyncio.create_task(on_the_loop())
+            record = await service.start_convergence(
+                _contract(max_attempts=1), mock_final_observation={**DONE, "text": "done again"}
+            )
+            await asyncio.wait_for(watcher, 10)
+
+        self.assertEqual(seen, [True], "the event loop waited for the replaced candidate's removal")
+        self.assertEqual(record.status, "converged")
+        self.assertEqual([entry.name for entry in service.store.staging_root.iterdir()], [record.candidate.skill_id])
+
+
+class StagingShutdownTests(unittest.TestCase):
+    """Review of c2 (Codex 1, GLM 2): asyncio.run cancels every task left when its main returns, a run's staging task
+    too. Placed by a worker thread that went on after that cancel, the candidate was staged while the run's record
+    never named it."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def test_a_shutdown_during_staging_leaves_no_candidate_the_runs_record_does_not_name(self) -> None:
+        service = HarnessService(self.root)
+        held, release = threading.Event(), threading.Event()
+
+        def prune() -> None:
+            with service.store.staging_lock:
+                held.set()
+                release.wait(PRUNE_HOLD_SECONDS)
+
+        thread = threading.Thread(target=prune, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        built = threading.Event()
+        build = service.inducer._build
+
+        def watched_build(*args, **kwargs):
+            try:
+                return build(*args, **kwargs)
+            finally:
+                built.set()
+
+        service.inducer._build = watched_build  # type: ignore[method-assign]
+
+        async def main() -> None:
+            # Left running when main returns: asyncio.run cancels it, and its staging task, as a shutdown does.
+            asyncio.ensure_future(service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE))
+            self.assertTrue(await asyncio.to_thread(built.wait, 5))
+            await asyncio.sleep(0.05)  # the stage now waits for the prune's staging lock
+            threading.Timer(0.2, release.set).start()
+
+        asyncio.run(main())
+
+        (stored,) = service.store.list()
+        placed = sorted(entry.name for entry in service.store.staging_root.iterdir())
+        if stored.candidate is None:
+            self.assertEqual(placed, [], "a candidate was staged that the run's record does not name")
+        else:
+            self.assertTrue(Path(stored.candidate.files["candidate.json"]).is_file())
+        # The next start finds the run converged with no candidate staged for it, and marks it failed.
+        HarnessService(self.root).store.recover_interrupted_staging()
+        (after,) = HarnessService(self.root).store.list()
+        self.assertEqual(after.status, "failed" if stored.candidate is None else "converged")
+
+
 class TraceBindingTests(_Base):
     def _edit_observation(self, record) -> None:
         path = Path(record.attempts[0].trace_path)
@@ -319,6 +520,185 @@ class TraceBindingTests(_Base):
         self._edit_observation(record)
 
         self.assertEqual(service.get_trace(record.id)["final_observation"]["url"], "https://example.com/forged")
+
+
+class RetentionReadTests(_Base):
+    """c2's "not done": retention's prune removed a candidate in a worker thread while candidate reads on the event
+    loop took no lock, so a read met a candidate half removed, which a signed candidate reads as tampered with."""
+
+    def _signed_service(self) -> HarnessService:
+        identity = NodeIdentity(self.root / "identity")
+        return HarnessService(
+            self.root / "harness",
+            signer=mesh_identity_signer(identity),
+            envelope_verifier=mesh_identity_verifier(identity),
+        )
+
+    async def _aged_candidate(self, service: HarnessService) -> tuple[str, Path]:
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        directory = Path(record.candidate.files["candidate.json"]).parent
+        for path in [*directory.iterdir(), directory]:
+            _age(path, 40)
+        return record.candidate.skill_id, directory
+
+    async def test_a_candidate_read_while_retention_removes_it_is_not_found_not_tampered_with(self) -> None:
+        from app.harness import iterate
+
+        service = self._signed_service()
+        skill_id, directory = await self._aged_candidate(service)
+        removing, resume = threading.Event(), threading.Event()
+        self.addCleanup(resume.set)
+        real_rmtree = shutil.rmtree
+
+        def paused_rmtree(path, *args, **kwargs):
+            if Path(path).parent.resolve() == directory.parent.resolve() and not removing.is_set():
+                (Path(path) / "SKILL.md").unlink()  # the removal is under way: the reads below run here
+                removing.set()
+                resume.wait(PRUNE_HOLD_SECONDS)
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(iterate.shutil, "rmtree", paused_rmtree):
+            pruning = asyncio.ensure_future(asyncio.to_thread(service.store.prune, 30))
+            self.assertTrue(await asyncio.to_thread(removing.wait, 5))
+            try:
+                with self.assertRaises(KeyError):
+                    service.get_candidate(skill_id)
+                with self.assertNoLogs("app.harness.register", "WARNING"):
+                    self.assertEqual(service.list_candidates(), [])
+                drift = await service.check_drift(skill_id)
+            finally:
+                resume.set()
+            self.assertEqual(await pruning, 1)
+
+        self.assertEqual(drift["status"], "missing")
+        self.assertFalse(directory.exists())
+
+    async def test_retention_waits_for_a_candidate_read_in_progress(self) -> None:
+        from app.harness.register import SkillStagingRegistry
+
+        service = self._signed_service()
+        skill_id, directory = await self._aged_candidate(service)
+        prune = threading.Thread(target=service.store.prune, args=(30,))
+        self.addCleanup(prune.join, 10)
+        finished_during_the_read: list[bool] = []
+        real_verify_files = SkillStagingRegistry._verify_files
+
+        def verify_files(registry, candidate, signed_hashes, folder):
+            # candidate.json is read; the files it signs are read next, and retention runs in between.
+            if prune.ident is None:
+                prune.start()
+                prune.join(0.5)
+                finished_during_the_read.append(not prune.is_alive())
+            return real_verify_files(registry, candidate, signed_hashes, folder)
+
+        with patch.object(SkillStagingRegistry, "_verify_files", verify_files):
+            read = service.get_candidate(skill_id)
+        prune.join(10)
+
+        self.assertEqual(finished_during_the_read, [False], "retention removed the candidate while it was read")
+        self.assertEqual(read["skill_id"], skill_id)
+        self.assertFalse(directory.exists())
+
+    async def test_retention_waits_for_a_listing_or_a_drift_check_reading_a_candidate(self) -> None:
+        # Review of c3 (Codex 9): the tests above read with get_candidate, or after the candidate was set aside, so
+        # the lock the listing, a drift check's read and check_all's listing take could go and no test would notice.
+        from app.harness.register import SkillStagingRegistry
+
+        service = self._signed_service()
+
+        async def list_candidates(skill_id: str) -> object:
+            return service.list_candidates()  # on the event loop, as the gateway calls it
+
+        async def check_drift(skill_id: str) -> object:
+            return await service.check_drift(skill_id)
+
+        async def check_all_drifts(skill_id: str) -> object:
+            return await service.check_all_drifts()
+
+        real_verify_files = SkillStagingRegistry._verify_files
+        for read in (list_candidates, check_drift, check_all_drifts):
+            with self.subTest(reader=read.__name__):
+                skill_id, directory = await self._aged_candidate(service)
+                prune = threading.Thread(target=service.store.prune, args=(30,))
+                self.addCleanup(prune.join, 10)
+                finished_during_the_read: list[bool] = []
+
+                def verify_files(
+                    registry, candidate, signed_hashes, folder, prune=prune, seen=finished_during_the_read
+                ):
+                    # candidate.json is read; the files it signs are read next, and retention runs in between.
+                    if prune.ident is None:
+                        prune.start()
+                        prune.join(0.5)
+                        seen.append(not prune.is_alive())
+                    return real_verify_files(registry, candidate, signed_hashes, folder)
+
+                with patch.object(SkillStagingRegistry, "_verify_files", verify_files):
+                    result = await read(skill_id)
+                prune.join(10)
+
+                self.assertEqual(finished_during_the_read, [False], "retention removed the candidate while it was read")
+                self.assertFalse(directory.exists())
+                if read is list_candidates:
+                    self.assertEqual([item["skill_id"] for item in result], [skill_id])
+                elif read is check_drift:
+                    self.assertEqual(result["status"], "healthy", result["notes"])
+
+
+class _HeldDriftVerifier:
+    """A drift check's verifier that waits until the test lets it answer."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def verify(self, contract, trace) -> VerificationResult:
+        self.entered.set()
+        await self.release.wait()
+        return VerificationResult(passed=True, confidence=1.0, backend="held")
+
+
+class DriftCheckGapTests(_Base):
+    """c2's "not done": a drift check read the candidate, awaited the verifier, then wrote drift.json into whatever its
+    directory held by then: a candidate re-staged meanwhile got the old one's result, and one removed got its
+    directory back, holding only drift.json."""
+
+    async def _held_check(self, service: HarnessService, skill_id: str) -> tuple[asyncio.Task, _HeldDriftVerifier]:
+        held = _HeldDriftVerifier()
+        service.drift_monitor.verifier = held
+        check = asyncio.create_task(service.check_drift(skill_id))
+        await asyncio.wait_for(held.entered.wait(), 5)
+        return check, held
+
+    async def test_a_drift_result_is_not_written_beside_a_candidate_restaged_while_it_was_checked(self) -> None:
+        service = HarnessService(self.root)
+        first = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        directory = Path(first.candidate.files["candidate.json"]).parent
+        check, held = await self._held_check(service, first.candidate.skill_id)
+        second = await service.start_convergence(
+            _contract(max_attempts=1), mock_final_observation={**DONE, "text": "done again"}
+        )
+        held.release.set()
+        result = await asyncio.wait_for(check, 10)
+
+        self.assertNotEqual(second.candidate.trace_hash, first.candidate.trace_hash)
+        self.assertEqual(result["trace_hash"], first.candidate.trace_hash)
+        self.assertFalse((directory / "drift.json").exists(), "the first candidate's result sits beside the second")
+        self.assertTrue(any("drift.json was not written" in note for note in result["notes"]), result["notes"])
+
+    async def test_a_drift_check_does_not_recreate_a_candidate_retention_removed_while_it_was_checked(self) -> None:
+        service = HarnessService(self.root)
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        directory = Path(record.candidate.files["candidate.json"]).parent
+        check, held = await self._held_check(service, record.candidate.skill_id)
+        for path in [*directory.iterdir(), directory]:
+            _age(path, 40)
+        self.assertEqual(await asyncio.to_thread(service.store.prune, 30), 1)
+        held.release.set()
+        result = await asyncio.wait_for(check, 10)
+
+        self.assertFalse(directory.exists(), "the drift check recreated the removed candidate's directory")
+        self.assertTrue(any("drift.json was not written" in note for note in result["notes"]), result["notes"])
 
 
 def _age(path: Path, days: float) -> None:
@@ -349,7 +729,8 @@ class RetentionTests(_Base):
 
     async def test_w4_11_a_candidate_restaged_while_prune_waits_to_remove_it_survives(self) -> None:
         # Prune read the old candidate's age, then removed whatever was at that path: a re-stage that replaced it in
-        # between lost the new candidate. Staging's replace now waits for prune's check-and-remove.
+        # between lost the new candidate. Staging's replace now waits for prune's age check and its rename of the
+        # candidate to a hidden name, which it removes from (since c3's A6; it removed the candidate in place before).
         import threading
 
         from app.harness import iterate
@@ -362,20 +743,22 @@ class RetentionTests(_Base):
         build = service.store.staging_root / ".tmp-restaged"
         shutil.copytree(target, build)
         (build / "candidate.json").write_text('{"fresh": true}', encoding="utf-8")
-        real_rmtree = shutil.rmtree
+        real_replace = os.replace
+        prune_thread = threading.get_ident()
         restage = threading.Thread(target=service.inducer.place, args=(build, target))
 
-        def paused_rmtree(path, *args, **kwargs):
+        def paused_replace(src, dst, *args, **kwargs):
             # Resolved (W10-12): the record's path is resolved, while prune walks the staging root as configured,
             # which differs under a symlinked or 8.3-form temp directory (C:/Users/RUNNER~1 on a Windows runner).
-            if Path(path).resolve() == target.resolve() and not restage.is_alive() and restage.ident is None:
+            pruning = threading.get_ident() == prune_thread
+            if pruning and Path(src).resolve() == target.resolve() and restage.ident is None:
                 restage.start()
                 restage.join(0.5)  # the replace runs now unless prune holds the staging lock
-            return real_rmtree(path, *args, **kwargs)
+            return real_replace(src, dst, *args, **kwargs)
 
-        with patch.object(iterate.shutil, "rmtree", paused_rmtree):
+        with patch.object(iterate.os, "replace", paused_replace):
             service.store.prune(30)
-        self.assertIsNotNone(restage.ident, f"prune never removed the aged candidate at {target}")
+        self.assertIsNotNone(restage.ident, f"prune never set the aged candidate at {target} aside")
         restage.join(10)
 
         self.assertFalse(restage.is_alive())
@@ -867,6 +1250,33 @@ class RetentionTests(_Base):
             self.assertEqual(service.store.prune(30), 2)
         self.assertTrue(any("unreadable" in line for line in logs.output), logs.output)
         self.assertEqual([path for path in aged if path.exists()], [])
+
+    async def test_a_candidate_that_cannot_be_set_aside_is_the_one_its_warning_names(self) -> None:
+        # Since c3's A6 the prune renames an aged candidate to a hidden `.tmp-` name, then removes it there; it took
+        # that name for its warning before the rename ran, so a rename that failed (a file held open on Windows) was
+        # logged for a path that never existed, not for the candidate it left in place.
+        from app.harness import iterate
+
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        directory = Path(record.candidate.files["candidate.json"]).parent
+        for path in [*directory.iterdir(), directory]:
+            _age(path, 40)
+        real_replace = os.replace
+
+        def replace(src, dst, *args, **kwargs):
+            if Path(src).resolve() == directory.resolve():
+                raise PermissionError(13, "The process cannot access the file", str(src))
+            return real_replace(src, dst, *args, **kwargs)
+
+        with patch.object(iterate.os, "replace", replace), self.assertLogs("app.harness.iterate", "WARNING") as logs:
+            self.assertEqual(service.store.prune(30), 0)
+
+        # The path the warning names (its first argument), not the error's text, which names the rename's own paths.
+        warnings = [entry for entry in logs.records if "could not remove" in entry.getMessage()]
+        self.assertEqual(len(warnings), 1, logs.output)
+        self.assertEqual(Path(warnings[0].args[0]).resolve(), directory.resolve())
+        self.assertEqual(service.get_candidate(record.candidate.skill_id)["skill_id"], record.candidate.skill_id)
 
     async def test_the_per_operator_cap_refuses_a_run_past_it_and_counts_each_operator_apart(self) -> None:
         service = HarnessService(self.root, max_runs_per_operator=2)

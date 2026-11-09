@@ -614,6 +614,7 @@ class BrowserDiagnosticsService:
             record = await self.manager.session_store.get(session_id)
         except KeyError:
             raise SessionNotFoundError(session_id) from None
+        # A download saved before STORE-40 kept its file's server path, which SessionRecord leaves out as it is read.
         return list(record.downloads)
 
     async def read_download_text(self, session_id: str, download_id: str | None = None) -> dict[str, Any]:
@@ -626,7 +627,8 @@ class BrowserDiagnosticsService:
         downloads = await self.list_downloads(session_id)
         record = self._select_download(session_id, downloads, download_id)
         downloads_dir = (Path(self.manager.settings.artifact_root) / session_id / "downloads").resolve()
-        path = Path(str(record.get("path") or "")).resolve()
+        # Found by its name: a record names no server path (STORE-40).
+        path = (downloads_dir / str(record.get("filename") or "")).resolve()
         if not path.is_relative_to(downloads_dir):
             logger.warning("refusing to read download %s: %s is outside %s", record.get("id"), path, downloads_dir)
             raise ValueError(f"Download {record.get('id')} is not in this session's downloads directory.")
@@ -644,6 +646,7 @@ class BrowserDiagnosticsService:
         text, lossy = _decode_text(data, content_type)
         if text is None:
             raise ValueError(f"Download {described} is binary, not text; fetch it from {record.get('url')}.")
+        text, scrub = await self._scrubbed_download(session_id, text, content_type)
         return {
             "download_id": record.get("id"),
             "filename": record.get("filename"),
@@ -652,8 +655,27 @@ class BrowserDiagnosticsService:
             "content_type": content_type,
             "size_bytes": size,
             "lossy": lossy,
+            "pii_scrub": scrub,
             "text": text,
         }
+
+    async def _scrubbed_download(
+        self, session_id: str, text: str, content_type: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        """A download's text, PII-scrubbed under PII_SCRUB_ENABLED (STORE-41), and what the scrub did."""
+        if not self.pii_scrubber.enabled:
+            return text, {"applied": False, "redactions": 0}
+        # Off the event loop, as the console's scrub is: the text is up to DOWNLOAD_READ_MAX_BYTES a page chose.
+        scrubbed = await asyncio.to_thread(self.pii_scrubber.download_text, text, content_type or "")
+        if scrubbed.hits and self.pii_scrubber.audit_report:
+            await self.manager.audit.append(
+                event_type="pii_redaction",
+                status="ok",
+                action="download_scrub",
+                session_id=session_id,
+                details=self.pii_scrubber.build_audit_report(session_id, "download", scrubbed.hits),
+            )
+        return scrubbed.text, {"applied": True, "redactions": len(scrubbed.hits)}
 
     @staticmethod
     def _select_download(session_id: str, downloads: list[dict[str, Any]], download_id: str | None) -> dict[str, Any]:
