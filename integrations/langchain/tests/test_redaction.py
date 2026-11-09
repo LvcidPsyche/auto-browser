@@ -19,7 +19,7 @@ import httpx
 import respx
 from auto_browser_langchain import AutoBrowserNode, AutoBrowserTool
 from auto_browser_langchain.auth import resolve_bearer_token
-from auto_browser_langchain.errors import _redacted
+from auto_browser_langchain.errors import _redacted, raise_for_status
 
 SECRET_URL = "http://alice:sentinel-pass@auto-browser.test:8000/?key=sentinel-key#sentinel-fragment"
 SHOWN = "Client error '401 Unauthorized' for url 'http://auto-browser.test:8000/"
@@ -63,6 +63,16 @@ class HttpErrorTests(unittest.IsolatedAsyncioTestCase):
             AutoBrowserTool.list_tools(base_url=SECRET_URL)
 
         self._assert_shown_without_secrets(caught.exception)
+
+    def test_the_status_error_names_the_url_without_its_userinfo_query_or_fragment(self) -> None:
+        # Alone, as errors_shown redacts around it only what it knows of the base URL: a request's own parameters too
+        # stay out of the message.
+        request = httpx.Request("POST", "http://alice:pw@auto-browser.test:8000/mcp/tools/call?key=value#part")
+
+        with self.assertRaises(httpx.HTTPStatusError) as caught:
+            raise_for_status(httpx.Response(401, request=request))
+
+        self.assertIn("for url 'http://auto-browser.test:8000/mcp/tools/call'", str(caught.exception))
 
     @respx.mock
     async def test_a_server_error_and_a_redirect_still_raise_and_a_success_does_not(self) -> None:
