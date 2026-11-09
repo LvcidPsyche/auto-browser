@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.browser.element_ids import ElementIds
@@ -219,6 +220,68 @@ async def test_the_setup_messages_of_one_call_share_one_deadline() -> None:
     assert (instance._cdp, instance._frame_id) == (None, None)
     await asyncio.wait_for(detached(cdp), timeout=TEST_BOUND_S)
     assert cdp.detached == 1
+
+
+class RetriedCdp(SlowCdp):
+    """A first session whose script message answers after ``script_s`` that its session is gone."""
+
+    def __init__(self, script_s: float) -> None:
+        super().__init__({SCRIPT: script_s})
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        reply = await super().send(method, params)
+        if method == SCRIPT:
+            self.script_answered_at = time.monotonic()
+            raise PlaywrightError("Target closed")
+        return reply
+
+
+def page_whose_second_attach_hangs(first: SlowCdp, first_attach_s: float) -> Any:
+    attaches = 0
+
+    async def new_cdp_session(_page: Any) -> SlowCdp:
+        nonlocal attaches
+        attaches += 1
+        if attaches > 1:
+            await asyncio.sleep(HUNG_S)
+        await asyncio.sleep(first_attach_s)
+        return first
+
+    return SimpleNamespace(context=SimpleNamespace(new_cdp_session=new_cdp_session))
+
+
+async def test_a_retried_call_shares_the_setup_deadline_of_its_first_try() -> None:
+    # The first try spends more than half the budget on its attach and its script answers session-gone; the second
+    # try's attach hangs. With a deadline of its own the retry waited a whole budget more, so the call outlived an
+    # outer bound a little longer than one budget and was cancelled, not failed.
+    budget_ms = 1000
+    page = page_whose_second_attach_hangs(RetriedCdp(0.0), first_attach_s=0.6)
+
+    with pytest.raises(BrowserActionError) as raised:
+        await asyncio.wait_for(
+            world().call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=budget_ms),
+            timeout=1.4 * budget_ms / 1000,
+        )
+
+    assert raised.value.code == PAGE_NOT_RESPONDING
+    assert waited_ms(raised.value) <= budget_ms - 500  # the attach of the first try took 600 ms of it
+
+
+async def test_a_setup_message_that_would_start_after_the_budget_is_spent_fails_at_once() -> None:
+    # The first try's script (bounded by timeout_ms, not the setup budget) outlasts the whole budget, then answers
+    # session-gone: the retry's attach finds no time left and is not waited for at all, though it would hang.
+    budget_ms = 1000
+    first = RetriedCdp(1.2)
+    page = page_whose_second_attach_hangs(first, first_attach_s=0.0)
+
+    _elapsed, error = await timed_failure(
+        world().call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=budget_ms)
+    )
+    failed_after_s = time.monotonic() - first.script_answered_at
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert waited_ms(error) == 0
+    assert failed_after_s < 0.5  # a retry with a budget of its own would have waited a whole second
 
 
 # -- at the gateway: under bounded(), not at the default action timeout ------------
