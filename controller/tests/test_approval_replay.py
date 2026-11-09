@@ -97,6 +97,32 @@ class ReplayTests(SpendBase):
         self.assertFalse(done.isError, done.content[0].text)
         self.assertEqual(self.navigations, ["https://example.com/a"])
 
+    async def test_an_element_approval_does_not_cover_another_element(self) -> None:
+        action = {"action": "click", "reason": "pay", "element_id": "op-" + "a" * 24, "risk_category": "payment"}
+        approval_id = await self.approved_governed(action)
+
+        replay = await self.governed({**action, "element_id": "op-" + "b" * 24}, approval_id)
+
+        self.assertTrue(replay.isError)
+        self.assertIn("does not match the requested action", replay.content[0].text)
+        self.assertEqual(self.page.clicks, 0)
+        self.assertEqual(await self.status(approval_id), "approved")
+
+    async def test_a_click_approval_does_not_cover_a_type(self) -> None:
+        click = {"action": "click", "reason": "pay", "selector": "#pay", "risk_category": "payment"}
+        approval_id = await self.approved_governed(click)
+
+        replay = await self.governed(
+            {"action": "type", "reason": "pay", "selector": "#pay", "text": "typed", "risk_category": "payment"},
+            approval_id,
+        )
+
+        self.assertTrue(replay.isError)
+        self.assertIn("does not match the requested action", replay.content[0].text)
+        self.assertEqual(self.page.clicks, 0)
+        self.assertEqual(self.page.keyboard.typed, [])
+        self.assertEqual(await self.status(approval_id), "approved")
+
     async def test_a_governed_storage_write_covers_only_its_value(self) -> None:
         arguments = {
             "session_id": SESSION,
