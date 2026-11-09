@@ -10,6 +10,7 @@ the stored record, and refuses another operator's session as not found.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,6 +115,19 @@ def test_the_owner_gets_a_closed_sessions_trace_and_the_artifact_it_names_is_ser
     # The route points at /artifacts, which serves a closed session's file to its owner.
     served = env.client.get(payload["trace_url"])
     assert (served.status_code, served.content) == (200, TRACE_BYTES)
+
+
+def test_the_trace_answer_names_no_server_path(env: Env) -> None:
+    # trace_url and viewer_command name the file; trace_path was the absolute path on the controller.
+    for session_id in (env.closed_id, env.live_id):
+        response = env.client.get(f"/sessions/{session_id}/trace")
+
+        assert response.status_code == 200, response.text
+        assert "trace_path" not in response.json()
+    # The raw text as JSON writes it too: a Windows path's backslashes are escaped there.
+    root = str(Path(env.manager.settings.artifact_root).resolve())
+    text = env.client.get(f"/sessions/{env.closed_id}/trace").text
+    assert root not in text and json.dumps(root)[1:-1] not in text
 
 
 def test_a_live_session_still_exports_and_has_no_trace_yet(env: Env) -> None:

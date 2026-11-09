@@ -206,6 +206,9 @@ All notable changes to auto-browser are documented here.
   JavaScript thread after the controller's 10-second bound had stopped waiting for it. The check reads the pattern's
   own syntax, folds case as the page's case-insensitive RegExp does (for an escape or a class it compares the text as
   written), and stops only these shapes; that bound stays for the rest. (MCP-24)
+- **`GET /sessions/{id}/trace` no longer names `trace_path`.** The field held the trace file's absolute path on the
+  controller, which a client has no use for; `trace_url` and `viewer_command` already name the file. A client that
+  read `trace_path` should use `trace_url`. (AUTH-35)
 
 ## [1.17.0] — 2026-11-08
 

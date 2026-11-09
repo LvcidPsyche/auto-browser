@@ -286,7 +286,6 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         if trace_path and trace_path.exists():
             return {
                 "session_id": session_id,
-                "trace_path": str(trace_path),
                 "trace_url": f"/artifacts/{session_id}/{trace_path.name}",
                 "trace_size_bytes": trace_path.stat().st_size,
                 # The hosted viewer cannot fetch the trace itself: this used to
@@ -299,7 +298,6 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
             }
         return {
             "session_id": session_id,
-            "trace_path": None,
             "trace_url": None,
             "viewer_url": None,
             "viewer_command": None,
