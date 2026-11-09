@@ -239,8 +239,10 @@ All notable changes to auto-browser are documented here.
   were held back. An event that cannot be written opens no window: the next refusal writes one, carrying the refusal
   it lost. Every refusal still answers `403`, `takeover_link_viewed` is written every time, and at most 1024 sources
   are remembered: the oldest is forgotten first, with its count. See the upgrade note. (R5C-6)
-- **A start that loses the race to create the mesh or Witness key loads the key the other start made.** It raised
-  `FileExistsError` instead, which failed that start. (R5C-8)
+- **A start that races another for the mesh or Witness key no longer trips over the other's files.** The loser of
+  the race raised `FileExistsError`, which failed that start; it now loads the key the other start made, retrying
+  for up to 2 seconds while the file is still being written, and the public key and `node_meta.json` are published
+  whole, so a reader never sees part of one. A key still unreadable when the wait ends is treated as before. (R5C-8)
 
 ### Changed
 
