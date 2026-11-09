@@ -21,6 +21,7 @@ from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
+from ..page_read import REFUSED_NETWORK_LOG_DETAIL
 from ..window_births import BirthVerdict
 from .observation import _scrub_disclosure
 
@@ -167,6 +168,12 @@ class BrowserDiagnosticsService:
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
+            # The log holds the URL of every request, the refused page's included: refused as a raw CDP read of that
+            # page is, under the lock, with a text that names no host (this is what an MCP caller reads).
+            try:
+                self.manager._assert_page_allowed(session)
+            except PermissionError:
+                raise PermissionError(REFUSED_NETWORK_LOG_DETAIL) from None
             inspector = session.network_inspector
             if inspector is None:
                 return {

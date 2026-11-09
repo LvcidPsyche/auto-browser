@@ -30,6 +30,10 @@ MOVED_DETAIL = (
     "The page moved while it was read: onto a host ALLOWED_HOSTS does not allow, or to another tab. "
     "What it showed is not returned."
 )
+REFUSED_NETWORK_LOG_DETAIL = (
+    "The page is on a host ALLOWED_HOSTS does not allow, or came from one, so the network log, which holds its "
+    "requests' URLs, is not returned until the page is navigated to an allowed URL."
+)
 
 
 class PageRead:

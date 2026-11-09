@@ -61,6 +61,11 @@ All notable changes to auto-browser are documented here.
   answered `403`, and `browser.get_auth_profile` answers as it does for a missing name instead of naming the owner.
   A client that took `403` to mean "it exists but is not yours" must treat `404` as either. `profile_dir` is gone from
   that answer and from `GET /auth-profiles`: use `profile_name`.
+- **The network log of a page `ALLOWED_HOSTS` refuses is now refused, as a raw CDP read of it is.**
+  `GET /sessions/{id}/network/requests` and `GET /sessions/{id}/network-log` answer `403` with the same fixed text as
+  the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. A session
+  whose page is allowed gets its log as before, and one whose page is refused gets it again once the page is
+  navigated to an allowed URL.
 
 ### Security
 
@@ -104,6 +109,11 @@ All notable changes to auto-browser are documented here.
   `browser.get_auth_profile`'s error named the owner. Both now answer as for a profile that does not exist (see the
   upgrade note). `profile_dir`, the profile's absolute path on the controller, is no longer in that answer or in
   `GET /auth-profiles`. (AUTH-31)
+- **A page `ALLOWED_HOSTS` refuses no longer shows in the network log, on any surface.** The log holds the URL of
+  every request, and a page that had moved onto a refused host had its own requests read back through
+  `GET /sessions/{id}/network/requests`, `GET /sessions/{id}/network-log`, `browser.get_network_log` and the
+  `browser://<id>/network` resource, none of which checked the page. Each now refuses it under the session lock, as
+  the raw CDP route does, with fixed text that names no host (see the upgrade note). (AUTH-22)
 
 ### Fixed
 

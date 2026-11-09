@@ -194,7 +194,11 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         method: str | None = None,
         url_contains: str | None = None,
     ) -> dict[str, Any]:
-        return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
+        with typed_route_errors(logger, "network log failed for session %s", session_id):
+            try:
+                return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
+            except PermissionError:
+                raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
 
     @router.post("/sessions/{session_id}/shadow-browse")
     async def enable_shadow_browse(session_id: str) -> dict[str, Any]:
