@@ -553,8 +553,8 @@ class StdioMcpBridge:
 
     def _encoded(self, response: dict[str, Any]) -> str:
         """``response`` as the line the client reads. A body ``json.loads`` parsed can be too deep for ``json.dumps``
-        to write (their limits differ on Python 3.14); that request gets an error, with a null id if the id itself is
-        the part too deep to write, and the bridge goes on."""
+        to write (their limits differ on Python 3.14); that request gets an error, with a null id if the id is not a
+        string or a number, and the bridge goes on."""
         try:
             return json.dumps(response, ensure_ascii=False)
         except RecursionError:
@@ -563,7 +563,7 @@ class StdioMcpBridge:
                 self._jsonrpc_error(
                     request_id if isinstance(request_id, (str, int, float)) else None,
                     -32000,
-                    "The controller's answer is nested too deep for the stdio bridge to send.",
+                    "The answer is nested too deep for the stdio bridge to send.",
                 ),
                 ensure_ascii=False,
             )

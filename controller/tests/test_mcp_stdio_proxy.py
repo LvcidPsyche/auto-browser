@@ -1188,7 +1188,7 @@ def test_an_answer_nested_too_deep_to_encode_is_answered_as_an_error_and_the_bri
         "id": 7,
         "error": {
             "code": -32000,
-            "message": "The controller's answer is nested too deep for the stdio bridge to send.",
+            "message": "The answer is nested too deep for the stdio bridge to send.",
         },
     }
     assert second == {"jsonrpc": "2.0", "id": 8, "result": {"ok": True}}

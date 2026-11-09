@@ -65,10 +65,10 @@ All notable changes to auto-browser are documented here.
   too deep]`, not walked, since a walk that deep ran out of stack and ended the bridge with no answer. A response body
   nested too deep for Python's `json` to parse (`RecursionError`) is answered as an unreadable one is, with its HTTP
   status, not as an unexpected bridge failure. An answer `json` parsed but cannot write back (on Python 3.14 the two
-  limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is the part too deep,
-  and a line from the client too deep to parse, or holding a number of more than 4300 digits, with `-32700`, where
-  the `RecursionError` or `ValueError` ended the bridge with no answer. A short secret is no longer replaced again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is
-  no longer read as a userinfo and dropped.
+  limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is not a string or a
+  number, and a line from the client too deep to parse, or holding a number of more than 4300 digits, with `-32700`,
+  where the `RecursionError` or `ValueError` ended the bridge with no answer. A short secret is no longer replaced
+  again inside an earlier `[redacted]`, and a path's `@` (`/a@b/mcp`) is no longer read as a userinfo and dropped.
 - **The Python client's and the LangChain tools' errors no longer show the bearer token or a secret of the controller
   URL.** The client's `AutoBrowserError` quoted a server's error detail as it came, so a proxy's or gateway's detail
   that echoed the base URL (its password, a token in its query) or the bearer token was shown whole; its `detail` and
@@ -140,9 +140,9 @@ All notable changes to auto-browser are documented here.
   OpenAI-compatible APIs, and the prompt itself of the Gemini API, the CLI planners and the OpenAI host bridge, which
   have none. These two reads give the script's message in the world a longer bound than the action timeout, and the
   messages that set the call up (the CDP session's attach, the frame tree and the world's creation) one of their own,
-  2 seconds under the read's 30: a page busy for longer than the default action timeout still gets its read, where a
-  world slow to create failed at that timeout first, and a setup that hangs ends as `page_not_responding` with its
-  session dropped and detached, before the read's own bound.
+  2 seconds under the read's 30: a page busy for longer than the default action timeout still gets its read. Each
+  setup message has this bound; one that hangs when the read starts ends as `page_not_responding` with its session
+  dropped and detached.
 - **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
   was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
   a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through
@@ -441,11 +441,11 @@ All notable changes to auto-browser are documented here.
   seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle. A read
   of float values (`getImageData` with `pixelFormat: "rgba-float16"`) is now left as it is: a shift of one there is
   the whole 0-1 range, so a grey of 0.5 read as -0.5 or 1.5. The wrapper also checks its receiver before it converts a
-  coordinate, as the native does: `getImageData.call({}, ...)` is a `TypeError` that calls no `valueOf`, where the
-  wrapper ran the coordinate's own `valueOf` first. And it converts the coordinates one at a time and stops at the
-  first the native refuses (not finite, or out of a `long`'s range): the native's `TypeError` comes at that coordinate
-  and no later `valueOf` runs. A BigInt or a Symbol coordinate goes to the native as it is, so its `TypeError` is the
-  native's own message, and the wrapper calls the `Math.trunc` it captured at init, not the page's.
+  coordinate, as the native does: `getImageData.call({}, ...)` is a `TypeError` that calls no `valueOf`. And it
+  converts the coordinates one at a time and stops at the first the native refuses (not finite, or out of a `long`'s
+  range): the native's `TypeError` comes at that coordinate and no later `valueOf` runs. A BigInt or a Symbol
+  coordinate goes to the native as it is, so its `TypeError` is the native's own message, and the wrapper calls the
+  `Math.trunc` it captured at init, not the page's.
 - **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** They ran
   the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran, or
   Git's `bin\bash.exe` wrapper, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a
