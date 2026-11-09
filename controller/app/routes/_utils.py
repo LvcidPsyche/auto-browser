@@ -32,6 +32,13 @@ def require_safe_segment(value: str, *, field: str) -> str:
 
 TAKEOVER_LINK_ROUTE = "/sessions/{session_id}/takeover-link"
 
+_HTTP_LINK_PREFIXES = ("http://", "https://")
+
+
+def is_http_link(url: object) -> bool:
+    """Whether a URL a page chose may be rendered as a clickable link: http(s) only, whatever its case or padding."""
+    return isinstance(url, str) and url.strip().lower().startswith(_HTTP_LINK_PREFIXES)
+
 
 async def require_session_access(request: Request) -> None:
     """Refuse another operator's session on every route that names one.

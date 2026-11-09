@@ -91,6 +91,9 @@ All notable changes to auto-browser are documented here.
   DNS-rebinding hostname is refused as a Host error first. Host names compare case-insensitively, a port equal to the
   `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
   See the upgrade note. (AUTH-24)
+- **The session replay page links only an http(s) URL.** A page sets its own URL, and the page rendered it as a link
+  whatever its scheme, so a `javascript:` or `data:` one clicked in the replay page ran on the controller's own
+  origin. Any other scheme is now shown as plain text, and the link opens with `rel="noopener noreferrer"`. (AUTH-37)
 
 ### Fixed
 

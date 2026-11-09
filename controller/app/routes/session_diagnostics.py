@@ -14,7 +14,7 @@ from starlette.responses import StreamingResponse
 from .. import events as _events
 from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..playwright_export import export_session_script
-from ._utils import OFF_LIST_PAGE_DETAIL, require_safe_segment, typed_route_errors
+from ._utils import OFF_LIST_PAGE_DETAIL, is_http_link, require_safe_segment, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,13 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         title = esc(session_info.get("title", session_id))
         created = esc(str(session_info.get("created_at", ""))[:19])
 
+        url_line = ""
+        if current_url:
+            # A page sets its own URL: only http(s) becomes a link, or a javascript: one runs on this origin if clicked.
+            link = f'<a href="{current_url}" target="_blank" rel="noopener noreferrer">{current_url}</a>'
+            shown = link if is_http_link(session_info.get("url")) else current_url
+            url_line = f"<span>URL: {shown}</span>"
+
         body = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -167,7 +174,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
   <span>Status: <strong>{status}</strong></span>
   <span>Created: {created}</span>
   <span>Title: {title}</span>
-  {f'<span>URL: <a href="{current_url}" target="_blank">{current_url}</a></span>' if current_url else ""}
+  {url_line}
 </div>
 <h2>Screenshots ({len(screenshots)})</h2>
 <div class="gallery">{screenshots_html}</div>
