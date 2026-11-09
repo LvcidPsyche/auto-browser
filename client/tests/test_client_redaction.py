@@ -82,6 +82,25 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_raised_without_secrets(caught.exception)
 
+    def test_the_delete_wrapper_raises_it_without_them(self) -> None:
+        for text in ECHOES:
+            with self.subTest(text=text):
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    _failing(text).close_session("s")
+                self._assert_raised_without_secrets(caught.exception)
+
+    async def test_the_async_get_and_delete_wrappers_raise_it_without_them(self) -> None:
+        calls = (
+            ("async_get", lambda client: client.async_get_session("s")),
+            ("async_delete", lambda client: client.async_close_session("s")),
+        )
+        for name, call in calls:
+            for text in ECHOES:
+                with self.subTest(wrapper=name, text=text):
+                    with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                        await call(_failing(text))
+                    self._assert_raised_without_secrets(caught.exception)
+
     def test_the_event_stream_raises_it_without_them_too(self) -> None:
         # stream_events builds a client of its own, which a loopback base URL gives httpx.HTTPTransport.
         def fail(request: httpx.Request) -> httpx.Response:

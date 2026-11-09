@@ -132,6 +132,26 @@ class TransportErrorTests(unittest.IsolatedAsyncioTestCase):
         self._assert_raised_without_secrets(caught.exception)
 
     @respx.mock
+    async def test_the_nodes_and_list_tools_transport_errors_echoing_the_token_never_show_it(self) -> None:
+        def echo_the_token(request: httpx.Request) -> httpx.Response:
+            header = request.headers["Authorization"]
+            raise httpx.RemoteProtocolError(f"illegal header line: b'Authorization: {header}'", request=request)
+
+        respx.route(host="auto-browser.test").mock(side_effect=echo_the_token)
+        url = "http://auto-browser.test"
+        token = "sentinel-token-0123456789"
+        calls = (
+            ("node", lambda: AutoBrowserNode(base_url=url, bearer_token=token).call_tool("browser.observe", {})),
+            ("list_tools", lambda: asyncio.to_thread(AutoBrowserTool.list_tools, base_url=url, bearer_token=token)),
+        )
+        for caller, call in calls:
+            with self.subTest(caller=caller):
+                with self.assertRaises(httpx.RemoteProtocolError) as caught:
+                    await call()
+                self._assert_raised_without_secrets(caught.exception)
+                self.assertNotIn(token, str(caught.exception))
+
+    @respx.mock
     async def test_a_transport_error_echoing_the_basic_credentials_of_the_userinfo_never_shows_them(self) -> None:
         # Review of c3's fixes (Codex 2): httpx sends a base URL's userinfo as "Authorization: Basic" and the base64 of
         # user:password, each percent-decoded, and a server echoing that header showed the credentials in that form.
