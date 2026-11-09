@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import tempfile
 import unittest
@@ -365,6 +366,97 @@ class CronWebhookKeyRestTests(unittest.TestCase):
         ):
             self.assertEqual(response.status_code, 400, response.text)
             self.assertEqual(response.json(), {"detail": "Invalid request"})
+
+
+class CronWebhookTriggerRefusalTests(unittest.IsolatedAsyncioTestCase):
+    """An unknown id, a job with no key and a wrong key are the same refusal: nothing says which it was."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service, self.manager = _service(Path(self.tmp.name) / "crons.json")
+
+    async def _cases(self) -> dict[str, tuple[str, str]]:
+        keyed = await self.service.create_job(name="keyed", goal="g", webhook_enabled=True)
+        unkeyed = await self.service.create_job(name="scheduled", goal="g", schedule="0 9 * * *")
+        return {
+            "unknown id": ("no-such-job", "any-key"),
+            "job with no key": (unkeyed["id"], "any-key"),
+            "wrong key": (keyed["id"], "wrong-key"),
+            "non-ascii wrong key": (keyed["id"], "clé-invalide"),
+        }
+
+    async def test_each_refusal_is_the_same_error_after_the_same_work(self) -> None:
+        cases = await self._cases()
+        errors: dict[str, str] = {}
+        real_compare = hmac.compare_digest
+        for name, (job_id, key) in cases.items():
+            with self.subTest(name), patch("app.cron_service.hmac.compare_digest", wraps=real_compare) as compare:
+                with self.assertRaises(PermissionError) as caught:
+                    await self.service.trigger_via_webhook(job_id, key)
+                self.assertEqual(
+                    compare.call_count, 1, "a refusal that skips the comparison is told apart by its speed"
+                )
+                self.assertEqual(type(caught.exception), PermissionError)
+                errors[name] = str(caught.exception)
+        self.assertEqual(len(set(errors.values())), 1, errors)
+        self.assertNotIn("not enabled", next(iter(errors.values())))
+        self.manager.create_session.assert_not_awaited()
+        self.manager.audit.append.assert_not_awaited()
+
+    async def test_the_route_answers_each_refusal_with_the_same_status_and_body(self) -> None:
+        cases = await self._cases()
+        app = FastAPI()
+        app.include_router(
+            create_operations_router(manager=self.manager, proxy_store=MagicMock(), cron_service=self.service)
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        answers = {
+            name: client.post(f"/crons/{job_id}/trigger", json={"webhook_key": key})
+            for name, (job_id, key) in cases.items()
+        }
+
+        for name, response in answers.items():
+            with self.subTest(name):
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json(), {"detail": "Not permitted"})
+
+    async def test_a_disabled_job_answers_its_error_only_after_the_key_is_proved(self) -> None:
+        job = await self.service.create_job(name="n", goal="g", schedule="0 9 * * *", webhook_enabled=True)
+        await self.service.update_job(job["id"], {"enabled": False})
+        app = FastAPI()
+        app.include_router(
+            create_operations_router(manager=self.manager, proxy_store=MagicMock(), cron_service=self.service)
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        wrong = client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": "wrong-key"})
+        right = client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": job["webhook_key"]})
+
+        self.assertEqual(wrong.status_code, 403, wrong.text)
+        self.assertEqual(wrong.json(), {"detail": "Not permitted"})
+        self.assertEqual(right.status_code, 409, right.text)
+        self.assertIn("job is disabled", right.json()["detail"])
+
+    async def test_a_key_that_hashes_to_the_dummy_digest_is_still_refused(self) -> None:
+        # What an empty comparison is made against must not be something a caller can present.
+        unkeyed = await self.service.create_job(name="scheduled", goal="g", schedule="0 9 * * *")
+
+        with patch("app.cron_service._NO_WEBHOOK_KEY_DIGEST", _digest("guessable")):
+            with self.assertRaises(PermissionError):
+                await self.service.trigger_via_webhook(unkeyed["id"], "guessable")
+            with self.assertRaises(PermissionError):
+                await self.service.trigger_via_webhook("no-such-job", "guessable")
+
+        self.manager.create_session.assert_not_awaited()
+
+    async def test_a_right_key_still_runs_a_job(self) -> None:
+        job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
+
+        result = await self.service.trigger_via_webhook(job["id"], job["webhook_key"])
+
+        self.assertTrue(result["triggered"])
 
 
 class CronWebhookKeyMcpTests(unittest.IsolatedAsyncioTestCase):

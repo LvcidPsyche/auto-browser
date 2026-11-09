@@ -67,6 +67,8 @@ except ImportError:
     logger.info("APScheduler not installed — cron scheduling disabled. Install: pip install apscheduler")
 
 
+# What an unknown id, a job with no key and a wrong key are refused with: nothing says which it was.
+WEBHOOK_KEY_REFUSED = "Invalid webhook key"
 # How a run's agent job can end, as AgentJobRecord.status says it. Anything else means its end was never written.
 _FINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "discarded"})
 # The run ended (its finish callback came), and its agent job's record cannot say how.
@@ -84,6 +86,10 @@ def _hash_webhook_key(key: str) -> str:
 def _webhook_key_id(key_hash: str) -> str:
     """A non-secret id for telling keys apart: derived from the hash, and neither the hash nor any part of it."""
     return hashlib.sha256(f"cron-webhook-key-id:{key_hash}".encode("utf-8")).hexdigest()[:12]
+
+
+# Compared against when there is no key to compare with, so a refusal costs the same whatever it was for.
+_NO_WEBHOOK_KEY_DIGEST = _hash_webhook_key("no webhook key is stored for this job")
 
 
 class CronJobDisabledError(RuntimeError):
@@ -370,17 +376,16 @@ class CronService:
 
     async def trigger_via_webhook(self, job_id: str, webhook_key: str) -> dict[str, Any]:
         """Verify webhook key and enqueue the job for immediate execution."""
-        jobs = self._load()
-        if job_id not in jobs:
-            raise KeyError(f"Cron job not found: {job_id}")
-        job = jobs[job_id]
-        stored_hash = self._stored_key_hash(job)
-        if not stored_hash:
-            raise PermissionError("This job does not have webhook triggering enabled")
-        # Compared as bytes: compare_digest raises TypeError for a str with
+        job = self._load().get(job_id)
+        stored_hash = self._stored_key_hash(job) if job is not None else None
+        # An unknown id, a job with no key and a wrong key are one refusal, after one comparison: what differs is
+        # which hash there was to compare against. Compared as bytes: compare_digest raises TypeError for a str with
         # non-ASCII characters, which surfaced as a 500 instead of a refusal.
-        if not hmac.compare_digest(_hash_webhook_key(webhook_key).encode("utf-8"), stored_hash.encode("utf-8")):
-            raise PermissionError("Invalid webhook key")
+        matched = hmac.compare_digest(
+            _hash_webhook_key(webhook_key).encode("utf-8"), (stored_hash or _NO_WEBHOOK_KEY_DIGEST).encode("utf-8")
+        )
+        if not matched or stored_hash is None:
+            raise PermissionError(WEBHOOK_KEY_REFUSED)
         return await self._run_job_now(job)
 
     async def trigger_job(self, job_id: str) -> dict[str, Any]:

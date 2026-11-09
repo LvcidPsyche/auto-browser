@@ -90,6 +90,9 @@ All notable changes to auto-browser are documented here.
   cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
   makes a new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
   `browser.revoke_cron_webhook_key` removes it.
+- **`POST /crons/{id}/trigger` no longer answers `404` for an unknown job.** A caller without the key could tell
+  which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`):
+  treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved.
 - **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
   fire now checks `API_BEARER_TOKENS` as it is then. An owner no credential names is refused: the answer is
@@ -159,6 +162,10 @@ All notable changes to auto-browser are documented here.
   `browser.rotate_cron_webhook_key` and `browser.revoke_cron_webhook_key` (governed as `write` and `destructive`),
   replace or remove a key, on a job the caller may use, and each change writes an audit event. See the upgrade
   note. (STORE-16)
+- **The cron webhook trigger no longer tells an unknown job from a wrong key.** `POST /crons/{id}/trigger` answered
+  `404` for an id that does not exist and `403` for a wrong key or a job with no webhook, so anyone with the bearer
+  token could list job ids by probing them. All three now do the same work, compare against a fixed digest when there
+  is no key, and are refused with the same `403` and text (see the upgrade note). (R5C-1)
 - **A cron job no longer fires as an operator whose credential is gone.** A job stores the token-verified operator
   who created it and ran as that operator on every fire, whether or not `API_BEARER_TOKENS` still named them, and a
   queued agent job ran as the operator who queued it the same way. Each fire now reads the credentials as they are at
