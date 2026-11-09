@@ -99,7 +99,8 @@ All notable changes to auto-browser are documented here.
   treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved.
 - **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
-  fire now checks `API_BEARER_TOKENS` as it is then. An owner no credential names is refused: the answer is
+  fire now checks `API_BEARER_TOKENS` as it is then, where a token listed twice proves only the first operator
+  listed with it. An owner no credential names is refused: the answer is
   `{"triggered": false, "reason": "owner_credential_removed"}`, `last_status` reads
   `refused: owner credential removed`, no session is opened, and one `cron_job_refused` audit event is written. A job
   a named operator queued fails when a worker takes it, with an error that says so, if that credential has gone

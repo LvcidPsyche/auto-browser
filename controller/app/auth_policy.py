@@ -238,8 +238,15 @@ def has_named_credentials(settings: Any) -> bool:
 
 
 def credential_names_operator(settings: Any, operator_id: str) -> bool:
-    """Whether a named credential proves ``operator_id`` now, by the settings as they are: a removal counts at once."""
-    return any(credential.operator_id == operator_id for credential in credentials_for(settings))
+    """Whether a named credential proves ``operator_id``, by the settings as they are when this is asked.
+
+    A request with a token proves the first credential holding it (match_credential), so a later entry repeating that
+    token proves no one.
+    """
+    proven_by_token: dict[str, str | None] = {}
+    for credential in credentials_for(settings):
+        proven_by_token.setdefault(credential.token, credential.operator_id)
+    return operator_id in proven_by_token.values()
 
 
 _HTTP_OPTIONAL_WHITESPACE = " \t"

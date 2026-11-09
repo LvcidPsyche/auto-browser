@@ -683,6 +683,14 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
 
                 self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
 
+    async def test_an_owner_only_a_later_entry_repeating_a_token_names_is_refused(self) -> None:
+        # A request with a token that is listed twice proves the first operator listed with it, and nothing proves alice.
+        self.manager.settings.api_bearer_tokens = "bob:token-b,alice:token-b"
+        self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+
+        self.manager.settings.api_bearer_tokens = "alice:token-b,bob:token-b"
+        self.assertTrue((await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))["triggered"])
+
     async def test_an_unowned_job_still_runs_as_anonymous_whatever_the_credentials(self) -> None:
         unowned = await self.service.create_job(name="shared", goal="g", webhook_enabled=True)
         self.assertIsNone(unowned["owner"])
