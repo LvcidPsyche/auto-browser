@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hmac
 import logging
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from ..action_errors import RefusedPageError
@@ -33,6 +36,7 @@ from ..models import (
     WaitRequest,
     validate_url,
 )
+from ..session_ownership import verified_operator
 from ..url_safety import refuse_another_navigation_host
 from ._utils import (
     OFF_LIST_OTHER_TAB_DETAIL,
@@ -51,9 +55,50 @@ logger = logging.getLogger(__name__)
 # only the header, not where the token lives: every caller without the token reads it (W2-22).
 TAKEOVER_LINK_REFUSED_DETAIL = "This endpoint needs the takeover token in the X-Takeover-Token header."
 
+# How long later takeover-link refusals from one source are only counted, and how many sources are remembered at once.
+TAKEOVER_REFUSAL_WINDOW_SECONDS = 60.0
+TAKEOVER_REFUSAL_SOURCES_MAX = 1024
+
+
+@dataclass(slots=True)
+class _RefusalWindow:
+    started_at: float
+    counted: int = 0
+
+
+class TakeoverRefusalWindows:
+    """Turns a flood of refused takeover-link calls into one audit event per source per window.
+
+    The first refusal from a source audits as it always did. Later ones in the same window are only counted, and
+    the next refusal after it audits again with that count. A source is the verified operator, else the client
+    host; the map is bounded, and a source pushed out of it audits as new. A refusal answers 403 every time.
+    """
+
+    def __init__(self) -> None:
+        self._windows: OrderedDict[str, _RefusalWindow] = OrderedDict()
+
+    def record(self, source: str, *, now: float) -> int | None:
+        """How many refusals the event due now reports (0: none held back), or None when this one is only counted."""
+        window = self._windows.get(source)
+        if window is not None and now - window.started_at < TAKEOVER_REFUSAL_WINDOW_SECONDS:
+            window.counted += 1
+            return None
+        self._windows[source] = _RefusalWindow(started_at=now)
+        self._windows.move_to_end(source)
+        while len(self._windows) > TAKEOVER_REFUSAL_SOURCES_MAX:
+            self._windows.popitem(last=False)
+        return window.counted if window is not None else 0
+
+
+def _refusal_source(request: Request) -> str:
+    """Who keeps being refused: the verified operator id, else the client host (a header claims nothing here)."""
+    operator = verified_operator()
+    return f"operator:{operator}" if operator else f"host:{request.client.host if request.client else 'unknown'}"
+
 
 def create_sessions_router(*, manager: Any) -> APIRouter:
     router = APIRouter()
+    refusal_windows = TakeoverRefusalWindows()
 
     @router.get("/sessions")
     async def list_sessions() -> list[dict[str, Any]]:
@@ -99,6 +144,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     @router.get(TAKEOVER_LINK_ROUTE)
     async def get_takeover_link(
         session_id: str,
+        request: Request,
         x_takeover_token: Annotated[str | None, Header(alias="X-Takeover-Token")] = None,
     ) -> JSONResponse:
         # Human-only (NAV-14): the full link, an isolated session's noVNC password in its fragment. No MCP tool and
@@ -115,13 +161,20 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         # Spaces and tabs around the token are not part of it, as normalize_authorization treats the bearer token.
         presented = (x_takeover_token or "").strip(" \t").encode("utf-8")
         if not hmac.compare_digest(presented, expected.encode("utf-8")):
-            await manager.audit.append(
-                event_type="takeover_link_refused",
-                status="refused",
-                action="get_takeover_link",
-                session_id=session_id,
-                details={"reason": "missing takeover token" if not x_takeover_token else "wrong takeover token"},
-            )
+            counted = refusal_windows.record(_refusal_source(request), now=time.monotonic())
+            if counted is not None:
+                details: dict[str, Any] = {
+                    "reason": "missing takeover token" if not x_takeover_token else "wrong takeover token"
+                }
+                if counted:
+                    details["count"] = counted
+                await manager.audit.append(
+                    event_type="takeover_link_refused",
+                    status="refused",
+                    action="get_takeover_link",
+                    session_id=session_id,
+                    details=details,
+                )
             raise HTTPException(status_code=403, detail=TAKEOVER_LINK_REFUSED_DETAIL)
         session = await manager.get_session(session_id)
         link = manager.remote_access.takeover_link(session)

@@ -66,6 +66,9 @@ All notable changes to auto-browser are documented here.
   the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. A session
   whose page is allowed gets its log as before, and one whose page is refused gets it again once the page is
   navigated to an allowed URL.
+- **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
+  the next carries `details.count`, the refusals held back since. An alert that counts these events must add that
+  field.
 
 ### Security
 
@@ -215,6 +218,11 @@ All notable changes to auto-browser are documented here.
   error keeps its status and `code`, a refusal is a generic `403`, a bad value `400`, a missing file `404`, and
   anything else a logged `500`. What a route answered on purpose (a tab another tab refused, a job's own `400`, a
   run's `503`) is unchanged. (AUTH-10)
+- **Repeated refused calls to `GET /sessions/{id}/takeover-link` no longer write an audit event each.** The first
+  refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
+  seconds are only counted, and the first refusal after that writes one event whose `details.count` says how many
+  were held back. Every refusal still answers `403`, `takeover_link_viewed` is written every time, and at most 1024
+  sources are remembered: the oldest is forgotten first, with its count. See the upgrade note. (R5C-6)
 
 ### Changed
 

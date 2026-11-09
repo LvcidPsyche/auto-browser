@@ -27,7 +27,7 @@ from app.main import handle_key_not_found
 from app.models import McpToolCallRequest
 from app.routes.extensions import _DASHBOARD_HTML
 from app.routes.operations import create_operations_router
-from app.routes.sessions import create_sessions_router
+from app.routes.sessions import TAKEOVER_LINK_REFUSED_DETAIL, create_sessions_router
 from app.session_isolation import DockerBrowserNodeProvisioner
 from app.tool_gateway.gateway import McpToolGateway
 from tests._bash import BASH, NO_BASH_REASON
@@ -90,6 +90,7 @@ class _Isolated(unittest.IsolatedAsyncioTestCase):
         app.add_exception_handler(KeyError, handle_key_not_found)  # the controller's own: an unknown session is 404
         app.include_router(create_sessions_router(manager=manager))
         app.include_router(create_operations_router(manager=manager, proxy_store=Mock(), cron_service=Mock()))
+        self.app = app
         self.client = TestClient(app)
 
     async def call(self, tool: str, **arguments) -> str:
@@ -206,6 +207,7 @@ class TakeoverTokenTests(_Isolated):
     def refusals(self) -> list:
         return [c for c in self.audit.await_args_list if c.kwargs.get("event_type") == "takeover_link_refused"]
 
+    @patch("app.routes.sessions.TAKEOVER_REFUSAL_WINDOW_SECONDS", 0)  # every refusal audits: this reads each event
     async def test_a_missing_or_wrong_token_is_403_and_audited_without_the_token_or_link(self) -> None:
         session_id = self.client.post("/sessions", json={"name": "iso"}).json()["id"]
         self.audit.reset_mock()
@@ -275,6 +277,125 @@ class TakeoverTokenTests(_Isolated):
         self.assertEqual(refused.status_code, 403, refused.text)
         allowed = client.get(f"/sessions/{session_id}/takeover-link", headers={"X-Takeover-Token": TAKEOVER})
         self.assertEqual(allowed.status_code, 200, allowed.text)
+
+
+class TakeoverRefusalWindowTests(_Isolated):
+    """A flood of refusals writes one audit event per source per minute, and the next one says how many (R5C-6)."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.session_id = self.client.post("/sessions", json={"name": "iso"}).json()["id"]
+        self.audit.reset_mock()
+        self.now = 1000.0
+        # The module's own name for the clock: patching time.monotonic itself would stop the event loop's.
+        patcher = patch("app.routes.sessions.time", Mock(monotonic=lambda: self.now))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def refused(self) -> list[dict]:
+        calls = self.audit.await_args_list
+        return [c.kwargs["details"] for c in calls if c.kwargs.get("event_type") == "takeover_link_refused"]
+
+    def refuse(self, client: TestClient | None = None, token: str | None = "wrong") -> None:
+        headers = {} if token is None else {"X-Takeover-Token": token}
+        response = (client or self.client).get(f"/sessions/{self.session_id}/takeover-link", headers=headers)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["detail"], TAKEOVER_LINK_REFUSED_DETAIL)
+
+    def from_host(self, host: str) -> TestClient:
+        return TestClient(self.app, client=(host, 50000))
+
+    async def test_refusals_in_one_minute_are_one_event_and_the_next_refusal_carries_their_count(self) -> None:
+        for _ in range(5):
+            self.refuse()
+        self.assertEqual(self.refused(), [{"reason": "wrong takeover token"}])  # the first, as it always was
+
+        self.now = 1059.5
+        self.refuse()  # still inside the minute: answered, and only counted
+        self.assertEqual(len(self.refused()), 1)
+
+        self.now = 1060.0
+        self.refuse(token=None)
+        self.assertEqual(self.refused()[1:], [{"reason": "missing takeover token", "count": 5}])
+
+    async def test_the_count_restarts_with_each_window_and_a_quiet_one_has_none(self) -> None:
+        self.refuse()
+        self.refuse()
+        self.now += 60
+        self.refuse()  # carries 1, and opens a window
+        self.refuse()
+        self.refuse()
+        self.now += 60
+        self.refuse()  # carries 2
+        self.now += 60
+        self.refuse()  # nothing was held back in the window before
+        wrong = {"reason": "wrong takeover token"}
+        self.assertEqual(self.refused(), [wrong, {**wrong, "count": 1}, {**wrong, "count": 2}, wrong])
+
+    async def test_the_right_token_is_audited_every_time_and_leaves_the_window_alone(self) -> None:
+        self.refuse()
+        self.refuse()
+        for _ in range(3):
+            self.assertEqual(self.link(self.session_id).status_code, 200)
+        viewed = [c for c in self.audit.await_args_list if c.kwargs.get("event_type") == "takeover_link_viewed"]
+        self.assertEqual(len(viewed), 3)
+
+        self.refuse()
+        self.assertEqual(len(self.refused()), 1)
+        self.now += 60
+        self.refuse()
+        self.assertEqual(self.refused()[-1]["count"], 2)
+
+    async def test_each_client_host_has_its_own_window(self) -> None:
+        first, second = self.from_host("203.0.113.1"), self.from_host("203.0.113.2")
+        for client in (first, second, first, second):
+            self.refuse(client)
+        self.assertEqual(len(self.refused()), 2)
+
+    async def test_a_claimed_operator_header_is_not_a_source(self) -> None:
+        # Tokenless, X-Operator-Id is a label anyone can set: a new label must not buy a new event.
+        from app.middleware.http import install_controller_http_middleware
+
+        settings = self.manager.settings
+        settings.api_bind_scope = "loopback"
+        settings.api_allow_tokenless_loopback = True
+        settings.api_bearer_token = None
+        app = FastAPI()
+        app.include_router(create_sessions_router(manager=self.manager))
+        install_controller_http_middleware(app, settings=settings, rate_limiter=None, metrics=Mock(enabled=False))
+        client = TestClient(app)
+        for operator in ("alice", "bob", "carol"):
+            headers = {"X-Takeover-Token": "wrong", "X-Operator-Id": operator}
+            response = client.get(f"/sessions/{self.session_id}/takeover-link", headers=headers)
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(len(self.refused()), 1)
+
+    @patch("app.routes.sessions.TAKEOVER_REFUSAL_SOURCES_MAX", 2)
+    async def test_the_map_is_bounded_and_the_oldest_source_is_forgotten(self) -> None:
+        a, b, c = (self.from_host(f"203.0.113.{n}") for n in (1, 2, 3))
+        for client in (a, b, c):
+            self.refuse(client)
+        self.refuse(b)  # still remembered, so only counted
+        self.assertEqual(len(self.refused()), 3)
+
+        self.refuse(a)  # pushed out by c, so it audits as a new source
+        self.assertEqual(self.refused()[3:], [{"reason": "wrong takeover token"}])
+
+    @patch("app.routes.sessions.TAKEOVER_REFUSAL_SOURCES_MAX", 2)
+    async def test_a_source_opening_a_new_window_is_the_newest_again(self) -> None:
+        a, b, c = (self.from_host(f"203.0.113.{n}") for n in (1, 2, 3))
+        self.refuse(a)
+        self.now += 30
+        self.refuse(b)
+        self.now += 30  # a's minute is over, b's is not
+        self.refuse(a)  # a new window: a is now newer than b
+        self.refuse(c)  # so it is b that is pushed out
+        self.assertEqual(len(self.refused()), 4)
+
+        self.refuse(a)  # still remembered
+        self.assertEqual(len(self.refused()), 4)
+        self.refuse(b)  # forgotten, so it audits as new
+        self.assertEqual(len(self.refused()), 5)
 
 
 class AgentPackagesTests(unittest.TestCase):

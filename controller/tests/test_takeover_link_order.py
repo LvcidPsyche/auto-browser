@@ -15,7 +15,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -84,6 +84,7 @@ class TakeoverLinkOrderTests(unittest.TestCase):
             headers["X-Takeover-Token"] = takeover
         return self.client.get(f"/sessions/{session_id}/takeover-link", headers=headers)
 
+    @patch("app.routes.sessions.TAKEOVER_REFUSAL_WINDOW_SECONDS", 0)  # every refusal audits: this reads each event
     def test_without_the_token_an_unknown_and_another_operators_id_are_403_and_audited(self) -> None:
         for session_id in ("0a0a0a0a0a0a", "owned-by-bob", "owned-by-alice"):
             for takeover in (None, "wrong-" + TAKEOVER):
@@ -93,6 +94,17 @@ class TakeoverLinkOrderTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 403, response.text)
                     events = [call.kwargs["event_type"] for call in self.manager.audit.append.await_args_list]
                     self.assertEqual(events, ["takeover_link_refused"])
+
+    def test_each_verified_operator_has_its_own_refusal_window_from_one_host(self) -> None:
+        # R5C-6: both come from the TestClient's one host, and a named credential is what tells them apart.
+        self.manager.audit.append.reset_mock()
+        for token in (ALICE_TOKEN, BOB_TOKEN, ALICE_TOKEN, BOB_TOKEN):
+            response = self.client.get(
+                "/sessions/owned-by-alice/takeover-link",
+                headers={"Authorization": f"Bearer {token}", "X-Takeover-Token": "wrong"},
+            )
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.manager.audit.append.await_count, 2)
 
     def test_with_the_token_an_unknown_and_another_operators_id_are_404_and_ones_own_is_200(self) -> None:
         self.assertEqual(self._get("0a0a0a0a0a0a", TAKEOVER).status_code, 404)
