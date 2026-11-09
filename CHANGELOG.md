@@ -174,13 +174,13 @@ All notable changes to auto-browser are documented here.
 - **The raw CDP route checks what it is sent, and a DOM read no longer returns a typed password.**
   `POST /sessions/{id}/cdp/raw` took its `method` and `params` as they came: a `method` that was a list raised a
   `TypeError` in the allowlist check (a 500), and `params` went to the browser whatever their names and types. A
-  `method` that is not a string, or `params` that are not an object, now get 422, and each allowed command takes only
-  its own parameters, by name and type; any other gets 422 with the reason. `DOM.getDocument` with `"pierce": true`
-  returned each input's user-agent shadow text, which is what was typed into it, so a password typed into a page came
-  back in plain text; a `DOM.*` read now blanks that text and the `value` attribute of any element whose `type`
-  attribute is `password`, and `GET /sessions/{id}/cdp/element`, which reads an element's attributes itself, blanks
-  that `value` attribute too. `docs/deployment.md` says what is still returned: what was typed into a field of any
-  other type.
+  `method` that is not a string, or `params` that are neither an object nor `null`, now get 422, and each allowed
+  command takes only its own parameters, by name and type; any other gets 422 with the reason. `DOM.getDocument` with
+  `"pierce": true` returned each input's user-agent shadow text, which is what was typed into it, so a password typed
+  into a page came back in plain text; a `DOM.*` read now blanks that text and the `value` attribute of any element
+  whose `type` attribute is `password`, and `GET /sessions/{id}/cdp/element`, which reads an element's attributes
+  itself, blanks that `value` attribute too. `docs/deployment.md` says what is still returned: what was typed into a
+  field of any other type.
 
 ### Fixed
 
@@ -202,10 +202,10 @@ All notable changes to auto-browser are documented here.
   (`GET /sessions/{session_id}/witness/bundle`, `browser.export_witness_bundle`) read the receipts, then read the
   chain again to check it, so a receipt recorded in between gave a bundle whose `head_hash` and chain check described
   a receipt its `receipts` did not hold, which `scripts/verify_witness_bundle.py` failed as "receipts missing". The
-  export now reads the chain once, under a file lock that an append to that chain waits for (a shared lock, which its
-  read-only handle can take on an NFS mount too). The chain check (`GET /sessions/{session_id}/witness/verify`,
-  `browser.verify_witness`) does the same: it walked the hashes of one read and checked the signatures of another, so
-  one verdict could describe two chains.
+  export now reads the chain once, under a file lock that an append to that chain waits for (shared on POSIX, which
+  its read-only handle can take on an NFS mount too, and exclusive on Windows). The chain check
+  (`GET /sessions/{session_id}/witness/verify`, `browser.verify_witness`) does the same: it walked the hashes of one
+  read and checked the signatures of another, so one verdict could describe two chains.
 - **A witness receipt listing now says when it skipped a torn tail, and the bundle verifier explains one.**
   `GET /sessions/{session_id}/witness` skipped a torn tail (bytes after the chain's last newline: an append cut short,
   never a receipt) without saying so, where a bundle says `torn_tail: true`; the listing now has a `torn_tail` field
@@ -244,7 +244,7 @@ All notable changes to auto-browser are documented here.
   remembers the 10,000 most recent), a missing file copy now defers to Redis: a closed record there refuses the write,
   and a Redis that cannot be read skips it until the next write. A new session's first write still asks nothing of
   Redis.
-- **A failed shadow browse now always rolls back fully and reports its own error, and a close always records itself.**
+- **A failed shadow browse now runs its whole rollback and reports its own error, and a close always records itself.**
   Marking a session-owned browser's pre-request gate before its close, and releasing the gate and the window-birth
   watcher after it, could raise, and nothing caught it: the rollback of a failed `enable_shadow_browse` stopped there,
   leaving the shadow session's directories and the active record its persist had written, and its caller got that
