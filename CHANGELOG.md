@@ -169,6 +169,11 @@ All notable changes to auto-browser are documented here.
   in an outage. An answer now stands for three seconds from when its probe finished, a failing one as long as a
   passing one, and callers that miss together share one probe, which a caller that disconnects cannot cancel. A
   readiness change can show up to three seconds late. (AUTH-26)
+- **The `Authorization` scheme is read as HTTP defines it, and a missing credential is the first thing a caller is
+  told.** `bearer <token>` was refused with `401` and only `Bearer <token>` passed; any case of the scheme now passes,
+  while the token stays an exact comparison, and both spellings share one rate-limit bucket. With
+  `REQUIRE_OPERATOR_ID` on and a token configured, a request with no valid credential and no operator header now
+  answers the token's `401` instead of `400` naming the operator header. (AUTH-38)
 
 ### Changed
 

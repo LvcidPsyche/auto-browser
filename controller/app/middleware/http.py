@@ -238,7 +238,13 @@ def install_controller_http_middleware(
             source = "header"
             conflicting = None
 
-        if settings.require_operator_id and not path.startswith(exempt_prefixes) and not operator_id:
+        if (
+            settings.require_operator_id
+            and not path.startswith(exempt_prefixes)
+            and not operator_id
+            # The token gate inside this layer answers a request with no valid credential with its 401 first.
+            and not (_auth_policy().required and credential is None)
+        ):
             return JSONResponse(
                 status_code=400,
                 content={

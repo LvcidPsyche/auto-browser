@@ -22,6 +22,7 @@ LIMIT = 5
 EXEMPT = ["/healthz", "/readyz", "/docs", "/openapi.json", "/redoc", "/artifacts", "/metrics"]
 WRONG = {"Authorization": "Bearer " + "x" * 40}
 RIGHT = {"Authorization": f"Bearer {TOKEN}"}
+LOWER_SCHEME = {"Authorization": f"bearer {TOKEN}"}
 
 
 def make_client(scope: str = BIND_SCOPE_LOOPBACK, *, tokenless: bool = False) -> TestClient:
@@ -72,6 +73,15 @@ class ExemptPathTokenGuessingTests(unittest.TestCase):
         client = make_client()
         self.assertEqual(set(self.statuses(client, "/metrics", RIGHT, 30)), {200})
         self.assertEqual(set(self.statuses(client, "/artifacts/x/y.png", RIGHT, 30)), {200})
+
+    def test_bearer_and_bearer_lowercase_are_one_tokens_one_bucket(self) -> None:
+        # A bucket per spelling of the scheme handed a token holder a fresh limit for each one.
+        client = make_client()
+        codes = [
+            client.get("/sessions", headers=headers).status_code
+            for headers in (RIGHT, LOWER_SCHEME, RIGHT, LOWER_SCHEME, RIGHT, LOWER_SCHEME)
+        ]
+        self.assertEqual(codes, [200] * LIMIT + [429])
 
     def test_healthchecks_are_never_throttled(self) -> None:
         client = make_client()

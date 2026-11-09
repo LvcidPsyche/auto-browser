@@ -58,6 +58,17 @@ class RateLimitHelpersTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(key(padded), key("Bearer secret"))
         self.assertNotEqual(key("Bearer other"), key("Bearer secret"))
 
+    async def test_the_schemes_case_shares_a_bucket_and_the_tokens_does_not(self) -> None:
+        def key(authorization: str) -> str:
+            return build_rate_limit_key(
+                operator_id_header="X-Operator-Id", headers={"authorization": authorization}, client_host="127.0.0.1"
+            )
+
+        for scheme in ("bearer", "BEARER", "bEaReR"):
+            with self.subTest(scheme=scheme):
+                self.assertEqual(key(f"{scheme} secret"), key("Bearer secret"))
+        self.assertNotEqual(key("Bearer SECRET"), key("Bearer secret"))
+
     async def test_limiter_evicts_oldest_bucket_at_capacity(self) -> None:
         limiter = SlidingWindowRateLimiter(limit=10, window_seconds=60, max_buckets=2)
 

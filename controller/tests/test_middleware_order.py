@@ -75,6 +75,18 @@ class MiddlewareOrderTests(unittest.TestCase):
         self.assertEqual(response.headers["WWW-Authenticate"], "Bearer")
         self.evaluate.assert_awaited_once()
 
+    def test_no_token_and_no_operator_header_is_the_tokens_401_not_the_operators_400(self) -> None:
+        # The operator-id layer runs outside the token gate and used to answer 400 first.
+        response = self.client.get("/sessions")
+
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(response.headers["WWW-Authenticate"], "Bearer")
+
+    def test_a_valid_token_without_the_operator_header_is_still_the_operators_400(self) -> None:
+        response = self.client.get("/sessions", headers=BEARER)
+
+        self.assertEqual(response.status_code, 400, response.text)
+
     def test_good_host_with_a_valid_token_is_served(self) -> None:
         with patch.object(main_module.manager, "list_sessions", new=AsyncMock(return_value=[])):
             response = self.client.get("/sessions", headers={**self.operator, **BEARER})
