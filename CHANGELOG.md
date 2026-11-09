@@ -97,6 +97,9 @@ All notable changes to auto-browser are documented here.
   cached for the next call to hang on. The removal now has a setup budget below that bound: a hung setup ends there,
   its session dropped and detached as the read tools' bounds do, and the drag's own error is still what is
   reported. (N7)
+- **`page_not_responding` names the whole setup budget.** A call whose setup messages share one budget named what was
+  left of it, so a retry after the budget was spent read "did not answer within 0 ms". The message now names the
+  budget, and `details.waited_ms` says what that message itself waited. (N7)
 - **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
   candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the

@@ -12,7 +12,6 @@ Chromium, not their bounds.
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,9 +93,8 @@ async def timed_failure(call: Any) -> tuple[float, BrowserActionError]:
 
 
 def waited_ms(error: BrowserActionError) -> int:
-    match = re.search(r"within (\d+) ms", str(error))
-    assert match, str(error)
-    return int(match.group(1))
+    """What the message that failed waited (the error's text names the whole budget, not what was left of it)."""
+    return int(error.details["waited_ms"])
 
 
 async def detached(cdp: SlowCdp) -> None:
@@ -127,6 +125,7 @@ async def test_a_setup_step_past_setup_timeout_ms_fails_there_not_at_timeout_ms(
 
     assert error.code == PAGE_NOT_RESPONDING
     assert waited_ms(error) <= SHORT_MS  # what was left of the setup budget
+    assert f"within {SHORT_MS} ms" in str(error)  # the budget, whatever was left of it
     assert elapsed < LONG_MS / 1000
 
 
@@ -156,6 +155,7 @@ async def test_with_no_setup_bound_a_setup_step_has_the_worlds_own_timeout_whate
 
     assert error.code == PAGE_NOT_RESPONDING
     assert f"within {DEFAULT_MS} ms" in str(error)
+    assert waited_ms(error) == DEFAULT_MS  # what it waited: with no budget, the same number the text gives
 
 
 async def test_with_no_bound_the_scripts_message_has_the_worlds_own_timeout_whatever_setup_timeout_ms_says() -> None:
@@ -282,6 +282,9 @@ async def test_a_setup_message_that_would_start_after_the_budget_is_spent_fails_
 
     assert error.code == PAGE_NOT_RESPONDING
     assert waited_ms(error) == 0
+    # It names the budget that was spent: "within 0 ms" said the page had no time at all.
+    assert f"within {budget_ms} ms" in str(error)
+    assert "within 0 ms" not in str(error)
     assert failed_after_s < 0.5  # a retry with a budget of its own would have waited a whole second
 
 

@@ -59,7 +59,7 @@ async def test_a_page_that_stops_answering_before_the_action_is_refused_with_a_c
         cancel = await env.element(session_id, "Cancel")
         world = env.manager.element_ids._world(env.page(session_id))
 
-        async def never(cdp, method, params=None, timeout_ms=None):
+        async def never(cdp, method, params=None, timeout_ms=None, **_setup):
             return await world._within(asyncio.Event().wait(), method, timeout_ms or world.timeout_ms)
 
         monkeypatch.setattr(world, "_send", never)
@@ -84,9 +84,9 @@ async def test_an_action_that_ran_before_the_page_stopped_answering_is_reported(
         send, check = world._send, env.manager._check_bot_challenge
         stopped = False
 
-        async def stops_after_the_action(cdp, method, params=None, timeout_ms=None):
+        async def stops_after_the_action(cdp, method, params=None, timeout_ms=None, **setup):
             if not stopped:
-                return await send(cdp, method, params, timeout_ms)
+                return await send(cdp, method, params, timeout_ms, **setup)
             return await world._within(asyncio.Event().wait(), method, timeout_ms or world.timeout_ms)
 
         async def then_stop(session):

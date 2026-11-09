@@ -609,9 +609,9 @@ async def test_an_upload_whose_page_stops_answering_once_the_file_is_in_is_recor
         send, set_input_files = world._send, ElementHandle.set_input_files
         stopped = False
 
-        async def stops_once_the_file_is_in(cdp, method, params=None, timeout_ms=None):
+        async def stops_once_the_file_is_in(cdp, method, params=None, timeout_ms=None, **setup):
             if not stopped:
-                return await send(cdp, method, params, timeout_ms)
+                return await send(cdp, method, params, timeout_ms, **setup)
             return await world._within(asyncio.Event().wait(), method, timeout_ms or world.timeout_ms)
 
         async def then_stop(self, *args, **kwargs):
