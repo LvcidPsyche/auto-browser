@@ -3,18 +3,23 @@
 browser.find_elements' regex mode hands the pattern to the page's RegExp. A pattern such as (a+)+$ can hang the page's
 JavaScript thread on the page's own text; the gateway's 10 s guard stops waiting for the read, not the regex, which goes
 on running in the renderer. So a group with an unbounded repeat after it (*, +, {n,}) is refused when its body holds an
-unbounded repeat of its own, or when its alternatives overlap (one is a prefix of another, or they are equal: the
-classic (a|aa)+).
+unbounded repeat of its own, or when its alternatives, or those of any group inside it, overlap (one is a prefix of
+another, or they are equal: the classic (a|aa)+, and ((a|aa))+).
 
 A small scanner over the pattern's syntax (escapes, character classes, groups), iterative and bounded by the pattern's
 length, not a regular expression over a regular expression. It reads the pattern as the page's RegExp does: JavaScript's
-syntax, with the case-insensitive flag the gateway uses. A malformed pattern is passed through for the page's RegExp to
-refuse. The check stops the classic shapes and is not a proof a pattern is safe: the 10 s guard stays.
+syntax, with the case-insensitive flag the gateway uses and no u flag, so a literal character folds as ECMAScript's
+Canonicalize folds it. A malformed pattern is passed through for the page's RegExp to refuse. Escapes and classes are
+compared as they are written, so \\x61 against a, or [a] against a, is not seen. That is the check's limit: it stops the
+classic shapes and is not a proof a pattern is safe, and the 10 s guard stays.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+# ECMAScript's Canonicalize keeps a character at or past U+0080 whose upper case falls below it.
+_CANONICALIZE_KEEPS_FROM = 0x80
 
 
 @dataclass
@@ -22,10 +27,12 @@ class _Group:
     """A group while the scan is inside it (the outermost one is the pattern itself, and is never repeated)."""
 
     opened_at: int
-    # Each alternative's text so far, case-folded where the page's case-insensitive matching ignores case.
+    # Each alternative's text so far, a literal character case-folded as the page's matching folds it (_canonicalized).
     alternatives: list[str] = field(default_factory=lambda: [""])
     # Whether its body holds an unbounded repeat, at any depth.
     holds_repeat: bool = False
+    # Whether a group inside it has overlapping alternatives, at any depth.
+    holds_overlap: bool = False
 
 
 def catastrophic_repeat(pattern: str) -> str | None:
@@ -48,6 +55,9 @@ def catastrophic_repeat(pattern: str) -> str | None:
             if unbounded and (reason := _refusal(pattern, inner, index)):
                 return reason
             parent.holds_repeat = parent.holds_repeat or inner.holds_repeat or unbounded
+            parent.holds_overlap = (
+                parent.holds_overlap or inner.holds_overlap or _alternatives_overlap(inner.alternatives)
+            )
             parent.alternatives[-1] += "(" + "|".join(inner.alternatives) + ")" + pattern[index + 1 : end]
             index = end
         else:
@@ -55,7 +65,7 @@ def catastrophic_repeat(pattern: str) -> str | None:
             end, unbounded = _quantifier(pattern, atom_end)
             group.holds_repeat = group.holds_repeat or unbounded
             atom = pattern[index:atom_end]
-            group.alternatives[-1] += (atom.lower() if char not in "\\[" else atom) + pattern[atom_end:end]
+            group.alternatives[-1] += (_canonicalized(atom) if char not in "\\[" else atom) + pattern[atom_end:end]
             index = end
     return None
 
@@ -64,8 +74,11 @@ def _refusal(pattern: str, group: _Group, closed_at: int) -> str | None:
     text = pattern[group.opened_at : closed_at + 1]
     if group.holds_repeat:
         why = "repeats without bound and its body holds an unbounded repeat of its own"
-    elif _alternatives_overlap(group.alternatives):
-        why = "repeats without bound and its alternatives overlap (one is a prefix of another, or they are equal)"
+    elif group.holds_overlap or _alternatives_overlap(group.alternatives):
+        why = (
+            "repeats without bound and its alternatives, or those of a group inside it, overlap (one is a prefix of "
+            "another, or they are equal)"
+        )
     else:
         return None
     return (
@@ -73,6 +86,14 @@ def _refusal(pattern: str, group: _Group, closed_at: int) -> str | None:
         "catastrophically on the page's text and hang the page. Rewrite the group, or use regex=false to match the "
         "text literally."
     )
+
+
+def _canonicalized(character: str) -> str:
+    """A literal character as the page's case-insensitive RegExp compares it (ECMAScript's Canonicalize, no u flag)."""
+    upper = character.upper()
+    if len(upper) != 1 or (ord(character) >= _CANONICALIZE_KEEPS_FROM and ord(upper) < _CANONICALIZE_KEEPS_FROM):
+        return character
+    return upper
 
 
 def _alternatives_overlap(alternatives: list[str]) -> bool:

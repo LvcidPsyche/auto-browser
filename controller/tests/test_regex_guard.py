@@ -28,6 +28,16 @@ REFUSED = (
     ("(a|A)+", "overlap"),
     ("(a|a)+", "overlap"),
     ("(|a)+", "overlap"),
+    # Overlapping alternatives anywhere inside the repeated group: wrapping them adds nothing, and `((a|aa)b)+` is
+    # the same trade as `(a+b)+`, refused for what it holds.
+    ("((a|aa))+", "those of a group inside it"),
+    ("(?:(a|aa))+", "those of a group inside it"),
+    ("((?:a|aa))+", "those of a group inside it"),
+    ("((a|a))+", "those of a group inside it"),
+    ("((a|aa)b)+", "those of a group inside it"),
+    ("(x(y(a|aa)))+", "those of a group inside it"),
+    # Case folds as the page's RegExp folds it (ECMAScript's Canonicalize, no u flag): e-acute and E-acute are one.
+    ("(é|É)+", "overlap"),
 )
 ALLOWED = (
     "a+b",
@@ -46,6 +56,16 @@ ALLOWED = (
     "(a+)",
     # Escapes a case-folding comparison must not merge.
     r"(\d|\D)+",
+    # A wrapped group whose alternatives do not overlap, and overlapping ones no unbounded repeat encloses.
+    "((foo|bar))+",
+    "(a|aa)",
+    "((a|aa))",
+    "((a|aa)){2,3}",
+    # ECMAScript's Canonicalize keeps these apart without the u flag: k and the Kelvin sign, s and the long s, and a
+    # character whose upper case is not one character (the sharp s).
+    "(k|K)+",
+    "(s|ſ)+",
+    "(ß|ss)+",
     # Malformed patterns are the page's RegExp to refuse; the scan does not crash on them.
     "(",
     ")",
