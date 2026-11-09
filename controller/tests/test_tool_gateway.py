@@ -1251,7 +1251,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             response = await self.full_gateway.call_tool(
                 McpToolCallRequest(
                     name="browser.find_elements",
-                    arguments={"session_id": "session-1", "query": "(a+)+$", "regex": True},
+                    # A shape the input check lets through (it stops only the classic ones): the bound still ends it.
+                    arguments={"session_id": "session-1", "query": "x+x+y", "regex": True},
                 )
             )
         finally:
@@ -1260,6 +1261,36 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent.get("code"), "query_timeout")
         self.assertIn("timed out", response.content[0].text)
+
+    async def test_find_elements_refuses_a_catastrophic_regex_before_the_page_runs_it(self) -> None:
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=[]))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1", "query": "(a+)+$", "regex": True},
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertIn("Invalid arguments for browser.find_elements", response.content[0].text)
+        self.assertIn("backtrack catastrophically", response.content[0].text)
+        page.evaluate.assert_not_awaited()
+
+    async def test_find_elements_takes_the_same_text_with_regex_off(self) -> None:
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=[]))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1", "query": "(a+)+$", "regex": False},
+            )
+        )
+
+        self.assertFalse(response.isError, response.content[0].text)
+        page.evaluate.assert_awaited_once()
 
     async def test_find_elements_invalid_regex_surfaces_structured_error(self) -> None:
         page = SimpleNamespace(evaluate=AsyncMock(return_value={"__invalid_regex": "Unterminated group"}))

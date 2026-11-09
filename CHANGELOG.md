@@ -99,6 +99,12 @@ All notable changes to auto-browser are documented here.
 - **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller
   refuses them, so a client on it was promised what the server would not do. `2025-11-25` and `2025-06-18` remain.
   (MCP-15)
+- **`browser.find_elements` refuses the classic catastrophic regular expressions.** With `regex=true`, a pattern with
+  a group that repeats without bound and either holds an unbounded repeat of its own (`(a+)+$`, `(.*)*`) or has
+  overlapping alternatives (`(a|aa)+`) now fails validation, with a message naming the group and why. It used to reach
+  the page, where it could hang the page's JavaScript thread after the controller's 10-second bound had stopped
+  waiting for it. The check reads the pattern's own syntax and stops only these shapes; that bound stays for the
+  rest. (MCP-24)
 
 ## [1.17.0] — 2026-11-08
 

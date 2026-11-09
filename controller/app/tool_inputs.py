@@ -32,6 +32,7 @@ from .models import (
     validate_coordinate_pair,
     validate_url,
 )
+from .regex_guard import catastrophic_repeat
 from .result_shaping import ResultDetail
 from .url_safety import refuse_ambiguous_host, refuse_another_navigation_host
 
@@ -556,6 +557,13 @@ class FindElementsInput(SessionIdInput):
             raise ValueError("find_elements requires either selector or query")
         if self.selector and self.query:
             raise ValueError("find_elements accepts either selector or query, not both")
+        return self
+
+    @model_validator(mode="after")
+    def refuse_catastrophic_regex(self) -> "FindElementsInput":
+        # app.regex_guard: the classic shapes only, and not a proof; the 10 s guard on the read stays.
+        if self.regex and self.query and (reason := catastrophic_repeat(self.query)):
+            raise ValueError(reason)
         return self
 
 
