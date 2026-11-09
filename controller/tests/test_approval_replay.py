@@ -109,13 +109,11 @@ class ReplayTests(SpendBase):
         self.assertEqual(await self.status(approval_id), "approved")
 
     async def test_a_click_approval_does_not_cover_a_type(self) -> None:
-        click = {"action": "click", "reason": "pay", "selector": "#pay", "risk_category": "payment"}
+        # The two differ in `action` alone, so this pins that field: the click carries the same text a type would use.
+        click = {"action": "click", "reason": "pay", "selector": "#pay", "text": "typed", "risk_category": "payment"}
         approval_id = await self.approved_governed(click)
 
-        replay = await self.governed(
-            {"action": "type", "reason": "pay", "selector": "#pay", "text": "typed", "risk_category": "payment"},
-            approval_id,
-        )
+        replay = await self.governed({**click, "action": "type"}, approval_id)
 
         self.assertTrue(replay.isError)
         self.assertIn("does not match the requested action", replay.content[0].text)
