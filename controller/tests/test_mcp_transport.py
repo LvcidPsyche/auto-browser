@@ -486,6 +486,26 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(contents[0]["text"], '[{"id": "session-1", "status": "active"}]')
         self.manager.list_sessions.assert_awaited_once_with()
 
+    def test_resources_read_refuses_a_uri_that_is_not_a_non_empty_string(self) -> None:
+        session_id, protocol_version = self._initialize()
+        headers = {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version}
+        self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        )
+
+        for params in ({"uri": 5}, {"uri": []}, {"uri": {}}, {"uri": None}, {"uri": ""}, {}):
+            with self.subTest(params=params):
+                response = self.client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": 16, "method": "resources/read", "params": params},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], -32602)
+                self.assertEqual(error["message"], "resources/read requires a non-empty uri")
+
     def test_resources_read_returns_not_found_error_for_unknown_uri(self) -> None:
         session_id, protocol_version = self._initialize()
         self.client.post(

@@ -257,7 +257,14 @@ class McpHttpTransport:
                 headers=self._session_headers(session),
             )
         if method == "resources/read":
-            uri = params.get("uri", "")
+            uri = params.get("uri")
+            if not isinstance(uri, str) or not uri:
+                return self._json_error_response(
+                    request_id,
+                    -32602,
+                    "resources/read requires a non-empty uri",
+                    headers=self._session_headers(session),
+                )
             content = await self._read_resource(uri)
             if content is None:
                 return self._json_error_response(

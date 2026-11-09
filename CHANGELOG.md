@@ -13,6 +13,12 @@ All notable changes to auto-browser are documented here.
   client that does send `MCP-Protocol-Version: 2025-03-26` is now refused with `400` and `-32602`, and has to
   initialize again.
 
+### Fixed
+
+- **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
+  unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
+  found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
+
 ### Changed
 
 - **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller
