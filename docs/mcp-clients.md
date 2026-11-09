@@ -393,11 +393,11 @@ tools in the order `tools/list` returns them.
 | `harness` | full | the convergence harness | `harness.start_convergence`, `harness.get_status`, `harness.get_trace`, `harness.list_runs`, `harness.list_candidates`, `harness.get_candidate`, `harness.check_drift`, `harness.check_all_drifts`, `harness.graduate` |
 
 ```bash
-MCP_TOOL_PROFILE=lean                                  # 7 tools, 11,934 B
+MCP_TOOL_PROFILE=lean                                  # 7 tools, about 13 KB
 MCP_TOOL_PROFILE=lean MCP_TOOL_PACKS=sessions,tabs     # 14 tools
-MCP_TOOL_PACKS=harness                                 # curated + harness: 29 tools, 34,077 B
-MCP_TOOL_PACKS=-scripting                              # curated without eval_js: 19 tools, 23,913 B
-MCP_TOOL_PROFILE=full MCP_TOOL_PACKS=-harness,-cron    # 61 tools, 57,117 B
+MCP_TOOL_PACKS=harness                                 # curated + harness: 29 tools, about 38 KB
+MCP_TOOL_PACKS=-scripting                              # curated without eval_js: 19 tools, about 27 KB
+MCP_TOOL_PROFILE=full MCP_TOOL_PACKS=-harness,-cron    # 61 tools, about 64 KB
 ```
 
 The rules:
