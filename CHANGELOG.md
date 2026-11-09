@@ -10,7 +10,7 @@ All notable changes to auto-browser are documented here.
   any other version the controller does not speak is, and one that cannot follow disconnects itself. A session that
   negotiated `2025-03-26` before the upgrade, restored from the session store, goes on at that version as it did,
   with or without the `MCP-Protocol-Version` header, until it initializes again: a stdio bridge that outlives the
-  upgrade sends that header on every request and re-initializes only on a `404`. On a session at any other version a
+  upgrade sends that header on every POST and re-initializes only on a `404`. On a session at any other version a
   `2025-03-26` header is refused with `400` and `-32602`.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
@@ -58,13 +58,15 @@ All notable changes to auto-browser are documented here.
 - **An MCP session now has one live `GET /mcp` stream, and a stream ends with its session.** Every `GET` opened
   another stream and another subscription to every browser event for the same session, and `DELETE` or an eviction
   left them all running for a session that no longer existed. A new `GET` now ends the session's previous stream, and
-  `DELETE` or an eviction past the session caps ends it, at once rather than at its next 15-second keepalive, and a
-  stopped stream sends nothing more. A stream blocked sending to a client that has stopped reading, which 1.17.0
-  could not stop either, ends when that send returns or the connection goes. Its event queue is released however the
-  stream ends. Eviction past the session caps now takes every session without a live stream before any session with
-  one, least recently used first within each, so a client that only listens outlasts a flood of `initialize` requests
-  and goes only when nothing but listeners remain; a client initializing into a table full of listeners keeps its new
-  session. An open stream still counts as use, as a request does, in the last-used time a restart goes by. (MCP-11)
+  `DELETE` or an eviction past the session caps ends it, while it waits for an event at once rather than at its next
+  15-second keepalive, and a stopped stream sends nothing more. A stream looking up an event's owner ends when that
+  returns; one blocked sending to a client that has stopped reading, which 1.17.0 could not stop either, ends when
+  that send returns or the connection goes. Its event queue is released however the stream ends. Among the sessions a
+  cap covers (one operator's, or the whole table), eviction now takes every session without a live stream before any
+  session with one, least recently used first within each, so a client that only listens outlasts a flood of
+  `initialize` requests and goes only when nothing but listeners remain under that cap; a client initializing into a
+  table full of listeners keeps its new session. An open stream still counts as use, as a request does, in the
+  last-used time a restart goes by. (MCP-11)
 - **`DELETE /mcp` checks `MCP-Protocol-Version`, as every other request after `initialize` does.** It ignored the
   header and deleted the session whatever the header said. An unsupported version is now `400` and `-32602`, a
   version other than the session's `400` and `-32600`, and the session stays; a matching or absent header still

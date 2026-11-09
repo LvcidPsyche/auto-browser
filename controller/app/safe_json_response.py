@@ -16,7 +16,7 @@ class SafeJSONResponse(JSONResponse):
 
     A page can hand over a lone surrogate (a JSON string's escape for one decodes to it), and UTF-8 cannot carry it,
     so a response holding one raised UnicodeEncodeError after its handler had run. Only a body that fails the normal
-    rendering is rewritten, so a normal response pays nothing. U+FFFD, and not the JSON escape, because a strict JSON
+    rendering is cleaned, so a normal response is not walked. U+FFFD, and not the JSON escape, because a strict JSON
     parser refuses a lone surrogate's escape, and a page should not be able to break a client's parser.
     """
 
