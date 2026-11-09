@@ -134,8 +134,8 @@ WORLD_PAD_SECONDS = 5.0
 PAGE_READ_WORLD_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000)
 # The world's setup messages (the session's attach, the frame tree, the world's creation) are bounded below a page
 # read's own timeout, not past it as its script is: a page busy for longer than ACTION_TIMEOUT_MS still gets its read.
-# Each setup message has this bound; one that hangs when the read starts ends as page_not_responding, its session
-# dropped and detached (review of c6).
+# They share this one deadline, counted from the start of the call; a setup still unfinished at it ends as
+# page_not_responding, its session dropped and detached (review of c6).
 WORLD_SETUP_MARGIN_SECONDS = 2.0
 PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
 

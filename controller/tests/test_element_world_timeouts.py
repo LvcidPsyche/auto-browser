@@ -12,6 +12,7 @@ Chromium, not their bounds.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,12 @@ async def timed_failure(call: Any) -> tuple[float, BrowserActionError]:
     return time.monotonic() - started, raised.value
 
 
+def waited_ms(error: BrowserActionError) -> int:
+    match = re.search(r"within (\d+) ms", str(error))
+    assert match, str(error)
+    return int(match.group(1))
+
+
 async def detached(cdp: SlowCdp) -> None:
     while not cdp.detached:
         await asyncio.sleep(0.01)
@@ -117,7 +124,7 @@ async def test_a_setup_step_past_setup_timeout_ms_fails_there_not_at_timeout_ms(
     )
 
     assert error.code == PAGE_NOT_RESPONDING
-    assert f"within {SHORT_MS} ms" in str(error)
+    assert SHORT_MS / 2 < waited_ms(error) <= SHORT_MS  # what was left of the setup budget
     assert elapsed < LONG_MS / 1000
 
 
@@ -194,6 +201,26 @@ async def test_a_setup_step_past_its_bound_fails_with_the_session_dropped_and_de
     assert cdp.detached == 1
 
 
+async def test_the_setup_messages_of_one_call_share_one_deadline() -> None:
+    # An attach that takes more than half the budget, then a frame tree that hangs: each message used to get the whole
+    # budget, so the call outlived an outer bound a little longer than one budget and was cancelled, not failed.
+    budget_ms = 1000
+    cdp = SlowCdp({"Page.getFrameTree": HUNG_S})
+    page = slow_page(cdp, attach_s=0.6)
+    instance = world()
+
+    with pytest.raises(BrowserActionError) as raised:
+        await asyncio.wait_for(
+            instance.call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=budget_ms),
+            timeout=1.4 * budget_ms / 1000,
+        )
+
+    assert raised.value.code == PAGE_NOT_RESPONDING
+    assert (instance._cdp, instance._frame_id) == (None, None)
+    await asyncio.wait_for(detached(cdp), timeout=TEST_BOUND_S)
+    assert cdp.detached == 1
+
+
 # -- at the gateway: under bounded(), not at the default action timeout ------------
 
 
@@ -254,6 +281,6 @@ async def test_a_page_read_whose_setup_hangs_ends_as_page_not_responding_before_
     elapsed, error = await timed_failure(read(gateway))
 
     assert error.code == PAGE_NOT_RESPONDING
-    assert f"within {SHORT_MS} ms" in str(error)
+    assert SHORT_MS / 2 < waited_ms(error) <= SHORT_MS  # what was left of the setup budget
     assert elapsed < read_bound_s
     assert manager.element_ids._world(session.page)._cdp is None

@@ -8,12 +8,12 @@ neither read the registry nor replace anything the world calls
 frame's document changes, and with a new, empty one after.
 
 Every call is two CDP messages on a session the controller opens for the page.
-Each message has its own deadline, a bound per message and not a deadline for a
-whole action. The one that runs the script has ``ACTION_TIMEOUT_MS``, plus the
-script's own wait for a script that waits, or the caller's ``timeout_ms``. The
-ones that set the call up (the session's attach, the frame tree, the world's
-creation) have ``ACTION_TIMEOUT_MS``, or the caller's ``setup_timeout_ms``: the
-script's wait is no reason for them to wait too. A renderer that crashed leaves
+The message that runs the script has ``ACTION_TIMEOUT_MS``, plus the script's
+own wait for a script that waits, or the caller's ``timeout_ms``. The ones that
+set the call up (the session's attach, the frame tree, the world's creation)
+have ``ACTION_TIMEOUT_MS`` each, or share one deadline, the caller's
+``setup_timeout_ms`` counted from the start of the call: the script's wait is no
+reason for them to wait too. A renderer that crashed leaves
 the session open with nothing answering, and a call with no deadline hung the
 request; now it fails with ``page_not_responding``. A session that timed out is
 detached and dropped, one that went away is dropped, and the next call opens a
@@ -216,9 +216,12 @@ class PageWorld:
     ) -> Any:
         """Run ``declaration`` in the world with ``args``.
 
-        ``timeout_ms`` bounds the message that runs it, and ``setup_timeout_ms``
-        each message that sets it up (the session's attach, the frame tree, the
-        world's creation); None is the world's own ``timeout_ms`` for either.
+        ``timeout_ms`` bounds the message that runs it. ``setup_timeout_ms`` is
+        one budget for everything that sets it up (the session's attach, the
+        frame tree, the world's creation), counted from the start of the call
+        and shared with a retry of it: a message gets what is left of it.
+        None is the world's own ``timeout_ms`` for each of those messages, and
+        for the script's message when ``timeout_ms`` is None.
 
         ``effect`` says what the call does to the page, and so whether it is
         sent once more after the session went away or the frame id changed
@@ -232,8 +235,9 @@ class PageWorld:
         ``page_not_responding`` and is never sent again.
         """
         timeout_ms = self.timeout_ms if timeout_ms is None else timeout_ms
+        deadline = None if setup_timeout_ms is None else asyncio.get_running_loop().time() + setup_timeout_ms / 1000
         try:
-            return await self._call(page, declaration, args, timeout_ms, setup_timeout_ms=setup_timeout_ms)
+            return await self._call(page, declaration, args, timeout_ms, setup_deadline=deadline)
         except _AnswerLost as exc:
             if effect not in _SENT_AGAIN:
                 raise BrowserActionError(
@@ -243,12 +247,12 @@ class PageWorld:
                     retryable=False,
                 ) from exc
             logger.debug("element ids: calling the world again after: %s", exc.message)
-            return await self._call(page, declaration, args, timeout_ms, setup_timeout_ms=setup_timeout_ms)
+            return await self._call(page, declaration, args, timeout_ms, setup_deadline=deadline)
         except PlaywrightError as exc:
             if effect not in _SENT_AGAIN or not (_NO_FRAME in exc.message or session_gone(exc)):
                 raise
             logger.debug("element ids: calling the world again after: %s", exc.message)
-            return await self._call(page, declaration, args, timeout_ms, setup_timeout_ms=setup_timeout_ms)
+            return await self._call(page, declaration, args, timeout_ms, setup_deadline=deadline)
 
     async def _call(
         self,
@@ -257,15 +261,15 @@ class PageWorld:
         args: tuple[Any, ...],
         timeout_ms: int,
         *,
-        setup_timeout_ms: int | None = None,
+        setup_deadline: float | None = None,
     ) -> Any:
-        cdp, frame_id = await self._session(page, setup_timeout_ms=setup_timeout_ms)
+        cdp, frame_id = await self._session(page, setup_deadline=setup_deadline)
         # Asked for on every call rather than cached: Chromium answers with the
         # same world until the frame's document changes and a new one after, and
         # a cached context could outlive its document (the back/forward cache)
         # and answer for a page that is no longer shown.
         world = await self._send(
-            cdp, "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": WORLD_NAME}, setup_timeout_ms
+            cdp, "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": WORLD_NAME}, _left_ms(setup_deadline)
         )
         try:
             reply = await self._send(
@@ -289,23 +293,23 @@ class PageWorld:
             raise PlaywrightError(_script_error(reply["exceptionDetails"]))
         return (reply.get("result") or {}).get("value")
 
-    async def _session(self, page: "Page", *, setup_timeout_ms: int | None = None) -> tuple["CDPSession", str]:
+    async def _session(self, page: "Page", *, setup_deadline: float | None = None) -> tuple["CDPSession", str]:
         if self._cdp is not None and self._frame_id is not None:
             return self._cdp, self._frame_id
         async with self._lock:
             if self._cdp is None:
-                self._cdp = await self._attach(page, setup_timeout_ms=setup_timeout_ms)
+                self._cdp = await self._attach(page, setup_deadline=setup_deadline)
             if self._frame_id is None:
-                tree = await self._send(self._cdp, "Page.getFrameTree", None, setup_timeout_ms)
+                tree = await self._send(self._cdp, "Page.getFrameTree", None, _left_ms(setup_deadline))
                 self._frame_id = tree["frameTree"]["frame"]["id"]
             return self._cdp, self._frame_id
 
-    async def _attach(self, page: "Page", *, setup_timeout_ms: int | None = None) -> "CDPSession":
+    async def _attach(self, page: "Page", *, setup_deadline: float | None = None) -> "CDPSession":
         attaching = asyncio.ensure_future(page.context.new_cdp_session(page))
         _LATE_ATTACHES.add(attaching)
         attaching.add_done_callback(_LATE_ATTACHES.discard)
         try:
-            return await self._within(asyncio.shield(attaching), "a CDP session", setup_timeout_ms)
+            return await self._within(asyncio.shield(attaching), "a CDP session", _left_ms(setup_deadline))
         except BaseException:
             # Timed out or cancelled: the attach can still complete, and its session is then detached, not left open.
             attaching.add_done_callback(_detach_when_attached)
@@ -371,6 +375,13 @@ class PageWorld:
 
 class _AnswerLost(PlaywrightError):
     """The session or frame went away after the function was sent to the world."""
+
+
+def _left_ms(deadline: float | None) -> int | None:
+    """Milliseconds until ``deadline`` (a loop time), 0 once it has passed; None for no deadline."""
+    if deadline is None:
+        return None
+    return max(0, int((deadline - asyncio.get_running_loop().time()) * 1000))
 
 
 def session_gone(exc: BaseException) -> bool:
