@@ -44,8 +44,9 @@ All notable changes to auto-browser are documented here.
   too, not a `500`. (MCP-35)
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
-  and a longer page ends in an HTML comment that names the cap, the page's length and `browser.get_html`, which
-  pages through the rest. A screenshot read stays a fresh, redacted, page-checked capture. (MCP-35)
+  and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and
+  `browser.get_html`, which pages through the rest. A screenshot read stays a fresh, redacted, page-checked capture.
+  (MCP-35)
 - **An MCP session now has one live `GET /mcp` stream, and a stream ends with its session.** Every `GET` opened
   another stream and another subscription to every browser event for the same session, and `DELETE` or an eviction
   left them all running for a session that no longer existed. A new `GET` now ends the session's previous stream, and

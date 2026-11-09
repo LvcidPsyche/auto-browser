@@ -188,16 +188,17 @@ class McpResourceReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer["result"]["contents"][0]["text"], html)
 
-    async def test_a_page_over_the_cap_is_cut_and_says_so(self) -> None:
+    async def test_a_page_over_the_cap_comes_back_at_the_cap_ending_in_a_marker_that_says_so(self) -> None:
         cap = mcp_transport.MAX_DOM_RESOURCE_CHARS
         self.page.content.return_value = "a" * (cap + 1)
 
         text = (await self.read("browser://s1/dom"))["result"]["contents"][0]["text"]
 
-        marker = text[cap:]
-        self.assertEqual(text[:cap], "a" * cap)
-        self.assertTrue(marker.startswith("<!--"), marker)
+        marker = text[text.index("<!--") :]
+        self.assertEqual(len(text), cap)
+        self.assertEqual(text[: -len(marker)], "a" * (cap - len(marker)))
         self.assertTrue(marker.endswith("-->"), marker)
+        self.assertIn("cut to", marker)
         self.assertIn(f"{cap:,}", marker)
         self.assertIn(f"{cap + 1:,}", marker)
         self.assertIn("browser.get_html", marker)

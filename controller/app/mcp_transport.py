@@ -40,7 +40,8 @@ INITIALIZATION_REQUIRED_ERROR = -32005
 # Readable, but no event ever notifies them (_updated_resource_uris), so a subscription would wait for ever.
 NEVER_NOTIFIED_RESOURCES = frozenset({"browser://audit/events"})
 # The most characters of a page's DOM one read returns: the most a tool result may return, so a page a tool could
-# hand over whole is not cut here. A longer page ends in a comment that says so and names the paging tool.
+# hand over whole is not cut here. A longer page ends in a comment, counted in this cap, that says so and names the
+# paging tool.
 MAX_DOM_RESOURCE_CHARS = MAX_TOOL_RESULT_CHARS
 # How long GET /mcp's event stream waits for an event before it sends a keepalive.
 _STREAM_KEEPALIVE_SECONDS = 15
@@ -900,10 +901,11 @@ def _json_resource(uri: str, payload: Any) -> dict[str, Any]:
 
 
 def _capped_dom(html: str) -> str:
-    """A page's HTML, cut to MAX_DOM_RESOURCE_CHARS, with a trailing comment saying so when it was cut."""
+    """A page's HTML, at most MAX_DOM_RESOURCE_CHARS in all: a longer page is cut and ends in a comment saying so."""
     if len(html) <= MAX_DOM_RESOURCE_CHARS:
         return html
-    return (
-        f"{html[:MAX_DOM_RESOURCE_CHARS]}<!-- auto-browser: cut at {MAX_DOM_RESOURCE_CHARS:,} of {len(html):,} "
+    marker = (
+        f"<!-- auto-browser: cut to {MAX_DOM_RESOURCE_CHARS:,} of {len(html):,} "
         "characters; browser.get_html pages through the whole text -->"
     )
+    return html[: MAX_DOM_RESOURCE_CHARS - len(marker)] + marker
