@@ -1226,6 +1226,10 @@ ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
 
 ## Cron jobs and webhook keys
 
+Schedules are read in the zone `CRON_TIMEZONE` names, `UTC` by default, whatever the host's own zone is: set it to an
+IANA zone name such as `America/Chicago` for a job to fire at that zone's hour. A name the zone database does not know
+stops the controller at startup, and the name is in the message. The controller image carries the zone database.
+
 A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (the bearer token is
 needed as well, as on any route). The key is 256 random bits, answered once by the call that makes it, `POST /crons`
 or a rotation. The store keeps only its SHA-256 hash, and reads answer `webhook_key_id`, a short non-secret id derived

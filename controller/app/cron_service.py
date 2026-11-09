@@ -69,6 +69,9 @@ except ImportError:
 
 # What an unknown id, a job with no key and a wrong key are refused with: nothing says which it was.
 WEBHOOK_KEY_REFUSED = "Invalid webhook key"
+# A fire the scheduler reaches up to five minutes late (a busy loop) still runs, a burst of missed fires runs once,
+# and one job's scheduled fire never overlaps itself.
+_SCHEDULER_JOB_DEFAULTS = {"misfire_grace_time": 300, "coalesce": True, "max_instances": 1}
 # How a run's agent job can end, as AgentJobRecord.status says it. Anything else means its end was never written.
 _FINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "discarded"})
 # The run ended (its finish callback came), and its agent job's record cannot say how.
@@ -121,9 +124,11 @@ class CronService:
         max_jobs: int = 50,
         job_queue: Any = None,  # AgentJobQueue
         manager: Any = None,  # BrowserManager
+        timezone: str = "UTC",
     ):
         self._store_path = Path(store_path)
         self._max_jobs = max_jobs
+        self._timezone = timezone
         self.job_queue = job_queue
         self.manager = manager
         self._scheduler: Any = None
@@ -140,7 +145,7 @@ class CronService:
         await self._hash_legacy_webhook_keys()
         if not _APSCHEDULER_AVAILABLE:
             return
-        self._scheduler = AsyncIOScheduler()
+        self._scheduler = AsyncIOScheduler(timezone=self._timezone, job_defaults=dict(_SCHEDULER_JOB_DEFAULTS))
         for job in jobs.values():
             if job.get("enabled") and job.get("schedule"):
                 self._register_job(job)
@@ -394,8 +399,7 @@ class CronService:
 
     # ── Internal ───────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _validate_schedule(schedule: str | None) -> None:
+    def _validate_schedule(self, schedule: str | None) -> None:
         """Reject a cron expression the scheduler cannot parse.
 
         _register_job only logs a parse failure, so an invalid schedule was
@@ -404,7 +408,7 @@ class CronService:
         if not schedule or not _APSCHEDULER_AVAILABLE:
             return
         try:
-            CronTrigger.from_crontab(schedule)
+            CronTrigger.from_crontab(schedule, timezone=self._timezone)
         except ValueError as exc:
             raise ValueError(f"Invalid cron schedule {schedule!r}: {exc}") from None
 
@@ -412,7 +416,7 @@ class CronService:
         if not _APSCHEDULER_AVAILABLE or self._scheduler is None:
             return
         try:
-            trigger = CronTrigger.from_crontab(job["schedule"])
+            trigger = CronTrigger.from_crontab(job["schedule"], timezone=self._timezone)
             self._scheduler.add_job(
                 self._scheduled_run,
                 trigger=trigger,

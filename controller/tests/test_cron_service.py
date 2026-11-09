@@ -4,11 +4,17 @@ import asyncio
 import hashlib
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from apscheduler.triggers.cron import CronTrigger
+from pydantic import ValidationError
+
+from app.app_factory import build_controller_services
 from app.audit import get_current_operator
+from app.config import Settings
 from app.cron_service import CronJobDisabledError, CronService, CronStoreUnreadableError
 from app.models import OperatorIdentity
 from app.session_ownership import acting_as
@@ -380,6 +386,71 @@ class CronQuarantineWarningTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_warning_without_a_quarantine_file(self) -> None:
         with self.assertNoLogs("app.cron_service", level="WARNING"):
             await self._start_and_stop()
+
+
+class CronTimezoneTests(unittest.IsolatedAsyncioTestCase):
+    """Schedules read in CRON_TIMEZONE (UTC by default), whatever the host's own time zone is."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store_path = Path(self.tmp.name) / "crons.json"
+
+    async def _started(self, **kwargs) -> CronService:
+        service = CronService(self.store_path, **kwargs)
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+        return service
+
+    async def test_the_scheduler_defaults_to_utc_and_holds_the_three_job_defaults(self) -> None:
+        service = await self._started()
+
+        self.assertEqual(str(service._scheduler.timezone), "UTC")
+        self.assertEqual(
+            service._scheduler._job_defaults, {"misfire_grace_time": 300, "coalesce": True, "max_instances": 1}
+        )
+
+    async def test_the_configured_zone_reaches_the_scheduler_and_the_trigger_a_job_gets(self) -> None:
+        await CronService(self.store_path).create_job(name="n", goal="g", schedule="0 9 * * *")
+
+        service = await self._started(timezone="Asia/Tokyo")
+
+        self.assertEqual(str(service._scheduler.timezone), "Asia/Tokyo")
+        [job] = service._scheduler.get_jobs()
+        self.assertEqual(str(job.trigger.timezone), "Asia/Tokyo")
+        # Nine in the morning there: the zone changes the instant it fires.
+        self.assertEqual(job.next_run_time.hour, 9)
+        self.assertNotEqual(job.next_run_time.utcoffset(), timedelta(0))
+
+    async def test_a_new_job_and_the_schedule_check_use_the_same_zone(self) -> None:
+        service = await self._started(timezone="Asia/Tokyo")
+        real_from_crontab = CronTrigger.from_crontab
+
+        with patch("app.cron_service.CronTrigger.from_crontab", wraps=real_from_crontab) as from_crontab:
+            created = await service.create_job(name="n", goal="g", schedule="30 6 * * *")
+
+        self.assertGreaterEqual(from_crontab.call_count, 2, "both the check and the registration read the schedule")
+        for call in from_crontab.call_args_list:
+            self.assertEqual(call.kwargs.get("timezone"), "Asia/Tokyo", call)
+        self.assertEqual(str(service._scheduler.get_job(created["id"]).trigger.timezone), "Asia/Tokyo")
+
+    async def test_a_bad_zone_name_stops_startup_with_a_clear_message(self) -> None:
+        for bad in ("Mars/Olympus", "not a zone", "../etc/passwd", "Europe"):
+            with self.subTest(bad):
+                with self.assertRaises(ValidationError) as caught:
+                    Settings(CRON_TIMEZONE=bad)
+                self.assertIn("CRON_TIMEZONE", str(caught.exception))
+                self.assertIn("IANA", str(caught.exception))
+
+    async def test_a_good_or_empty_zone_name_is_kept_or_defaulted_and_the_controller_is_wired_to_it(self) -> None:
+        self.assertEqual(Settings().cron_timezone, "UTC")
+        self.assertEqual(Settings(CRON_TIMEZONE="").cron_timezone, "UTC")
+        self.assertEqual(Settings(CRON_TIMEZONE="  ").cron_timezone, "UTC")
+        self.assertEqual(Settings(CRON_TIMEZONE=" America/Chicago ").cron_timezone, "America/Chicago")
+
+        services = build_controller_services(Settings(CRON_TIMEZONE="Europe/Berlin"), version="test")
+
+        self.assertEqual(services.cron_service._timezone, "Europe/Berlin")
 
 
 class _OutcomeQueue:

@@ -90,6 +90,10 @@ All notable changes to auto-browser are documented here.
   cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
   makes a new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
   `browser.revoke_cron_webhook_key` removes it.
+- **Cron schedules now run in `CRON_TIMEZONE`, `UTC` by default, not in the host's zone.** A controller whose host was
+  not on UTC fires its jobs at a different hour after upgrading: a `0 9 * * *` job meant nine by the host's clock and
+  now means nine UTC. To keep the old hours, set `CRON_TIMEZONE` to the host's zone name (`America/Chicago`,
+  `Europe/Berlin`). A name the zone database does not know stops the controller at startup.
 - **`POST /crons/{id}/trigger` no longer answers `404` for an unknown job.** A caller without the key could tell
   which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`):
   treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved.
@@ -300,6 +304,10 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
+- **Cron schedules are read in one zone, `CRON_TIMEZONE`, and a late fire still runs.** Schedules and the scheduler
+  used the host's zone. `CRON_TIMEZONE` (default `UTC`, an IANA name, checked at startup) now sets it for both: see
+  the upgrade note. The scheduler also runs a fire it reaches up to five minutes late, runs a burst of missed fires
+  once, and keeps one job's scheduled fire from overlapping itself. (STORE-18)
 - **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller
   refuses them, so a client on it was promised what the server would not do. `2025-11-25` and `2025-06-18` remain.
   (MCP-15)

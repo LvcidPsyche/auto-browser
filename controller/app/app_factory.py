@@ -85,6 +85,7 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
         max_jobs=settings.cron_max_jobs,
         job_queue=job_queue,
         manager=manager,
+        timezone=settings.cron_timezone,
     )
     share_manager = SessionShareManager(
         secret=settings.share_token_secret,

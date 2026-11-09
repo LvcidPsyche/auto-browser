@@ -3,6 +3,7 @@ import random
 import re
 from functools import lru_cache
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -469,6 +470,8 @@ class Settings(BaseSettings):
     # Cron / webhook triggers
     cron_store_path: str = Field("/data/crons/crons.json", alias="CRON_STORE_PATH")
     cron_max_jobs: int = Field(50, alias="CRON_MAX_JOBS")
+    # The zone cron schedules are read in, the same for the scheduler and every job: UTC unless set, not the host's.
+    cron_timezone: str = Field("UTC", alias="CRON_TIMEZONE")
 
     # Shared session links
     share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET", repr=False)
@@ -513,6 +516,23 @@ class Settings(BaseSettings):
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
         return value
+
+    @field_validator("cron_timezone", mode="before")
+    @classmethod
+    def _cron_timezone_is_known(cls, value: object) -> object:
+        # A misspelt zone stops startup here, with its name in the message, not at the first schedule read in it.
+        # "UTC" needs no lookup (APScheduler has it without the zone database); empty is the default, as unset is.
+        if not isinstance(value, str):
+            return value
+        name = value.strip() or "UTC"
+        if name != "UTC":
+            try:
+                ZoneInfo(name)
+            except (KeyError, OSError, ValueError):  # not found is a KeyError; a directory name is an OSError
+                raise ValueError(
+                    f"CRON_TIMEZONE must be an IANA time zone name such as UTC or America/Chicago, got {value!r}"
+                ) from None
+        return name
 
     @field_validator("mesh_timestamp_window")
     @classmethod
