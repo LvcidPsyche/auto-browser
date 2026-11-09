@@ -109,6 +109,12 @@ All notable changes to auto-browser are documented here.
   refused. Give the owner a named credential again, or delete the job and create it again under a credential that
   stays. A job created on the shared token or with no token is unowned and runs as before, as does a job queued by an
   operator named only by a header.
+- **A resumed agent run now gets its first run's `max_steps`, where it got what was left of them.**
+  `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` with no `max_steps` queued a run of the steps the
+  first had not used, and of one step when it had used them all. They now queue a run of the first run's whole
+  `max_steps`, so a resumed run can take more steps than were left: pass `max_steps` to set the number. A resumed run
+  also no longer presents the `approval_id` its first run was queued with, so a step of it that needs an approval asks
+  for a new one.
 
 ### Security
 
@@ -304,6 +310,11 @@ All notable changes to auto-browser are documented here.
   no longer the job's latest leaves the newer run's status alone, and a store that cannot be read or saved at that
   moment is logged and the session is still closed. A run the controller loses before it can report the end (a crash,
   or a run still waiting in the queue at a restart) keeps `queued`. (STORE-15)
+- **A resumed agent run gets the step budget of the run it resumes, and not its approval.** A resume with no
+  `max_steps` queued a run of the steps the first had left, which could be one, too few to finish anything, and the
+  new run kept the `approval_id` the first was queued with, so each of its steps presented an approval given for
+  another run. The resumed run now gets the first run's `max_steps` unless the caller gives one, and no `approval_id`.
+  See the upgrade note. (STORE-23)
 
 ### Changed
 

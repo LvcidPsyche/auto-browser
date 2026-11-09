@@ -360,7 +360,7 @@ class AgentJobIdInput(StrictInputModel):
 
 class ResumeAgentJobInput(AgentJobIdInput):
     max_steps: int | None = Field(
-        default=None, ge=1, le=20, description="Steps to allow from here. Omitted: what the job had left."
+        default=None, ge=1, le=20, description="Steps to allow from here. Omitted: what the job was first given."
     )
 
 

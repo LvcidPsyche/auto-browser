@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from app.agent_jobs import AgentJobQueue
-from app.models import AgentRunRequest, AgentRunResult, AgentStepRequest, AgentStepResult
+from app.models import AgentJobCheckpoint, AgentRunRequest, AgentRunResult, AgentStepRequest, AgentStepResult
+from app.utils import utc_now
 
 
 class FakeOrchestrator:
@@ -156,7 +157,58 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["checkpoint_count"], 1)
         self.assertFalse(stored["resumable"])
 
-    async def test_agent_run_records_checkpoints_and_resume_queues_remaining_steps(self) -> None:
+    async def _an_interrupted_run(self, request: AgentRunRequest, *, checkpoints: int) -> str:
+        """The id of a run a restart stopped after `checkpoints` completed steps."""
+        record = await self.queue.store.create(session_id="session-14", kind="agent_run", request=request.model_dump())
+        for step_index in range(1, checkpoints + 1):
+            await self.queue.store.append_checkpoint(
+                record.id, AgentJobCheckpoint(step_index=step_index, created_at=utc_now(), status="acted")
+            )
+        record = await self.queue.store.get(record.id)
+        record.status = "interrupted"
+        await self.queue.store.update(record)
+        return record.id
+
+    async def _finished(self, job_id: str) -> dict:
+        """The job once it has ended: its store writes run in threads the teardown's cancel does not stop (W7-9)."""
+        for _ in range(200):
+            stored = await self.queue.get_job(job_id)
+            if stored["status"] in {"completed", "failed", "interrupted", "cancelled"}:
+                return stored
+            await asyncio.sleep(0.05)
+        self.fail(f"job {job_id} did not finish")
+
+    async def test_a_resumed_run_gets_the_original_step_budget_and_not_the_old_approval(self) -> None:
+        # STORE-23: it got the steps that were left (2 of 6 here, 1 for a run that used them all), and every step
+        # of it presented the approval the first run was queued with.
+        source = await self._an_interrupted_run(
+            AgentRunRequest(provider="openai", goal="finish it", max_steps=6, approval_id="approval-old"),
+            checkpoints=4,
+        )
+
+        resumed = await self.queue.resume_job(source)
+        await self._finished(resumed["id"])
+
+        self.assertEqual(resumed["request"]["max_steps"], 6)
+        self.assertIsNone(resumed["request"]["approval_id"])
+        self.assertEqual(
+            [(call["max_steps"], call["approval_id"]) for call in self.orchestrator.run_calls], [(6, None)]
+        )
+        # The source's own record is not rewritten: it still says what it was queued with.
+        self.assertEqual((await self.queue.get_job(source))["request"]["approval_id"], "approval-old")
+
+    async def test_a_resumed_run_takes_the_step_budget_its_caller_gives(self) -> None:
+        source = await self._an_interrupted_run(
+            AgentRunRequest(provider="openai", goal="finish it", max_steps=6), checkpoints=4
+        )
+
+        resumed = await self.queue.resume_job(source, max_steps=2)
+        await self._finished(resumed["id"])
+
+        self.assertEqual(resumed["request"]["max_steps"], 2)
+        self.assertEqual([call["max_steps"] for call in self.orchestrator.run_calls], [2])
+
+    async def test_agent_run_records_checkpoints_and_resume_queues_the_original_steps(self) -> None:
         job = await self.queue.enqueue_run(
             "session-2",
             AgentRunRequest(provider="openai", goal="run it", max_steps=3, workflow_profile="governed"),
@@ -180,7 +232,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resumed_record["parent_job_id"], job["id"])
         self.assertEqual(resumed_record["request"]["workflow_profile"], "governed")
-        self.assertEqual(resumed_record["request"]["max_steps"], 1)
+        self.assertEqual(resumed_record["request"]["max_steps"], 3)
         self.assertIn("Resuming background agent job", resumed_record["request"]["context_hints"])
         self.assertIn("https://example.com/3", resumed_record["request"]["context_hints"])
 

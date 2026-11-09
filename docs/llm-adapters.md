@@ -177,7 +177,10 @@ curl -X POST http://localhost:8000/agent/jobs/<job_id>/resume \
 
 The MCP full profile exposes the same behavior as `browser.resume_agent_job`.
 Resume creates a new child job with `parent_job_id` set to the original job and
-injects the checkpoint summary into `context_hints`.
+injects the checkpoint summary into `context_hints`. The child gets the original
+job's `max_steps`, not what was left of them, unless the request gives
+`max_steps`. It does not carry the original job's `approval_id`: a step that
+needs an approval asks for a new one.
 
 ## Safety behavior
 

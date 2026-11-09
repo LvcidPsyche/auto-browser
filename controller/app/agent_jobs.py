@@ -403,9 +403,12 @@ class AgentJobQueue:
             raise ValueError("Only agent_run jobs can be resumed")
 
         payload = AgentRunRequest.model_validate(source.request)
-        completed_steps = len(source.checkpoints)
-        remaining_steps = max(1, payload.max_steps - completed_steps)
-        payload.max_steps = max_steps or remaining_steps
+        # A new run, with the budget the first was given unless the caller gives one: what was left could be a single
+        # step, too few to finish anything.
+        if max_steps is not None:
+            payload.max_steps = max_steps
+        # The approval the first run was queued with was given for that run: this one asks for its own.
+        payload.approval_id = None
         payload.context_hints = self._merge_context_hints(
             payload.context_hints,
             self._resume_context(source),
