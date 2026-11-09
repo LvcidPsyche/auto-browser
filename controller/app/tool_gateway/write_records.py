@@ -121,7 +121,7 @@ async def recorded_write(
 async def _refuse_by_policy(
     manager: Any, session: Any, tool: str, action_class: str, policy: WitnessPolicyOutcome
 ) -> None:
-    """What the action pipeline checks before an action (top of _execute): a required hosted Witness, then the policy."""
+    """What the action pipeline checks before an action (top of _execute): a required hosted Witness, the policy."""
     if action_class != "read":
         await manager._ensure_witness_remote_ready(session, action=tool)
     if policy.should_block:

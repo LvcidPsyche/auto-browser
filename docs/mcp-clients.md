@@ -454,7 +454,8 @@ Use `workflow_profile=governed` when starting convergence against a live browser
 
 ### Governed approvals on tool calls
 
-Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool assigned a
+Pass `workflow_profile=governed` on a tool call (it defaults to `fast`; a tool assigned a governed kind refuses any
+other value) and every tool assigned a
 governed kind asks for an operator's approval first (most tools that write have one, not all: creating a
 session or a proxy persona does not; see `FORCE_GOVERNED_APPROVALS` below): the call returns
 `approval_required` with an `approval_id`, an operator approves it, and the agent repeats the same call
