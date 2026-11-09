@@ -38,7 +38,7 @@ class _HoldingAudit:
         # Held further until this says so too, for a test that needs the finish callback done before enqueue returns.
         self.also_until: Callable[[], bool] = lambda: True
         self.fails_after_the_hold = False
-        # Set, and the `agent_job_finished` write waits for it: the job's record has ended, and its finish callback has not.
+        # When set, the `agent_job_finished` write waits for it: the record has ended, the finish callback has not.
         self.hold_the_finish: asyncio.Event | None = None
         self.events: list[str] = []
         self.failing: set[str] = set()
