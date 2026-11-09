@@ -156,7 +156,9 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(new_page=self._never(release), close=mock.AsyncMock())
         browser = SimpleNamespace(new_context=mock.AsyncMock(return_value=context))
 
-        response, elapsed = await self._probe(browser)
+        # Room to reach new_page: on a loaded runner the whole of 0.2 s can go before the context exists (CI saw a
+        # 0.27 s stall here), and then there is no context to close and the assertion below proves nothing.
+        response, elapsed = await self._probe(browser, probe_seconds=1.0)
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
