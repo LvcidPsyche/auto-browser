@@ -121,7 +121,7 @@ class FingerprintConfig:
     // for a receiver that is not a 2d context, and runs no page code, where the coordinates below can (review of c5).
     const _canvasOf = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'canvas').get;
     const _getPrototypeOf = Object.getPrototypeOf;
-    // Captured with the others: the loop below called the live global, which a page can replace to turn the noise off.
+    // Captured with the others: the loop below called the live global, which a page can change to turn the noise off.
     const _trunc = Math.trunc;
     const _bytesPrototype = Uint8ClampedArray.prototype;
     const _LONG_MIN = -2147483648;
