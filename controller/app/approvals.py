@@ -33,6 +33,7 @@ from .approval_execution import (
     held_action_approval,
     held_for_execution,
     held_status,
+    held_tool_call_approval,
     refused_before_effect,
     spent_refusal,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "held_action_approval",
     "held_for_execution",
     "held_status",
+    "held_tool_call_approval",
     "refused_before_effect",
     "spent_refusal",
 ]

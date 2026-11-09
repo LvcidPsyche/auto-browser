@@ -21,7 +21,7 @@ from ..action_records import wait_for_pending_record, write_record
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
 from ..utils import spawn_background_task, utc_now
-from ..witness import WitnessApproval
+from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +319,7 @@ class BrowserActionPipeline:
         if witness_state.action_class != "read":
             await manager._ensure_witness_remote_ready(session, action=context.action_name)
         if witness_state.outcome.should_block:
-            raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
+            raise PermissionError(witness_state.outcome.block_reason or WITNESS_POLICY_BLOCKED)
         gates = getattr(manager, "request_gates", None)
         if gates is not None:
             # Again before the effect and the operation: the gate can be lost while the action prepares.

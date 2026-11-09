@@ -30,7 +30,7 @@ from app.browser import page_read
 from app.browser.services import sessions as sessions_module
 from app.browser_manager import BrowserSession
 from app.mcp_transport import McpHttpTransport, McpSession
-from app.models import McpToolCallRequest
+from app.models import McpToolCallRequest, WitnessRemoteState
 from app.network_inspector import url_origin
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
 from app.routes.extensions.cdp import cdp_router
@@ -153,6 +153,17 @@ class ReadPage:
         return self.closed
 
 
+def witness_session_fields() -> dict[str, object]:
+    """What a fake session needs for the witness policy, which the gateway's own writes evaluate (write_records)."""
+    return {
+        "protection_mode": "normal",
+        "isolation_mode": "shared_browser_node",
+        "shared_takeover_surface": True,
+        "shared_browser_process": True,
+        "witness_remote_state": WitnessRemoteState(),
+    }
+
+
 def read_session(manager, kind: str, tmp_path: Path, *, evaluated: object = LEAKED) -> SimpleNamespace:
     page = ReadPage(evaluated)
     session = SimpleNamespace(
@@ -167,6 +178,7 @@ def read_session(manager, kind: str, tmp_path: Path, *, evaluated: object = LEAK
         downloads=[],
         artifact_dir=tmp_path,
         last_action=None,
+        **witness_session_fields(),
     )
     page.move = lambda: MOVES[kind](manager, session, page)
     manager.get_session = AsyncMock(return_value=session)

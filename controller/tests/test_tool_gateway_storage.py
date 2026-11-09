@@ -9,18 +9,26 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 
 from app.action_records import wait_for_pending_record
+from app.models import OperatorIdentity
+from app.session_ownership import acting_as
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import GetStorageInput, SetCookiesInput, SetStorageInput, SetViewportInput
+from app.witness import REDACTED
 from tests.test_approval_spend import SESSION, SpendBase
 
 # Goes in every cookie value and every storage value; neither it nor its SHA-256 may reach a record.
 CANARY = "canary-secret-value-90c1"
 CANARY_SHA256 = hashlib.sha256(CANARY.encode("utf-8")).hexdigest()
 WRITE_RECORDS_LOGGER = "app.tool_gateway.write_records"
+NAMED_OPERATOR_REQUIRED = "Confidential high-risk actions require a named operator identity."
+ALICE = OperatorIdentity(id="alice", source="token")
+# A receipt of a call with no approval.
+NO_APPROVAL = {"required": False, "approval_id": None, "status": None, "reason": None}
 # The tool, its arguments, what the record's digest says of them, and the receipt's action_class.
 WRITES = (
     (
@@ -47,6 +55,10 @@ WRITES = (
         "account_change",
     ),
 )
+# The two the witness policy treats as high-risk: account_change, not a plain write.
+HIGH_RISK_WRITES = WRITES[1:]
+# A high-risk write's receipt is restricted: a key whose name holds a secret word (cookies) is withheld.
+RECEIPT_DIGESTS = {"browser.set_cookies": {"cookies": REDACTED}}
 
 
 def _build_gateway() -> tuple[McpToolGateway, SimpleNamespace, SimpleNamespace]:
@@ -163,7 +175,10 @@ class GatewayWriteRecordTests(SpendBase):
                 self.assertFalse(response.isError, response.content[0].text)
                 events, receipts = await self.records(tool)
                 self.assertEqual([(event.status, event.details["digest"]) for event in events], [("ok", digest)])
-                self.assertEqual([(item["status"], item["target"]["digest"]) for item in receipts], [("ok", digest)])
+                self.assertEqual(
+                    [(item["status"], item["target"]["digest"]) for item in receipts],
+                    [("ok", RECEIPT_DIGESTS.get(tool, digest))],
+                )
                 self.assertEqual(events[0].session_id, SESSION)
                 self.assertEqual((receipts[0]["session_id"], receipts[0]["action_class"]), (SESSION, action_class))
                 self.assert_no_value_recorded()
@@ -392,6 +407,187 @@ class GatewayWriteRecordTests(SpendBase):
         events, receipts = await self.records("browser.set_viewport")
         self.assertEqual([event.status for event in events], ["error"])
         self.assertEqual([item["status"] for item in receipts], ["error"])
+
+    def make_confidential(self) -> None:
+        """A confidential session in an isolated browser: what is left to refuse is the operator or a shared surface."""
+        self.session.protection_mode = "confidential"
+        self.session.shared_takeover_surface = False
+        self.session.shared_browser_process = False
+
+    async def assert_refused_and_recorded_blocked(self, tool: str, response: Any, reason: str) -> None:
+        self.assertTrue(response.isError, response.content[0].text)
+        self.assertEqual(response.structuredContent["error"], reason)
+        events, receipts = await self.records(tool)
+        events = [event for event in events if event.details["error"] == reason]
+        receipts = [item for item in receipts if item["metadata"]["error"] == reason]
+        self.assertEqual([event.status for event in events], ["blocked"])
+        self.assertEqual([item["status"] for item in receipts], ["blocked"])
+        self.assertIs(events[0].details["reached_page"], False)
+        self.assertIs(receipts[0]["metadata"]["reached_page"], False)
+
+    async def test_an_anonymous_operator_on_a_confidential_session_is_refused_the_high_risk_writes(self) -> None:
+        self.make_confidential()
+        for tool, arguments, _digest, _action_class in HIGH_RISK_WRITES:
+            with self.subTest(tool=tool):
+                response = await self.call(tool, session_id=SESSION, **arguments)
+
+                await self.assert_refused_and_recorded_blocked(tool, response, NAMED_OPERATOR_REQUIRED)
+        self.context.add_cookies.assert_not_awaited()
+        self.assertEqual(self.page.evaluated, [])
+
+    async def test_a_confidential_session_on_a_shared_surface_or_browser_refuses_the_high_risk_writes(self) -> None:
+        cases = (
+            ("shared_takeover_surface", "Confidential high-risk actions require an isolated takeover surface."),
+            ("shared_browser_process", "Confidential high-risk actions require isolated browser execution."),
+        )
+        for shared, reason in cases:
+            self.make_confidential()
+            setattr(self.session, shared, True)
+            for tool, arguments, _digest, _action_class in HIGH_RISK_WRITES:
+                with self.subTest(shared=shared, tool=tool), acting_as(ALICE):
+                    response = await self.call(tool, session_id=SESSION, **arguments)
+
+                    await self.assert_refused_and_recorded_blocked(tool, response, reason)
+        self.context.add_cookies.assert_not_awaited()
+        self.assertEqual(self.page.evaluated, [])
+
+    async def test_a_named_operator_in_an_isolated_browser_runs_them_on_a_confidential_session_restricted(self) -> None:
+        self.make_confidential()
+        for tool, arguments, digest, _action_class in WRITES:
+            with self.subTest(tool=tool), acting_as(ALICE):
+                response = await self.call(tool, session_id=SESSION, **arguments)
+
+                self.assertFalse(response.isError, response.content[0].text)
+                events, receipts = await self.records(tool)
+                self.assertEqual([event.status for event in events], ["ok"])
+                self.assertEqual([item["status"] for item in receipts], ["ok"])
+                self.assertEqual(receipts[0]["evidence_mode"], "restricted")
+                # The audit entry keeps what changed; a restricted receipt withholds a secret-named key.
+                self.assertEqual(events[0].details["digest"], digest)
+                self.assertEqual(receipts[0]["target"]["digest"], RECEIPT_DIGESTS.get(tool, digest))
+                self.assert_no_value_recorded()
+
+    async def test_a_viewport_change_is_not_a_high_risk_action_on_a_confidential_session(self) -> None:
+        # An anonymous operator and shared surfaces refuse a high-risk action: a viewport change is a plain write.
+        self.session.protection_mode = "confidential"
+
+        response = await self.call("browser.set_viewport", session_id=SESSION, width=800, height=600)
+
+        self.assertFalse(response.isError, response.content[0].text)
+        self.page.set_viewport_size.assert_awaited_once()
+        _events, receipts = await self.records("browser.set_viewport")
+        self.assertEqual([item["status"] for item in receipts], ["ok"])
+        self.assertEqual(receipts[0]["evidence_mode"], "restricted")
+
+    async def test_a_required_hosted_witness_out_of_reach_refuses_every_write(self) -> None:
+        self.session.witness_remote_state.required = True
+        remote = self.manager.witness_remote
+        remote.base_url = "https://witness.example"
+        remote.healthz = AsyncMock(side_effect=httpx.ConnectError("down"))  # type: ignore[method-assign]
+        remote.record = AsyncMock()  # type: ignore[method-assign]
+        for tool, arguments, _digest, _action_class in WRITES:
+            with self.subTest(tool=tool):
+                response = await self.call(tool, session_id=SESSION, **arguments)
+
+                await self.assert_refused_and_recorded_blocked(
+                    tool, response, f"Hosted Witness preflight failed before {tool}."
+                )
+        self.page.set_viewport_size.assert_not_awaited()
+        self.context.add_cookies.assert_not_awaited()
+        self.assertEqual(self.page.evaluated, [])
+
+    async def test_a_normal_session_runs_them_with_a_concern_for_a_high_risk_write_and_no_block(self) -> None:
+        for tool, arguments, _digest, action_class in WRITES:
+            with self.subTest(tool=tool):
+                response = await self.call(tool, session_id=SESSION, **arguments)
+
+                self.assertFalse(response.isError, response.content[0].text)
+                _events, receipts = await self.records(tool)
+                codes = [concern["code"] for concern in receipts[0]["concerns"]]
+                self.assertEqual("operator_missing" in codes, action_class == "account_change", codes)
+                self.assertEqual(receipts[0]["approval"], NO_APPROVAL)
+
+    async def test_a_policy_block_is_recorded_blocked_beside_a_record_that_fails(self) -> None:
+        # A refusal's own record may fail; the refusal is what the caller gets, as for any failure.
+        self.make_confidential()
+        self.manager.audit.append = AsyncMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
+        tool, arguments, _digest, _action_class = HIGH_RISK_WRITES[0]
+
+        with self.assertLogs(WRITE_RECORDS_LOGGER, level="WARNING") as logs:
+            response = await self.call(tool, session_id=SESSION, **arguments)
+
+        self.assertEqual(response.structuredContent["error"], NAMED_OPERATOR_REQUIRED)
+        self.assertIn("PermissionError", logs.output[0])
+
+    async def test_a_governed_write_names_its_approval_on_its_receipt(self) -> None:
+        arguments = {
+            "session_id": SESSION,
+            "workflow_profile": "governed",
+            "storage_type": "local",
+            "key": "theme",
+            "value": CANARY,
+        }
+        ask = await self.call("browser.set_local_storage", **arguments)
+        approval_id = ask.structuredContent["approval_id"]
+        await self.manager.approve(approval_id)
+
+        done = await self.call("browser.set_local_storage", **arguments, approval_id=approval_id)
+
+        self.assertFalse(done.isError, done.content[0].text)
+        _events, receipts = await self.records("browser.set_local_storage")
+        self.assertEqual(receipts[0]["approval"], self.spent_approval(approval_id))
+
+    def spent_approval(self, approval_id: str) -> dict[str, Any]:
+        return {"required": True, "approval_id": approval_id, "status": "executed", "reason": None}
+
+    async def test_a_governed_write_refused_before_the_page_names_it_as_approved(self) -> None:
+        arguments = {
+            "session_id": SESSION,
+            "workflow_profile": "governed",
+            "cookies": [{"name": "sid", "value": CANARY, "domain": "elsewhere.test"}],
+        }
+        ask = await self.call("browser.set_cookies", **arguments)
+        approval_id = ask.structuredContent["approval_id"]
+        await self.manager.approve(approval_id)
+
+        done = await self.call("browser.set_cookies", **arguments, approval_id=approval_id)
+
+        self.assertTrue(done.isError)
+        self.context.add_cookies.assert_not_awaited()
+        events, receipts = await self.records("browser.set_cookies")
+        self.assertEqual(
+            ([event.status for event in events], [item["status"] for item in receipts]), (["failed"], ["failed"])
+        )
+        self.assertEqual(
+            receipts[0]["approval"],
+            {"required": True, "approval_id": approval_id, "status": "approved", "reason": None},
+        )
+
+    async def test_a_governed_write_cancelled_while_recorded_keeps_its_approval_on_the_receipt(self) -> None:
+        # The record's task goes on after the call's hold is released: the values are read before it starts.
+        arguments = {
+            "session_id": SESSION,
+            "workflow_profile": "governed",
+            "storage_type": "local",
+            "key": "theme",
+            "value": CANARY,
+        }
+        ask = await self.call("browser.set_local_storage", **arguments)
+        approval_id = ask.structuredContent["approval_id"]
+        await self.manager.approve(approval_id)
+        recording, release = self.hold_the_audit_write()
+
+        task = asyncio.ensure_future(self.call("browser.set_local_storage", **arguments, approval_id=approval_id))
+        await recording.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        release.set()
+        await wait_for_pending_record(self.session)
+
+        _events, receipts = await self.records("browser.set_local_storage")
+        self.assertEqual(receipts[0]["status"], "ok")
+        self.assertEqual(receipts[0]["approval"], self.spent_approval(approval_id))
 
     async def test_a_cancellation_while_a_success_is_recorded_lands_ok_and_ends_cancelled(self) -> None:
         recording, release = self.hold_the_audit_write()

@@ -4,7 +4,8 @@ These tools change a session outside the action pipeline, so they left no audit 
 fast profile. Each call now leaves one of each, on success and on failure, written as a takeover's record is
 (app.action_records): a cancellation does not cut the writes short, and what records next on the session waits for
 them. A record names what changed and never a cookie or storage value, nor a hash of one: a hash of a short value can
-be guessed offline.
+be guessed offline. They follow the witness policy an action does, before anything touches the page, and a receipt says
+what an action's would: the policy's evidence mode and concerns, and the approval a governed call ran under.
 """
 
 from __future__ import annotations
@@ -17,8 +18,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..action_records import write_record
+from ..approvals import held_tool_call_approval
 from ..browser.services.witness import BrowserWitnessService
 from ..network_inspector import url_origin
+from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval, WitnessPolicyOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +58,26 @@ async def recorded_write(
     page records nothing, as nothing ran, and one cancelled after records ``error`` with an unknown outcome, as the
     page may have changed. A record that cannot be written is logged, never raised over the error being reported;
     with nothing to report, as for an action that ran, the record's own failure is raised.
+
+    The witness policy comes first, as the pipeline's _prepare and the top of its _execute do, before anything touches
+    the page: a required hosted Witness that does not answer and a policy block are refused here, recorded ``blocked``
+    with that fixed text and ``reached_page`` false, and the refusal goes on.
     """
     write = RecordedWrite()
+    target = {"digest": digest}
+    # The witness's own classifier: a tool with no risk of its own is a write.
+    action_class = BrowserWitnessService.action_class(tool, risk_category=risk_category)
+    policy = manager.witness_policy.evaluate_action(
+        session=manager._witness_session_context(session),
+        action=manager._build_witness_action_context(
+            action_name=tool, target=target, witness_context={"risk_category": risk_category}
+        ),
+    )
 
     async def record(status: str, **outcome: Any) -> None:
+        # Before the writes' task starts: it can finish after the call's hold on its approval is released.
+        approval = _receipt_approval(policy, reached_page=write.reached_page)
+
         async def writes() -> None:
             await manager.audit.append(
                 event_type=TOOL_WRITE_EVENT,
@@ -72,15 +91,21 @@ async def recorded_write(
                 event_type=TOOL_WRITE_EVENT,
                 status=status,
                 action=tool,
-                # The witness's own classifier: a tool with no risk of its own is a write.
-                action_class=BrowserWitnessService.action_class(tool, risk_category=risk_category),
+                action_class=action_class,
                 risk_category=risk_category,
-                target={"digest": digest},
+                target=target,
+                outcome=policy,
+                approval=approval,
                 metadata=outcome,
             )
 
         await write_record(session, writes)
 
+    try:
+        await _refuse_by_policy(manager, session, tool, action_class, policy)
+    except PermissionError as exc:
+        await _record_beside(record("blocked", error=str(exc), reached_page=False), tool, exc)
+        raise
     try:
         yield write
     except asyncio.CancelledError as exc:
@@ -91,6 +116,25 @@ async def recorded_write(
         await _record_beside(record("failed", error=type(exc).__name__, reached_page=write.reached_page), tool, exc)
         raise
     await record("ok")
+
+
+async def _refuse_by_policy(
+    manager: Any, session: Any, tool: str, action_class: str, policy: WitnessPolicyOutcome
+) -> None:
+    """What the action pipeline checks before an action (top of _execute): a required hosted Witness, then the policy."""
+    if action_class != "read":
+        await manager._ensure_witness_remote_ready(session, action=tool)
+    if policy.should_block:
+        raise PermissionError(policy.block_reason or WITNESS_POLICY_BLOCKED)
+
+
+def _receipt_approval(policy: WitnessPolicyOutcome, *, reached_page: bool) -> WitnessApproval:
+    """The approval a receipt names: the one a governed call runs under, ``executed`` once the call reached the page and
+    ``approved`` before (held_status's meaning), or, with none, only whether the policy requires one."""
+    approval_id = held_tool_call_approval()
+    if approval_id is None:
+        return WitnessApproval(required=policy.require_approval)
+    return WitnessApproval(required=True, approval_id=approval_id, status="executed" if reached_page else "approved")
 
 
 async def _record_beside(recording: Any, tool: str, exc: BaseException) -> None:

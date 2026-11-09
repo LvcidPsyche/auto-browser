@@ -26,19 +26,36 @@ All notable changes to auto-browser are documented here.
   loses the older one when it opens the newer, and a stream also ends when its session is deleted or evicted. Open one
   stream per session, reconnect only when it has ended, and after reconnecting read again what you watch:
   notifications are not replayed.
+- **On a confidential session, `browser.set_cookies` and `browser.set_local_storage` now follow an action's rules, and
+  a required hosted Witness must answer.** Both are `account_change`, so a session with `protection_mode=confidential`
+  refuses them for an anonymous operator, on a shared takeover surface and in a shared browser process, as it refuses
+  a high-risk action: the call answers with the reason and nothing is changed. `browser.set_viewport` is a plain
+  write, which those rules do not refuse. All three are refused when the session requires a hosted Witness
+  (`WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL`) and it is not configured or does not answer. Send an operator id
+  (`X-Operator-Id`), run such sessions with an isolated takeover surface and browser, and keep the hosted Witness
+  reachable.
 
 ### Security
 
 - **`browser.set_viewport`, `browser.set_cookies` and `browser.set_local_storage` now leave an audit entry and a
-  witness receipt.** These three tools change a session outside the action pipeline, and in the fast profile they
-  recorded nothing. Each call now writes one audit event (`mcp_tool_write`) and one receipt, on success and on failure
-  (a host off `ALLOWED_HOSTS`, a Playwright error, a page that moved), naming the tool, the session and what changed:
-  the viewport size, the cookies' names and domains or URL origins, the storage type and key. Neither a value nor a
-  hash of one goes in the record: a short value's hash can be guessed offline. A failure's record keeps its error's
-  class only, and the error goes on unchanged. A call cancelled after it reached the page is recorded with an unknown
-  outcome, as a cancelled action is; one cancelled before it reached the page records nothing, as nothing ran. A
-  record that cannot be written fails a change that was made, as an action's does, and is only logged beside a
-  failure's own error, whose text stays out of that log, as out of the record. (MCP-23)
+  witness receipt, and follow the witness policy an action does.** These three tools change a session outside the
+  action pipeline, and in the fast profile they recorded nothing and no policy applied to them. Each call now writes
+  one audit event (`mcp_tool_write`) and one receipt, on success and on failure (a host off `ALLOWED_HOSTS`, a
+  Playwright error, a page that moved), naming the tool, the session and what changed: the viewport size, the
+  cookies' names and domains or URL origins, the storage type and key. Neither a value nor a hash of one goes in the
+  record: a short value's hash can be guessed offline. Before anything touches the page the policy is evaluated as an
+  action's is, and a refusal is recorded `blocked` with the policy's fixed text and goes on: a confidential session
+  refuses the cookie and storage writes (`account_change`, a high-risk class) for an anonymous operator, on a shared
+  takeover surface or in a shared browser process, and a session that requires a hosted Witness refuses all three
+  when it is not configured or does not answer (see the upgrade note). Receipts now carry the evidence mode and
+  concerns the policy gave them, so a cookie or storage write's is restricted on every session, as a high-risk
+  action's is, and withholds what a restricted receipt withholds: a cookie write's keeps neither the cookies' names
+  nor their domains (the audit entry keeps them). A governed call's receipt names its approval, as `executed` once
+  the call reached the page and `approved` before. A failure's record keeps its error's class only, and the error
+  goes on unchanged. A call cancelled after it reached the page is recorded with an unknown outcome, as a cancelled
+  action is; one cancelled before it reached the page records nothing, as nothing ran. A record that cannot be
+  written fails a change that was made, as an action's does, and is only logged beside a failure's own error, whose
+  text stays out of that log, as out of the record. (MCP-23)
 
 ### Fixed
 

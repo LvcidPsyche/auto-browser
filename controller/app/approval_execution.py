@@ -181,6 +181,18 @@ def held_action_approval() -> str | None:
     return None
 
 
+def held_tool_call_approval() -> str | None:
+    """The tool call's approval the current task's execution holds, for its receipts; None if it holds none.
+
+    held_action_approval's sibling, for a change the gateway makes itself (browser.set_cookies and its like) under a
+    governed call's approval, whose receipt names it. Only a live hold counts, as there.
+    """
+    for approval_id, hold in _HELD_APPROVALS.get().items():
+        if hold.active and hold.origin == "tool_call":
+            return approval_id
+    return None
+
+
 class ApprovalRequiredError(HTTPException):
     def __init__(self, approval: ApprovalRecord, message: str | None = None):
         self.approval = approval

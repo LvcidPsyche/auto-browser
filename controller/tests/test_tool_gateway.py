@@ -17,6 +17,7 @@ from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.tool_gateway import CreateSessionRequest, McpToolGateway, ToolRegistry, ToolSpec
 from app.tool_inputs import EmptyInput
+from app.witness import WitnessPolicyOutcome
 from tests._fake_element_ids import FakePageElementIds
 
 
@@ -71,6 +72,11 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             # What the gateway's own state changes record through (set_viewport, set_cookies, set_local_storage).
             audit=SimpleNamespace(append=AsyncMock()),
             _record_witness_receipt=AsyncMock(),
+            # And what they follow first: an action's witness policy, here one that refuses nothing.
+            witness_policy=SimpleNamespace(evaluate_action=Mock(return_value=WitnessPolicyOutcome(profile="normal"))),
+            _witness_session_context=Mock(),
+            _build_witness_action_context=Mock(),
+            _ensure_witness_remote_ready=AsyncMock(),
             verify_witness_chain=AsyncMock(
                 return_value={
                     "scope": "session-1",
