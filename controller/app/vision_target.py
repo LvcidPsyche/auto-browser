@@ -65,7 +65,7 @@ def _reply_object(raw_text: str) -> dict[str, Any]:
 
 
 def _finite_number(value: Any) -> float | None:
-    """``value`` as a float, if it is a JSON number a float can hold; a boolean is not one (bool is an int in Python)."""
+    """``value`` as a float, if it is a JSON number a float can hold; a boolean is not one (Python's bool is an int)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
@@ -88,7 +88,7 @@ def _checked_point(reply: dict[str, Any], raw_text: str, image_bytes: bytes) -> 
         with Image.open(io.BytesIO(image_bytes)) as image:
             width, height = image.size
     except Exception as exc:
-        # Whatever its decoder raises for an image it cannot read: the point cannot be checked, so it is not vouched for.
+        # Whatever its decoder raises for an unreadable image: the point cannot be checked, so it is not vouched for.
         raise _refused(raw_text, "the screenshot's size could not be read", type(exc).__name__) from None
     if not (0 <= numbers["x"] < width and 0 <= numbers["y"] < height):
         raise _refused(raw_text, f"its point is outside the screenshot ({width}x{height})", "outside_screenshot")
