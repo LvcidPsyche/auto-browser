@@ -62,7 +62,7 @@ All notable changes to auto-browser are documented here.
   strings are redacted; a forwarded JSON-RPC error's message and its data are redacted, the data keeping its shape (a
   result is never rewritten); and the line a bridge prints on stderr for an unexpected failure is redacted as its
   answer is. A list or an object nested more than 100 deep in a detail or the data is replaced by `[redacted: nested
-  too deep]`, not walked, since a walk that deep ran out of stack and ended the bridge with no answer. A response body
+  too deep]`, not walked, since a walk that deep would run out of stack and end the bridge with no answer. A response body
   nested too deep for Python's `json` to parse (`RecursionError`) is answered as an unreadable one is, with its HTTP
   status, not as an unexpected bridge failure. An answer `json` parsed but cannot write back (on Python 3.14 the two
   limits differ) is answered with a JSON-RPC error for its request, with a null id if the id is not a string or a
@@ -84,15 +84,12 @@ All notable changes to auto-browser are documented here.
   pairs alone too (a request's own parameter replaces one of the same name, so the query is then not sent whole), and
   so do the `Authorization: Basic` credentials httpx sends for the URL's user name and password (their base64); the
   MCP bridges, which share the client's redaction, send no such header. httpx itself still logs every request at INFO
-  on its `httpx` logger, naming the URL as sent (userinfo, query and fragment included) and the server's reason
+  on its `httpx` logger, naming the URL as sent (userinfo and query included) and the server's reason
   phrase: the packages do not own that
   logger, and a filter added at import would change the logging of everything else in the process, so they leave it
   alone, and their READMEs now say to keep a secret in the token, not in the base URL. A tool's own error (`isError`),
   which the LangChain tool returns and `AutoBrowserNode` raises, is passed on as the controller sent it, as the MCP
-  bridges pass on a tool call's result. A token httpx cannot send in a header (one holding a line break or another
-  control character but a tab, or a character outside ASCII) failed the first request with httpx's error, which quoted
-  the whole header for a line break, a NUL, a vertical tab or a form feed, and named a character outside ASCII and its
-  position; the client and the LangChain tools now refuse it with a `ValueError` naming `token`, `bearer_token` or the
+  bridges pass on a tool call's result. A token httpx cannot send in a header (one holding a line break, a NUL, a vertical tab, a form feed or a character outside ASCII) failed the first request with httpx's error, which quoted the whole header for the first four and named a character outside ASCII and its position; the client and the LangChain tools now refuse it, and a token holding any other control character but a tab (httpx sent those as they were), with a `ValueError` naming `token`, `bearer_token` or the
   token file, never the token; a token file that is not UTF-8 text, whose `UnicodeDecodeError` named one of its bytes
   and its position, now raises a `ValueError` naming the file and saying so, as the MCP bridges' answer does. The
   client refuses an `Authorization` header given in `headers` the same way, and leaves its credentials out of its
@@ -265,8 +262,7 @@ All notable changes to auto-browser are documented here.
   link to an existing directory already was; the rollback removes neither, and never goes through one.
 - **A converging harness run no longer holds up the controller while retention removes an old skill candidate.** A
   converged run built and placed its candidate on the event loop, and placing it waits for the staging lock, which
-  the `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal
-  (milliseconds for one candidate's files). The candidate is now built and signed in a worker thread, and placed once
+  the `HARNESS_RETENTION_DAYS` prune holds while it removes a candidate, so every request waited for that removal. The candidate is now built and signed in a worker thread, and placed once
   the lock is free, which the event loop no longer waits for, and the candidate a re-stage replaces is removed in a
   worker thread too; a run cancelled meanwhile waits for that work, and its record names the candidate it staged. A
   shutdown that cancels the staging itself places nothing, and the next start marks that run failed.
@@ -295,8 +291,7 @@ All notable changes to auto-browser are documented here.
   node's name whole, and decoded the whole quoted name first, so a page that gave an element a megabyte `aria-label`
   put that megabyte into every observation and action snapshot that listed it or found it focused. A name is now cut
   to 200 characters, as an element's text is, and only as much of it as gives those is decoded.
-- **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that
-  every observation and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
+- **A page summary whose script fails no longer leaves its accessibility snapshot reading the page.** The summary that every observation but a `fast` one and every action's before and after snapshot take ran its script and Playwright's ARIA snapshot
   together and gave up at the first error, so the snapshot went on reading the page after the caller had let go of
   the session's lock; it now waits for both, as the observation's other paired reads do, then raises the error.
 - **A screenshot capture cut off by a shutdown, or whose write fails, no longer leaves its image behind.** A capture
@@ -304,8 +299,7 @@ All notable changes to auto-browser are documented here.
   shutdown cancels the capture itself, which then ended before Playwright's write of the file (in a thread of
   Playwright's own) did, so the image was written after its removal and stayed in the session's artifact directory.
   The controller now writes the image Playwright returns, in a worker thread that removes the file itself when it
-  ends after its capture was cancelled. A capture whose write failed partway (a full disk) left the part it wrote, at
-  its published name, or at its hidden one when it was to be redacted; that part is now removed before the error
+  ends after its capture was cancelled. A capture whose write failed partway (a full disk) left the part it wrote, at its published name; that part is now removed before the error
   goes on.
 - **A click or key press that opens a tab is verified by it, and its result names the tab.** Observations and actions
   stay on the active tab, which a tab a page opens does not become, so a click on a link that opened a new tab changed
@@ -365,8 +359,7 @@ All notable changes to auto-browser are documented here.
   With `ISOLATED_TUNNEL_ENABLED`, a create cancelled (or failing) while its autossh started killed autossh and waited
   for it with no bound, so one stuck in uninterruptible I/O held the create until it exited. That wait is now bounded
   at five seconds, as a release's has been since 1.16.0, and then logged as a warning naming the session and the pid.
-  A second cancel during that wait also left autossh's log open and its metadata (which names the bastion, its user
-  and the key path) on disk; both now go whatever ends the wait.
+  A second cancel during that wait also left autossh's log open and its metadata (which names the bastion and its user) on disk; both now go whatever ends the wait.
 - **A token file whose mode cannot be read, and whose descriptor then fails to close, is reported for the read.**
   When the mode check of `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE` failed to read the file's mode (an I/O error) and
   closing the file failed too, the close's error replaced the read's, so the takeover token's warning gave the
@@ -399,8 +392,7 @@ All notable changes to auto-browser are documented here.
   naming the character and its position, and agent_eval failed on with http.client's error. The bridges' openers now
   handle only `http://` and `https://`: urllib's default handlers, which they kept, answer a `file:`, `data:` or
   `ftp:` request from a local file, the URL itself or an FTP server, and an environment proxy of such a scheme turns a
-  request into one. Nor do they take an environment proxy for another scheme any more: with `ftp_proxy` set, urllib
-  sent an `ftp://` URL to that proxy as an HTTP request, bearer token included, and took its answer as the
+  request into one. Nor do they take an environment proxy for another scheme any more: with `ftp_proxy` set, urllib sent an `ftp://` URL handed to such an opener to that proxy as an HTTP request, bearer token included, and took its answer as the
   controller's. The bridges' `urlopen` itself now refuses a URL that is not `http://` or `https://` with a host, as an
   invalid controller URL, before an opener is chosen, as their own requests have been refused since 1.16.0. agent_eval
   built openers of its own with urllib's `build_opener`, which kept all of those handlers and that proxy (its
@@ -430,8 +422,7 @@ All notable changes to auto-browser are documented here.
   `toDataURL` and `getContext`, and the `Function.prototype.toString` that masks them, now read as native code
   (`function toDataURL() { [native code] }`) with the native name and length; the script's WebGL `getParameter` and
   permissions patches, and the `getImageData` wrapper `STEALTH_PROFILE=light` adds, still show their source. A
-  `type` whose `toString` throws now throws before any export is made and leaves the canvas as it was: the noise
-  stayed on its first pixel, and the export was made a second time. The `type` is converted once before the canvas is
+  `type` whose `toString` throws now throws before any export is made and leaves the canvas as it was, where the noise stayed on its first pixel and the export was tried a second time, running the `toString` again. The `type` is converted once before the canvas is
   touched, so what its `toString` draws is kept (the export shows it), where the restored pixel erased it; a Symbol
   `type` is the native's `TypeError` and leaves the canvas alone; a canvas with a `width` or `height` accessor of its
   own that throws is still exported, as the native export reads neither; and a receiver that is not a canvas is
@@ -442,17 +433,15 @@ All notable changes to auto-browser are documented here.
   a pixel's R, G and B now goes one up or one down by a hash of the pixel's place on the canvas and the session's
   seed (alpha is left alone), so the noise holds for the session and a pixel reads the same in any rectangle. A read
   of float values (`getImageData` with `pixelFormat: "rgba-float16"`) is now left as it is: a shift of one there is
-  the whole 0-1 range, so a grey of 0.5 read as -0.5 or 1.5. The wrapper also checks its receiver before it converts a
+  the whole 0-1 range, so a grey of 0.5 read as 0 or 1.5. The wrapper also checks its receiver before it converts a
   coordinate, as the native does: `getImageData.call({}, ...)` is a `TypeError` that calls no `valueOf`. And it
   converts the coordinates one at a time and stops at the first the native refuses (not finite, or out of a `long`'s
   range): the native's `TypeError` comes at that coordinate and no later `valueOf` runs. A BigInt or a Symbol
   coordinate goes to the native as it is, so its `TypeError` is the native's own message, and the wrapper calls the
   `Math.trunc` it captured at init, not the page's.
-- **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** They ran
-  the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran, or
-  Git's `bin\bash.exe` wrapper, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a
+- **On Windows, the tests that run the repo's shell scripts no longer run them with a bash that cannot.** Some ran the first `bash` on PATH, which can be WSL's launcher (`WindowsApps\bash.exe`), failing before the script ran; the rest ran Git's `bin\bash.exe` wrapper, found beside `git`, which puts `/usr/bin` ahead of a test's stubs. They now use a `bash.exe` in a
   `usr\bin` folder (Git's or MSYS2's), the first on PATH or else the one beside `git`, or the bash
-  `AUTO_BROWSER_TEST_BASH` names (`controller/tests/_bash.py`), and skip with that reason when there is none; on
+  `AUTO_BROWSER_TEST_BASH` names (`controller/tests/_bash.py`), and skip when there is none; on
   other systems, the bash on PATH as before. On Windows what a script runs by name (`bash`, a stub's
   `#!/usr/bin/env bash`, and the tools beside bash, such as `rm`) is found beside that bash, after the test's stubs.
 
