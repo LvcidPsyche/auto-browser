@@ -190,6 +190,43 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(undescribed, [], "add description= to these input fields")
 
+    async def test_governed_tools_advertise_the_approval_arguments_and_others_are_unchanged(self) -> None:
+        # An agent cannot find the approval retry flow from a schema that does not name it (MCP-20).
+        specs = self.full_gateway._registry.tools
+        for tool in self.full_gateway.list_tools():
+            name = tool["name"]
+            schema = tool["inputSchema"]
+            properties = schema.get("properties", {})
+            with self.subTest(tool=name):
+                if specs[name].governed_kind is None:
+                    self.assertNotIn("workflow_profile", properties)
+                    self.assertEqual(schema, specs[name].input_model.model_json_schema())
+                    continue
+                self.assertEqual(properties["workflow_profile"]["enum"], ["fast", "governed"])
+                self.assertIn("approval_id", properties)
+                self.assertNotIn("workflow_profile", schema.get("required", []))
+                self.assertNotIn("approval_id", schema.get("required", []))
+                self.assertTrue(properties["workflow_profile"]["description"])
+                self.assertTrue(properties["approval_id"]["description"])
+
+    async def test_a_field_a_governed_model_declares_itself_keeps_its_own_description(self) -> None:
+        tools = {tool["name"]: tool for tool in self.gateway.list_tools()}
+        properties = tools["browser.execute_action"]["inputSchema"]["properties"]
+
+        self.assertIn("authorizes this action", properties["approval_id"]["description"])
+
+    async def test_list_tools_gives_the_same_answer_every_time_and_leaves_the_models_schema_alone(self) -> None:
+        spec = self.full_gateway._registry.get("browser.set_cookies")
+        before = json.dumps(spec.input_model.model_json_schema(), sort_keys=True)
+
+        first, second = self.full_gateway.list_tools(), self.full_gateway.list_tools()
+
+        self.assertEqual(first, second)
+        self.assertEqual(json.dumps(spec.input_model.model_json_schema(), sort_keys=True), before)
+        listed = {tool["name"]: tool for tool in first}["browser.set_cookies"]["inputSchema"]["properties"]
+        self.assertIn("workflow_profile", listed)
+        self.assertNotIn("workflow_profile", spec.input_model.model_json_schema()["properties"])
+
     async def test_list_tools_includes_expected_browser_tools(self) -> None:
         tools = self.gateway.list_tools()
         names = {tool["name"] for tool in tools}

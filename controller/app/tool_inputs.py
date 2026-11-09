@@ -654,7 +654,8 @@ class CreateCronJobInput(StrictInputModel):
     enabled: bool = True
     webhook_enabled: bool = False
     # Every run of the job starts under it. Over MCP the gateway sets it from the creating call's
-    # workflow_profile, so it is not in the tool's schema; a REST body (an operator) names it.
+    # workflow_profile, which tools/list advertises for every governed tool, so this field stays out
+    # of the model's schema; a REST body (an operator) names it.
     workflow_profile: SkipJsonSchema[WorkflowProfile] = "fast"
 
     @field_validator("start_url")
