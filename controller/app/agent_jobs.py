@@ -332,6 +332,9 @@ class AgentJobQueue:
         self._started = True
 
     async def _requeue(self, job_ids: list[str]) -> None:
+        # More recovered jobs than the queue holds keep it full until workers have taken enough of them. A new enqueue
+        # meanwhile is refused as at capacity (_enqueue), which is true of the queue at that moment: the caller tries
+        # again, as the refusal says, and room a worker makes goes to whichever of the two reaches it first.
         for job_id in job_ids:
             await self.queue.put(job_id)
 
