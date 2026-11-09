@@ -38,6 +38,8 @@ class _HoldingAudit:
         # Held further until this says so too, for a test that needs the finish callback done before enqueue returns.
         self.also_until: Callable[[], bool] = lambda: True
         self.fails_after_the_hold = False
+        # Set, and the `agent_job_finished` write waits for it: the job's record has ended, and its finish callback has not.
+        self.hold_the_finish: asyncio.Event | None = None
         self.events: list[str] = []
         self.failing: set[str] = set()
 
@@ -45,6 +47,9 @@ class _HoldingAudit:
         self.events.append(kwargs["event_type"])
         if kwargs["event_type"] in self.failing:
             raise OSError("No space left on device")
+        if kwargs["event_type"] == "agent_job_finished" and self.hold_the_finish is not None:
+            await self.hold_the_finish.wait()
+            return
         if kwargs["event_type"] != "agent_job_enqueued":
             return
         self.reached.set()
@@ -156,6 +161,30 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["last_status"], "completed")
         self.assertEqual(stored["run_count"], 1)
         self.assertIsNotNone(stored["last_run_at"])
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_a_run_whose_finish_callback_is_still_to_come_keeps_it_when_the_enqueue_audit_fails(self) -> None:
+        # The record says the job ended while the worker still writes the end's audit event: the callback that closes
+        # the session has not run, and with the trigger answering success, nothing else would close it.
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        self.audit.until_finished = self.queue
+        self.audit.fails_after_the_hold = True
+        self.audit.hold_the_finish = asyncio.Event()
+
+        with self.assertLogs("app.agent_jobs", level="ERROR"):
+            result = await asyncio.wait_for(self.cron.trigger_job(self.job["id"]), timeout=10)
+
+        self.assertTrue(result["triggered"])
+        self.assertEqual(self.cron._active_runs, {self.job["id"]: "session-1"}, "the run was released before it ended")
+        self.manager.close_session.assert_not_awaited()
+
+        self.audit.hold_the_finish.set()
+        await _until(lambda: not self.cron._active_runs)
+
+        stored = self.cron._load()[self.job["id"]]
+        self.assertEqual(stored["last_status"], "completed")
+        self.assertEqual(stored["run_count"], 1)
         self.manager.close_session.assert_awaited_once_with("session-1")
 
     async def test_an_enqueue_audit_that_fails_before_the_job_is_taken_up_still_withdraws_it_and_raises(self) -> None:

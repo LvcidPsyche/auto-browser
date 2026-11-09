@@ -517,20 +517,24 @@ class AgentJobQueue:
         try:
             await self._audit("agent_job_enqueued", "queued", record)
         except BaseException as exc:
-            already_finished = False
+            ran_to_its_end = False
             if on_finish is not None:
                 # The caller is about to close the session this job runs in: take the job back first.
                 try:
                     await self._withdraw(record.id)
                 except _AlreadyFinished:
-                    already_finished = True  # there is nothing to take back
+                    # There is nothing to take back. Told of a failure (not a cancellation), the caller would say the
+                    # job never ran, and invite a second run.
+                    ran_to_its_end = isinstance(exc, Exception)
                 except Exception:
                     logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
                 finally:
-                    self._on_finish.pop(record.id, None)
-            if not already_finished or not isinstance(exc, Exception):
+                    # A caller answered with an error closes the session itself. One answered with success leaves that
+                    # to the finish callback, which the worker may not have reached yet: it stays.
+                    if not ran_to_its_end:
+                        self._on_finish.pop(record.id, None)
+            if not ran_to_its_end:
                 raise
-            # The job ran to its end during the write: an error would say it never ran, and invite a second run.
             logger.exception("agent job %s has finished, but its queuing could not be audited", record.id)
         return self._public_record(record)
 
