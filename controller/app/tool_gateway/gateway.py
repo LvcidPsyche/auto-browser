@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from pathlib import Path, PurePath
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -176,6 +176,8 @@ _JSON_CHARACTER = re.compile(r"\\ud[89ab][0-9a-f]{2}\\u[0-9a-f]{4}|\\u[0-9a-f]{4
 # putting in a model's context; the text result still carries its URL.
 _INLINE_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 _INLINE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+# Why a screenshot the result was to carry was withheld (image_omitted): a closed set, never a path or an error's text.
+ImageOmitted = Literal["no_artifact_root", "outside_artifact_root", "unsupported_type", "unreadable", "too_large"]
 
 
 def _page_of(content: str, *, offset: int, max_chars: int) -> dict[str, Any]:
@@ -424,6 +426,10 @@ class McpToolGateway:
                 ):
                     result = await spec.handler(arguments)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
+            # Decided before the result is encoded, so the text and the structured result say the same.
+            image, image_omitted = await self._inline_image(spec.name, result)
+            if image_omitted is not None:
+                result = {**result, "image_omitted": image_omitted}
             try:
                 result = _json_safe(result)
                 text = json.dumps(result, ensure_ascii=False, allow_nan=False)
@@ -436,7 +442,6 @@ class McpToolGateway:
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.
             content: list[McpToolCallContent | McpImageContent] = [McpToolCallContent(text=text)]
-            image = await self._inline_image(spec.name, result)
             if image is not None:
                 content.append(image)
             return McpToolCallResponse(content=content, structuredContent=result, isError=False)
@@ -521,31 +526,36 @@ class McpToolGateway:
             logger.exception("tool %s failed", payload.name)
             return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
 
-    async def _inline_image(self, tool_name: str, result: Any) -> McpImageContent | None:
-        """The result's screenshot as MCP image content, when the tool's job is to show the page."""
+    async def _inline_image(self, tool_name: str, result: Any) -> tuple[McpImageContent | None, ImageOmitted | None]:
+        """The result's screenshot as MCP image content, when the tool's job is to show the page, and otherwise why not.
+
+        The image and None; None and a reason code when the result was to carry one and it was withheld; two Nones
+        when it was not to carry one.
+        """
         path_value = inline_screenshot_path(tool_name, result)
         if path_value is None:
-            return None
+            return None, None
         artifact_root = getattr(getattr(self.manager, "settings", None), "artifact_root", None)
         if not artifact_root:
-            return None
-        path = Path(path_value).resolve()
-        # The path comes from the manager, but it is read back and sent to the
-        # client, so it has to be a screenshot artifact and nothing else.
-        if not path.is_relative_to(Path(artifact_root).resolve()):
-            logger.warning("not inlining %s: outside the artifact root", path)
-            return None
-        mime_type = _INLINE_IMAGE_TYPES.get(path.suffix.lower())
-        if mime_type is None:
-            return None
+            return None, "no_artifact_root"
         try:
+            path = Path(path_value).resolve()
+            # The path comes from the manager, but it is read back and sent to the
+            # client, so it has to be a screenshot artifact and nothing else.
+            if not path.is_relative_to(Path(artifact_root).resolve()):
+                logger.warning("not inlining %s: outside the artifact root", path)
+                return None, "outside_artifact_root"
+            mime_type = _INLINE_IMAGE_TYPES.get(path.suffix.lower())
+            if mime_type is None:
+                return None, "unsupported_type"
             data = await asyncio.to_thread(_read_inline_image, path)
-        except OSError as exc:
-            logger.debug("could not inline screenshot %s: %s", path, exc)
-            return None
+        except (OSError, ValueError) as exc:
+            # A failure here is the image's, not the result's: the handler ran, and only the image is withheld.
+            logger.debug("could not inline screenshot %s: %s", path_value, exc)
+            return None, "unreadable"
         if data is None:
-            return None
-        return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type)
+            return None, "too_large"
+        return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type), None
 
     def _unknown_tool_message(self, name: str) -> str:
         """Point a mistyped or guessed tool name at the tool the caller meant."""

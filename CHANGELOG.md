@@ -84,6 +84,11 @@ All notable changes to auto-browser are documented here.
   header and deleted the session whatever the header said. An unsupported version is now `400` and `-32602`, a
   version other than the session's `400` and `-32600`, and the session stays; a matching or absent header still
   deletes it.
+- **A screenshot that a tool result could not carry now says why.** `browser.screenshot` and observe's `fast` preset
+  dropped the inline image without a word when the screenshot was too large, outside the artifact root, of an
+  unsupported type or could not be read. The result now carries `image_omitted`, in its text and in
+  `structuredContent` alike, with one of `too_large`, `outside_artifact_root`, `unsupported_type`, `unreadable` or
+  `no_artifact_root`; a result that carries its image, or was never meant to, has no such key. (MCP-26)
 
 ### Changed
 
