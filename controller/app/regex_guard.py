@@ -9,9 +9,10 @@ another, or they are equal: the classic (a|aa)+, and ((a|aa))+).
 A small scanner over the pattern's syntax (escapes, character classes, groups), iterative and bounded by the pattern's
 length, not a regular expression over a regular expression. It reads the pattern as the page's RegExp does: JavaScript's
 syntax, with the case-insensitive flag the gateway uses and no u flag, so a literal character folds as ECMAScript's
-Canonicalize folds it. A malformed pattern is passed through for the page's RegExp to refuse. Escapes and classes are
-compared as they are written, so \\x61 against a, or [a] against a, is not seen. That is the check's limit: it stops the
-classic shapes and is not a proof a pattern is safe, and the 10 s guard stays.
+Canonicalize folds it. A malformed pattern is passed through for the page's RegExp to refuse. Escapes, classes and a
+nested group's parentheses are compared as they are written, so \\x61 against a, [a] against a, or (a) against a is not
+seen, and a group's inline modifiers ((?-i:...)) are not read: its letters fold as the whole pattern's do. That is the
+check's limit: it stops the classic shapes and is not a proof a pattern is safe, and the 10 s guard stays.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from dataclasses import dataclass, field
 
 # ECMAScript's Canonicalize keeps a character at or past U+0080 whose upper case falls below it.
 _CANONICALIZE_KEEPS_FROM = 0x80
+# Past this, a pattern with no u flag is read as two surrogates, which have no case.
+_LAST_UTF16_UNIT = 0xFFFF
 
 
 @dataclass
@@ -91,7 +94,9 @@ def _refusal(pattern: str, group: _Group, closed_at: int) -> str | None:
 def _canonicalized(character: str) -> str:
     """A literal character as the page's case-insensitive RegExp compares it (ECMAScript's Canonicalize, no u flag)."""
     upper = character.upper()
-    if len(upper) != 1 or (ord(character) >= _CANONICALIZE_KEEPS_FROM and ord(upper) < _CANONICALIZE_KEEPS_FROM):
+    if ord(character) > _LAST_UTF16_UNIT or len(upper) != 1:
+        return character
+    if ord(character) >= _CANONICALIZE_KEEPS_FROM and ord(upper) < _CANONICALIZE_KEEPS_FROM:
         return character
     return upper
 

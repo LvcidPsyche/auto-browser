@@ -260,7 +260,7 @@ class GatewayWriteRecordTests(SpendBase):
         task = asyncio.ensure_future(
             self.gateway._set_viewport(SetViewportInput(session_id=SESSION, width=800, height=600))
         )
-        await reached.wait()
+        await asyncio.wait_for(reached.wait(), WAIT_SECONDS)
         task.cancel()
 
         with self.assertRaises(asyncio.CancelledError):
@@ -359,7 +359,7 @@ class GatewayWriteRecordTests(SpendBase):
 
         with self.assertLogs(WRITE_RECORDS_LOGGER, level="WARNING") as logs:
             task = asyncio.ensure_future(self.gateway._set_cookies(payload))
-            await recording.wait()
+            await asyncio.wait_for(recording.wait(), WAIT_SECONDS)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -369,7 +369,7 @@ class GatewayWriteRecordTests(SpendBase):
         self.assert_logged_the_class_and_no_text(logs.records, "Error")
 
     async def test_a_record_that_fails_logs_the_errors_class_and_its_own_repr_only(self) -> None:
-        # The recording's own exception is raised while the original is handled, so its __context__ is the original.
+        # A traceback here would print the recording's failure and whatever chain it holds, so none is logged.
         self.context.add_cookies = AsyncMock(side_effect=PlaywrightError(f"rejected: {CANARY}"))
         self.manager.audit.append = AsyncMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
         payload = SetCookiesInput(
@@ -396,9 +396,9 @@ class GatewayWriteRecordTests(SpendBase):
             self.gateway._set_viewport(SetViewportInput(session_id=SESSION, width=800, height=600))
         )
         with self.assertLogs(WRITE_RECORDS_LOGGER, level="WARNING") as logs:
-            await reached.wait()
+            await asyncio.wait_for(reached.wait(), WAIT_SECONDS)
             task.cancel()
-            await recording.wait()
+            await asyncio.wait_for(recording.wait(), WAIT_SECONDS)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -580,7 +580,7 @@ class GatewayWriteRecordTests(SpendBase):
         recording, release = self.hold_the_audit_write()
 
         task = asyncio.ensure_future(self.call("browser.set_local_storage", **arguments, approval_id=approval_id))
-        await recording.wait()
+        await asyncio.wait_for(recording.wait(), WAIT_SECONDS)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
@@ -645,7 +645,7 @@ class GatewayWriteRecordTests(SpendBase):
             self.gateway._set_viewport(SetViewportInput(session_id=SESSION, width=800, height=600))
         )
 
-        await recording.wait()
+        await asyncio.wait_for(recording.wait(), WAIT_SECONDS)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task

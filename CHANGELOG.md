@@ -37,7 +37,7 @@ All notable changes to auto-browser are documented here.
 - **A governed tool now refuses a `workflow_profile` other than `fast` or `governed`.** Any other value (a typo, the
   wrong case, a non-string) used to read as `fast`, so the call ran without the approval it asked for. It now answers
   an error that names the two values, and nothing runs: send one of them, or leave the argument out (`null` counts as
-  left out). Tools that are not governed ignore the argument, as before.
+  left out). Tools that are not governed do not check the value, as before.
 - **A garbled reply from `browser.find_by_vision`'s model is now a tool error, where it read as `found: false`.** That
   is a reply that is not a JSON object, one with no `found` or a `found` that is neither true nor false, or a
   `found: true` reply whose point is not usable (see Changed). A client that took `found: false` to cover those must

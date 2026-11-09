@@ -66,6 +66,9 @@ ALLOWED = (
     "(k|K)+",
     "(s|ſ)+",
     "(ß|ss)+",
+    # Past U+FFFF the page's RegExp, with no u flag, reads two surrogates, which have no case: Deseret's small and
+    # capital long I stay apart.
+    "(\U00010428|\U00010400)+",
     # Malformed patterns are the page's RegExp to refuse; the scan does not crash on them.
     "(",
     ")",

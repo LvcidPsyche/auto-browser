@@ -142,8 +142,9 @@ async def _record_beside(recording: Any, tool: str, exc: BaseException) -> None:
 
     A cancellation while it is written wins over an error being reported (its class is logged here, as the record
     keeps it), so a cancelled job ends cancelled; one that lands while a cancellation is being recorded is absorbed, and
-    the first goes on. The writes finish behind it either way (write_record shields them). These logs carry no error's
-    text and no traceback: a traceback prints an exception's whole chain, and ``exc``'s text can hold a page's content.
+    the first goes on. The writes finish behind it either way (write_record shields them). These logs carry none of
+    ``exc``'s text and no traceback: that text can hold a page's content, and a traceback prints an exception's whole
+    chain. A failed record is named by its own repr, which comes from the stores and not from the page.
     """
     try:
         await recording
