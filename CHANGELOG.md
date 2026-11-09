@@ -4,6 +4,19 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-11-08
+
+A security and correctness release over 1.16.0, from the review findings 1.16.0 left open and from reviews of this
+release's own changes. The controller image now installs its whole Python dependency tree from a lock pinned at
+releases at least 72 hours old. A restricted witness receipt withholds secrets at any depth; the MCP bridges, the
+Python client and the LangChain tools no longer show the bearer token or a secret of the controller URL in an error; a
+screenshot that is to be PII-redacted is no longer served before its redaction is done, and a download read with
+`browser.read_download` is PII-scrubbed; and `browser.get_html` with `text_only` and `browser.find_elements` now read
+the page in the controller's isolated world, so a page's own scripts cannot change what they see. Read the upgrade
+note first: a `MESH_TIMESTAMP_WINDOW` above 250 seconds, or at or below 0, now stops startup. The controller image and
+the client and LangChain packages change, and the MCP bridge package now requires this client; the browser-node image
+changes only in version.
+
 ### Upgrade notes
 
 - **A `MESH_TIMESTAMP_WINDOW` above 250 seconds, or at or below 0, now stops startup.** Set it inside those limits
