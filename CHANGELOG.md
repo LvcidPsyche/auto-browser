@@ -196,6 +196,8 @@ All notable changes to auto-browser are documented here.
   for it, and on the SQLite backend `GET /sessions/{id}/audit` with a negative `limit` returned every row, because
   SQLite reads a negative `LIMIT` as no limit. Those routes and `/sessions/{id}/witness` now answer an empty list
   for a limit at or below zero, and the SQLite store itself returns none for one. (AUTH-28)
+- **A `RuntimeError` behind a `409 Conflict` from `POST /sessions` or a fork is logged.** The answer stays `409`
+  `Conflict`; its cause, which nothing recorded, now goes in the log with its traceback. (AUTH-21)
 
 ### Changed
 

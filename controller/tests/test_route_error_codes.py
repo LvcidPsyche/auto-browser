@@ -235,6 +235,21 @@ def test_a_forks_page_refusal_answers_as_the_page_routes_do(client: TestClient, 
     assert (response.status_code, response.json()) == (403, {"detail": OFF_LIST_PAGE_DETAIL})
 
 
+@pytest.mark.parametrize("route", [r for r in ALL_ROUTES if r.runtime == (409, "Conflict")], ids=lambda r: r.id)
+def test_a_runtime_error_answered_409_is_logged_with_its_cause(
+    client: TestClient, route: Route, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A tested 409 keeps its answer; only the log line is the operator's way to the cause.
+    with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(route, RuntimeError("boom-cause")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()) == (409, {"detail": "Conflict"})
+    logged = [r for r in caplog.records if r.name == "app.routes.sessions" and r.exc_info]
+    assert logged, "the route answered 409 without logging the RuntimeError"
+    assert logged[0].exc_info[0] is RuntimeError
+    assert logged[0].levelno == logging.WARNING
+    assert "boom-cause" in str(logged[0].exc_info[1])
+
+
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
 def test_value_error_is_400_without_its_message(client: TestClient, route: Route) -> None:
     with _raising(route, ValueError("bad value at /srv/secret/path")):

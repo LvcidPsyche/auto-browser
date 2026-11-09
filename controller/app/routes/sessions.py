@@ -85,6 +85,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 # A fixed text that says what to check; it names no path.
                 raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
+                # The caller gets the generic answer; the cause is here, and nowhere else.
+                logger.warning("create session failed", exc_info=True)
                 raise HTTPException(status_code=409, detail="Conflict") from None
             return created
 
@@ -336,6 +338,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 # The fork's own stored state, read back by create_session: the fixed text POST /sessions answers.
                 raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
+                # The caller gets the generic answer; the cause is here, and nowhere else.
+                logger.warning("fork failed for session %s", session_id, exc_info=True)
                 raise HTTPException(status_code=409, detail="Conflict") from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes answer it. Every other PermissionError
