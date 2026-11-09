@@ -138,6 +138,9 @@ PAGE_READ_WORLD_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS + WORLD_PAD_SECONDS)
 # page_not_responding, its session dropped and detached (review of c6).
 WORLD_SETUP_MARGIN_SECONDS = 2.0
 PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
+# find_elements' query mode has its own, shorter timeout, and the same margin under it: a setup that hangs there is the
+# page not answering, not a pattern that backtracks.
+FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS = int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
 
 # How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
 # answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.
@@ -1133,6 +1136,7 @@ class McpToolGateway:
                 [payload.query, payload.regex, payload.context, payload.limit],
                 # The world's own deadline must not cut this off before the timeout below says why.
                 timeout_ms=int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS + WORLD_PAD_SECONDS) * 1000),
+                setup_timeout_ms=FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
             )
             try:
                 elements = await asyncio.wait_for(evaluate, timeout=FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS)

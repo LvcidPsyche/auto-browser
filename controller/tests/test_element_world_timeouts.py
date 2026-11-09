@@ -224,6 +224,10 @@ async def test_the_setup_messages_of_one_call_share_one_deadline() -> None:
 # -- at the gateway: under bounded(), not at the default action timeout ------------
 
 
+def query_read(gateway: Any) -> Any:
+    return gateway._find_elements(FindElementsInput(session_id="s1", query="x"))
+
+
 def text_read(gateway: Any) -> Any:
     return gateway._get_html(GetPageHtmlInput(session_id="s1", text_only=True))
 
@@ -283,4 +287,23 @@ async def test_a_page_read_whose_setup_hangs_ends_as_page_not_responding_before_
     assert error.code == PAGE_NOT_RESPONDING
     assert SHORT_MS / 2 < waited_ms(error) <= SHORT_MS  # what was left of the setup budget
     assert elapsed < read_bound_s
+    assert manager.element_ids._world(session.page)._cdp is None
+
+
+async def test_a_find_elements_query_whose_setup_hangs_ends_as_page_not_responding_not_query_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page, _cdp = one_slow_step("Page.getFrameTree", HUNG_S, {"value": [], "issued": [], "tag": "tag"})
+    gateway, manager, session = gateway_over(
+        page, tmp_path, monkeypatch, read_bound_s=2 * LONG_MS / 1000, setup_bound_ms=LONG_MS
+    )
+    # As in production, the world's own timeout is past the query's, so only the setup bound can end it first.
+    manager.element_ids = ElementIds(SimpleNamespace(action_timeout_ms=int(HUNG_S * 1000)))
+    monkeypatch.setattr("app.tool_gateway.gateway.FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS", SHORT_MS)
+    monkeypatch.setattr("app.tool_gateway.gateway.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS", LONG_MS / 1000)
+
+    elapsed, error = await timed_failure(query_read(gateway))
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert elapsed < LONG_MS / 1000
     assert manager.element_ids._world(session.page)._cdp is None

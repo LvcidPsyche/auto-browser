@@ -142,7 +142,9 @@ All notable changes to auto-browser are documented here.
   messages that set the call up (the CDP session's attach, the frame tree and the world's creation) one deadline
   between them, 2 seconds under the read's 30 and counted from the start of the call: a page busy for longer than the
   default action timeout still gets its read. A setup that is still unfinished at that deadline ends as
-  `page_not_responding` with its session dropped and detached, before the read's own bound.
+  `page_not_responding` with its session dropped and detached, before the read's own bound. `find_elements` with a
+  `query` has the same, 2 seconds under its own 10: a setup that hangs there was answered `query_timeout`, blaming the
+  pattern, with the session kept.
 - **A script exported from a session's audit log writes only numbers where numbers go, and says when a typed text
   was cut.** `GET /sessions/{id}/export-script` and `browser.export_script` wrote a click's or a hover's coordinates,
   a scroll's amounts and a wait's time into the script as the audit event held them, where every string goes through

@@ -1328,15 +1328,18 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(script=script[:40]):
                 self.assertIsNotNone(deadlines[script])
                 self.assertGreater(deadlines[script], bound * 1000)
-        # The setup messages' bound is below a page read's own, so a hung setup is the world's to report; the query
-        # mode gives none, as its own bound is shorter than the world's default.
+        # The setup's bound is below each read's own, so a hung setup is the world's to report, not the read's.
         self.assertLess(gateway_module.PAGE_READ_SETUP_TIMEOUT_MS, PAGE_READ_TIMEOUT_SECONDS * 1000)
+        self.assertLess(
+            gateway_module.FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
+            gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS * 1000,
+        )
         self.assertEqual(
             setup_deadlines,
             {
                 PAGE_TEXT_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
                 FIND_ELEMENTS_SELECTOR_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
-                FIND_ELEMENTS_TEXT_SCRIPT: None,
+                FIND_ELEMENTS_TEXT_SCRIPT: gateway_module.FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
             },
         )
 
