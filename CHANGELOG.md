@@ -89,6 +89,10 @@ All notable changes to auto-browser are documented here.
   unsupported type or could not be read. The result now carries `image_omitted`, in its text and in
   `structuredContent` alike, with one of `too_large`, `outside_artifact_root`, `unsupported_type`, `unreadable` or
   `no_artifact_root`; a result that carries its image, or was never meant to, has no such key. (MCP-26)
+- **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the
+  script as a Python repr, which is not a JavaScript string: a non-printable character past the BMP (U+10FFFF, say)
+  was written as `\U0010ffff`, which JavaScript reads as other text, so the read looked up another key. The key is
+  now the evaluate's argument, as `browser.set_local_storage`'s always was. (MCP-34)
 
 ### Changed
 

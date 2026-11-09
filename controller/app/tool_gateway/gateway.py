@@ -1243,9 +1243,9 @@ class McpToolGateway:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
         if payload.key:
-            script = f"() => window.{payload.storage_type}Storage.getItem({payload.key!r})"
+            script = f"(k) => window.{payload.storage_type}Storage.getItem(k)"
             async with locked_read(self.manager, session):
-                value = await bounded(session.page.evaluate(script))
+                value = await bounded(session.page.evaluate(script, payload.key))
             return {"session_id": payload.session_id, "key": payload.key, "value": value}
         script = (
             f"() => Object.fromEntries("

@@ -102,6 +102,20 @@ class ToolGatewayStorageRuntimeGuardTests(unittest.IsolatedAsyncioTestCase):
         manager.get_session.assert_not_awaited()
 
 
+class GetStorageKeyTests(SpendBase):
+    async def test_a_key_is_the_evaluate_argument_and_never_part_of_the_script(self) -> None:
+        # A key spliced in as a Python repr is not a JavaScript string: past the BMP, repr can write \U0010ffff.
+        for key in ("it's", 'say "hi"', "back\\slash", "new\nline", "\U0001f600", "\U0010ffff"):
+            with self.subTest(key=ascii(key)):
+                self.page.evaluated.clear()
+                self.page.evaluated_args.clear()
+
+                await self.gateway._get_local_storage(GetStorageInput(session_id=SESSION, key=key))
+
+                self.assertEqual(self.page.evaluated_args, [key])
+                self.assertNotIn(key, self.page.evaluated[0])
+
+
 class GatewayWriteRecordTests(SpendBase):
     """The three state changes the gateway makes itself (MCP-23).
 
