@@ -8,10 +8,10 @@ All notable changes to auto-browser are documented here.
 
 - **MCP protocol `2025-03-26` is no longer negotiated.** A client that initializes with it is offered `2025-11-25`, as
   any other version the controller does not speak is, and one that cannot follow disconnects itself. A session that
-  negotiated `2025-03-26` before the upgrade, restored from the session store, is left as it is: that version defines
-  no `MCP-Protocol-Version` header, so a client on it sends none and keeps working until it initializes again. A
-  client that does send `MCP-Protocol-Version: 2025-03-26` is now refused with `400` and `-32602`, and has to
-  initialize again.
+  negotiated `2025-03-26` before the upgrade, restored from the session store, goes on at that version as it did,
+  with or without the `MCP-Protocol-Version` header, until it initializes again: a stdio bridge that outlives the
+  upgrade sends that header on every request and re-initializes only on a `404`. On a session at any other version a
+  `2025-03-26` header is refused with `400` and `-32602`.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
   silent, as it always was, and `resources/unsubscribe` still removes it.

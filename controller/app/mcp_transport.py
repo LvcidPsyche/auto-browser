@@ -683,7 +683,10 @@ class McpHttpTransport:
         self, request: Request, session: McpSession, *, request_id: Any = None
     ) -> Response | None:
         protocol_version = request.headers.get(MCP_PROTOCOL_HEADER)
-        if not protocol_version:
+        # A session goes on at the version it negotiated, whatever that is, until it initializes again. A session
+        # restored at a version no longer offered needs this: a stdio bridge sends it on every POST and re-initializes
+        # only on a 404, so a 400 here would never end.
+        if not protocol_version or protocol_version == session.protocol_version:
             return None
         if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
             return self._json_error_response(
@@ -694,18 +697,16 @@ class McpHttpTransport:
                 status_code=400,
                 headers=self._session_headers(session),
             )
-        if protocol_version != session.protocol_version:
-            return self._json_error_response(
-                request_id,
-                -32600,
-                (
-                    f"Protocol version mismatch for session {session.id}: expected {session.protocol_version}, "
-                    f"got {protocol_version}"
-                ),
-                status_code=400,
-                headers=self._session_headers(session),
-            )
-        return None
+        return self._json_error_response(
+            request_id,
+            -32600,
+            (
+                f"Protocol version mismatch for session {session.id}: expected {session.protocol_version}, "
+                f"got {protocol_version}"
+            ),
+            status_code=400,
+            headers=self._session_headers(session),
+        )
 
     def _validate_origin(self, request: Request) -> Response | None:
         origin = request.headers.get("origin")

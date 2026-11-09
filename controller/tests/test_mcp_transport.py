@@ -25,6 +25,22 @@ from app.models import McpToolCallContent, McpToolCallResponse
 from tests.test_mcp_resource_ownership import mcp_request
 
 
+def _stream_request(session_id: str, protocol_version: str) -> Request:
+    """A GET /mcp: the TestClient would buffer the endless stream."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/mcp",
+            "query_string": b"",
+            "headers": [
+                (MCP_SESSION_HEADER.lower().encode(), session_id.encode()),
+                (MCP_PROTOCOL_HEADER.lower().encode(), protocol_version.encode()),
+            ],
+        }
+    )
+
+
 class McpTransportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -165,13 +181,27 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(response.json()["result"]["tools"][0]["name"], "browser.observe")
         self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-03-26")
 
-    def test_a_2025_03_26_version_header_is_refused_as_unsupported(self) -> None:
+    def test_a_restored_2025_03_26_session_goes_on_at_its_own_version_with_the_header(self) -> None:
+        """A stdio bridge sends its negotiated version on every POST and re-initializes only on a 404: refused with a
+        400, a bridge that outlived the upgrade would never get past it."""
         session_id = self._restart_with_a_session_negotiated_at("2025-03-26")
+        headers = {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: "2025-03-26"}
+
+        post = self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        stream = asyncio.run(self.transport.handle_get_request(_stream_request(session_id, "2025-03-26")))
+
+        self.assertEqual(post.status_code, 200)
+        self.assertEqual(post.json()["result"]["tools"][0]["name"], "browser.observe")
+        self.assertEqual(post.headers[MCP_PROTOCOL_HEADER], "2025-03-26")
+        self.assertIsInstance(stream, StreamingResponse)
+
+    def test_a_2025_03_26_header_on_a_session_at_another_version_is_refused_as_unsupported(self) -> None:
+        headers = {**self._ready_headers(), MCP_PROTOCOL_HEADER: "2025-03-26"}
 
         response = self.client.post(
-            "/mcp",
-            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: "2025-03-26"},
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
         )
 
         self.assertEqual(response.status_code, 400)
