@@ -37,6 +37,7 @@ class _HoldingAudit:
         self.until_finished: AgentJobQueue | None = None
         # Held further until this says so too, for a test that needs the finish callback done before enqueue returns.
         self.also_until: Callable[[], bool] = lambda: True
+        self.fails_after_the_hold = False
         self.events: list[str] = []
         self.failing: set[str] = set()
 
@@ -50,6 +51,8 @@ class _HoldingAudit:
         while self.until_finished is not None:
             records = await self.until_finished.store.list()
             if records and all(record.status in TERMINAL for record in records) and self.also_until():
+                if self.fails_after_the_hold:
+                    raise OSError("No space left on device")
                 return
             await asyncio.sleep(0.01)
         await self.release.wait()
@@ -135,6 +138,37 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         stored = self.cron._load()[self.job["id"]]
         self.assertEqual(stored["last_status"], "completed", "the 'queued' write ran over the run's outcome")
         self.assertEqual(stored["run_count"], 1)
+
+    async def test_an_enqueue_audit_that_fails_after_the_run_ended_still_answers_triggered(self) -> None:
+        # The run is over and cannot be taken back: an error here would say it never happened, and invite a second one.
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        self.audit.until_finished = self.queue
+        self.audit.also_until = lambda: not self.cron._active_runs
+        self.audit.fails_after_the_hold = True
+
+        with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
+            result = await asyncio.wait_for(self.cron.trigger_job(self.job["id"]), timeout=10)
+
+        self.assertTrue(result["triggered"])
+        self.assertTrue(any(result["queued_job"]["id"] in line for line in logged.output), logged.output)
+        stored = self.cron._load()[self.job["id"]]
+        self.assertEqual(stored["last_status"], "completed")
+        self.assertEqual(stored["run_count"], 1)
+        self.assertIsNotNone(stored["last_run_at"])
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_an_enqueue_audit_that_fails_before_the_job_is_taken_up_still_withdraws_it_and_raises(self) -> None:
+        await self.queue.store.startup()  # no workers: a queued job stays queued
+        self.audit.failing.add("agent_job_enqueued")
+
+        with self.assertRaises(OSError):
+            await self.cron.trigger_job(self.job["id"])
+
+        self.assertEqual([record.status for record in await self.queue.store.list()], ["interrupted"])
+        self.assertEqual(self.cron._load()[self.job["id"]]["run_count"], 0)
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.cron._active_runs, {})
 
     async def test_last_status_says_how_a_real_run_ended(self) -> None:
         class FailingOrchestrator:

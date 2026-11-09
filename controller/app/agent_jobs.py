@@ -516,18 +516,22 @@ class AgentJobQueue:
             raise RuntimeError("Job queue is at capacity. Try again later.")
         try:
             await self._audit("agent_job_enqueued", "queued", record)
-        except BaseException:
+        except BaseException as exc:
+            already_finished = False
             if on_finish is not None:
                 # The caller is about to close the session this job runs in: take the job back first.
                 try:
                     await self._withdraw(record.id)
                 except _AlreadyFinished:
-                    pass  # there is nothing to take back
+                    already_finished = True  # there is nothing to take back
                 except Exception:
                     logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
                 finally:
                     self._on_finish.pop(record.id, None)
-            raise
+            if not already_finished or not isinstance(exc, Exception):
+                raise
+            # The job ran to its end during the write: an error would say it never ran, and invite a second run.
+            logger.exception("agent job %s has finished, but its queuing could not be audited", record.id)
         return self._public_record(record)
 
     async def _worker_loop(self, worker_index: int) -> None:

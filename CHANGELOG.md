@@ -294,7 +294,8 @@ All notable changes to auto-browser are documented here.
   the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
-  error for a run that had started. The failure is now logged and the run's metadata is left as it was. (D7-6)
+  error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
+  write that fails when the run has already ended is logged too, and the answer stays `triggered: true`. (D7-6)
 - **A cron job's `last_status` now says how its last run ended.** It stayed `queued` after the run was over. The agent
   job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
   when the job's record cannot say, also for a run that finishes while its trigger is still answering. A run that is
