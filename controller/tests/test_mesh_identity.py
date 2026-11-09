@@ -91,7 +91,7 @@ class NodeIdentityKeyFileTests(unittest.TestCase):
 
 
 class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
-    """A start can read another start's key file before its bytes are in: _write_private_file creates it, then writes."""
+    """A start can read another start's key file before its bytes are in: _write_private_file creates, then writes."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
