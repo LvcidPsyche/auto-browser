@@ -9,6 +9,7 @@ scripts/takeover_link.sh read and no MCP tool or agent-facing package exposes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import stat
@@ -18,6 +19,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -27,7 +29,7 @@ from app.main import handle_key_not_found
 from app.models import McpToolCallRequest
 from app.routes.extensions import _DASHBOARD_HTML
 from app.routes.operations import create_operations_router
-from app.routes.sessions import TAKEOVER_LINK_REFUSED_DETAIL, create_sessions_router
+from app.routes.sessions import TAKEOVER_LINK_REFUSED_DETAIL, TakeoverRefusalWindows, create_sessions_router
 from app.session_isolation import DockerBrowserNodeProvisioner
 from app.tool_gateway.gateway import McpToolGateway
 from tests._bash import BASH, NO_BASH_REASON
@@ -279,6 +281,44 @@ class TakeoverTokenTests(_Isolated):
         self.assertEqual(allowed.status_code, 200, allowed.text)
 
 
+class TakeoverRefusalWindowsEventNotWrittenTests(unittest.TestCase):
+    SOURCE = "host:203.0.113.9"
+
+    def setUp(self) -> None:
+        self.windows = TakeoverRefusalWindows()
+
+    def test_a_window_whose_event_was_not_written_does_not_stand(self) -> None:
+        self.assertEqual(self.windows.record(self.SOURCE, now=1000.0), 0)
+
+        self.windows.event_not_written(self.SOURCE, reported=0)
+
+        self.assertEqual(self.windows.record(self.SOURCE, now=1001.0), 1)  # the refusal whose event was lost
+        self.assertIsNone(self.windows.record(self.SOURCE, now=1002.0))  # that event opened the window
+
+    def test_what_the_lost_event_was_to_report_is_kept_with_this_refusal(self) -> None:
+        self.windows.record(self.SOURCE, now=1000.0)
+        self.windows.record(self.SOURCE, now=1001.0)
+        reported = self.windows.record(self.SOURCE, now=1060.0)
+        self.assertEqual(reported, 1)
+
+        self.windows.event_not_written(self.SOURCE, reported=reported)
+
+        self.assertEqual(self.windows.record(self.SOURCE, now=1061.0), 2)
+
+    def test_counts_added_while_the_append_failed_are_kept(self) -> None:
+        self.assertEqual(self.windows.record(self.SOURCE, now=1000.0), 0)
+        self.assertIsNone(self.windows.record(self.SOURCE, now=1000.5))  # concurrent, during the append
+
+        self.windows.event_not_written(self.SOURCE, reported=0)
+
+        self.assertEqual(self.windows.record(self.SOURCE, now=1001.0), 2)
+
+    def test_a_source_pushed_out_meanwhile_audits_as_new(self) -> None:
+        self.windows.event_not_written("host:never-seen", reported=0)  # nothing to undo, and no error
+
+        self.assertEqual(self.windows.record("host:never-seen", now=1000.0), 0)
+
+
 class TakeoverRefusalWindowTests(_Isolated):
     """A flood of refusals writes one audit event per source per minute, and the next one says how many (R5C-6)."""
 
@@ -380,6 +420,70 @@ class TakeoverRefusalWindowTests(_Isolated):
 
         self.refuse(a)  # pushed out by c, so it audits as a new source
         self.assertEqual(self.refused()[3:], [{"reason": "wrong takeover token"}])
+
+    async def test_a_failed_append_opens_no_window_and_the_next_refusal_writes_its_event_with_the_count(self) -> None:
+        self.audit.side_effect = RuntimeError("audit store down")
+        client = TestClient(self.app, raise_server_exceptions=False)
+
+        response = client.get(f"/sessions/{self.session_id}/takeover-link", headers={"X-Takeover-Token": "wrong"})
+
+        self.assertEqual(response.status_code, 500, response.text)  # an append failure answers as it always did
+        self.assertEqual(self.refused(), [{"reason": "wrong takeover token"}])
+
+        self.audit.side_effect = None
+        self.refuse()  # the audit store is back: this writes, carrying the refusal whose event was lost
+
+        self.assertEqual(self.refused()[1:], [{"reason": "wrong takeover token", "count": 1}])
+
+        self.refuse()  # that event opened a window: this one is only counted, as before
+        self.assertEqual(len(self.refused()), 2)
+
+    async def test_a_refusal_during_a_failing_append_is_counted(self) -> None:
+        started, fail = asyncio.Event(), asyncio.Event()
+
+        async def append_that_fails_later(**_kwargs) -> None:
+            started.set()
+            await fail.wait()
+            raise RuntimeError("audit store down")
+
+        self.audit.side_effect = append_that_fails_later
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://t")
+        self.addAsyncCleanup(client.aclose)
+        url = f"/sessions/{self.session_id}/takeover-link"
+        headers = {"X-Takeover-Token": "wrong"}
+
+        first = asyncio.ensure_future(client.get(url, headers=headers))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        during = await client.get(url, headers=headers)  # no append of its own: the window stands for now
+        self.assertEqual(during.status_code, 403, during.text)
+        fail.set()
+        with self.assertRaises(RuntimeError):
+            await first
+
+        self.audit.side_effect = None
+        after = await client.get(url, headers=headers)
+
+        self.assertEqual(after.status_code, 403, after.text)
+        self.assertEqual(self.refused()[-1], {"reason": "wrong takeover token", "count": 2})
+
+    async def test_a_cancelled_append_counts_as_not_written(self) -> None:
+        async def append_cancelled_meanwhile(**_kwargs) -> None:
+            raise asyncio.CancelledError
+
+        self.audit.side_effect = append_cancelled_meanwhile
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://t")
+        self.addAsyncCleanup(client.aclose)
+        url = f"/sessions/{self.session_id}/takeover-link"
+        headers = {"X-Takeover-Token": "wrong"}
+
+        with self.assertRaises(asyncio.CancelledError):
+            await client.get(url, headers=headers)
+
+        self.audit.side_effect = None
+        response = await client.get(url, headers=headers)
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.refused()[-1], {"reason": "wrong takeover token", "count": 1})
 
     @patch("app.routes.sessions.TAKEOVER_REFUSAL_SOURCES_MAX", 2)
     async def test_a_source_opening_a_new_window_is_the_newest_again(self) -> None:

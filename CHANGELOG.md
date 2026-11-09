@@ -236,8 +236,9 @@ All notable changes to auto-browser are documented here.
 - **Repeated refused calls to `GET /sessions/{id}/takeover-link` no longer write an audit event each.** The first
   refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
   seconds are only counted, and the first refusal after that writes one event whose `details.count` says how many
-  were held back. Every refusal still answers `403`, `takeover_link_viewed` is written every time, and at most 1024
-  sources are remembered: the oldest is forgotten first, with its count. See the upgrade note. (R5C-6)
+  were held back. An event that cannot be written opens no window: the next refusal writes one, carrying the refusal
+  it lost. Every refusal still answers `403`, `takeover_link_viewed` is written every time, and at most 1024 sources
+  are remembered: the oldest is forgotten first, with its count. See the upgrade note. (R5C-6)
 - **A start that loses the race to create the mesh or Witness key loads the key the other start made.** It raised
   `FileExistsError` instead, which failed that start. (R5C-8)
 

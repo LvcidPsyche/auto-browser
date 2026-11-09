@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import math
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -89,6 +90,18 @@ class TakeoverRefusalWindows:
             self._windows.popitem(last=False)
         return window.counted if window is not None else 0
 
+    def event_not_written(self, source: str, *, reported: int) -> None:
+        """The event record() asked for was not written: the next refusal writes one instead of being counted.
+
+        It carries what the lost event was to report, this refusal, and what was counted meanwhile. A source pushed
+        out of the map meanwhile audits as new, as any other.
+        """
+        window = self._windows.get(source)
+        if window is None:
+            return
+        window.started_at = -math.inf
+        window.counted += reported + 1
+
 
 def _refusal_source(request: Request) -> str:
     """Who keeps being refused: the verified operator id, else the client host (a header claims nothing here)."""
@@ -161,20 +174,26 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         # Spaces and tabs around the token are not part of it, as normalize_authorization treats the bearer token.
         presented = (x_takeover_token or "").strip(" \t").encode("utf-8")
         if not hmac.compare_digest(presented, expected.encode("utf-8")):
-            counted = refusal_windows.record(_refusal_source(request), now=time.monotonic())
+            source = _refusal_source(request)
+            counted = refusal_windows.record(source, now=time.monotonic())
             if counted is not None:
                 details: dict[str, Any] = {
                     "reason": "missing takeover token" if not x_takeover_token else "wrong takeover token"
                 }
                 if counted:
                     details["count"] = counted
-                await manager.audit.append(
-                    event_type="takeover_link_refused",
-                    status="refused",
-                    action="get_takeover_link",
-                    session_id=session_id,
-                    details=details,
-                )
+                try:
+                    await manager.audit.append(
+                        event_type="takeover_link_refused",
+                        status="refused",
+                        action="get_takeover_link",
+                        session_id=session_id,
+                        details=details,
+                    )
+                except BaseException:
+                    # Cancelled too: the window opens only once its event is written.
+                    refusal_windows.event_not_written(source, reported=counted)
+                    raise
             raise HTTPException(status_code=403, detail=TAKEOVER_LINK_REFUSED_DETAIL)
         session = await manager.get_session(session_id)
         link = manager.remote_access.takeover_link(session)
