@@ -91,6 +91,8 @@ async def lifespan(application: FastAPI):
     for warning in policy_report.warnings:
         logger.warning("runtime policy warning: %s", warning)
     warn_about_ownerless_personas(proxy_store, named_tokens=has_named_credentials(settings))
+    # A start of the lifespan has no /readyz answer yet, and no probe in flight on a closed event loop.
+    application.state.readyz_answer = None
     await manager.startup()
     await job_queue.startup()
     await cron_service.startup()

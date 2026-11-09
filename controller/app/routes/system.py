@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..audit import get_current_operator
@@ -18,6 +18,10 @@ from ..run_as import controller_user_status
 # session-creation retry budget (CONNECT_RETRIES x CONNECT_RETRY_DELAY_SECONDS,
 # 60s by default). Failing fast is the correct answer for "are you ready?".
 READYZ_TIMEOUT_SECONDS = 5.0
+# How long a /readyz answer stands, counted from when its probe finished, a failing answer as long as a passing one.
+# The route needs no token and is exempt from the rate limit, so a flood must cost one probe per window, an outage
+# included. Short: an orchestrator's readiness flips late by at most this much.
+READYZ_ANSWER_CACHE_SECONDS = 3.0
 
 if TYPE_CHECKING:
     from ..browser_manager import BrowserManager
@@ -91,6 +95,60 @@ async def _wait_for_browser(manager: "BrowserManager") -> Any:
         if not connect.done():
             _let_finish_in_background(connect)
         raise
+
+
+class _ReadyzAnswer:
+    """The last /readyz answer and the probe that will give the next one.
+
+    Lives on app.state, not this module: the probe is a task on one event loop, and a test or a restart of the
+    lifespan must start without it (app/main.py clears it at startup).
+    """
+
+    __slots__ = ("probe", "ready", "finished_at")
+
+    def __init__(self) -> None:
+        self.probe: "asyncio.Future[bool] | None" = None
+        self.ready = False
+        self.finished_at: float | None = None
+
+
+def _readyz_answer(state: Any) -> _ReadyzAnswer:
+    answer = getattr(state, "readyz_answer", None)
+    if answer is None:
+        answer = state.readyz_answer = _ReadyzAnswer()
+    return answer
+
+
+async def _probe_readiness(manager: "BrowserManager", answer: _ReadyzAnswer) -> bool:
+    """Run the one probe a window gets. Any failure is a not-ready answer, kept like a ready one and logged once."""
+    try:
+        # Bounded. ensure_browser() retries CONNECT_RETRIES times (default
+        # 60) at CONNECT_RETRY_DELAY_SECONDS apart *while holding the global
+        # browser lock*, so with browser-node down this probe used to hang
+        # for a minute or more and every concurrent readyz and every
+        # create_session queued behind it — the API looked dead instead of
+        # reporting "not ready". A readiness probe must answer promptly; it
+        # stops waiting, and leaves the shared connect to finish (see
+        # _wait_for_browser), rather than cancel it mid-connect.
+        await _wait_for_browser(manager)
+        ready = True
+    except TimeoutError:
+        logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)
+        ready = False
+    except Exception:
+        logger.exception("readiness check failed")
+        ready = False
+    answer.ready, answer.finished_at = ready, time.monotonic()
+    return ready
+
+
+async def _is_ready(manager: "BrowserManager", answer: _ReadyzAnswer) -> bool:
+    if answer.finished_at is not None and time.monotonic() - answer.finished_at < READYZ_ANSWER_CACHE_SECONDS:
+        return answer.ready
+    if answer.probe is None or answer.probe.done():
+        answer.probe = asyncio.ensure_future(_probe_readiness(manager, answer))
+    # Shielded: a caller that disconnects or is cancelled ends its own wait, not the probe the others are waiting on.
+    return await asyncio.shield(answer.probe)
 
 
 async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
@@ -244,24 +302,10 @@ def create_system_router(
         return JSONResponse(content=payload)
 
     @router.get("/readyz")
-    async def readyz() -> dict[str, str]:
-        try:
-            # Bounded. ensure_browser() retries CONNECT_RETRIES times (default
-            # 60) at CONNECT_RETRY_DELAY_SECONDS apart *while holding the global
-            # browser lock*, so with browser-node down this probe used to hang
-            # for a minute or more and every concurrent readyz and every
-            # create_session queued behind it — the API looked dead instead of
-            # reporting "not ready". A readiness probe must answer promptly; it
-            # stops waiting, and leaves the shared connect to finish (see
-            # _wait_for_browser), rather than cancel it mid-connect.
-            await _wait_for_browser(manager)
+    async def readyz(request: Request) -> dict[str, str]:
+        if await _is_ready(manager, _readyz_answer(request.app.state)):
             return {"status": "ready", "environment": settings.environment_name}
-        except TimeoutError:
-            logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)
-            raise HTTPException(status_code=503, detail="Service unavailable") from None
-        except Exception:
-            logger.exception("readiness check failed")
-            raise HTTPException(status_code=503, detail="Service unavailable") from None
+        raise HTTPException(status_code=503, detail="Service unavailable")
 
     @router.get("/version")
     async def get_version() -> dict[str, str]:

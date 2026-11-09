@@ -164,6 +164,11 @@ All notable changes to auto-browser are documented here.
   session as a read does and answers `The session is busy with another call. Try again.` after 10 seconds, a page on
   a host `ALLOWED_HOSTS` refuses is refused before the viewport changes, and a page that does not answer ends the
   call after 30 seconds. (MCP-23)
+- **`/readyz` answers from a three-second cache, so a flood of it costs one browser check, not one a request.** The
+  route needs no token and is exempt from the rate limit, and each hit asked the browser again, for up to five seconds
+  in an outage. An answer now stands for three seconds from when its probe finished, a failing one as long as a
+  passing one, and callers that miss together share one probe, which a caller that disconnects cannot cancel. A
+  readiness change can show up to three seconds late. (AUTH-26)
 
 ### Changed
 

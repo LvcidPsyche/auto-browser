@@ -4,13 +4,16 @@ import asyncio
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import httpx
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.routes import system
 from app.routes.system import create_system_router
 
@@ -286,7 +289,11 @@ class ReadyzConnectTests(unittest.IsolatedAsyncioTestCase):
             return object()
 
         manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
-        with mock.patch.object(system, "READYZ_TIMEOUT_SECONDS", TEST_TIMEOUT_SECONDS):
+        with (
+            mock.patch.object(system, "READYZ_TIMEOUT_SECONDS", TEST_TIMEOUT_SECONDS),
+            # Every call probes here: the shared connect is what is under test, not the answer cache.
+            mock.patch.object(system, "READYZ_ANSWER_CACHE_SECONDS", 0),
+        ):
             async with _client(manager) as client:
                 for _ in range(3):
                     response = await asyncio.wait_for(client.get("/readyz"), timeout=5)
@@ -303,6 +310,193 @@ class ReadyzConnectTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(connects), 2)  # a finished connect is not reused: the next probe asks the manager
+
+
+class _Clock:
+    """Stands in for app.routes.system's `time`. Patching time.monotonic itself would stop the event loop's clock."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def patch(self) -> mock._patch:
+        return mock.patch.object(
+            system, "time", new=SimpleNamespace(monotonic=self.monotonic, perf_counter=time.perf_counter)
+        )
+
+
+class ReadyzAnswerCacheTests(unittest.IsolatedAsyncioTestCase):
+    """/readyz is exempt from the rate limit and the token, so a flood must not cost a probe per request."""
+
+    async def _flood(self, client: httpx.AsyncClient, count: int) -> list[int]:
+        return [(await client.get("/readyz")).status_code for _ in range(count)]
+
+    async def test_a_flood_on_a_cold_cache_costs_one_probe(self) -> None:
+        connects: list[int] = []
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            return object()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        async with _client(manager) as client:
+            statuses = await self._flood(client, 5)
+
+        self.assertEqual((statuses, len(connects)), ([200] * 5, 1))
+
+    async def test_concurrent_misses_share_one_probe(self) -> None:
+        release = asyncio.Event()
+
+        async def ensure_browser() -> object:
+            await release.wait()
+            return object()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        # _wait_for_browser, not ensure_browser: the shared connect would hide a second probe, and a probe that waited
+        # on the connect is still a second wait the window was to spare.
+        with mock.patch.object(system, "_wait_for_browser", wraps=system._wait_for_browser) as waited:
+            async with _client(manager) as client:
+                waiters = [asyncio.ensure_future(client.get("/readyz")) for _ in range(5)]
+                await asyncio.sleep(0.05)  # every miss has found the probe in flight
+                release.set()
+                responses = await asyncio.wait_for(asyncio.gather(*waiters), timeout=5)
+
+        self.assertEqual([response.status_code for response in responses], [200] * 5)
+        self.assertEqual(waited.await_count, 1)
+
+    async def test_a_flood_against_a_failing_browser_costs_one_probe_per_window(self) -> None:
+        connects: list[int] = []
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            raise ConnectionError("browser down")
+
+        clock = _Clock()
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        with clock.patch():
+            async with _client(manager) as client:
+                self.assertEqual(await self._flood(client, 4), [503] * 4)
+                self.assertEqual(len(connects), 1)
+                clock.advance(system.READYZ_ANSWER_CACHE_SECONDS - 0.01)
+                self.assertEqual(await self._flood(client, 3), [503] * 3)
+                self.assertEqual(len(connects), 1)  # a failing answer holds as long as a passing one
+                clock.advance(0.02)
+                self.assertEqual(await self._flood(client, 3), [503] * 3)
+                self.assertEqual(len(connects), 2)
+
+    async def test_a_passing_answer_stands_for_the_window_and_no_longer(self) -> None:
+        connects: list[int] = []
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            return object()
+
+        clock = _Clock()
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        with clock.patch():
+            async with _client(manager) as client:
+                self.assertEqual(await self._flood(client, 3), [200] * 3)
+                clock.advance(system.READYZ_ANSWER_CACHE_SECONDS + 0.01)
+                self.assertEqual(await self._flood(client, 1), [200])
+
+        self.assertEqual(len(connects), 2)
+
+    async def test_the_window_runs_from_when_the_answer_finished_not_when_the_probe_began(self) -> None:
+        connects: list[int] = []
+        clock = _Clock()
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            clock.advance(60)  # a probe that took a minute
+            return object()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        with clock.patch():
+            async with _client(manager) as client:
+                await client.get("/readyz")
+                clock.advance(system.READYZ_ANSWER_CACHE_SECONDS - 0.01)
+                await client.get("/readyz")
+                self.assertEqual(len(connects), 1)
+                clock.advance(0.02)
+                await client.get("/readyz")
+
+        self.assertEqual(len(connects), 2)
+
+    async def test_a_cancelled_caller_does_not_cancel_the_probe_the_others_wait_on(self) -> None:
+        release = asyncio.Event()
+        connects: list[int] = []
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            await release.wait()
+            return object()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        async with _client(manager) as client:
+            first = asyncio.ensure_future(client.get("/readyz"))
+            second = asyncio.ensure_future(client.get("/readyz"))
+            await asyncio.sleep(0.05)
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+
+            release.set()
+            response = await asyncio.wait_for(second, timeout=5)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(connects), 1)
+
+            # And the answer it gave is the cached one: the next caller costs no probe.
+            self.assertEqual((await client.get("/readyz")).status_code, 200)
+
+        self.assertEqual(len(connects), 1)
+
+    async def test_each_app_has_its_own_answer(self) -> None:
+        connects: list[int] = []
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            return object()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        async with _client(manager) as one, _client(manager) as other:
+            await one.get("/readyz")
+            await other.get("/readyz")
+
+        self.assertEqual(len(connects), 2)
+
+
+class ReadyzRestartTests(unittest.TestCase):
+    def test_a_restart_of_the_real_app_does_not_inherit_its_answer(self) -> None:
+        ensure_browser = mock.AsyncMock(return_value=object())
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    main_module, "validate_runtime_policy", return_value=SimpleNamespace(errors=[], warnings=[])
+                )
+            )
+            for service, method_name in (
+                (main_module.manager, "startup"),
+                (main_module.manager, "shutdown"),
+                (main_module.job_queue, "startup"),
+                (main_module.job_queue, "shutdown"),
+                (main_module.cron_service, "startup"),
+                (main_module.cron_service, "shutdown"),
+                (main_module.maintenance, "startup"),
+                (main_module.maintenance, "shutdown"),
+            ):
+                stack.enter_context(mock.patch.object(service, method_name, new=mock.AsyncMock()))
+            stack.enter_context(mock.patch.object(main_module.manager, "ensure_browser", new=ensure_browser))
+            with TestClient(main_module.app) as client:
+                self.assertEqual(client.get("/readyz").status_code, 200)
+            with TestClient(main_module.app) as client:
+                self.assertEqual(client.get("/readyz").status_code, 200)
+
+        self.assertEqual(ensure_browser.await_count, 2)
 
 
 def _strings(value: object) -> list[str]:
