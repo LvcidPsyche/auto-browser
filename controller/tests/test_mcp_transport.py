@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -120,6 +121,61 @@ class McpTransportTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"]["protocolVersion"], "2025-06-18")
+
+    def test_2025_03_26_is_answered_with_a_counter_offer(self) -> None:
+        """That version allowed JSON-RPC batches, which this transport refuses."""
+        response = self._initialize_with_version("2025-03-26")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["protocolVersion"], "2025-11-25")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-11-25")
+
+    def _restart_with_a_session_negotiated_at(self, version: str) -> str:
+        """A session from before this version was dropped, restored from the store. Its id is returned."""
+        store = Path(f"{self.tempdir.name}/mcp-sessions.json")
+        session = McpSession(
+            id="restored", protocol_version=version, client_info={}, client_capabilities={}, initialized=True
+        )
+        store.write_text(json.dumps([asdict(session)]), encoding="utf-8")
+        self.transport = McpHttpTransport(
+            tool_gateway=self.gateway,
+            server_name="auto-browser",
+            server_title="Auto Browser MCP",
+            server_version="0.2.0",
+            allowed_origins=["https://allowed.example"],
+            session_store_path=str(store),
+            manager=self.manager,
+        )
+        return session.id
+
+    def test_a_restored_2025_03_26_session_keeps_working_without_the_version_header(self) -> None:
+        """A client on 2025-03-26 sends no MCP-Protocol-Version header, so nothing changes for it until it initializes."""
+        session_id = self._restart_with_a_session_negotiated_at("2025-03-26")
+
+        response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id},
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["tools"][0]["name"], "browser.observe")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-03-26")
+
+    def test_a_2025_03_26_version_header_is_refused_as_unsupported(self) -> None:
+        session_id = self._restart_with_a_session_negotiated_at("2025-03-26")
+
+        response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: "2025-03-26"},
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertEqual(error["data"]["requested"], "2025-03-26")
+        self.assertNotIn("2025-03-26", error["data"]["supported"])
 
     def _initialize(self) -> tuple[str, str]:
         response = self.client.post(

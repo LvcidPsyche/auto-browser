@@ -4,6 +4,21 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **MCP protocol `2025-03-26` is no longer negotiated.** A client that initializes with it is offered `2025-11-25`, as
+  any other version the controller does not speak is, and one that cannot follow disconnects itself. A session that
+  negotiated `2025-03-26` before the upgrade, restored from the session store, is left as it is: that version defines
+  no `MCP-Protocol-Version` header, so a client on it sends none and keeps working until it initializes again. A
+  client that does send `MCP-Protocol-Version: 2025-03-26` is now refused with `400` and `-32602`, and has to
+  initialize again.
+
+### Changed
+
+- **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller
+  refuses them, so a client on it was promised what the server would not do. `2025-11-25` and `2025-06-18` remain.
+  (MCP-15)
+
 ## [1.17.0] — 2026-11-08
 
 A security and correctness release over 1.16.0, from the review findings 1.16.0 left open and from reviews of this

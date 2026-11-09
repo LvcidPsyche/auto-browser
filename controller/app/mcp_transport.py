@@ -30,7 +30,6 @@ MCP_PROTOCOL_HEADER = "MCP-Protocol-Version"
 SUPPORTED_PROTOCOL_VERSIONS = (
     "2025-11-25",
     "2025-06-18",
-    "2025-03-26",
 )
 CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 # -32002 is the spec's "resource not found" code and is used as such below, so
