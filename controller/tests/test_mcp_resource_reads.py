@@ -122,15 +122,14 @@ class McpResourceReadTests(unittest.IsolatedAsyncioTestCase):
         self.assert_internal_error(answer, "browser://s1/console")
         self.assertIn("TypeError", logged.output[0])
 
-    async def test_a_read_that_cannot_be_written_as_json_is_an_internal_error(self) -> None:
-        """A page can put a lone surrogate in its DOM; UTF-8 cannot carry one, so the response cannot be built."""
+    async def test_a_dom_holding_a_lone_surrogate_is_read_with_the_replacement_character(self) -> None:
+        """A page can put a lone surrogate in its DOM, and UTF-8 cannot carry one: its text answers with U+FFFD."""
         self.page.content.return_value = "<p>\ud83d</p>"
 
-        with self.assertLogs("app.mcp_transport", "WARNING") as logged:
+        with self.assertNoLogs("app.mcp_transport", "WARNING"):
             answer = await self.read("browser://s1/dom")
 
-        self.assert_internal_error(answer, "browser://s1/dom")
-        self.assertIn("UnicodeEncodeError", logged.output[0])
+        self.assertEqual(answer["result"]["contents"][0]["text"], "<p>\ufffd</p>")
 
     async def test_the_exceptions_own_text_reaches_neither_the_client_nor_the_log(self) -> None:
         self.manager.get_session.side_effect = RuntimeError(f"net::ERR_ABORTED at https://x.test/?token={SECRET}")

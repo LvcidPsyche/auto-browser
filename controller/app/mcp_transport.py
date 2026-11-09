@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
 from . import events as _events
@@ -19,6 +19,7 @@ from .audit import get_current_operator
 from .browser.page_read import bounded, locked_read
 from .mcp_instructions import server_instructions
 from .models import McpToolCallRequest, OperatorIdentity
+from .safe_json_response import SafeJSONResponse
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .tool_gateway.gateway import _json_safe
 from .tool_inputs import MAX_TOOL_RESULT_CHARS
@@ -360,19 +361,18 @@ class McpHttpTransport:
             )
         # The one place a read's failure becomes an answer. -32002 is only for what does not exist; a session of
         # another operator's raises SessionNotFoundError, and must read the same as a resource that was never there.
-        not_found = self._json_error_response(request_id, -32002, f"Resource not found: {uri}", headers=headers)
         try:
             content = await self._read_resource(uri)
-            if content is None:
-                return not_found
-            return self._json_result_response(request_id, {"contents": [content]}, headers=headers)
         except SessionNotFoundError:
-            return not_found
+            content = None
         except Exception as exc:
             # The class only, and the URI quoted, as it is caller input: an exception's text can carry a page URL
             # with a token in it, so the client's message is fixed text and the log keeps the class.
             logger.warning("MCP resource read of %r failed: %s", uri, type(exc).__name__)
             return self._json_error_response(request_id, -32603, f"Could not read resource: {uri}", headers=headers)
+        if content is None:
+            return self._json_error_response(request_id, -32002, f"Resource not found: {uri}", headers=headers)
+        return self._json_result_response(request_id, {"contents": [content]}, headers=headers)
 
     async def _read_resource(self, uri: str) -> dict[str, Any] | None:
         """Fetch the content of a resource URI, or None if it names no resource.
@@ -854,8 +854,8 @@ class McpHttpTransport:
         *,
         headers: dict[str, str] | None = None,
         status_code: int = 200,
-    ) -> JSONResponse:
-        return JSONResponse(status_code=status_code, content=self._json_result(request_id, result), headers=headers)
+    ) -> SafeJSONResponse:
+        return SafeJSONResponse(status_code=status_code, content=self._json_result(request_id, result), headers=headers)
 
     def _json_error_response(
         self,
@@ -866,8 +866,8 @@ class McpHttpTransport:
         data: Any = None,
         headers: dict[str, str] | None = None,
         status_code: int = 200,
-    ) -> JSONResponse:
-        return JSONResponse(
+    ) -> SafeJSONResponse:
+        return SafeJSONResponse(
             status_code=status_code,
             content=self._json_error(request_id, code, message, data=data),
             headers=headers,

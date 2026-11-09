@@ -31,6 +31,7 @@ from .proxy_personas import ProxyPersonaStore
 from .rate_limits import SlidingWindowRateLimiter
 from .routes._utils import require_session_access
 from .routes.system import create_system_router
+from .safe_json_response import SafeJSONResponse
 from .session_ownership import may_use
 from .session_share import SessionShareManager
 from .tool_gateway import McpToolGateway
@@ -235,6 +236,8 @@ def create_controller_app(
         version=version,
         lifespan=lifespan,
         summary="Visual Auto Browser control plane for LLM workflows.",
+        # Page text reaches every route's answer: a lone surrogate must not turn one into a 500 (safe_json_response).
+        default_response_class=SafeJSONResponse,
         dependencies=[Depends(require_session_access)],
         # Served by install_docs_pages, with pinned, integrity-checked assets.
         docs_url=None,

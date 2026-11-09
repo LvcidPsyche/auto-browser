@@ -41,8 +41,14 @@ All notable changes to auto-browser are documented here.
   names no resource or the session is not there (another operator's session reads exactly the same); anything else
   that goes wrong is `-32603`, with a fixed message that names the URI and never the exception's text, which can
   hold a page URL with a token in it. The controller logs each one at WARNING with the URI and the exception's class,
-  where it was a debug line. A response that cannot be written as JSON (a lone surrogate from a page) is `-32603`
-  too, not a `500`. (MCP-35)
+  where it was a debug line. A resource whose content cannot be encoded as JSON (not a page's lone surrogate, which
+  goes out as U+FFFD: see below) is `-32603` too. (MCP-35)
+- **A lone surrogate from a page no longer fails a response.** A page can hand one over (a JSON escape decodes to
+  one), and UTF-8 cannot carry it, so a response holding one raised after its handler had run: `tools/call` and any
+  REST route returning page text answered `500`, whatever the tool had done by then. What a route returns, the MCP
+  responses, and the `404` and `BrowserActionError` answers now carry U+FFFD in its place, as the controller's records
+  already do: a strict JSON parser refuses a lone surrogate's own escape, and a page should not break a client's
+  parser. A URI holding one answers `-32002`, not `500`.
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
   and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and

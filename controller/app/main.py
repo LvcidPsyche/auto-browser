@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from . import process_hardening
 from .action_errors import BrowserActionError, SessionNotFoundError
@@ -26,6 +26,7 @@ from .routes.session_diagnostics import create_session_diagnostics_router
 from .routes.sessions import create_sessions_router
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
+from .safe_json_response import SafeJSONResponse
 from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -145,18 +146,18 @@ async def legacy_ui_redirect(_: Request, rest_of_path: str = "") -> RedirectResp
 
 
 @app.exception_handler(KeyError)
-async def handle_key_not_found(request: Request, exc: KeyError) -> JSONResponse:
+async def handle_key_not_found(request: Request, exc: KeyError) -> SafeJSONResponse:
     if isinstance(exc, SessionNotFoundError):
         # reason: the controller's own close (request_gate_lost), for a client to branch on; absent otherwise.
         content = {"detail": exc.message, "code": exc.code, **({"reason": exc.reason} if exc.reason else {})}
-        return JSONResponse(status_code=404, content=content)
+        return SafeJSONResponse(status_code=404, content=content)
     # A plain KeyError is either an unknown id a service chose to raise as one or a bug
     # reaching the client as a 404; the log line is the only way to tell them apart.
     logger.warning("unmapped KeyError on %s %s", request.method, request.url.path, exc_info=exc)
     key = exc.args[0] if exc.args else "unknown"
-    return JSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
+    return SafeJSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
 
 
 @app.exception_handler(BrowserActionError)
-async def handle_browser_action_error(_: Request, exc: BrowserActionError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content=exc.payload)
+async def handle_browser_action_error(_: Request, exc: BrowserActionError) -> SafeJSONResponse:
+    return SafeJSONResponse(status_code=exc.status_code, content=exc.payload)
