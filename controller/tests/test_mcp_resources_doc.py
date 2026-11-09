@@ -7,11 +7,15 @@ No browser/network — inspects the module source and the doc text.
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
+from app.mcp_transport import McpHttpTransport
+
 _REPO = Path(__file__).resolve().parents[2]
 _DOC = _REPO / "examples" / "mcp-resources.md"
+_CLIENTS_DOC = _REPO / "docs" / "mcp-clients.md"
 _TRANSPORT = _REPO / "controller" / "app" / "mcp_transport.py"
 
 
@@ -45,6 +49,27 @@ class McpResourcesDocTests(unittest.TestCase):
         self.assertIn("-32002", self.transport)
         self.assertIn("-32002", self.doc)
         self.assertIn("-32602", self.doc)
+
+    def test_the_doc_does_not_promise_a_notification_for_every_change(self) -> None:
+        clients = _CLIENTS_DOC.read_text(encoding="utf-8")
+        self.assertNotIn("whenever that resource changes", self.doc)
+        self.assertNotIn("When a subscribed resource changes", clients)
+
+    def test_documented_notifications_match_the_code(self) -> None:
+        uris = [f"browser://s/{kind}" for kind in ("screenshot", "dom", "console", "network")]
+        for event in ("observe", "action", "session", "approval"):
+            with self.subTest(event=event):
+                row = re.search(rf"^\| `{event}`[^|]*\| (.+) \|$", self.doc, re.MULTILINE)
+                self.assertIsNotNone(row, f"{event} is missing from the notification table")
+                documented = set(re.findall(r"browser://<id>/(\w+)", row.group(1)))
+
+                notified = McpHttpTransport._updated_resource_uris({"event": event, "session_id": "s"}, subscribed=uris)
+
+                self.assertEqual(documented, {uri.rsplit("/", 1)[1] for uri in notified})
+
+    def test_the_doc_says_the_audit_events_are_read_not_notified(self) -> None:
+        self.assertIn("browser://audit/events", self.doc)
+        self.assertIn("poll it with `resources/read`", self.doc)
 
 
 if __name__ == "__main__":

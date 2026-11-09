@@ -290,7 +290,8 @@ curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp \
 The default resource set includes:
 
 - `browser://sessions` for active browser sessions
-- `browser://audit/events` for recent audit events
+- `browser://audit/events` for recent audit events (never notified, so read it
+  with `resources/read`: subscribing to it returns `-32602`)
 - `browser://<session-id>/dom`, `browser://<session-id>/screenshot`,
   `browser://<session-id>/console`, and `browser://<session-id>/network` once a
   session exists
@@ -339,8 +340,12 @@ curl -N "${AUTH[@]}" http://127.0.0.1:8000/mcp \
   -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION"
 ```
 
-When a subscribed resource changes, the stream emits a JSON-RPC notification
-named `notifications/resources/updated` with the updated `uri`.
+When a browser event notifies a resource you subscribed to, the stream emits a
+JSON-RPC notification named `notifications/resources/updated` with its `uri`.
+Only the events listed in
+[`examples/mcp-resources.md`](../examples/mcp-resources.md#subscribing-to-changes)
+notify, each for the URIs listed there; for anything else, read the resource
+again.
 
 ## MCP tool profiles and packs
 

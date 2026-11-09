@@ -625,6 +625,55 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(subscribe_response.status_code, 200)
         self.assertEqual(subscribe_response.json()["error"]["code"], -32002)
 
+    def _ready_headers(self) -> dict[str, str]:
+        """The headers of a session that has sent notifications/initialized."""
+        session_id, protocol_version = self._initialize()
+        headers = {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version}
+        self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        )
+        return headers
+
+    def _resource_call(self, headers: dict[str, str], method: str, uri: str):
+        return self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 17, "method": method, "params": {"uri": uri}}
+        )
+
+    def test_subscribing_to_the_audit_events_is_refused_because_nothing_notifies_them(self) -> None:
+        headers = self._ready_headers()
+
+        response = self._resource_call(headers, "resources/subscribe", "browser://audit/events")
+
+        self.assertEqual(response.status_code, 200)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertIn("poll resources/read", error["message"])
+        self.assertEqual(self.transport._sessions[headers[MCP_SESSION_HEADER]].resource_subscriptions, [])
+
+    def test_a_manager_without_audit_events_answers_the_subscribe_as_an_unknown_resource(self) -> None:
+        headers = self._ready_headers()
+        self.manager.list_audit_events = None
+
+        response = self._resource_call(headers, "resources/subscribe", "browser://audit/events")
+
+        self.assertEqual(response.json()["error"]["code"], -32002)
+
+    def test_a_persisted_subscription_to_the_audit_events_stays_silent_and_can_be_removed(self) -> None:
+        """A version that accepted the subscribe left this in the store."""
+        headers = self._ready_headers()
+        session = self.transport._sessions[headers[MCP_SESSION_HEADER]]
+        session.resource_subscriptions.append("browser://audit/events")
+
+        for event in ("observe", "action", "session", "approval"):
+            uris = McpHttpTransport._updated_resource_uris(
+                {"event": event, "session_id": "session-1"}, subscribed=session.resource_subscriptions
+            )
+            self.assertEqual(uris, [], event)
+        response = self._resource_call(headers, "resources/unsubscribe", "browser://audit/events")
+
+        self.assertEqual(response.json()["result"], {})
+        self.assertEqual(session.resource_subscriptions, [])
+
     def test_resource_update_mapping_only_emits_subscribed_resources(self) -> None:
         uris = McpHttpTransport._updated_resource_uris(
             {"event": "observe", "session_id": "session-1"},

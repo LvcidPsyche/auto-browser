@@ -36,6 +36,8 @@ CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 # reusing it here left clients unable to tell "send initialized first" apart
 # from "no such resource". -32005 sits in the implementation-defined range.
 INITIALIZATION_REQUIRED_ERROR = -32005
+# Readable, but no event ever notifies them (_updated_resource_uris), so a subscription would wait for ever.
+NEVER_NOTIFIED_RESOURCES = frozenset({"browser://audit/events"})
 # The most MCP sessions the table keeps, and the most one token-verified operator keeps: past its
 # cap an operator loses its own least recently used sessions, so its initialize flood cannot evict
 # another operator's. Unowned sessions (shared token, no token) are bounded by the table's cap alone.
@@ -291,7 +293,7 @@ class McpHttpTransport:
         )
 
     async def _list_resources(self) -> list[dict[str, Any]]:
-        """Return the list of subscribable browser resources."""
+        """Return the browser resources a client can read; all but NEVER_NOTIFIED_RESOURCES can be subscribed to."""
         resources: list[dict[str, Any]] = [
             {
                 "uri": "browser://sessions",
@@ -420,6 +422,13 @@ class McpHttpTransport:
                 request_id,
                 -32002,
                 f"Resource not found: {uri}",
+                headers=self._session_headers(session),
+            )
+        if uri in NEVER_NOTIFIED_RESOURCES:
+            return self._json_error_response(
+                request_id,
+                -32602,
+                f"Resource is not notified of changes; poll resources/read instead: {uri}",
                 headers=self._session_headers(session),
             )
         if uri not in session.resource_subscriptions:

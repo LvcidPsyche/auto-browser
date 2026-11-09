@@ -12,7 +12,7 @@ controller's token as `Authorization: Bearer <token>`: the contents of
 
 ## Resource catalog
 
-`resources/list` returns the subscribable resources. `browser://sessions` is
+`resources/list` returns the resources you can read. `browser://sessions` is
 always present; the per-session resources appear once a browser session exists.
 
 ```jsonc
@@ -38,6 +38,7 @@ always present; the per-session resources appear once a browser session exists.
 | URI | mimeType | Content |
 |-----|----------|---------|
 | `browser://sessions` | `application/json` | All active sessions |
+| `browser://audit/events` | `application/json` | Recent audit events (never notified: poll it) |
 | `browser://<id>/screenshot` | `image/png` | Latest screenshot for the session |
 | `browser://<id>/dom` | `text/html` | Current page HTML |
 | `browser://<id>/console` | `application/json` | Recent console messages |
@@ -56,9 +57,23 @@ always present; the per-session resources appear once a browser session exists.
 ## Subscribing to changes
 
 Subscribe to a resource URI to receive a `notifications/resources/updated`
-message whenever that resource changes (e.g. the page DOM updates or a new
-network request lands). Subscribing to an unknown URI returns error `-32002`;
-a missing/empty URI returns `-32602`.
+message when a browser event notifies it, for a session you may use. These
+events do, and nothing else does:
+
+| Event | Notifies |
+|-------|----------|
+| Every event below | `browser://sessions` |
+| `observe`: the session was observed | `browser://<id>/dom`, `browser://<id>/screenshot` |
+| `action`: an action on the page succeeded | `browser://<id>/dom`, `browser://<id>/network`, `browser://<id>/screenshot` |
+| `session`: the session closed | `browser://<id>/dom` |
+| `approval`: an approval was requested | `browser://<id>/console` |
+
+A notification says only that the URI may have changed, so `resources/read` it
+for the new content. Between these events nothing is sent: a console message or
+a network request the page makes by itself notifies nobody until one of them
+follows. Subscribing to an unknown URI returns error `-32002`; a missing/empty
+URI returns `-32602`. `browser://audit/events` is never notified, so subscribing
+to it returns `-32602` as well: poll it with `resources/read`.
 
 ```jsonc
 // --> subscribe
@@ -67,7 +82,7 @@ a missing/empty URI returns `-32602`.
 
 // <-- result: {}   (subscription recorded)
 
-// <-- later, pushed by the server when the DOM changes:
+// <-- later, pushed by the server after an observe, action or session event:
 { "jsonrpc": "2.0", "method": "notifications/resources/updated",
   "params": { "uri": "browser://<session-id>/dom" } }
 ```

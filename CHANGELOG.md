@@ -12,12 +12,20 @@ All notable changes to auto-browser are documented here.
   no `MCP-Protocol-Version` header, so a client on it sends none and keeps working until it initializes again. A
   client that does send `MCP-Protocol-Version: 2025-03-26` is now refused with `400` and `-32602`, and has to
   initialize again.
+- **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
+  a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
+  silent, as it always was, and `resources/unsubscribe` still removes it.
 
 ### Fixed
 
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
+- **The MCP resource docs say which events notify which URI.** They said a subscriber is notified whenever a
+  resource changes. `browser://sessions` is notified by every browser event, and a session's resources only by its
+  observe, action, session and approval events, as listed in `examples/mcp-resources.md`: a console message or a
+  network request the page makes by itself notifies nobody until one of those follows. `browser://audit/events` is
+  never notified, and subscribing to it is now refused (see the upgrade note). (MCP-10)
 
 ### Changed
 
