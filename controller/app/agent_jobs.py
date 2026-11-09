@@ -436,6 +436,12 @@ class AgentJobQueue:
         await self._accessible(job_id)
         record, changed = await self.store.request_cancel(job_id)
         task = self._running_tasks.get(job_id) if record.status == "cancelling" else None
+        if job_id in self._finishing:
+            # The run is over and its task is in its finish callback (closing its session); the record still reads
+            # running or cancelling only because the write of its end failed. Cancelled there, the close never
+            # happened (as in _withdraw). Nothing is left to stop, so the record is settled below as one no worker
+            # holds is.
+            task = None
         if task is not None:
             # Before anything is audited: the record already says cancelling, and an audit that fails (a full
             # disk) used to raise here and leave the job running.

@@ -315,6 +315,12 @@ All notable changes to auto-browser are documented here.
   new run kept the `approval_id` the first was queued with, so each of its steps presented an approval given for
   another run. The resumed run now gets the first run's `max_steps` unless the caller gives one, and no `approval_id`.
   See the upgrade note. (STORE-23)
+- **Cancelling an agent job whose run is already over no longer cuts short the close of its session.** A run whose
+  end could not be written (a full disk) still read `running` while its worker ran the finish callback that closes
+  the session a cron fire opened for it. `POST /agent/jobs/{id}/cancel` or `browser.cancel_agent_job` then cancelled
+  the worker inside that callback, and a close cut short there left the session open with nothing else to close it.
+  The cancel now leaves the callback to finish and settles the record as `interrupted`, as it does for a running
+  record no worker holds. (NODE-cancel-job-finish-callback)
 
 ### Changed
 

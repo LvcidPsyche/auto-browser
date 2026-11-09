@@ -545,6 +545,37 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((interrupted["status"], interrupted["error"]), ("interrupted", "agent_job_interrupted"))
         self.assertTrue(any(record.id in line for line in logged.output), logged.output)
 
+    async def test_cancelling_a_job_whose_end_could_not_be_written_leaves_its_finish_callback_to_run(self) -> None:
+        # A run whose end could not be written (a full disk) still reads running while its task closes its session.
+        # A cancel then cancelled that task inside the close, and nothing else closes the session.
+        closing, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def close_the_session(_job_id: str) -> None:
+            closing.set()
+            await release.wait()
+            closed.set()
+
+        full_disk = AsyncMock(side_effect=OSError("No space left on device"))
+        self.queue.store.finish = full_disk  # type: ignore[method-assign]
+        with self.assertLogs("app.agent_jobs", level="ERROR"):
+            job = await self.queue.enqueue_run(
+                "session-15",
+                AgentRunRequest(provider="openai", goal="ends on a full disk", max_steps=1),
+                on_finish=close_the_session,
+            )
+            await asyncio.wait_for(closing.wait(), timeout=5)
+            task = self.queue._running_tasks[job["id"]]
+            self.assertEqual((await self.queue.store.get(job["id"])).status, "running")
+
+            answer = await self.queue.cancel_job(job["id"])
+            release.set()
+            await asyncio.wait({task}, timeout=5)
+
+        self.assertTrue(closed.is_set(), "the cancel stopped the finish callback, so the session was never closed")
+        # Nothing was left to stop: the record is settled as one no worker holds is.
+        self.assertEqual((answer["status"], answer["error"]), ("interrupted", "agent_job_interrupted"))
+        self.assertEqual((await self.queue.store.get(job["id"])).status, "interrupted")
+
     async def test_shutdown_interrupts_running_job(self) -> None:
         class SlowOrchestrator:
             def __init__(self) -> None:
