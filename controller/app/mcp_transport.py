@@ -43,6 +43,8 @@ NEVER_NOTIFIED_RESOURCES = frozenset({"browser://audit/events"})
 # The most characters of a page's DOM one read returns: the most a tool result may return, so a page a tool could
 # hand over whole is not cut here. A longer page ends in a comment that says so and names the paging tool.
 MAX_DOM_RESOURCE_CHARS = MAX_TOOL_RESULT_CHARS
+# How long GET /mcp's event stream waits for an event before it sends a keepalive.
+_STREAM_KEEPALIVE_SECONDS = 15
 # The most MCP sessions the table keeps, and the most one token-verified operator keeps: past its
 # cap an operator loses its own least recently used sessions, so its initialize flood cannot evict
 # another operator's. Unowned sessions (shared token, no token) are bounded by the table's cap alone.
@@ -92,6 +94,8 @@ class McpHttpTransport:
         self.server_title = server_title or server_name
         self.allowed_origins = tuple(allowed_origins or [])
         self._sessions: dict[str, McpSession] = {}
+        # The stop event of each MCP session's one live GET stream. Never saved: a stream does not outlive the process.
+        self._event_streams: dict[str, asyncio.Event] = {}
         self._session_store_path = Path(session_store_path).resolve() if session_store_path else None
         self.manager = manager  # BrowserManager for Resources protocol
         self._load_sessions()
@@ -145,11 +149,13 @@ class McpHttpTransport:
                 headers=self._session_headers(session),
             )
 
+        # Here, not in the generator, which starts only when the body is streamed: two GETs would race it.
+        stop = self._take_over_event_stream(session.id)
         # The body is streamed after this handler has returned, and the HTTP
         # middleware resets the operator once its call_next returns, so the
         # operator is not reliably set while the stream runs: take it now.
         return StreamingResponse(
-            self._resource_event_stream(request, session, get_current_operator()),
+            self._resource_event_stream(request, session, stop, get_current_operator()),
             media_type="text/event-stream",
             headers={
                 **self._session_headers(session),
@@ -171,7 +177,7 @@ class McpHttpTransport:
         session = self._sessions.get(session_id)
         if session is None or not may_use(session.owner):
             return self._json_error_response(None, -32001, f"Unknown MCP session: {session_id}", status_code=404)
-        del self._sessions[session_id]
+        self._forget_session(session_id)
         self._persist_sessions()
         return Response(status_code=204)
 
@@ -468,21 +474,42 @@ class McpHttpTransport:
             self._persist_sessions()
         return self._json_result_response(request_id, {}, headers=self._session_headers(session))
 
+    def _take_over_event_stream(self, session_id: str) -> asyncio.Event:
+        """Stop the session's live stream, if any, and register the next one: one stream per MCP session."""
+        self._stop_event_stream(session_id)
+        stop = self._event_streams[session_id] = asyncio.Event()
+        return stop
+
+    def _stop_event_stream(self, session_id: str) -> None:
+        stop = self._event_streams.pop(session_id, None)
+        if stop is not None:
+            stop.set()
+
+    def _forget_session(self, session_id: str) -> None:
+        """Drop a session and end its stream; every deletion of a session (DELETE, eviction) goes through here."""
+        del self._sessions[session_id]
+        self._stop_event_stream(session_id)
+
     async def _resource_event_stream(
         self,
         request: Request,
         session: McpSession,
+        stop: asyncio.Event,
         operator: OperatorIdentity | None = None,
     ):
         queue = _events.subscribe_all()
         try:
             yield ": connected\n\n"
-            while True:
+            while not stop.is_set():
                 if await request.is_disconnected():
                     break
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
+                # A listening stream is use, even on a turn that reaches neither a keepalive nor a notification;
+                # eviction goes by this. Saved with the next store write, not per turn.
+                session.last_used_at = utc_now()
+                payload = await _next_stream_event(queue, stop)
+                if stop.is_set():
+                    break
+                if payload is None:
                     yield ": keepalive\n\n"
                     continue
                 try:
@@ -501,6 +528,9 @@ class McpHttpTransport:
                     yield f"event: message\ndata: {json.dumps(message, ensure_ascii=False)}\n\n"
         finally:
             _events.unsubscribe_all(queue)
+            # Only the stream that owns the entry removes it: a successor may hold it by now.
+            if self._event_streams.get(session.id) is stop:
+                del self._event_streams[session.id]
 
     async def _may_see_event(self, event: dict[str, Any], operator: OperatorIdentity | None) -> bool:
         """Whether the subscriber may hear about this event's session.
@@ -745,10 +775,10 @@ class McpHttpTransport:
                 by_owner.setdefault(session.owner, []).append(session)
         for sessions in by_owner.values():
             for session in sessions[: max(0, len(sessions) - MAX_MCP_SESSIONS_PER_OWNER)]:
-                del self._sessions[session.id]
+                self._forget_session(session.id)
         excess = len(self._sessions) - MAX_MCP_SESSIONS
         for session in _least_recently_used(self._sessions.values())[: max(0, excess)]:
-            del self._sessions[session.id]
+            self._forget_session(session.id)
 
     def _persist_sessions(self) -> None:
         if self._session_store_path is None:
@@ -818,6 +848,24 @@ class McpHttpTransport:
     @staticmethod
     def _session_headers(session: McpSession) -> dict[str, str]:
         return {MCP_PROTOCOL_HEADER: session.protocol_version}
+
+
+async def _next_stream_event(queue: asyncio.Queue, stop: asyncio.Event) -> str | None:
+    """The next event off the queue, or None at a keepalive's wake or once stop is set.
+
+    Waits on the queue and on stop in their own tasks, cancels whichever is left, and waits for both, on every way
+    out (the generator cancelled here included): a stopped stream wakes at once and leaves no task behind. A cancel
+    that lands as an event arrives leaves the event on the queue, and one landing with the stop is dropped with it.
+    """
+    getter = asyncio.ensure_future(queue.get())
+    stopper = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({getter, stopper}, timeout=_STREAM_KEEPALIVE_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+        return getter.result() if getter.done() else None
+    finally:
+        getter.cancel()
+        stopper.cancel()
+        await asyncio.gather(getter, stopper, return_exceptions=True)
 
 
 def _least_recently_used(sessions: Iterable[McpSession]) -> list[McpSession]:

@@ -22,6 +22,9 @@ All notable changes to auto-browser are documented here.
   gets `-32603` for those, and should retry or report them. `browser://<id>/dom` now returns at most 1,000,000
   characters, the most a tool result may return; a longer page ends in an HTML comment that says so and names
   `browser.get_html`, which pages through the rest.
+- **A session's second `GET /mcp` ends its first.** A client that keeps two event streams open for one MCP session now
+  loses the older one when it opens the newer, and a stream also ends when its session is deleted or evicted. Open one
+  stream per session, and reconnect only when it has ended.
 
 ### Fixed
 
@@ -43,6 +46,12 @@ All notable changes to auto-browser are documented here.
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
   and a longer page ends in an HTML comment that names the cap, the page's length and `browser.get_html`, which
   pages through the rest. A screenshot read stays a fresh, redacted, page-checked capture. (MCP-35)
+- **An MCP session now has one live `GET /mcp` stream, and a stream ends with its session.** Every `GET` opened
+  another stream and another subscription to every browser event for the same session, and `DELETE` or an eviction
+  left them all running for a session that no longer existed. A new `GET` now ends the session's previous stream, and
+  `DELETE` or an eviction past the session caps ends it, at once rather than at its next 15-second keepalive; its
+  event queue is released however the stream ends. An open stream counts as use when eviction picks the least recently
+  used session, as a request does, so a client that only listens is not the one dropped. (MCP-11)
 
 ### Changed
 
