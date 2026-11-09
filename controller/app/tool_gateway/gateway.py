@@ -426,12 +426,13 @@ class McpToolGateway:
                 ):
                     result = await spec.handler(arguments)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
-            # Decided before the result is encoded, so the text and the structured result say the same.
-            image, image_omitted = await self._inline_image(spec.name, result)
-            if image_omitted is not None:
-                result = {**result, "image_omitted": image_omitted}
             try:
                 result = _json_safe(result)
+                # From the result as _json_safe left it (a Path is its text), and before it is encoded, so the text
+                # and the structured result say the same.
+                image, image_omitted = await self._inline_image(spec.name, result)
+                if image_omitted is not None:
+                    result = {**result, "image_omitted": image_omitted}
                 text = json.dumps(result, ensure_ascii=False, allow_nan=False)
             except (TypeError, ValueError, RecursionError):
                 # The handler has run: say so, rather than "Tool execution failed", which reads as nothing done.

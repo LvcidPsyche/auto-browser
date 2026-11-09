@@ -13,7 +13,7 @@ import base64
 import json
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -69,6 +69,18 @@ class InlineScreenshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.mimeType, "image/png")
         self.assertEqual(base64.b64decode(image.data), PNG_BYTES)
         self.assertEqual(response.structuredContent["screenshot_url"], "/artifacts/sess-1/20260101T000000Z-manual.png")
+
+    async def test_a_screenshot_path_given_as_a_path_object_still_gets_the_image(self) -> None:
+        # _json_safe turns it into its text, and the image is decided from that text (as at 1.17.0).
+        self.manager.capture_screenshot = AsyncMock(
+            return_value={**self._shot_result(), "screenshot_path": PurePath(self.shot)}
+        )
+
+        response = await self._call("browser.screenshot", session_id="sess-1")
+
+        self.assertEqual([block.type for block in response.content], ["text", "image"])
+        self.assertEqual(base64.b64decode(response.content[1].data), PNG_BYTES)
+        self.assertEqual(response.structuredContent["screenshot_path"], str(self.shot))
 
     async def test_only_the_fast_preset_inlines_the_screenshot(self) -> None:
         for preset, expected_blocks in (("fast", ["text", "image"]), ("normal", ["text"]), ("rich", ["text"])):
