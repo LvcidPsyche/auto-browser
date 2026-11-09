@@ -187,6 +187,25 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["run_count"], 1)
         self.manager.close_session.assert_awaited_once_with("session-1")
 
+    async def test_a_job_cancelled_in_the_queue_as_the_enqueue_audit_fails_is_released_by_the_trigger(self) -> None:
+        # It never ran and no worker holds it, so nothing is bound to run its finish callback: the error stands, and
+        # the trigger's own cleanup closes the session.
+        await self.queue.store.startup()  # no workers: nothing will ever take the job
+        self.audit.until_finished = self.queue
+        self.audit.fails_after_the_hold = True
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        await asyncio.wait_for(self.audit.reached.wait(), timeout=5)
+        [record] = await self.queue.store.list()
+
+        await self.queue.cancel_job(record.id)
+
+        with self.assertRaises(OSError):
+            await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(self.queue._on_finish, {})
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.cron._active_runs, {})
+        self.assertEqual(self.cron._load()[self.job["id"]]["run_count"], 0)
+
     async def test_an_enqueue_audit_that_fails_before_the_job_is_taken_up_still_withdraws_it_and_raises(self) -> None:
         await self.queue.store.startup()  # no workers: a queued job stays queued
         self.audit.failing.add("agent_job_enqueued")

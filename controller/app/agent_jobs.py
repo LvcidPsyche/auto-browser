@@ -523,9 +523,12 @@ class AgentJobQueue:
                 try:
                     await self._withdraw(record.id)
                 except _AlreadyFinished:
-                    # There is nothing to take back. Told of a failure (not a cancellation), the caller would say the
-                    # job never ran, and invite a second run.
-                    ran_to_its_end = isinstance(exc, Exception)
+                    # There is nothing to take back. If a worker had it, a caller told of a failure (not a cancellation)
+                    # would say it never ran, and invite a second run. One no worker holds whose callback is still here
+                    # never ran (it was cancelled in the queue), and nothing is bound to run that callback.
+                    ran_to_its_end = isinstance(exc, Exception) and (
+                        record.id in self._running_tasks or record.id not in self._on_finish
+                    )
                 except Exception:
                     logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
                 finally:
