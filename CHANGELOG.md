@@ -81,6 +81,15 @@ All notable changes to auto-browser are documented here.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
   the next carries `details.count`, the refusals held back since. An alert that counts these events must add that
   field.
+- **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
+  replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
+  cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
+  no usable key. `GET /crons`, `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and
+  `browser.create_cron_job` answered the key's first 8 characters in `webhook_key_preview`: they now answer
+  `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key cannot
+  be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key` makes a
+  new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
+  `browser.revoke_cron_webhook_key` removes it.
 - **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
   fire now checks `API_BEARER_TOKENS` as it is then. An owner no credential names is refused: the answer is
@@ -142,6 +151,14 @@ All notable changes to auto-browser are documented here.
   `browser://<id>/network` resource, none of which checked the page. Each now refuses it, as the raw CDP route does,
   under a bounded wait for the session lock and with fixed text that names no host, checking the page before the read
   and again after it, with the entries read last (see the upgrade note). (AUTH-22)
+- **A cron job's webhook key is stored as a hash, and can be rotated and revoked.** The store file held every key
+  in plaintext, and every read answered its first 8 characters. The store now holds the SHA-256 of the 256-bit key,
+  and a trigger compares hashes with `compare_digest`. Reads answer a non-secret `webhook_key_id` instead, and no key
+  or hash reaches any API, MCP or log surface, nor an audit or witness record: a key is answered once, by the call
+  that makes it. `POST /crons/{id}/webhook-key/rotate` and `DELETE /crons/{id}/webhook-key`, and the `cron` pack's
+  `browser.rotate_cron_webhook_key` and `browser.revoke_cron_webhook_key` (governed as `write` and `destructive`),
+  replace or remove a key, on a job the caller may use, and each change writes an audit event. See the upgrade
+  note. (STORE-16)
 - **A cron job no longer fires as an operator whose credential is gone.** A job stores the token-verified operator
   who created it and ran as that operator on every fire, whether or not `API_BEARER_TOKENS` still named them, and a
   queued agent job ran as the operator who queued it the same way. Each fire now reads the credentials as they are at

@@ -75,5 +75,27 @@ def register(registry, gateway):
             governed_kind="write",
             pack="cron",
         ),
+        ToolSpec(
+            name="browser.rotate_cron_webhook_key",
+            description=(
+                "Replace a cron job's webhook key, or give the job its first. The previous key stops working at once. "
+                "The new key is in this result only and cannot be read again."
+            ),
+            input_model=CronJobIdInput,
+            handler=gateway._rotate_cron_webhook_key,
+            governed_kind="write",
+            pack="cron",
+        ),
+        ToolSpec(
+            name="browser.revoke_cron_webhook_key",
+            description=(
+                "Remove a cron job's webhook key. Its webhook trigger is then refused until a new key is made; "
+                "the job's schedule is not touched."
+            ),
+            input_model=CronJobIdInput,
+            handler=gateway._revoke_cron_webhook_key,
+            governed_kind="destructive",
+            pack="cron",
+        ),
     ]:
         registry.register(spec)

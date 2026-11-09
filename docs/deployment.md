@@ -1224,6 +1224,23 @@ unprivileged `browser` user (uid 10001). The entrypoint starts as root only to t
 ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
 `./data/browser-profile` and `./data/downloads` end up owned by uid 10001.
 
+## Cron jobs and webhook keys
+
+A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (the bearer token is
+needed as well, as on any route). The key is 256 random bits, answered once by the call that makes it, `POST /crons`
+or a rotation. The store keeps only its SHA-256 hash, and reads answer `webhook_key_id`, a short non-secret id derived
+from the hash that tells keys apart:
+
+- **Rotate** with `POST /crons/{job_id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`: a new key, answered
+  once; the old key stops working at once, and a job with no webhook gets its first.
+- **Revoke** with `DELETE /crons/{job_id}/webhook-key` or `browser.revoke_cron_webhook_key`: the key is removed, and
+  a trigger is refused as for a job that never had one. A rotation brings the webhook back.
+
+Each change writes one audit event (`cron_webhook_key_rotated`, `cron_webhook_key_revoked`) without the key or its hash, and
+another operator's job answers as one that does not exist. A key made before 1.18.0 is replaced by its hash on the
+first start after the upgrade and goes on working; if the store cannot be re-saved then, the job keeps working from
+the plaintext key still in the file, and the failure is logged and retried at the next start.
+
 ## Backups
 
 Back up at least:

@@ -13,7 +13,8 @@ Job schema:
     "provider":    str,
     "schedule":    str (cron expr, e.g. "0 9 * * 1-5") or null for webhook-only,
     "enabled":     bool,
-    "webhook_key": str | null (secret key for POST /crons/{id}/trigger),
+    "webhook_key_hash": str | null (SHA-256 of the 256-bit random secret for POST /crons/{id}/trigger; the secret is
+                   shown once, by create or rotate, and is never read back),
     "goal":        str (natural language goal for agent),
     "start_url":   str | null,
     "auth_profile":str | null,
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import hashlib
 import hmac
 import json
 import logging
@@ -72,6 +74,16 @@ RUN_OUTCOME_UNKNOWN = "unknown"
 # A fire refused because no named credential proves the job's owner any more: the answer's reason, and last_status.
 OWNER_CREDENTIAL_REMOVED = "owner_credential_removed"
 OWNER_CREDENTIAL_REMOVED_STATUS = "refused: owner credential removed"
+
+
+def _hash_webhook_key(key: str) -> str:
+    """SHA-256 of a webhook key: the key is 256 random bits, so nothing slower is needed to protect it at rest."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _webhook_key_id(key_hash: str) -> str:
+    """A non-secret id for telling keys apart: derived from the hash, and neither the hash nor any part of it."""
+    return hashlib.sha256(f"cron-webhook-key-id:{key_hash}".encode("utf-8")).hexdigest()[:12]
 
 
 class CronJobDisabledError(RuntimeError):
@@ -119,6 +131,7 @@ class CronService:
         # Before the scheduler check: it needs only the store, so a deployment without APScheduler is told too.
         jobs = self._load()
         self._warn_if_store_was_quarantined(jobs)
+        await self._hash_legacy_webhook_keys()
         if not _APSCHEDULER_AVAILABLE:
             return
         self._scheduler = AsyncIOScheduler()
@@ -127,6 +140,31 @@ class CronService:
                 self._register_job(job)
         self._scheduler.start()
         logger.info("cron service started with %d jobs", len(jobs))
+
+    async def _hash_legacy_webhook_keys(self) -> None:
+        """Replace keys an earlier version stored as they are with their hash: once, at startup, never on a read.
+
+        Before the scheduler check, as webhook triggers work without APScheduler. A store that cannot be re-saved is
+        only logged, and goes on working: a job still holding its key is compared by hashing that key.
+        """
+        async with self._lock:
+            jobs = self._load()
+            legacy = [job for job in jobs.values() if job.get("webhook_key")]
+            if not legacy:
+                return
+            for job in legacy:
+                job["webhook_key_hash"] = self._stored_key_hash(job)
+                del job["webhook_key"]
+            try:
+                self._save(jobs)
+            except OSError as exc:
+                logger.error(
+                    "cron store %s: %d job(s) still hold their webhook key in plaintext, as the store could not be "
+                    "re-saved with their hashes: %s",
+                    self._store_path,
+                    len(legacy),
+                    exc,
+                )
 
     def _warn_if_store_was_quarantined(self, jobs: dict[str, Any]) -> None:
         """Say at every start that an empty store follows a quarantined one.
@@ -182,7 +220,7 @@ class CronService:
                 "provider": provider,
                 "schedule": schedule,
                 "enabled": enabled,
-                "webhook_key": webhook_key,
+                "webhook_key_hash": _hash_webhook_key(webhook_key) if webhook_key else None,
                 "goal": goal,
                 "start_url": start_url,
                 "auth_profile": auth_profile,
@@ -206,9 +244,8 @@ class CronService:
 
             created = self._safe_job(job)
             if webhook_key:
-                # The one time the full key is disclosed. Every later read masks
-                # it, so before this the key existed only in the store file: the
-                # webhook trigger demanded a secret no API caller could obtain.
+                # The one time the full key is disclosed: the store keeps only its hash, and every read strips
+                # that, so a caller who does not read it here must rotate the key to get a new one.
                 created["webhook_key"] = webhook_key
             return created
 
@@ -287,6 +324,48 @@ class CronService:
                     logger.warning("failed to remove cron job %s during delete: %s", job_id, exc)
             return True
 
+    # ── Webhook key ─────────────────────────────────────────────────────────
+
+    async def rotate_webhook_key(self, job_id: str) -> dict[str, Any]:
+        """Give the job a new webhook key, or its first: the only time this key is ever shown."""
+        new_key = secrets.token_hex(32)
+        async with self._lock:
+            jobs = self._load()
+            job = self._accessible(jobs, job_id)
+            job.pop("webhook_key", None)  # a plaintext key from an older store does not outlive its replacement
+            job["webhook_key_hash"] = _hash_webhook_key(new_key)
+            self._save(jobs)
+            rotated = self._safe_job(job)
+        await self._audit_quietly(
+            job_id,
+            event_type="cron_webhook_key_rotated",
+            status="ok",
+            action="rotate_cron_webhook_key",
+            details={"cron_job": job_id, "webhook_key_id": rotated["webhook_key_id"]},
+        )
+        rotated["webhook_key"] = new_key
+        return rotated
+
+    async def revoke_webhook_key(self, job_id: str) -> dict[str, Any]:
+        """Remove the job's webhook key, after which its webhook is refused as a job without a key is."""
+        async with self._lock:
+            jobs = self._load()
+            job = self._accessible(jobs, job_id)
+            key_hash = self._stored_key_hash(job)
+            if key_hash:
+                job.pop("webhook_key", None)
+                job.pop("webhook_key_hash", None)
+                self._save(jobs)
+        if key_hash:
+            await self._audit_quietly(
+                job_id,
+                event_type="cron_webhook_key_revoked",
+                status="ok",
+                action="revoke_cron_webhook_key",
+                details={"cron_job": job_id, "webhook_key_id": _webhook_key_id(key_hash)},
+            )
+        return {"job_id": job_id, "revoked": bool(key_hash)}
+
     # ── Webhook trigger ─────────────────────────────────────────────────────
 
     async def trigger_via_webhook(self, job_id: str, webhook_key: str) -> dict[str, Any]:
@@ -295,12 +374,12 @@ class CronService:
         if job_id not in jobs:
             raise KeyError(f"Cron job not found: {job_id}")
         job = jobs[job_id]
-        stored_key = job.get("webhook_key")
-        if not stored_key:
+        stored_hash = self._stored_key_hash(job)
+        if not stored_hash:
             raise PermissionError("This job does not have webhook triggering enabled")
         # Compared as bytes: compare_digest raises TypeError for a str with
         # non-ASCII characters, which surfaced as a 500 instead of a refusal.
-        if not hmac.compare_digest(webhook_key.encode("utf-8"), str(stored_key).encode("utf-8")):
+        if not hmac.compare_digest(_hash_webhook_key(webhook_key).encode("utf-8"), stored_hash.encode("utf-8")):
             raise PermissionError("Invalid webhook key")
         return await self._run_job_now(job)
 
@@ -475,6 +554,8 @@ class CronService:
 
     async def _audit_quietly(self, job_id: str, *, event_type: str, status: str, action: str, details: dict) -> None:
         """Audit what has already happened: a failure is logged, never raised over it."""
+        if self.manager is None:
+            return
         try:
             await self.manager.audit.append(event_type=event_type, status=status, action=action, details=details)
         except Exception:
@@ -584,13 +665,19 @@ class CronService:
         atomic_write_text(self._store_path, json.dumps(data, indent=2), mode=PRIVATE_FILE_MODE)
 
     @staticmethod
-    def _safe_job(job: dict[str, Any]) -> dict[str, Any]:
-        """Return job dict with webhook_key masked."""
-        result = dict(job)
-        if result.get("webhook_key"):
-            result["webhook_key_preview"] = result["webhook_key"][:8] + "..."
-            result["webhook_enabled"] = True
-        else:
-            result["webhook_enabled"] = False
-        result.pop("webhook_key", None)
+    def _stored_key_hash(job: dict[str, Any]) -> str | None:
+        """The hash of the job's webhook key, or None. A key still held as it is (an unmigrated store) is hashed."""
+        if job.get("webhook_key_hash"):
+            return str(job["webhook_key_hash"])
+        legacy_key = job.get("webhook_key")
+        return _hash_webhook_key(str(legacy_key)) if legacy_key else None
+
+    @classmethod
+    def _safe_job(cls, job: dict[str, Any]) -> dict[str, Any]:
+        """The job as callers see it: neither the key nor its hash, and a non-secret id instead of them."""
+        key_hash = cls._stored_key_hash(job)
+        result = {key: value for key, value in job.items() if key not in {"webhook_key", "webhook_key_hash"}}
+        result["webhook_enabled"] = key_hash is not None
+        if key_hash is not None:
+            result["webhook_key_id"] = _webhook_key_id(key_hash)
         return result

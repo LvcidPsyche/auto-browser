@@ -1384,6 +1384,16 @@ class McpToolGateway:
         deleted = await self.cron_service.delete_job(payload.job_id)
         return {"job_id": payload.job_id, "deleted": deleted}
 
+    async def _rotate_cron_webhook_key(self, payload: CronJobIdInput) -> dict[str, Any]:
+        if self.cron_service is None:
+            raise RuntimeError("Cron service not initialized")
+        return await self.cron_service.rotate_webhook_key(payload.job_id)
+
+    async def _revoke_cron_webhook_key(self, payload: CronJobIdInput) -> dict[str, Any]:
+        if self.cron_service is None:
+            raise RuntimeError("Cron service not initialized")
+        return await self.cron_service.revoke_webhook_key(payload.job_id)
+
     async def _trigger_cron_job(self, payload: CronJobIdInput) -> dict[str, Any]:
         if self.cron_service is None:
             raise RuntimeError("Cron service not initialized")

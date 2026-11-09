@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,16 +34,20 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(created["name"], "daily check")
         self.assertTrue(created["webhook_enabled"])
-        self.assertIn("webhook_key_preview", created)
         # Disclosed once, on creation — otherwise no caller could ever trigger it.
         self.assertEqual(len(created["webhook_key"]), 64)
-        self.assertTrue(created["webhook_key"].startswith(created["webhook_key_preview"].removesuffix("...")))
+        self.assertNotIn("webhook_key_preview", created)
+        self.assertNotIn("webhook_key_hash", created)
+        self.assertFalse(created["webhook_key"].startswith(created["webhook_key_id"]))
         fetched = await service.get_job(created["id"])
         self.assertEqual(fetched["id"], created["id"])
         self.assertNotIn("webhook_key", fetched)
+        self.assertNotIn("webhook_key_hash", fetched)
+        self.assertEqual(fetched["webhook_key_id"], created["webhook_key_id"])
         listed = await service.list_jobs()
         self.assertEqual(len(listed), 1)
         self.assertNotIn("webhook_key", listed[0])
+        self.assertNotIn("webhook_key_hash", listed[0])
 
         with self.assertRaises(ValueError):
             await service.create_job(name="overflow", goal="nope")
@@ -72,7 +77,8 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         raw = service._load()[created["id"]]
 
-        self.assertEqual(created["webhook_key"], raw["webhook_key"])
+        self.assertNotIn("webhook_key", raw)
+        self.assertEqual(raw["webhook_key_hash"], hashlib.sha256(created["webhook_key"].encode("utf-8")).hexdigest())
 
         with self.assertRaises(PermissionError):
             await service.trigger_via_webhook(created["id"], "wrong")

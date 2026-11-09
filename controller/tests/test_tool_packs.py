@@ -164,6 +164,8 @@ PACK_OF = {
     "browser.create_cron_job": "cron",
     "browser.delete_cron_job": "cron",
     "browser.trigger_cron_job": "cron",
+    "browser.rotate_cron_webhook_key": "cron",
+    "browser.revoke_cron_webhook_key": "cron",
     "harness.start_convergence": "harness",
     "harness.get_status": "harness",
     "harness.get_trace": "harness",
@@ -341,7 +343,7 @@ class SelectionTests(unittest.TestCase):
 class PackCatalogTests(unittest.TestCase):
     def test_every_tool_is_in_the_pinned_pack(self) -> None:
         packs = {name: spec.pack for name, spec in _all_specs().items()}
-        self.assertEqual(len(PACK_OF), 75)
+        self.assertEqual(len(PACK_OF), 77)
         self.assertEqual(packs, PACK_OF)
         self.assertEqual(set(packs.values()), set(PACKS))
 
@@ -379,7 +381,7 @@ class GatewaySelectionTests(unittest.TestCase):
 
     def test_full_serves_every_tool_in_registration_order(self) -> None:
         every = list(_all_specs())
-        self.assertEqual(len(every), 75)
+        self.assertEqual(len(every), 77)
         self.assertEqual(_names(_gateway(tool_profile="full", vision_targeter=object())), every)
         self.assertEqual(
             _names(_gateway(tool_profile="full")), [name for name in every if name != "browser.find_by_vision"]

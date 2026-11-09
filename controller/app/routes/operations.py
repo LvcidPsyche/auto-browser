@@ -12,7 +12,7 @@ from ..auth_state import AuthStateDecryptError
 from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
-from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
+from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
 from ._utils import bounded_limit, cron_store_errors, persona_file_errors, typed_route_errors
 
 logger = logging.getLogger(__name__)
@@ -184,6 +184,28 @@ def create_operations_router(
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Cron job not found: {job_id}")
         return {"deleted": True, "job_id": job_id}
+
+    @router.post("/crons/{job_id}/webhook-key/rotate")
+    async def rotate_cron_webhook_key(job_id: str) -> dict[str, Any]:
+        try:
+            payload = CronJobIdInput.model_validate({"job_id": job_id})
+            with cron_store_errors():
+                return await cron_service.rotate_webhook_key(payload.job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Not found") from None
+        except ValidationError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+
+    @router.delete("/crons/{job_id}/webhook-key")
+    async def revoke_cron_webhook_key(job_id: str) -> dict[str, Any]:
+        try:
+            payload = CronJobIdInput.model_validate({"job_id": job_id})
+            with cron_store_errors():
+                return await cron_service.revoke_webhook_key(payload.job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Not found") from None
+        except ValidationError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.post("/crons/{job_id}/trigger")
     async def trigger_cron_job_via_webhook(job_id: str, request: Request) -> dict[str, Any]:

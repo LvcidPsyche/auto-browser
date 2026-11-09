@@ -389,7 +389,7 @@ tools in the order `tools/list` returns them.
 | `approvals` | full | listing and deciding approvals over MCP | `browser.list_approvals`, `browser.approve_approval`, `browser.reject_approval`, `browser.execute_approval` |
 | `agent_jobs` | full | the built-in agent queue and its model providers | `browser.list_agent_jobs`, `browser.get_agent_job`, `browser.resume_agent_job`, `browser.discard_agent_job`, `browser.cancel_agent_job`, `browser.queue_agent_step`, `browser.queue_agent_run`, `browser.list_providers` |
 | `proxies` | full | proxy personas | `browser.list_proxy_personas`, `browser.create_proxy_persona`, `browser.delete_proxy_persona` |
-| `cron` | full | agent runs on a schedule or a webhook | `browser.list_cron_jobs`, `browser.create_cron_job`, `browser.delete_cron_job`, `browser.trigger_cron_job` |
+| `cron` | full | agent runs on a schedule or a webhook | `browser.list_cron_jobs`, `browser.create_cron_job`, `browser.delete_cron_job`, `browser.trigger_cron_job`, `browser.rotate_cron_webhook_key`, `browser.revoke_cron_webhook_key` |
 | `harness` | full | the convergence harness | `harness.start_convergence`, `harness.get_status`, `harness.get_trace`, `harness.list_runs`, `harness.list_candidates`, `harness.get_candidate`, `harness.check_drift`, `harness.check_all_drifts`, `harness.graduate` |
 
 ```bash
@@ -718,8 +718,9 @@ comments decisions were given with, though not a reason or a tool call's argumen
 
 #### Cron jobs and FORCE_GOVERNED_APPROVALS
 
-The cron tools are governed too: `browser.create_cron_job` and `browser.trigger_cron_job` are `write`
-and `browser.delete_cron_job` is `destructive`. A job keeps the `workflow_profile` of the call that
+The cron tools are governed too: `browser.create_cron_job`, `browser.trigger_cron_job` and
+`browser.rotate_cron_webhook_key` are `write`, and `browser.delete_cron_job` and
+`browser.revoke_cron_webhook_key` are `destructive`. A job keeps the `workflow_profile` of the call that
 created it, and every run, scheduled or triggered, starts under it, so a job created by a `governed`
 caller cannot be used to run writes without approval. Likewise, a run or step queued by a `governed`
 `browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.
