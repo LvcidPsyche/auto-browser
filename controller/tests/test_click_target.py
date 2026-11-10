@@ -8,6 +8,7 @@ against real Chromium in test_click_target_chromium.py.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import unittest
 from typing import Any
@@ -378,6 +379,29 @@ class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.sleep(0)
         self.assertEqual(page.left, 1)
+
+    async def test_a_click_cancelled_as_its_read_fails_leaves_nothing_for_asyncio_to_report(self) -> None:
+        # The read had ended, with an exception, when the click was cancelled: nothing retrieved it, and asyncio
+        # reported "Task exception was never retrieved" at error, the exception's text (the page's) with it.
+        page = _Page(PlaywrightError("PAGE_PRIVATE_TEXT"))
+        loop = asyncio.get_running_loop()
+        reported: list[dict[str, Any]] = []
+        handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: reported.append(context))
+        self.addCleanup(loop.set_exception_handler, handler)
+        reading = asyncio.ensure_future(self._read(AsyncMock(), page, selector="text=Gone"))
+        await asyncio.sleep(0)  # the read is asked
+        await asyncio.sleep(0)  # and has failed; the click has not been told yet
+
+        reading.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await reading
+
+        del reading
+        await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+        self.assertEqual([context["message"] for context in reported], [])
 
     async def test_an_unread_click_is_logged_at_info_by_session_and_kind_of_failure_never_its_text(self) -> None:
         # A page that does not answer, a navigation in flight, a selector nothing matches: each runs as labelled,

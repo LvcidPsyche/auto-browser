@@ -382,13 +382,15 @@ async def _read_selected(page: Page, selector: str) -> Any:
     finally:
         if not call.done():
             call.cancel()
-            call.add_done_callback(_outcome_left_behind)
+        # On every way out, an ended read too: a click cancelled just as its read failed left the failure, the
+        # page's text in it, for asyncio to report.
+        call.add_done_callback(_outcome_left_behind)
     if not done:
         raise TimeoutError(f"the element did not answer within {READ_TIMEOUT_MS} ms")
     return call.result()
 
 
 def _outcome_left_behind(call: asyncio.Future[Any]) -> None:
-    """Retrieve what a cancelled read ended with, so asyncio does not report it as never retrieved."""
+    """Retrieve what a read ended with, so asyncio does not report it as never retrieved."""
     if not call.cancelled():
         call.exception()
