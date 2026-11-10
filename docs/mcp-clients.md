@@ -649,21 +649,25 @@ when `STATE_DB_PATH` holds the records), created with mode 0600, read at every s
 replaced; whoever can read `APPROVAL_ROOT` itself reads the key with the records. Records that 1.17.0
 and earlier stored with the plain SHA-256 are rewritten at the first start that finds them, in both
 stores, and cover the same call as before; one that cannot be rewritten is logged, still matches its
-call, and is taken at the next start. An approval kept under a key the controller no longer holds (the
-file was removed or replaced before a start; a running controller goes on with the key it read) cannot
-be matched to any call. Approving it is refused before the record changes ("its arguments' digest is
-kept under another key than this controller holds ..."), a call that presents one approved earlier is
-refused with the same reason and told to repeat the call without `approval_id`, which asks for a new
-approval, and each start logs how many such approvals are pending or approved; rejecting them ends that
-warning. An operator's rejection kept under that key no longer stops an agent's own approval of the same
-call under `AUTONOMOUS_APPROVALS`, and each start logs, in a warning of its own, how many such rejections
-are stored (one made to end the first warning is one of them): reject the call again when it is asked
-for, turn `AUTONOMOUS_APPROVALS` off, or restore the key file. That warning repeats while the rejections
-are stored: the retention (`APPROVAL_RETENTION_DAYS`) removes one made in a session that has closed, and
-keeps one in controller scope. When the file cannot be used at a start (it holds no key, cannot be read,
-or cannot be written where there is none), the start logs it and keys with a key of its own: its
-tool call approvals work until that process ends, and are refused the same way after a restart. A file
-that holds no key is left as it is, and has to be removed before a start writes a new one.
+call, and is taken at the next start. Until then, or until a decision or a call writes that record, what
+is stored of it (its file, and its row with `STATE_DB_PATH`) holds the plain digest, and the controller
+lists and answers it keyed all the same.
+
+An approval kept under a key the controller no longer holds (the file was removed or replaced before a
+start; a running controller goes on with the key it read) cannot be matched to any call. Approving it is
+refused before the record changes ("its arguments' digest is kept under another key than this controller
+holds ..."), a call that presents one approved earlier is refused with the same reason and told to
+repeat the call without `approval_id`, which asks for a new approval, and each start logs how many such
+approvals are pending or approved; rejecting them ends that warning. An operator's rejection kept under
+that key no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`, and each
+start logs, in a warning of its own, how many such rejections are stored (one made to end the first
+warning is one of them): reject the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or
+restore the key file. That warning repeats while the rejections are stored: the retention
+(`APPROVAL_RETENTION_DAYS`) removes one made in a session that has closed, and keeps one in controller
+scope. When the file cannot be used at a start (it holds no key, cannot be read, or cannot be written
+where there is none), the start logs it and keys with a key of its own: its tool call approvals work
+until that process ends, and are refused the same way after a restart. A file that holds no key is left
+as it is, and has to be removed before a start writes a new one.
 
 In the dashboard (the queue, the confirm dialog, the arguments viewer and the run replay), in the
 `action_summary`, and in the webhook's and the SSE event's `reason`, a character that would hide or
@@ -673,8 +677,8 @@ variation selectors and Hangul fillers. The server's lists of format and default
 are Unicode 17.0's, whatever Unicode its Python knows. In the `reason`, a newline is written `\n`, and a
 tab, a carriage return or another control as its code point (`[U+0009]`), so a multi-line reason
 arrives on one line; field strings are JSON, so their controls show as JSON escapes (above). A tool
-call's preview and arguments are ASCII JSON (`\u202e`). Every answer that carries the record serves its
-fields as stored: the record and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP
+call's preview and arguments are ASCII JSON (`\u202e`). Every answer that carries the record serves such
+characters as they are: the record and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP
 `browser.list_approvals`), the answers to an approve, a reject or an execute over REST and MCP, the
 `approval_required` answer, and witness receipts. The queue lists only pending approvals: read one on
 its row before you decide. Letters that look alike across scripts (a Cyrillic `а` for a Latin `a`), and

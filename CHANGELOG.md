@@ -241,13 +241,14 @@ All notable changes to auto-browser are documented here.
   value or password offline against it. The store now keeps `<tool> hmac-sha256:<key id>:<digest>`: an HMAC of that
   text under a 32-byte key the controller creates in `APPROVAL_ROOT/.tool-call-digest.key` (mode 0600, written once,
   read at every start), so the same call still matches its approval after a restart, with either store. The plain
-  digest is no longer written to a store or served, and the approval webhook, the SSE event, audit entries and
+  digest is no longer served, nor stored in a new record, and the approval webhook, the SSE event, audit entries and
   witness receipts do not carry it. A record an earlier version stored still matches its call, and the first start
-  that finds it rewrites it keyed, in both stores (one that cannot be rewritten is logged, and the next start tries
-  again). An approval kept under a key the controller no longer holds cannot be matched to a call: an approve of it,
-  and a call that presents one approved earlier, are refused with a message that says so, and the agent asks again.
-  The key lies beside the records, so a reader of `APPROVAL_ROOT` itself can still guess: the change protects what
-  the API, the MCP tools and a copy of the database alone show. See the upgrade note.
+  that finds it rewrites it keyed, in both stores. One that cannot be rewritten is logged and taken at the next
+  start: until then, or until a decision or a call writes it, the stores hold its plain digest, and it is listed and
+  answered keyed all the same. An approval kept under a key the controller no longer holds cannot be matched to a
+  call: an approve of it, and a call that presents one approved earlier, are refused with a message that says so,
+  and the agent asks again. The key lies beside the records, so a reader of `APPROVAL_ROOT` itself can still guess:
+  the change protects what the API, the MCP tools and a copy of the database alone show. See the upgrade note.
 
 ### Fixed
 

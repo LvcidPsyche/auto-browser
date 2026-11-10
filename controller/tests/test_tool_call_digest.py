@@ -191,7 +191,10 @@ class ToolCallDigestTests(ApprovalBindingBase):
         approval_id = await self._asked()
         await self.manager.approve(approval_id)
         await self._store_plain(approval_id)
-        self.assertEqual(approval_tool(await self.manager.approvals.get(approval_id)), "browser.set_cookies")
+        # Read as it is stored (the store hands it out keyed), the tool is still named.
+        as_stored = await self.manager.approvals.file_store.get(approval_id)
+        self.assertEqual(as_stored.action.text, self._plain_stand_in(SECRET))
+        self.assertEqual(approval_tool(as_stored), "browser.set_cookies")
 
         other = await self._spend("another", approval_id)
         spend = await self._spend(SECRET, approval_id)
@@ -207,6 +210,31 @@ class ToolCallDigestTests(ApprovalBindingBase):
 
         self.assertEqual(await self._asked(), approval_id)
         self.assertEqual(len(await self.manager.approvals.list()), 1)
+
+    async def test_a_record_still_stored_plain_is_listed_and_answered_keyed(self) -> None:
+        # The record a start could not rewrite: nothing serves its plain digest meanwhile, and the next write of
+        # it is keyed. It was listed, and answered to the repeated call, as stored.
+        approval_id = await self._asked()
+        await self._store_plain(approval_id)
+        plain = _digest(self._plain_stand_in(SECRET))
+        on_disk = Path(self.manager.settings.approval_root) / f"{approval_id}.json"
+
+        again = await self.call(
+            "browser.set_cookies", session_id=SESSION, workflow_profile="governed", cookies=_cookies(SECRET)
+        )
+        listed = await self.manager.list_approvals()
+        shown = await self.manager.get_approval(approval_id)
+
+        self.assertEqual(again.structuredContent["approval_id"], approval_id)
+        for served in (again.structuredContent["approval"], listed[0], shown):
+            self.assertRegex(served["action"]["text"], KEYED)
+        self.assertNotIn(plain, json.dumps([again.model_dump(mode="json"), listed, shown]))
+        # Reading wrote nothing: the file holds the plain digest until a write replaces it.
+        self.assertIn(plain, on_disk.read_text(encoding="utf-8"))
+        await self.manager.approve(approval_id)
+        self.assertNotIn(plain, on_disk.read_text(encoding="utf-8"))
+        spend = await self._spend(SECRET, approval_id)
+        self.assertFalse(spend.isError, spend.content[0].text)
 
     async def test_an_operators_rejection_stored_plain_still_refuses_the_agents_own_approval(self) -> None:
         self.manager.settings.autonomous_approvals = True
@@ -442,12 +470,69 @@ class StoredDigestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("1 approval record(s)", "\n".join(logged.output))
         self.assertIn(approval.id, "\n".join(logged.output))
-        self.assertEqual((await restarted.get(approval.id)).action.text, _plain("a"))
+        # On disk it is untouched (the store itself hands it out keyed: the test below).
+        self.assertEqual((await restarted.file_store.get(approval.id)).action.text, _plain("a"))
+        self.assertIn(_digest(_plain("a")), self._raw("file"))
         self.assertEqual((await self._spendable(restarted, approval.id, _plain("a"))).id, approval.id)
 
         later = await self._store()
 
-        self.assertRegex((await later.get(approval.id)).action.text, KEYED)
+        self.assertRegex((await later.file_store.get(approval.id)).action.text, KEYED)
+        self.assertNotIn(_digest(_plain("a")), self._raw("file"))
+
+    async def test_a_record_a_start_could_not_rewrite_is_handed_out_keyed_and_written_keyed(self) -> None:
+        names = ("pending", "approved", "run", "rejected")
+        for backend in BACKENDS:
+            with self.subTest(backend=backend):
+                store = await self._store(backend)
+                asked = {name: await self._asked(store, _plain(name)) for name in names}
+                await store.approve(asked["approved"].id)
+                await store.approve(asked["run"].id)
+                await store.reject(asked["rejected"].id, comment="no")
+                for name, approval in asked.items():
+                    await self._as_stored_before(store, approval.id, _plain(name))
+                restarted = await self._store(backend, started=False)
+                with (
+                    patch.object(FileApprovalStore, "_write_sync", side_effect=OSError(28, "No space left on device")),
+                    self.assertLogs("app.approvals", level="WARNING"),
+                ):
+                    await restarted.startup()
+                plain = {name: _digest(_plain(name)) for name in names}
+                stored = self._raw(backend)
+
+                listed = await restarted.list()
+                got = [await restarted.get(approval.id) for approval in asked.values()]
+                # What the repeated call is answered with (its pending approval), and what a call that presents the
+                # approved one is matched against.
+                again = await self._asked(restarted, _plain("pending"))
+                presented = await self._spendable(restarted, asked["approved"].id, _plain("approved"))
+
+                self.assertEqual(again.id, asked["pending"].id)
+                for record in (*listed, *got, again, presented):
+                    self.assertRegex(record.action.text, KEYED, record.status)
+                self.assertEqual({record.id: record for record in listed}, {record.id: record for record in got})
+                # Reading wrote nothing: each store holds what it held, every plain digest.
+                self.assertEqual(self._raw(backend), stored)
+                for digest in plain.values():
+                    self.assertIn(digest, stored)
+                # Each write of such a record is keyed, in every store: a decision, a claim, a spend.
+                await restarted.approve(asked["pending"].id)
+                self.assertNotIn(plain["pending"], self._raw(backend))
+                hold = await restarted.claim_execution(asked["approved"].id)
+                self.assertNotIn(plain["approved"], self._raw(backend))
+                hold.gives_back_on_its_own = True
+                self.assertEqual((await restarted.give_back(hold)).status, "approved")
+                restarted.release_execution(hold, spent=False)
+                await restarted.mark_executed(asked["run"].id)
+                self.assertNotIn(plain["run"], self._raw(backend))
+                await restarted.approve(asked["rejected"].id)
+                self.assertNotIn(plain["rejected"], self._raw(backend))
+                # Each still covers the call it was asked for, and the next start finds nothing left to rewrite.
+                for name in ("pending", "approved", "rejected"):
+                    spendable = await self._spendable(restarted, asked[name].id, _plain(name))
+                    self.assertEqual(spendable.id, asked[name].id)
+                with self.assertNoLogs("app.approvals", level="INFO"):
+                    await (await self._store(backend, started=False)).startup()
 
     async def test_a_listing_that_fails_does_not_stop_the_start(self) -> None:
         store = await self._store(started=False)

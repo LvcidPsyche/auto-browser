@@ -280,7 +280,8 @@ class ApprovalStore:
     async def _key_stored_digests(self) -> None:
         """At a start, rewrite each record that keeps a stand-in's plain digest with the keyed one, in both stores.
 
-        Versions before 1.18.0 stored it plain, and a record is listed as it is stored. Nothing but the text
+        Versions before 1.18.0 stored it plain. Nothing hands it out so (_handed_out), which is why the records are
+        read from the backend here, but the stores would hold it until each record's next write. Nothing but the text
         changes, so the stores agree as before (_catch_sqlite_up), and the same call still matches (_keyed). A record
         that cannot be rewritten stays, still matches, and is taken at the next start; the pass never stops one.
 
@@ -479,10 +480,23 @@ class ApprovalStore:
         status: ApprovalStatus | None = None,
         session_id: str | None = None,
     ) -> list[ApprovalRecord]:
-        return await self._primary.list(status=status, session_id=session_id)
+        return [self._handed_out(record) for record in await self._primary.list(status=status, session_id=session_id)]
 
     async def get(self, approval_id: str) -> ApprovalRecord:
-        return await self._primary.get(approval_id)
+        return self._handed_out(await self._primary.get(approval_id))
+
+    def _handed_out(self, record: ApprovalRecord) -> ApprovalRecord:
+        """``record`` as the store hands it out: a stand-in's digest keyed, whatever its stores still hold.
+
+        A record stored before 1.18.0 that a start could not rewrite (_key_stored_digests) keeps its plain digest
+        in the stores. Handed out as stored, it was listed and answered to the repeated call with that digest, and
+        a decision, a claim or a give-back wrote it back plain. Nothing is written here: the next write of the
+        record, or the next start, replaces what the stores hold. The passes that compare or rewrite what is
+        stored read the backends themselves (_catch_sqlite_up, _key_stored_digests, _write). The record is changed
+        in place: a backend reads one anew at every call, so no one else holds it.
+        """
+        record.action = self._keyed(record.action)
+        return record
 
     async def create_or_reuse_pending(
         self,
