@@ -84,7 +84,10 @@ token, from either source.
   included, can then drive the browser. It never applies to an exposed or
   production controller. Such a controller refuses (403) a POST, PUT, PATCH or DELETE that a browser marks as
   `Sec-Fetch-Site: cross-site` or `same-site`, or whose `Origin` is not the host and port in its `Host` header: a web
-  page on another origin, or on another port of the same host, must send a token or be served from the same origin.
+  page on another origin, or on another port of the same host, must be served from the controller's own origin. A
+  token does not help a page (nothing checks one on such a controller, and no route answers a CORS preflight, so a
+  page on another origin cannot send one to a controller that has a token either); a browser extension, or a
+  non-browser client that names an origin, needs the controller to have a token, and sends it.
   `GET /auth-profiles/{name}/export`, which writes an archive, is refused the same way when a browser marks it so.
   A request with neither header (curl, an SDK) is served. `/mesh/receive` is signed, and `/mcp` keeps its own Origin
   check and `MCP_ALLOWED_ORIGINS`. A loopback reverse proxy in front of such a controller must pass the browser's

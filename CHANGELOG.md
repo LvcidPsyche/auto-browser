@@ -52,7 +52,10 @@ All notable changes to auto-browser are documented here.
   cross-site` or `same-site`, or whose `Origin` names another host or port than its `Host` (`Origin: null` and one
   that cannot be parsed included), answers `403`, and so does a `GET /auth-profiles/{name}/export` marked that way,
   since an export writes an archive. A page on another origin, or on another port of the same host, that writes to
-  such a controller must send a bearer token or call it from the same origin. A loopback reverse proxy in front of
+  such a controller must be served from the controller's own origin instead. A token does not help a page: nothing
+  checks one on such a controller, and a page on another origin cannot send one to a controller that has a token
+  either, since no route answers a CORS preflight. A browser extension, or a non-browser client that names an
+  origin, needs the controller to have a token, and sends it. A loopback reverse proxy in front of
   such a controller must pass the browser's `Host` through, or the controller needs a token: one that rewrites `Host`
   leaves the browser's `Origin` naming another host, and is refused. A request with neither header (curl, an SDK) is
   served as before, and so is one whose `Origin` matches its `Host` with `Sec-Fetch-Site` `same-origin` or `none`.

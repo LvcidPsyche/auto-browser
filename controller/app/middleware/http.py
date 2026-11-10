@@ -42,9 +42,13 @@ _CROSS_SITE_EXEMPT_PATHS = frozenset({"/mesh/receive", "/mcp", "/mcp/"})
 # it blind: a profile's name can be guessed, where a session id or a share token cannot. Compiled as the router
 # compiles it, so what routes to it is what this refuses.
 _EXPORT_ROUTE_PATTERN = compile_path(AUTH_PROFILE_EXPORT_ROUTE)[0]
+# What works, for whom: this layer runs only where no token is configured, so "send a bearer token" could not work
+# here, and a page on another origin could not send one to a controller with a token either (no route answers a CORS
+# preflight).
 CROSS_SITE_WRITE_DETAIL = (
-    "This controller has no API token, so it refuses a write sent from another web origin. Send a bearer token, or "
-    "call it from the same origin."
+    "This controller has no API token (API_ALLOW_TOKENLESS_LOOPBACK=true), so it refuses a write sent from another "
+    "web origin. A web page must be served from the controller's own origin. A browser extension, or another client "
+    "that names an origin, needs the controller to have a token, and sends it as a bearer token."
 )
 # A page the operator's browser has open can send refused writes without end, and this layer answers ahead of the
 # rate limiter: one warning a source (the client host) a window, and the next one says how many were only counted.

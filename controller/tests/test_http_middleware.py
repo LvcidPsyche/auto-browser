@@ -149,6 +149,20 @@ class CrossSiteWriteRefusedTests(unittest.TestCase):
             "evil.example", self.client.post("/maintenance/cleanup", headers={"Origin": FOREIGN_ORIGIN}).text
         )
 
+    def test_the_fixed_body_says_what_works_on_a_controller_that_has_no_token(self) -> None:
+        # It said "Send a bearer token", and this layer runs only where no token is configured to check one.
+        self.assertNotIn("Send a bearer token", CROSS_SITE_WRITE_DETAIL)
+        for words in (
+            "API_ALLOW_TOKENLESS_LOOPBACK=true",
+            "served from the controller's own origin",
+            "needs the controller to have a token",
+        ):
+            self.assertIn(words, CROSS_SITE_WRITE_DETAIL)
+
+    def test_a_token_sent_to_a_controller_that_has_none_does_not_pass_the_refusal(self) -> None:
+        # Why the old advice could not work: nothing checks the token here.
+        self.assert_refused("post", {"Sec-Fetch-Site": "cross-site", "Authorization": f"Bearer {TOKEN}"})
+
     def test_a_write_with_neither_header_is_served(self) -> None:
         # curl and the SDKs send neither.
         for method in WRITES:
@@ -462,7 +476,7 @@ class AProxyInFrontOfATokenlessControllerTests(unittest.TestCase):
 
 
 class TheRefusalsLogLineTests(unittest.TestCase):
-    """What a page on another origin can do to the controller's log: FR-B3-4 and B3-F9."""
+    """What a page on another origin can do to the controller's log: write a line of its own, or fill it."""
 
     def setUp(self) -> None:
         self.client = _client()
