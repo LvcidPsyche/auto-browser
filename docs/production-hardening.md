@@ -131,13 +131,19 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       `Remove from queue`, `Remove from watchlist`, `Remove from library`, `Remove from list`,
       `Purchase history`, `Purchase order`, `Purchase orders`, `Pay as you go`, `Post code`
     - Nor is `Send` asked about when it sends a way to sign in ("Send code", "Send me a login link", "Send reset
-      link to my email"): the word itself, then nothing or words of the next list, then one of: `code`, `link`,
-      `otp`, `passcode`, `one-time password`, `one-time pin`, `verification email`, `confirmation email`,
-      `activation email`, `recovery email`, `reset email`, `login email`, `sign-in email`,
-      `reset instructions`
+      link to my email"): the word itself, then nothing or words of the next list, then one of: `code`, `otp`,
+      `passcode`, `one-time password`, `one time password`, `one-time pin`, `one time pin`,
+      `verification email`, `confirmation email`, `activation email`, `recovery email`, `reset email`,
+      `login email`, `sign-in email`, `reset instructions`
     - Between the two only these words may stand: `me`, `us`, `a`, `an`, `the`, `my`, `new`, `another`, `login`,
-      `log-in`, `sign-in`, `signin`, `magic`, `reset`, `password`, `verification`, `confirmation`, `activation`,
-      `security`, `one-time`, `single-use`, `recovery`, `authentication`, `2fa`, `mfa`, `sms`, `email`, `text`
+      `log-in`, `log in`, `sign-in`, `sign in`, `signin`, `magic`, `reset`, `password`, `verification`,
+      `confirmation`, `activation`, `security`, `one-time`, `one time`, `single-use`, `recovery`,
+      `authentication`, `2fa`, `mfa`, `sms`, `email`, `text`
+    - A `link` is a way to sign in only where one of these words stands before it: `me`, `us`, `login`, `log-in`,
+      `log in`, `sign-in`, `sign in`, `signin`, `magic`, `reset`, `password`, `verification`, `confirmation`,
+      `activation`, `one-time`, `one time`, `single-use`, `recovery`, `authentication`. "Send link" by itself
+      is also the button of a share dialog, which sends a document to whomever its form names, so it asks, as
+      "Send a link", "Send link by email" and "Send link to everyone" do.
     - After it the label ends, or goes on with one of: `to`, `via`, `by`, `through`, `using`, `in`, `on`, `again`,
       `now`, `instead`. So "Send payment link", "Send gift code" and "Send code review request" ask, and so
       do "Send email", "Send SMS", "Send again" and "Send PIN" (a pin is also what a map or a board sends).

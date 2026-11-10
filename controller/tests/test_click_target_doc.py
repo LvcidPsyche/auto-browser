@@ -16,6 +16,7 @@ from app.browser.click_target import (
     HARMLESS_AFTER_SEND,
     HARMLESS_LABEL_PHRASES,
     SEND_FILLER_WORDS,
+    SEND_LINK_WORDS,
     SEND_TAIL_WORDS,
 )
 
@@ -25,6 +26,7 @@ _SECTION = "- In the fast profile a click's `risk_category` is the model's word"
 _HARMLESS = "- Not asked about, though each starts with a phrase above:"
 _AFTER_SEND = "- Nor is `Send` asked about when it sends a way to sign in"
 _SEND_FILLERS = "- Between the two only these words may stand:"
+_SEND_LINK = "- A `link` is a way to sign in only where one of these words stands before it:"
 _SEND_TAILS = "- After it the label ends, or goes on with one of:"
 # A bullet that lists a kind's phrases: "- `payment`: ...".
 _KIND_BULLET = re.compile(r"^\s*- `(\w+)`:", re.MULTILINE)
@@ -66,6 +68,7 @@ class ClickTargetDocTests(unittest.TestCase):
     def test_what_send_may_be_followed_by_is_the_modules(self) -> None:
         self.assertEqual(sorted(_listed(self.section, _AFTER_SEND)), sorted(HARMLESS_AFTER_SEND))
         self.assertEqual(sorted(_listed(self.section, _SEND_FILLERS)), sorted(SEND_FILLER_WORDS))
+        self.assertEqual(sorted(_listed(self.section, _SEND_LINK)), sorted(SEND_LINK_WORDS))
         self.assertEqual(sorted(_listed(self.section, _SEND_TAILS)), sorted(SEND_TAIL_WORDS))
 
 

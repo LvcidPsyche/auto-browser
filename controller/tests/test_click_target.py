@@ -31,6 +31,7 @@ from app.browser.click_target import (
     MAX_LABEL_CHARS,
     READ_TIMEOUT_MS,
     SEND_FILLER_WORDS,
+    SEND_LINK_WORDS,
     SEND_TAIL_WORDS,
     classified_reason,
     classified_risk,
@@ -98,6 +99,7 @@ class ClassifiedRiskTests(unittest.TestCase):
         # Only a name that goes on from the very words that ask, harmlessly.
         self.assertEqual(classified_risk(button("Remove filter", "Delete account"), "write"), "destructive")
         self.assertEqual(classified_risk(button("Send payment link", "Send"), "write"), "post")
+        self.assertEqual(classified_risk(button("Send", "Send link to everyone"), "write"), "post")
         self.assertEqual(classified_risk(button("Sending code", "Send"), "write"), "post")
 
     def test_role_button_and_input_buttons_count_and_a_link_does_not(self) -> None:
@@ -194,6 +196,15 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send instructions"),
         # A pin is also what a map or a board sends to somebody.
         ("post", "Send PIN"),
+        # And a link is what a share dialog's button sends, to whomever its form names: a way to sign in only
+        # where a word before it says so.
+        ("post", "Send link"),
+        ("post", "Send a link"),
+        ("post", "Send new link"),
+        ("post", "Send link by email"),
+        ("post", "Send link to John"),
+        ("post", "Send link to everyone"),
+        ("post", "Send email link"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -254,8 +265,18 @@ class LabelRulesTests(unittest.TestCase):
         "Send SMS code",
         "Send magic link",
         "Send code to my phone",
-        "Send link by email",
         "Send code again",
+        "Send me a link",
+        "Send us a new link",
+        "Send verification link",
+        "Send login link to my email",
+        "Send magic link by email",
+        # Written without the hyphen.
+        "Send me a sign in link",
+        "Send log in link",
+        "Send one time code",
+        "Send one time password",
+        "Send me a one time PIN",
         "Remove filter",
         "Remove filters",
         "Remove all filters",
@@ -353,6 +374,10 @@ class LabelRulesTests(unittest.TestCase):
         self.assertTrue(SEND_TAIL_WORDS)
         self.assertEqual(set(SEND_FILLER_WORDS) & set(HARMLESS_AFTER_SEND), set())
         self.assertEqual(set(SEND_TAIL_WORDS) & (set(SEND_FILLER_WORDS) | set(HARMLESS_AFTER_SEND)), set())
+        # A link is no way to sign in by itself, and every word that makes it one may stand before it.
+        self.assertNotIn("link", HARMLESS_AFTER_SEND)
+        self.assertTrue(SEND_LINK_WORDS)
+        self.assertLessEqual(set(SEND_LINK_WORDS), set(SEND_FILLER_WORDS))
 
     def test_the_page_hands_over_enough_of_a_label_for_three_lines(self) -> None:
         self.assertGreaterEqual(click_target._LABEL_CUT, 3 * (MAX_LABEL_CHARS + 1))

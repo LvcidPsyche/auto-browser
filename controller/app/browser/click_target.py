@@ -135,13 +135,18 @@ HARMLESS_LABEL_PHRASES: tuple[str, ...] = (
 # "Send reset link", "Send code to my phone". Without it no login by a one-time code ran unattended. Only words of
 # SEND_FILLER_WORDS may stand between "send" and one of HARMLESS_AFTER_SEND, and only a word of SEND_TAIL_WORDS may
 # follow it, so "Send payment link", "Send gift code" and "Send code review request" still ask.
+#
+# A link is a way to sign in only where one of SEND_LINK_WORDS stands before it. "Send link" is also the button of
+# a share dialog, and what that sends is a document, to whomever the dialog's form names: text on the page can
+# have the model fill in the form and press it.
 HARMLESS_AFTER_SEND: tuple[str, ...] = (
     "code",
-    "link",
     "otp",
     "passcode",
     "one-time password",
+    "one time password",
     "one-time pin",
+    "one time pin",
     "verification email",
     "confirmation email",
     "activation email",
@@ -162,7 +167,9 @@ SEND_FILLER_WORDS: tuple[str, ...] = (
     "another",
     "login",
     "log-in",
+    "log in",
     "sign-in",
+    "sign in",
     "signin",
     "magic",
     "reset",
@@ -172,6 +179,7 @@ SEND_FILLER_WORDS: tuple[str, ...] = (
     "activation",
     "security",
     "one-time",
+    "one time",
     "single-use",
     "recovery",
     "authentication",
@@ -180,6 +188,27 @@ SEND_FILLER_WORDS: tuple[str, ...] = (
     "sms",
     "email",
     "text",
+)
+SEND_LINK_WORDS: tuple[str, ...] = (
+    "me",
+    "us",
+    "login",
+    "log-in",
+    "log in",
+    "sign-in",
+    "sign in",
+    "signin",
+    "magic",
+    "reset",
+    "password",
+    "verification",
+    "confirmation",
+    "activation",
+    "one-time",
+    "one time",
+    "single-use",
+    "recovery",
+    "authentication",
 )
 SEND_TAIL_WORDS: tuple[str, ...] = ("to", "via", "by", "through", "using", "in", "on", "again", "now", "instead")
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
@@ -206,11 +235,13 @@ def _one_of(words: tuple[str, ...]) -> str:
 
 _PHRASE_PATTERNS = {kind: re.compile(_starting_with(phrases)) for kind, phrases in CLICK_LABEL_PHRASES.items()}
 # The label is matched with its spaces collapsed to one each, so a space here is any run of them.
+_SEND_FILLERS = f"(?: {_one_of(SEND_FILLER_WORDS)})*"
 _HARMLESS_PATTERN = re.compile(
     _starting_with(HARMLESS_LABEL_PHRASES)
     + "|"
     + _starting_with(("send",))
-    + f"(?: {_one_of(SEND_FILLER_WORDS)})* {_one_of(HARMLESS_AFTER_SEND)}"
+    + f"(?:{_SEND_FILLERS} {_one_of(HARMLESS_AFTER_SEND)}"
+    + f"|{_SEND_FILLERS} {_one_of(SEND_LINK_WORDS)}{_SEND_FILLERS} link)"
     + f"(?:$| {_one_of(SEND_TAIL_WORDS)}{_WORD_END})"
 )
 _LEADING_SYMBOLS = re.compile(r"^[^\w]+")
