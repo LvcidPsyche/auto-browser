@@ -225,8 +225,12 @@ _BUTTON_INPUT_TYPES = frozenset({"button", "submit", "image", "reset"})
 _WORD_END = r"(?![\w\-\u2010\u2011])"
 
 
+def _any_of(phrases: tuple[str, ...]) -> str:
+    return "(?:" + "|".join(re.escape(phrase).replace(",", ",?") for phrase in phrases) + ")" + _WORD_END
+
+
 def _starting_with(phrases: tuple[str, ...]) -> str:
-    return "^(?:" + "|".join(re.escape(phrase).replace(",", ",?") for phrase in phrases) + ")" + _WORD_END
+    return "^" + _any_of(phrases)
 
 
 def _one_of(words: tuple[str, ...]) -> str:
@@ -235,11 +239,14 @@ def _one_of(words: tuple[str, ...]) -> str:
 
 _PHRASE_PATTERNS = {kind: re.compile(_starting_with(phrases)) for kind, phrases in CLICK_LABEL_PHRASES.items()}
 # The label is matched with its spaces collapsed to one each, so a space here is any run of them.
+_HARMLESS_START = re.compile(_starting_with(HARMLESS_LABEL_PHRASES))
+# A phrase of the table further into a line, where a word of the line starts: what a harmless start does not excuse.
+_PHRASE_LATER = re.compile(
+    r"(?<![\w\-\u2010\u2011])" + _any_of(tuple(phrase for kind in CLICK_LABEL_PHRASES.values() for phrase in kind))
+)
 _SEND_FILLERS = f"(?: {_one_of(SEND_FILLER_WORDS)})*"
-_HARMLESS_PATTERN = re.compile(
-    _starting_with(HARMLESS_LABEL_PHRASES)
-    + "|"
-    + _starting_with(("send",))
+_SIGN_IN_SEND = re.compile(
+    _starting_with(("send",))
     + f"(?:{_SEND_FILLERS} {_one_of(HARMLESS_AFTER_SEND)}"
     + f"|{_SEND_FILLERS} {_one_of(SEND_LINK_WORDS)}{_SEND_FILLERS} link)"
     + f"(?:$| {_one_of(SEND_TAIL_WORDS)}{_WORD_END})"
@@ -463,7 +470,7 @@ def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
     if not shown or len(shown) > MAX_LABEL_CHARS:
         return None
     for reading in _readings(shown):
-        if _HARMLESS_PATTERN.match(reading) or (rest and _HARMLESS_PATTERN.match(f"{reading} {rest}")):
+        if _asks_nothing(reading) or (rest and _asks_nothing(f"{reading} {rest}")):
             continue
         for kind, pattern in _PHRASE_PATTERNS.items():
             if pattern.match(reading):
@@ -471,9 +478,21 @@ def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
     return None
 
 
+def _asks_nothing(text: str) -> bool:
+    """Whether ``text``, case folded, is a harmless continuation of a phrase of the table.
+
+    A way to sign in that Send sends, which has a grammar of its own, or a harmless phrase with no phrase of the
+    table after it: "Remove from library and delete files" starts as a harmless label does, and was let go for it.
+    """
+    if _SIGN_IN_SEND.match(text):
+        return True
+    start = _HARMLESS_START.match(text)
+    return start is not None and _PHRASE_LATER.search(text, start.end()) is None
+
+
 def _harmless(shown: str) -> bool:
     """Whether a text, read from its first word, is a harmless continuation of a phrase of the table."""
-    return _HARMLESS_PATTERN.match(_readings(shown)[-1]) is not None
+    return _asks_nothing(_readings(shown)[-1])
 
 
 def _readings(shown: str) -> list[str]:

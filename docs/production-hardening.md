@@ -129,7 +129,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       `Remove all filters`, `Remove from cart`, `Remove from basket`, `Remove from bag`, `Remove from compare`,
       `Remove from wishlist`, `Remove from favorites`, `Remove from favourites`, `Remove from playlist`,
       `Remove from queue`, `Remove from watchlist`, `Remove from library`, `Remove from list`,
-      `Purchase history`, `Purchase order`, `Purchase orders`, `Pay as you go`, `Post code`
+      `Purchase history`, `Purchase order`, `Purchase orders`, `Pay as you go`, `Post code`. One that goes
+      on, on the same line, to a phrase of the lists above asks all the same ("Remove from library and delete
+      files").
     - Nor is `Send` asked about when it sends a way to sign in ("Send code", "Send me a login link", "Send reset
       link to my email"): the word itself, then nothing or words of the next list, then one of: `code`, `otp`,
       `passcode`, `one-time password`, `one time password`, `one-time pin`, `one time pin`,
@@ -208,7 +210,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     itself hostile.
   - It asks more than it must where a harmless label starts with a phrase and no exception lists it: `Transfer
     files`, a `Post` tab that only opens a form, a counter ("1 Post"), a dash where a hyphen would have joined
-    the words ("Pay – as you go"), a tile whose name and description together start with one.
+    the words ("Pay – as you go"), a tile whose name and description together start with one, a harmless
+    label that goes on to a word of the table ("Remove filter: Pay later").
   - A target that is not there (no element at the point, an `element_id` the page no longer has) is not
     classified, and neither is one that cannot be read: a page that does not answer within 2 seconds (for an
     `element_id` or a point, 2 to set the read up and 2 more to run it), or a selector that matches nothing in

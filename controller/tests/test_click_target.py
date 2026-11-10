@@ -98,6 +98,8 @@ class ClassifiedRiskTests(unittest.TestCase):
                 self.assertIsNone(classified_risk(button(*labels), "write"))
         # Only a name that goes on from the very words that ask, harmlessly.
         self.assertEqual(classified_risk(button("Remove filter", "Delete account"), "write"), "destructive")
+        both = button("Remove", "Remove from library and delete files")
+        self.assertEqual(classified_risk(both, "write"), "destructive")
         self.assertEqual(classified_risk(button("Send payment link", "Send"), "write"), "post")
         self.assertEqual(classified_risk(button("Send", "Send link to everyone"), "write"), "post")
         self.assertEqual(classified_risk(button("Sending code", "Send"), "write"), "post")
@@ -213,6 +215,13 @@ class LabelRulesTests(unittest.TestCase):
         # A harmless line does not excuse a dangerous one beside it.
         ("destructive", "Remove filter\nDelete account"),
         ("destructive", "Delete account\nRemove filter"),
+        # Nor a harmless start what its own line goes on to.
+        ("destructive", "Remove from library and delete files"),
+        ("destructive", "Remove filter and delete the account"),
+        ("destructive", "remove filter delete account"),
+        ("destructive", "Remove from list & Erase data"),
+        ("payment", "Purchase history and delete the account"),
+        ("payment", "Pay as you go: Buy credits"),
         # The phrases added.
         ("payment", "Place your order"),
         ("payment", "Buy it now"),
@@ -281,6 +290,15 @@ class LabelRulesTests(unittest.TestCase):
         "Remove filters",
         "Remove all filters",
         "Remove from cart",
+        # What a harmless label goes on with, where that is no phrase of the table.
+        "Remove filter: Brand",
+        "Remove from cart (2 items)",
+        "Remove from list of non-delete items",
+        "Purchase history for 2024",
+        "Purchase order #1042",
+        "Pay as you go plan",
+        # What Send sends to sign in stays one whatever it is for.
+        "Send code to reset password",
         "Remove from basket",
         "Remove from compare",
         "Remove from wishlist",
