@@ -340,6 +340,11 @@ async def test_a_call_waits_for_the_session_another_call_is_opening_no_longer_th
 
         assert error.code == PAGE_NOT_RESPONDING
         assert f"within {SHORT_MS} ms" in str(error)
+        # In its own words: this call sent the page nothing, and was told the page "may have crashed or hung, and
+        # nothing more was sent to it. Reload the page", which is what a page that did not answer is told.
+        assert "sent the page nothing" in str(error)
+        assert "crashed" not in str(error)
+        assert 0 < error.details["waited_ms"] <= SHORT_MS  # what was left of its budget when it began to wait
         assert not opening.done()  # it gave up while the other call was still attaching
         # Only the call that waited gave up: the one that was opening the session gets it, and its answer.
         attached.set()

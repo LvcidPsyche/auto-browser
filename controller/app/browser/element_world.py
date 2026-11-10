@@ -339,7 +339,20 @@ class PageWorld:
         if setup is None:
             await self._lock.acquire()
             return
-        await self._within(self._lock.acquire(), "the session another call is opening", setup=setup, keep_session=True)
+        waited_ms = setup.left_ms()
+        try:
+            await asyncio.wait_for(self._lock.acquire(), waited_ms / 1000)
+        except asyncio.TimeoutError:
+            # Its own words, and nothing reset: _within's are for a page that did not answer a message ("it may
+            # have crashed", "reload the page"), and this call sent it none.
+            raise BrowserActionError(
+                f"Another call was still opening this page's session within {setup.whole_ms} ms, so this call sent "
+                "the page nothing. Retry it; if this goes on, the page has hung: reload it or open a new tab.",
+                code=PAGE_NOT_RESPONDING,
+                status_code=504,
+                retryable=False,
+                details={"waited_ms": waited_ms},
+            ) from None
 
     async def _attach(self, page: "Page", *, setup: _SetupBudget | None = None) -> "CDPSession":
         attaching = asyncio.ensure_future(page.context.new_cdp_session(page))
