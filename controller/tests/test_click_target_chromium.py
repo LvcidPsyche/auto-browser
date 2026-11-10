@@ -17,7 +17,7 @@ import pytest
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
-from app.browser.click_target import CLICK_TARGET_SCRIPT, READ_TIMEOUT_MS, same_element_at
+from app.browser.click_target import CLICK_TARGET_SCRIPT, DESCRIBE_TARGET_SCRIPT, READ_TIMEOUT_MS, same_element_at
 from app.browser.services import actions as actions_module
 from app.models import BrowserActionDecision
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
@@ -80,7 +80,11 @@ SLOTTED = """<title>start</title>
 <x-button id="noted"><div>Delete account</div>
   <div>This permanently removes your profile and all its data</div></x-button>
 <x-button id="filter"><span>Remove</span> <b>filter</b></x-button>
+<x-button id="bare">Erase everything</x-button>
+<x-card id="card"><span slot="title">Storage</span><span slot="action">Delete</span></x-card>
 <script>
+document.getElementById('card').attachShadow({mode: 'open'}).innerHTML =
+  `<h3><slot name="title"></slot></h3><button><slot name="action"></slot></button>`;
 for (const host of document.querySelectorAll('x-button')) {
   host.attachShadow({mode: 'open'}).innerHTML = `<button class="inner"><slot></slot></button>`;
   host.shadowRoot.querySelector('.inner').addEventListener('click', () => { document.title = 'PRESSED ' + host.id; });
@@ -100,6 +104,14 @@ NAMED_BESIDE = """<title>start</title>
 <script>
 document.getElementById('text').attachShadow({mode: 'open'}).innerHTML = `<span>Delete account</span>`;
 </script>
+"""
+# A label for a button, and one around a button: a press on either is a press on the button, as HTML has it.
+LABELLED = """<title>start</title>
+<style>label { display: block; margin: 12px }</style>
+<button id="del" onclick="document.title='DELETED'">Delete account</button>
+<label id="for" for="del">Erase my data</label>
+<label id="around">Billing <input id="pay" type="button" value="Pay now" onclick="document.title='PAID'"></label>
+<label id="field">Your name <input id="name"></label>
 """
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
@@ -286,6 +298,50 @@ async def test_a_label_slotted_into_a_shadow_button_is_read_as_that_buttons(tmp_
         # A harmless continuation split over two elements is still one: it runs.
         await env.manager.execute_decision(session_id, _click("write", selector="#filter .inner"))
         assert await _title(env, session_id) == "PRESSED filter"
+
+
+async def test_a_component_that_is_a_button_is_read_as_the_button_inside_it(tmp_path: Path) -> None:
+    # Text a page gives a component straight, with no element around it, is under the pointer as the component:
+    # the walk up from it never enters the component's own tree, where the button is.
+    async with browser_env(tmp_path, {"/": SLOTTED}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+
+        for target in ({"selector": "#bare"}, await _centre(page.locator("#bare"))):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", **target))
+            assert asked.value.approval.kind == "destructive", target
+        assert await _title(env, session_id) == "start"
+
+        # Only a component all of whose content sits in one button: a card with a button among its parts is a card.
+        assert (await page.locator("#bare").evaluate(DESCRIBE_TARGET_SCRIPT, 400))["tag"] == "button"
+        assert (await page.locator("#card").evaluate(DESCRIBE_TARGET_SCRIPT, 400))["tag"] == "x-card"
+
+
+async def test_a_label_of_a_button_is_read_as_that_button(tmp_path: Path) -> None:
+    # A press on a label is one on its control. Read as a label, "Erase my data" for the "Delete account" button
+    # was no button at all, and neither was the word beside "Pay now" inside its label.
+    async with browser_env(tmp_path, {"/": LABELLED}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        named = await _centre(page.locator("#for"))
+        box = await page.locator("#around").bounding_box()
+        word = {"x": box["x"] + 6, "y": box["y"] + box["height"] / 2}
+
+        for target, kind in (
+            ({"selector": "#for"}, "destructive"),
+            ({"selector": "text=Erase my data"}, "destructive"),
+            (named, "destructive"),
+            (word, "payment"),
+        ):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", **target))
+            assert asked.value.approval.kind == kind, target
+        assert await _title(env, session_id) == "start"
+
+        # A label of a field is no button: the click runs, and puts the caret in the field.
+        await env.manager.execute_decision(session_id, _click("read", selector="#field"))
+        assert await page.evaluate("document.activeElement.id") == "name"
 
 
 async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that_name(tmp_path: Path) -> None:
