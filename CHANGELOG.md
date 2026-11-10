@@ -252,6 +252,11 @@ All notable changes to auto-browser are documented here.
   one warning a request, ahead of the rate limiter, so a page left open could write them without end: a client
   host's first refusal is logged, later ones in the next 60 seconds are only counted, and the first after that is
   logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count.
+- **A mesh peer can no longer write a line of its own into the controller's log.** The capability a registered
+  peer's signed request asks for, and the session id it names, were logged as sent: a line break in either ended the
+  line. Both are logged quoted now, in the `mesh.policy.denied`, `mesh.policy: PERMIT`,
+  `mesh.delegation.approval_required`, `mesh.delegation.approval_denied` and `mesh.delegation.session_verb` lines,
+  where `capability=tool:browser.observe` now reads `capability='tool:browser.observe'`.
 - **A refused start no longer quotes a long `*_AUTH_MODE` value.** With `APP_ENV=production`, an `OPENAI_AUTH_MODE`,
   `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the start with an error that quoted the value,
   and `.env.example` has each a few lines under its provider's API key: a key set on the wrong line was written to

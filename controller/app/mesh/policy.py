@@ -221,8 +221,10 @@ class PolicyEvaluator:
         # Record the invocation for rate limiting (after all checks pass)
         _record_invocation_for_grant(matching_grant, peer.node_id)
 
+        # %r: under a wildcard grant the capability is the peer's own text past the prefix, and a line break in it
+        # must not start a log line.
         logger.info(
-            "mesh.policy: PERMIT peer=%s capability=%s require_approval=%s",
+            "mesh.policy: PERMIT peer=%s capability=%r require_approval=%s",
             peer.node_id,
             request.capability,
             matching_grant.require_approval,

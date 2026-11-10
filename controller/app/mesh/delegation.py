@@ -354,7 +354,9 @@ class DelegationManager:
         try:
             grant = self._policy.evaluate(peer, request)
         except PolicyError as exc:
-            logger.info("mesh.policy.denied peer=%s capability=%s reason=%s", sender_id, request.capability, exc)
+            # %r, here and below: the capability and the session id are the peer's own text, and a line break in
+            # one must not start a log line. (The reason quotes the capability with repr already.)
+            logger.info("mesh.policy.denied peer=%s capability=%r reason=%s", sender_id, request.capability, exc)
             return DelegationResponse(
                 request_id=request.request_id,
                 status="rejected",
@@ -374,7 +376,7 @@ class DelegationManager:
                 )
             approval_id = str(uuid.uuid4())
             logger.info(
-                "mesh.delegation.approval_required peer=%s capability=%s approval_id=%s",
+                "mesh.delegation.approval_required peer=%s capability=%r approval_id=%s",
                 sender_id,
                 request.capability,
                 approval_id,
@@ -400,7 +402,7 @@ class DelegationManager:
                 )
             if approval_status != "approved":
                 logger.info(
-                    "mesh.delegation.approval_denied peer=%s capability=%s approval_id=%s status=%s",
+                    "mesh.delegation.approval_denied peer=%s capability=%r approval_id=%s status=%s",
                     sender_id,
                     request.capability,
                     approval_id,
@@ -455,7 +457,7 @@ class DelegationManager:
         # session:<verb> → session handler stub
         if cap.startswith("session:"):
             verb = cap[8:]
-            logger.info("mesh.delegation.session_verb verb=%s session_id=%s", verb, request.session_id)
+            logger.info("mesh.delegation.session_verb verb=%r session_id=%r", verb, request.session_id)
             return {"_mesh_error": True, "error": "session delegation not yet wired", "verb": verb}
 
         return {"_mesh_error": True, "error": f"Unknown capability kind: {cap!r}"}
