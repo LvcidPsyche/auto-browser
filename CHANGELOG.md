@@ -116,11 +116,14 @@ All notable changes to auto-browser are documented here.
   also no longer presents the `approval_id` its first run was queued with, so a step of it that needs an approval asks
   for a new one.
 - **Decided approvals are now deleted 30 days after their decision, and this deletes history.** The first start after
-  the upgrade, and each maintenance sweep after it, delete from `APPROVAL_ROOT` and `STATE_DB_PATH` every approval
-  approved, rejected or executed more than `APPROVAL_RETENTION_DAYS` (default `30`) ago, with a tool call's stored
-  arguments. `GET /approvals` stops listing them, and their ids answer as ids that do not exist. The audit log's own
-  events about them stay, within `AUDIT_MAX_EVENTS`. To keep every record, set `APPROVAL_RETENTION_DAYS=0` before
-  upgrading, or copy `APPROVAL_ROOT` and the database first. A negative value stops the controller at startup.
+  the upgrade, and each maintenance sweep after it, delete from `APPROVAL_ROOT` and `STATE_DB_PATH` the approvals
+  decided, approved or rejected, more than `APPROVAL_RETENTION_DAYS` (default `30`) ago, with a tool call's stored
+  arguments. The days count from the decision, for an approval that has run since too, and the decided ones the
+  Changed entry lists are kept. A pending approval is never deleted, whatever its age, so the stores still grow with
+  approvals nobody decides. `GET /approvals` stops listing the deleted ones, and their ids answer as ids that do not
+  exist. The audit log's own events about them stay, within `AUDIT_MAX_EVENTS`. To keep every record, set
+  `APPROVAL_RETENTION_DAYS=0` before upgrading, or copy `APPROVAL_ROOT` and the database first. A negative value
+  stops the controller at startup.
 - **A fast-profile click on a pay, delete, post or account button now asks for approval, whatever its label.** A
   click labelled `read` or `write` (an unlabelled click is `write`) on a button whose label starts with a phrase such
   as `Pay`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers `approval_required` of that
@@ -130,19 +133,23 @@ All notable changes to auto-browser are documented here.
   `docs/production-hardening.md`.
 - **Approvals for tool calls are now matched under a key file, `.tool-call-digest.key` in `APPROVAL_ROOT`: back it up
   with the records.** The first start after the upgrade writes the key there (also when `STATE_DB_PATH` holds the
-  records) and rewrites every stored approval whose `action.text` reads `<tool> sha256:<digest>` to
-  `<tool> hmac-sha256:<key id>:<digest>`, in both stores. Pending and approved ones go on covering the same call, and
-  a client that reads the tool's name out of `action.text` has the new form to parse. Back up and restore
-  `APPROVAL_ROOT` whole, the dot file included. Restored without the key file, or with another one, pending and
-  approved approvals for tool calls are refused with a message that says so and the agent asks again; each start logs
-  how many there are, and rejecting them ends that warning. An operator's earlier rejection of a tool call then no
-  longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`, and each start logs how many
-  such rejections are stored, in a warning of its own: reject the call again when it is asked for, turn
-  `AUTONOMOUS_APPROVALS` off, or restore the key file. A start that can neither read a key from the file nor write
-  one logs a warning and keys with a key of its own, so its approvals for tool calls do not outlive that process; a
-  file that holds no key is left as it is, to be removed by hand. After a downgrade to 1.17.0, an approval for a
-  tool call that 1.18.0 stored matches no call there (the call answers that the approval does not match the
-  requested action), and the agent asks again.
+  records) and rewrites each stored tool call's stand-in, a `request_human_takeover` action whose `action.text` reads
+  `<tool> sha256:<digest>`, so that it reads `<tool> hmac-sha256:<key id>:<digest>`, in both stores; no other
+  approval's text changes, and one it cannot write is logged and taken at the next start. Pending and approved
+  approvals go on covering the same call, and a client that reads the tool's name out of `action.text` has the new
+  form to parse. Back up and restore `APPROVAL_ROOT` whole, the dot file included. Restored without the key file, or
+  with another one, pending and approved approvals for tool calls are refused with a message that says so and the
+  agent asks again; each start logs how many there are, and rejecting them ends that warning. An operator's earlier
+  rejection of a tool call then no longer stops an agent's own approval of the same call under
+  `AUTONOMOUS_APPROVALS`, and each start logs how many such rejections are stored, in a warning of its own: reject
+  the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or restore the key file. A start that can
+  neither read a key from the file nor write one logs a warning and keys with a key of its own, so its approvals for
+  tool calls do not outlive that process; a file that holds no key is left as it is, to be removed by hand. After a
+  downgrade to 1.17.0, an approval for a tool call that 1.18.0 stored or rewrote matches no call there (the call
+  answers that the approval does not match the requested action), and the agent asks again. Nor does an operator's
+  rejection of a tool call that 1.18.0 stored or rewrote stop an agent's own approval of that call there under
+  `AUTONOMOUS_APPROVALS`, with the key file kept or not: 1.17.0 compares the stored text as it is. Reject the call
+  again there, or leave `AUTONOMOUS_APPROVALS` off across the downgrade.
 
 ### Security
 
@@ -421,14 +428,15 @@ All notable changes to auto-browser are documented here.
   read `trace_path` should use `trace_url`. (AUTH-35)
 - **Decided approvals are deleted after `APPROVAL_RETENTION_DAYS`.** Every approval was kept in both stores for good,
   and each `GET /approvals` read them all. At startup and in each maintenance sweep (`CLEANUP_INTERVAL_SECONDS`,
-  `POST /maintenance/cleanup`), one approved, rejected or executed more than `APPROVAL_RETENTION_DAYS` (default 30,
+  `POST /maintenance/cleanup`), one decided, approved or rejected, more than `APPROVAL_RETENTION_DAYS` (default 30,
   `0` keeps them) ago is now deleted from both stores with its arguments, and one `approvals_pruned` audit event
-  carries the count. Kept whatever its age: a pending approval, one an action holds, one approved and not expired, an
-  operator's rejection in controller scope or in a session still open (it refuses an agent's approval of the same
-  action there), and one whose decision time cannot be read, which is logged once. Nothing is deleted while SQLite
-  is configured and unavailable; an approval whose record or arguments cannot be removed is logged and stays in both
-  stores for the next pass, and a pass that fails is logged and leaves the rest for the next. See the upgrade note.
-  (AUTH-33)
+  carries the count. The days count from the decision, not from the run of an approval spent since. Kept whatever
+  its age: a pending approval, one an action holds, one approved and not expired, an operator's rejection in
+  controller scope or in a session still open (it refuses an agent's approval of the same action there), and one
+  whose decision time cannot be read, which is logged once. So the pass removes decided approvals only, and the
+  stores still grow with approvals nobody decides. Nothing is deleted while SQLite is configured and unavailable; an
+  approval whose record or arguments cannot be removed is logged and stays in both stores for the next pass, and a
+  pass that fails is logged and leaves the rest for the next. See the upgrade note. (AUTH-33)
 
 ## [1.17.0] — 2026-11-08
 

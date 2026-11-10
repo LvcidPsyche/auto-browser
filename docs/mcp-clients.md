@@ -564,9 +564,12 @@ workers sharing a store, and a restored backup can leave a file record that diff
 latest word, and the rule then keeps the spend or the rejection. A stored record that no longer
 validates (a navigate approval an earlier version stored for a URL this one refuses) is left out of
 listings and answers as an unknown id, in either store; fetching or listing it logs a warning that names
-it and where it fails, not what it holds. Not covered: two controller processes sharing one approval
-store (file or SQLite) can both claim an approval, since the claim is atomic only within a process;
-several workers or replicas are not supported.
+it and where it fails, not what it holds. An approval the retention has deleted
+(`APPROVAL_RETENTION_DAYS` after its decision, 30 by default; see `docs/production-hardening.md`)
+answers as an unknown id too: a 404 from the approval routes, and for a call that presents its
+`approval_id` the error an id that never existed gets. Not covered: two controller processes sharing one
+approval store (file or SQLite) can both claim an approval, since the claim is atomic only within a
+process; several workers or replicas are not supported.
 
 These refusal messages are the tool call's answer over MCP, `browser.execute_approval` included. REST
 routes answer an approval refusal with fixed text (403 "Not permitted" on `/sessions/{id}/actions/*`,
@@ -574,6 +577,10 @@ routes answer an approval refusal with fixed text (403 "Not permitted" on `/sess
 message, its `code` and its `approval_given_back` there too (the approval guard's refusals,
 `approval_rejected` and the like, answer 409), and a 409 for a decision on a claimed approval, or for an
 approve whose arguments or text are gone, carries its reason as the `detail`, which the dashboard shows.
+So does the 409 that refuses an operator listed in `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS` an approve
+of an approval they asked for themselves: the approval stays as it was, for another operator to approve
+where one can reach it, in a session nobody owns (in a session the asker owns, and in controller scope,
+none can, and a pending one stays pending).
 
 #### Rejecting or approving while an action holds its approval
 
@@ -646,12 +653,18 @@ name and the SHA-256 of the call's own arguments, so a value the preview leaves 
 against what `GET /approvals`, the approval tools or the `approval_required` answer serve. The key is 32
 random bytes, written in hex at the first start to `.tool-call-digest.key` in `APPROVAL_ROOT` (there too
 when `STATE_DB_PATH` holds the records), created with mode 0600, read at every start and never
-replaced; whoever can read `APPROVAL_ROOT` itself reads the key with the records. Records that 1.17.0
-and earlier stored with the plain SHA-256 are rewritten at the first start that finds them, in both
-stores, and cover the same call as before; one that cannot be rewritten is logged, still matches its
-call, and is taken at the next start. Until then, or until a decision or a call writes that record, what
-is stored of it (its file, and its row with `STATE_DB_PATH`) holds the plain digest, and the controller
-lists and answers it keyed all the same.
+replaced; whoever can read `APPROVAL_ROOT` itself reads the key with the records. Keying stops a guess
+made offline, against a listing or a copy of the records without the key, and not one made through the
+controller: the keyed text is the same for the same tool and arguments in every session (`session_id`
+is no part of it), so a caller who can read an approval and may make governed calls can still try a
+value one request at a time, each miss leaving a pending approval and the record of its request (a
+witness receipt in a session, while `WITNESS_ENABLED` is on; an audit event in controller scope).
+
+Records that 1.17.0 and earlier stored with the plain SHA-256 are rewritten at the first start that
+finds them, in both stores, and cover the same call as before; one that cannot be rewritten is logged,
+still matches its call, and is taken at the next start. Until then, or until a decision or a call writes
+that record, what is stored of it (its file, and its row with `STATE_DB_PATH`) holds the plain digest,
+and the controller lists and answers it keyed all the same.
 
 An approval kept under a key the controller no longer holds (the file was removed or replaced before a
 start; a running controller goes on with the key it read) cannot be matched to any call. Approving it is
@@ -667,7 +680,10 @@ restore the key file. That warning repeats while the rejections are stored: the 
 scope. When the file cannot be used at a start (it holds no key, cannot be read, or cannot be written
 where there is none), the start logs it and keys with a key of its own: its tool call approvals work
 until that process ends, and are refused the same way after a restart. A file that holds no key is left
-as it is, and has to be removed before a start writes a new one.
+as it is, and has to be removed before a start writes a new one. A start that dies between creating the
+file and writing the key leaves one, empty or cut short of its 64 hex characters: no approval was ever
+kept under it, so it is safe to remove. One that held a key and was changed since (edited, or saved in
+another encoding) is better restored, since approvals are kept under the key it held.
 
 In the dashboard (the queue, the confirm dialog, the arguments viewer and the run replay), in the
 `action_summary`, and in the webhook's and the SSE event's `reason`, a character that would hide or
