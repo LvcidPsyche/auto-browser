@@ -329,11 +329,13 @@ class SharedCdp(SlowCdp):
         super().__init__({})
         self._script_delays = list(script_delays)
         self._closed = asyncio.Event()
+        self.script_sent = asyncio.Event()
 
     async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if method != SCRIPT:
             return await super().send(method, params)
         self.sent.append(method)
+        self.script_sent.set()
         try:
             await asyncio.wait_for(self._closed.wait(), self._script_delays.pop(0))
         except asyncio.TimeoutError:
@@ -345,19 +347,21 @@ class SharedCdp(SlowCdp):
         self._closed.set()
 
 
-async def a_change_in_flight_beside(instance: PageWorld, page: Any) -> asyncio.Task[Any]:
+async def a_change_in_flight_beside(instance: PageWorld, page: Any, cdp: SharedCdp) -> asyncio.Task[Any]:
     """A slow change (a focus, a selection) sent on the world's session and not yet answered."""
     change = asyncio.ensure_future(instance.call(page, "decl", effect=CHANGES_PAGE, timeout_ms=LONG_MS))
-    await asyncio.sleep(0.05)
+    # Its script's message has gone out: a fixed wait here was a guess at how long the setup before it takes.
+    await asyncio.wait_for(cdp.script_sent.wait(), timeout=TEST_BOUND_S)
     return change
 
 
 async def test_a_call_past_its_bound_drops_the_session_under_the_call_beside_it() -> None:
     # What every caller gets unless it asks otherwise: the session may be dead, so it is dropped and detached, and
-    # a change in flight on it can no longer be confirmed.
-    cdp = SharedCdp([SLOW_S, HUNG_S])
+    # a change in flight on it can no longer be confirmed. The change never answers by itself: answering after
+    # SLOW_S, it had 130 ms in which the detach had to reach it first.
+    cdp = SharedCdp([HUNG_S, HUNG_S])
     page, instance = slow_page(cdp), world()
-    change = await a_change_in_flight_beside(instance, page)
+    change = await a_change_in_flight_beside(instance, page, cdp)
 
     _elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, timeout_ms=SHORT_MS))
 
@@ -374,7 +378,7 @@ async def test_a_read_that_keeps_the_session_abandons_only_itself_past_its_bound
     # its session at every read or write click, under whatever else was in flight on it.
     cdp = SharedCdp([SLOW_S, HUNG_S])
     page, instance = slow_page(cdp), world()
-    change = await a_change_in_flight_beside(instance, page)
+    change = await a_change_in_flight_beside(instance, page, cdp)
 
     _elapsed, error = await timed_failure(
         instance.call(page, "decl", effect=READ, timeout_ms=SHORT_MS, keep_session=True)
@@ -422,6 +426,10 @@ async def test_element_ids_hands_keep_session_to_the_world() -> None:
     )
 
     assert error.code == PAGE_NOT_RESPONDING
+    # A session that is dropped is forgotten at once and detached in a task of its own, which had not run yet when
+    # only the detach was looked at here: the test passed with the flag left behind.
+    assert ids._world(page)._cdp is cdp
+    await asyncio.sleep(0.05)
     assert cdp.detached == 0
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from app.approvals import ApprovalRequiredError, held_for_execution
 from app.browser.click_target import (
     CLICK_TARGET_SCRIPT,
     DESCRIBE_TARGET_SCRIPT,
+    MAX_LABEL_CHARS,
     PRESS_READ_TIMEOUT_MS,
     READ_TIMEOUT_MS,
     same_element_at,
@@ -53,7 +55,7 @@ WORDY = """<title>start</title>
 <button id="code" onclick="document.title='SENT'">Send code</button>
 """
 # A frame of the page's own origin inside another, each with a border and padding to cross, and beside them a
-# frame the page cannot reach into (sandboxed, so of an origin of its own).
+# frame the page cannot reach into (sandboxed, so of an origin of its own; its script runs, to show a press).
 FRAMES = """<title>start</title>
 <style>
   body { margin: 0 }
@@ -62,7 +64,8 @@ FRAMES = """<title>start</title>
   #apart { top: 300px; height: 80px }
 </style>
 <iframe id="outer"></iframe>
-<iframe id="apart" sandbox srcdoc="<button id='sealed'>Delete account</button>"></iframe>
+<iframe id="apart" sandbox="allow-scripts"
+  srcdoc="<button id='sealed' onclick=&quot;this.textContent = 'PRESSED'&quot;>Delete account</button>"></iframe>
 <script>
 document.getElementById('outer').srcdoc = `<body style="margin: 0">
   <iframe id="inner" style="margin: 12px; border: 3px solid #333; width: 300px; height: 110px"
@@ -138,6 +141,12 @@ UNDER_THE_POINTER = """<title>start</title>
   onclick="document.title='REMOVED'">Remove member</button></div>
 <div id="row">Report <button onclick="document.title='GONE'">Delete</button></div>
 """
+# A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
+BUSY = """<title>start</title>
+<button id="close">Close</button>
+<script>window.spin = (ms) => { const end = performance.now() + ms; while (performance.now() < end) {} };</script>
+"""
+DOUBLE = "(arg) => arg.n * 2"
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
 # PAGE with a button before the others that only a selector piercing an open shadow root finds.
@@ -415,12 +424,14 @@ async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that
 async def test_a_point_inside_a_frame_of_another_origin_is_not_read(tmp_path: Path) -> None:
     async with browser_env(tmp_path, {"/": FRAMES}) as env:
         session_id = await env.create("/")
-        sealed = await _centre(env.page(session_id).frame_locator("#apart").locator("#sealed"))
+        button = env.page(session_id).frame_locator("#apart").locator("#sealed")
+        sealed = await _centre(button)
 
         # The page's own origin cannot see into it, so neither can the controller's world there: unread, the
-        # click runs as labelled.
+        # click runs as labelled, before the decision and at the press.
         await env.manager.execute_decision(session_id, _click("read", **sealed))
 
+        assert await button.inner_text() == "PRESSED"
         assert await env.manager.approvals.list() == []
 
 
@@ -500,6 +511,54 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
         ]
         assert await _title(env, session_id) == "DELETED"
         assert await env.manager.approvals.list() == []
+
+
+async def test_a_read_given_up_on_a_busy_page_keeps_the_session_and_its_answers_apart(tmp_path: Path) -> None:
+    # The world's tests give up a read on a fake session. Here the page is really busy: the read's answer comes
+    # late, on a session that was kept, and must reach no later call as its own.
+    async with browser_env(tmp_path, {"/": BUSY}) as env:
+        session_id = await env.create("/")
+        page, ids = env.page(session_id), env.manager.element_ids
+        assert await ids.evaluate(page, DOUBLE, {"n": 1}) == 2
+        world = ids._world(page)
+        session = world._cdp
+        assert session is not None
+
+        # The page's main thread is taken for 1.2 s, shortly after this returns.
+        await page.evaluate("() => { setTimeout(() => window.spin(1200), 30); }")
+        await asyncio.sleep(0.15)
+        beside = asyncio.ensure_future(ids.evaluate(page, DOUBLE, {"n": 21}, timeout_ms=8000, setup_timeout_ms=8000))
+        started = time.monotonic()
+        with pytest.raises(BrowserActionError) as given_up:
+            await ids.evaluate(page, DOUBLE, {"n": 100}, timeout_ms=300, setup_timeout_ms=300, keep_session=True)
+
+        assert given_up.value.code == PAGE_NOT_RESPONDING
+        assert time.monotonic() - started < 1.0
+        assert world._cdp is session
+        # The call beside it, on the same session, gets its own answer once the page is free, and so does every
+        # call after it.
+        assert await asyncio.wait_for(beside, 10) == 42
+        assert await asyncio.gather(*(ids.evaluate(page, DOUBLE, {"n": n}) for n in range(6))) == [0, 2, 4, 6, 8, 10]
+        assert world._cdp is session
+
+
+async def test_the_third_line_of_a_label_is_handed_over_whole(tmp_path: Path) -> None:
+    # The page hands over a cut of each label (click_target._LABEL_CUT), and the rules read its first three lines:
+    # three lines as long as a line may be, the name on the last.
+    line = ("Storage and backups " * 3)[:MAX_LABEL_CHARS]
+    name = "Delete account and all of its saved data"
+    assert len(line) == len(name) == MAX_LABEL_CHARS
+    tall = (
+        f'<title>start</title><button id="tall" onclick="document.title=\'GONE\'">{line}<br>{line}<br>{name}</button>'
+    )
+    async with browser_env(tmp_path, {"/": tall}) as env:
+        session_id = await env.create("/")
+
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, _click("read", selector="#tall"))
+
+        assert asked.value.approval.kind == "destructive"
+        assert await _title(env, session_id) == "start"
 
 
 async def test_an_approval_presented_for_its_click_is_spent_though_the_target_is_not_read_again(
