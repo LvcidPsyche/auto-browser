@@ -114,7 +114,9 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
         if settings.request_rate_limit_enabled
         else None
     )
-    maintenance = MaintenanceService(settings, session_provider=lambda: manager.sessions.values())
+    maintenance = MaintenanceService(
+        settings, session_provider=lambda: manager.sessions.values(), approval_store=manager.approvals
+    )
     mcp_transport = McpHttpTransport(
         tool_gateway=tool_gateway,
         server_name="auto-browser",

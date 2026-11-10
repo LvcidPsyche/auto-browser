@@ -6,7 +6,7 @@ import hmac
 import logging
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -45,7 +45,7 @@ from .models import (
     ApprovalStatus,
     BrowserActionDecision,
 )
-from .session_ownership import may_use, verified_operator
+from .session_ownership import as_system, may_use, verified_operator
 from .utils import UTC, utc_now
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,7 @@ class ApprovalStore:
         db_path: str | None = None,
         *,
         approval_ttl_minutes: int = 15,
+        retention_days: float = 0,
         audit: Any = None,
         rejection_receipt: Callable[[ApprovalRecord], Awaitable[None]] | None = None,
     ):
@@ -139,6 +140,12 @@ class ApprovalStore:
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
         self.approval_ttl = timedelta(minutes=max(1, approval_ttl_minutes))
+        # How long a decided approval is kept after its decision (prune_decided); 0 keeps them all, and is
+        # what a bare store does. The controller passes APPROVAL_RETENTION_DAYS.
+        self.retention_days = retention_days
+        # What the retention has said once and does not repeat at every pass.
+        self._retention_unreadable: set[str] = set()
+        self._retention_waits_for_sqlite = False
         # Keyed per process, so a stored digest cannot be brute-forced offline.
         # An approval for sensitive text therefore only works in the process
         # that created it: not after a restart, and not in another uvicorn
@@ -277,6 +284,95 @@ class ApprovalStore:
         if approval.decided_at is None:
             return False
         return self._parse_timestamp(approval.decided_at) + self.approval_ttl <= datetime.now(UTC)
+
+    async def prune_decided(self, *, open_sessions: Iterable[str] = ()) -> int:
+        """Delete the approvals decided more than ``retention_days`` ago, from both stores: how many went.
+
+        Run at startup and by each maintenance sweep. Kept whatever their age: a pending approval; one an
+        execution holds; an approved one that has not expired, which can still run its action; an operator's
+        rejection in controller scope or in a session of ``open_sessions`` (those live in this process), where
+        it still refuses an agent's approval of the same request (_operator_rejected); and a record whose
+        decision (or, approved, expiry) time cannot be read, named once in the log.
+
+        Nothing goes while SQLite is configured and the file store stands in for it: SQLite is caught up from
+        the file records at its next start, and a record removed meanwhile could not show that SQLite's copy of
+        it is stale (pending there, rejected since).
+
+        The pass runs under the lock and lands whole whatever happens to its caller (_run_through), as a write
+        does. A failure is logged and answers 0, so a start or a sweep goes on, and the next pass takes what
+        this one left.
+        """
+        if self.retention_days <= 0:
+            return 0
+        try:
+            removed, cancelled = await _run_through(self._prune_decided(frozenset(open_sessions)))
+        except Exception:
+            logger.exception("the approval retention pass failed; the next one takes what it left")
+            return 0
+        if cancelled:
+            raise asyncio.CancelledError
+        return removed
+
+    async def _prune_decided(self, open_sessions: frozenset[str]) -> int:
+        async with self._lock:
+            if self.sqlite_store is not None and self._primary is not self.sqlite_store:
+                if not self._retention_waits_for_sqlite:
+                    self._retention_waits_for_sqlite = True
+                    logger.warning(
+                        "approval retention removes nothing while SQLite is unavailable and the file store stands in"
+                    )
+                return 0
+            now = datetime.now(UTC)
+            past = [
+                record.id for record in await self._primary.list() if self._past_retention(record, now, open_sessions)
+            ]
+            # The files first: a record whose file stays keeps its SQLite record too, so the two agree.
+            removed = await self.file_store.remove_many(past)
+            if self.sqlite_store is not None:
+                await self.sqlite_store.remove_many(removed)
+        if not removed:
+            return 0
+        logger.info(
+            "approval retention removed %d approval(s) decided more than %g days ago", len(removed), self.retention_days
+        )
+        if self.audit is not None:
+            try:
+                with as_system():
+                    await self.audit.append(
+                        event_type="approvals_pruned",
+                        status="ok",
+                        action="retention",
+                        details={"count": len(removed), "retention_days": self.retention_days},
+                    )
+            except Exception:
+                logger.exception("could not audit the approval retention pass, which removed %d", len(removed))
+        return len(removed)
+
+    def _past_retention(self, record: ApprovalRecord, now: datetime, open_sessions: frozenset[str]) -> bool:
+        """Whether the retention removes ``record``; prune_decided says what it keeps."""
+        if record.status == "pending" or record.id in self._claims:
+            return False
+        if (
+            record.status == "rejected"
+            and record.decided_via != "agent"
+            and (record.session_id == CONTROLLER_SCOPE or record.session_id in open_sessions)
+        ):
+            return False
+        try:
+            if record.status == "approved" and not self.has_expired(record):
+                return False
+            if record.decided_at is None:
+                raise ValueError("no decided_at")
+            age = now - self._parse_timestamp(record.decided_at)
+        except (ValueError, OverflowError):
+            if record.id not in self._retention_unreadable:
+                self._retention_unreadable.add(record.id)
+                logger.warning(
+                    "approval %s is kept by the retention: its decision or expiry time cannot be read", record.id
+                )
+            return False
+        # Compared in seconds: a timedelta cannot hold more days than the calendar has.
+        return age.total_seconds() > self.retention_days * 86400
 
     async def list(
         self,

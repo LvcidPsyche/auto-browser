@@ -270,6 +270,9 @@ class Settings(BaseSettings):
     max_sessions: int = Field(1, alias="MAX_SESSIONS")
     require_approval_for_uploads: bool = Field(True, alias="REQUIRE_APPROVAL_FOR_UPLOADS")
     approval_ttl_minutes: int = Field(15, alias="APPROVAL_TTL_MINUTES")
+    # Days a decided approval (approved, rejected or executed) is kept after its decision; then its record is
+    # deleted, at startup and in each maintenance sweep (ApprovalStore.prune_decided). 0 keeps them all.
+    approval_retention_days: float = Field(30.0, alias="APPROVAL_RETENTION_DAYS")
     # Lets agents approve their own pending actions: MCP browser.approve_approval
     # and the built-in agent loop. Off, an operator approves every one.
     autonomous_approvals: bool = Field(False, alias="AUTONOMOUS_APPROVALS")
@@ -533,6 +536,16 @@ class Settings(BaseSettings):
                     f"CRON_TIMEZONE must be an IANA time zone name such as UTC or America/Chicago, got {value!r}"
                 ) from None
         return name
+
+    @field_validator("approval_retention_days")
+    @classmethod
+    def _approval_retention_not_negative(cls, value: float) -> float:
+        # Refused, not read as "off" the way the sweep's hours are: this one deletes records, and 0 is how to say keep.
+        if value < 0:
+            raise ValueError(
+                f"APPROVAL_RETENTION_DAYS must be 0 (keep every decided approval) or a number of days, got {value!r}"
+            )
+        return value
 
     @field_validator("mesh_timestamp_window")
     @classmethod

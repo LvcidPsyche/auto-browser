@@ -255,6 +255,7 @@ class BrowserManager:
             self.settings.approval_root,
             db_path=self.settings.state_db_path,
             approval_ttl_minutes=self.settings.approval_ttl_minutes,
+            retention_days=self.settings.approval_retention_days,
             audit=self.audit,
             rejection_receipt=self.approval_service.rejection_receipt,
         )
@@ -320,6 +321,8 @@ class BrowserManager:
         logger.info("starting browser manager")
         await self.approvals.startup()
         await self.audit.startup()
+        # Once the audit store is up, so the pass's event reaches the half its listings read. No session is open yet.
+        await self.approvals.prune_decided()
         await self.witness.startup()
         if self.settings.witness_enabled:
             await self.witness_remote.startup()

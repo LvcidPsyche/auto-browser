@@ -85,6 +85,29 @@ class FileApprovalStore:
         """Remove a record, if there is one: a write SQLite refused, of an approval SQLite does not hold."""
         await asyncio.to_thread(self._path(approval_id).unlink, missing_ok=True)
 
+    async def remove_many(self, approval_ids: list[str]) -> list[str]:
+        """Remove these records, each with its arguments (the retention): the ids whose record is gone.
+
+        One that cannot be removed is logged and left out of the answer, so its SQLite record stays with it.
+        """
+        return await asyncio.to_thread(self._remove_many_sync, approval_ids)
+
+    def _remove_many_sync(self, approval_ids: list[str]) -> list[str]:
+        removed: list[str] = []
+        for approval_id in approval_ids:
+            try:
+                self._path(approval_id).unlink(missing_ok=True)
+            except (OSError, KeyError) as exc:  # a KeyError: a stored id that names no file of this store
+                logger.warning("approval %s could not be removed: %r", approval_id, exc)
+                continue
+            removed.append(approval_id)
+            try:
+                self._arguments_path(approval_id).unlink(missing_ok=True)
+            except OSError as exc:
+                # The startup sweep removes arguments whose record is gone.
+                logger.warning("the arguments of approval %s could not be removed: %r", approval_id, exc)
+        return removed
+
     def _list_sync(
         self,
         status: ApprovalStatus | None,
@@ -183,6 +206,15 @@ class SQLiteApprovalStore:
 
     async def upsert(self, approval: ApprovalRecord) -> None:
         await asyncio.to_thread(self._upsert_sync, approval)
+
+    async def remove_many(self, approval_ids: list[str]) -> None:
+        """Remove these records, all or none (the retention)."""
+        await asyncio.to_thread(self._remove_many_sync, approval_ids)
+
+    def _remove_many_sync(self, approval_ids: list[str]) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.executemany("DELETE FROM approvals WHERE id = ?", [(approval_id,) for approval_id in approval_ids])
+            conn.commit()
 
     def _startup_sync(self) -> None:
         with closing(self._connect()) as conn, conn:

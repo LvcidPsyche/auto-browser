@@ -7,10 +7,13 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from .config import Settings
 from .utils import UTC
+
+if TYPE_CHECKING:
+    from .approvals import ApprovalStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +51,12 @@ class MaintenanceService:
         settings: Settings,
         *,
         session_provider: Callable[[], Iterable[object]],
+        approval_store: ApprovalStore | None = None,
     ) -> None:
         self.settings = settings
         self.session_provider = session_provider
+        # Its decided approvals past APPROVAL_RETENTION_DAYS go in each sweep (ApprovalStore.prune_decided).
+        self.approval_store = approval_store
         self._task: asyncio.Task | None = None
         # CLEANUP_ON_STARTUP's sweep, run in the background after startup (see startup()).
         self._startup_task: asyncio.Task | None = None
@@ -130,6 +136,7 @@ class MaintenanceService:
                 # session and request for the whole sweep.
                 reports.append(await asyncio.to_thread(self._cleanup_root, Path(root), retention, protected_roots))
             await self._prune_harness()
+            await self._prune_approvals()
             completed = datetime.now(UTC)
             self._last_report = CleanupReport(
                 started_at=started.isoformat().replace("+00:00", "Z"),
@@ -152,6 +159,14 @@ class MaintenanceService:
             return
         if pruned:
             logger.info("harness retention sweep removed %d run/candidate directories", pruned)
+
+    async def _prune_approvals(self) -> None:
+        """The approval retention pass, which logs its own failure and raises none."""
+        if self.approval_store is None:
+            return
+        # An operator's rejection in a session still open keeps refusing an agent's approval of that action there.
+        open_sessions = {getattr(session, "id", None) for session in self.session_provider()}
+        await self.approval_store.prune_decided(open_sessions=open_sessions - {None})
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():

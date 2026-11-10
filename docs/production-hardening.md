@@ -99,6 +99,10 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - artifacts
   - uploads
   - saved auth-state files
+  - decided approvals, deleted `APPROVAL_RETENTION_DAYS` (30 by default; `0` keeps them) after their decision. Kept
+    whatever its age: an approval still pending, held by an action, or approved and not expired, and an operator's
+    rejection in controller scope or in a session still open, which goes on refusing an agent's approval of the
+    same action there.
 - Containerized CI for controller tests + compose validation
 - A deployment/runbook document with exact credential handoff steps
 - `STEALTH_ENABLED=false`

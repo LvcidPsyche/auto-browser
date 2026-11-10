@@ -115,6 +115,12 @@ All notable changes to auto-browser are documented here.
   `max_steps`, so a resumed run can take more steps than were left: pass `max_steps` to set the number. A resumed run
   also no longer presents the `approval_id` its first run was queued with, so a step of it that needs an approval asks
   for a new one.
+- **Decided approvals are now deleted 30 days after their decision, and this deletes history.** The first start after
+  the upgrade, and each maintenance sweep after it, delete from `APPROVAL_ROOT` and `STATE_DB_PATH` every approval
+  approved, rejected or executed more than `APPROVAL_RETENTION_DAYS` (default `30`) ago, with a tool call's stored
+  arguments. `GET /approvals` stops listing them, and their ids answer as ids that do not exist. The audit log's own
+  events about them stay, within `AUDIT_MAX_EVENTS`. To keep every record, set `APPROVAL_RETENTION_DAYS=0` before
+  upgrading, or copy `APPROVAL_ROOT` and the database first. A negative value stops the controller at startup.
 
 ### Security
 
@@ -348,6 +354,15 @@ All notable changes to auto-browser are documented here.
 - **`GET /sessions/{id}/trace` no longer names `trace_path`.** The field held the trace file's absolute path on the
   controller, which a client has no use for; `trace_url` and `viewer_command` already name the file. A client that
   read `trace_path` should use `trace_url`. (AUTH-35)
+- **Decided approvals are deleted after `APPROVAL_RETENTION_DAYS`.** Every approval was kept in both stores for good,
+  and each `GET /approvals` read them all. At startup and in each maintenance sweep (`CLEANUP_INTERVAL_SECONDS`,
+  `POST /maintenance/cleanup`), one approved, rejected or executed more than `APPROVAL_RETENTION_DAYS` (default 30,
+  `0` keeps them) ago is now deleted from both stores with its arguments, and one `approvals_pruned` audit event
+  carries the count. Kept whatever its age: a pending approval, one an action holds, one approved and not expired, an
+  operator's rejection in controller scope or in a session still open (it refuses an agent's approval of the same
+  action there), and one whose decision time cannot be read, which is logged once. Nothing is deleted while SQLite
+  is configured and unavailable, and a pass that fails is logged and leaves the rest for the next. See the upgrade
+  note. (AUTH-33)
 
 ## [1.17.0] — 2026-11-08
 
