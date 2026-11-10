@@ -397,7 +397,8 @@ async def test_a_restricted_decision_receipt_withholds_the_operators_comment(tmp
 
     receipt = (await manager.witness.list(session.id))[0]  # newest first
     assert (receipt.event_type, receipt.action, receipt.evidence_mode) == ("approval", decide, "restricted")
-    assert receipt.metadata == {"comment": "[REDACTED]", "decided_via": "operator"}
+    # Who decided is kept: no named credential proved the operator here, so it is None.
+    assert receipt.metadata == {"comment": "[REDACTED]", "decided_via": "operator", "decided_by": None}
     assert (await manager.approvals.get(approval_id)).decision_comment == "card 4111 1111 1111 1111 is fine"
 
 

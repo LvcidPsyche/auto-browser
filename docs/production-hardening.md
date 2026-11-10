@@ -53,13 +53,13 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   the takeover desktop is shared by every session on a browser node; use
   `docker_ephemeral` isolation to give each session its own.
 - Each approval decision records `decided_by`, the operator a named credential proved (for an agent's decision, the
-  operator it acts for), in the record, `GET /approvals` and the decision's audit event; it is `null` without
-  named credentials. `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS=alice,ci-bot` refuses a listed operator an approve of
-  an approval they asked for (`409`), the withdraw of a rejection waiting on it included; their rejections, and an
-  agent's approval under `AUTONOMOUS_APPROVALS`, are not affected. Under named credentials only the operator who
-  asked may use an approval in a session they own or in controller scope, so a listed operator's approvals there
-  stay pending: list operators whose actions run in sessions created under the shared token, which every operator
-  may use.
+  operator it acts for), in the record, `GET /approvals`, the decision's audit event and its witness receipt's
+  `metadata`; it is `null` without named credentials. `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS=alice,ci-bot`
+  refuses a listed operator an approve of an approval they asked for (`409`), the withdraw of a rejection waiting on
+  it included; their rejections, and an agent's approval under `AUTONOMOUS_APPROVALS`, are not affected. Under named
+  credentials only the operator who asked may use an approval in a session they own or in controller scope, so a
+  listed operator's approvals there stay pending: list operators whose actions run in sessions created under the
+  shared token, which every operator may use.
 - `browser.cdp_attach` is refused under `BROWSER_SANDBOX=on`: the controller cannot verify the sandbox
   of a Chrome reached over CDP (over `POST /mcp/tools/call`, as every tool refusal, that is HTTP 200 with
   `isError`). `CDP_CONNECT_URL` is the operator's own way to use such a Chrome.

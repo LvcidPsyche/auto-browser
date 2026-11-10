@@ -262,7 +262,8 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         self.settings = Settings(_env_file=None, APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS=" alice ,, dave ")
-        for name in ("artifact", "upload", "auth", "approval", "audit"):
+        # The witness root too: a test reads the session's whole chain, which the suite's shared root keeps.
+        for name in ("artifact", "upload", "auth", "approval", "audit", "witness"):
             setattr(self.settings, f"{name}_root", str(root / name))
         self.settings.session_store_root = str(root / "sessions")
         self.manager = BrowserManager(self.settings)
@@ -282,14 +283,29 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             trace_path=artifact_dir / "trace.zip",
         )
 
-    async def _ask(self) -> str:
+    async def _ask(self, number: int = 0) -> str:
         with acting_as(ALICE), self.assertRaises(Exception) as asked:
-            await self.manager.execute_decision(SESSION, _action())
+            await self.manager.execute_decision(SESSION, _action(number))
         return asked.exception.approval.id
 
     async def _decision_events(self) -> list[tuple[str, str | None]]:
         events = await self.manager.audit.list(event_type="approval_decision")
         return [(event.status, event.details.get("decided_by")) for event in reversed(events)]
+
+    async def _decision_receipts(self) -> list[tuple[str, str, str, str | None, str | None]]:
+        """Each decision's witness receipt, oldest first: its action and status, the operator whose task wrote
+        it, and how and by whom its metadata says the decision was made."""
+        return [
+            (
+                item["action"],
+                item["status"],
+                item["operator"]["id"],
+                item["metadata"]["decided_via"],
+                item["metadata"]["decided_by"],
+            )
+            for item in reversed(await self.manager.list_witness_receipts(SESSION))
+            if item["event_type"] == "approval" and item["action"] in {"approve", "reject"}
+        ]
 
     def test_the_setting_is_read_as_a_list_of_operator_ids(self) -> None:
         self.assertEqual(self.manager.approvals.refuse_self_approval, frozenset({"alice", "dave"}))
@@ -324,6 +340,66 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await self._decision_events(), [("approved", "bob"), ("deferred", "carol"), ("withdrawn", "bob")]
+        )
+
+    async def test_a_decision_receipt_names_who_decided(self) -> None:
+        approved, rejected, by_an_agent = await self._ask(1), await self._ask(2), await self._ask(3)
+
+        with acting_as(BOB):
+            await self.manager.approve(approved)
+        with acting_as(CAROL):
+            await self.manager.reject(rejected)
+            await self.manager.approve(by_an_agent, decided_via="agent")
+
+        self.assertEqual(
+            await self._decision_receipts(),
+            [
+                ("approve", "approved", "bob", "operator", "bob"),
+                ("reject", "rejected", "carol", "operator", "carol"),
+                ("approve", "approved", "carol", "agent", "carol"),
+            ],
+        )
+
+    async def test_the_receipt_of_a_rejection_a_give_back_applies_names_who_rejected(self) -> None:
+        approval_id = await self._ask()
+        with acting_as(BOB):
+            await self.manager.approve(approval_id)
+        refusal = PermissionError("refused before the operation")
+
+        # Written by the task of the operator whose action was refused: only the metadata names who rejected.
+        with acting_as(ALICE), self.assertRaises(PermissionError):
+            async with held_for_execution(self.manager.approvals, approval_id, may_give_back=True):
+                with acting_as(CAROL):
+                    await self.manager.reject(approval_id, comment="no")  # deferred on the claim
+                refused_before_effect(refusal)
+                raise refusal
+
+        self.assertEqual(
+            await self._decision_receipts(),
+            [("approve", "approved", "bob", "operator", "bob"), ("reject", "rejected", "alice", "operator", "carol")],
+        )
+
+    async def test_the_receipt_of_a_withdrawn_rejection_names_who_withdrew_it(self) -> None:
+        approval_id = await self._ask()
+        with acting_as(BOB):
+            await self.manager.approve(approval_id)
+        refusal = PermissionError("refused before the operation")
+
+        with acting_as(ALICE), self.assertRaises(PermissionError):
+            async with held_for_execution(self.manager.approvals, approval_id, may_give_back=True):
+                with acting_as(CAROL):
+                    await self.manager.reject(approval_id, comment="no")
+                refused_before_effect(refusal)
+                with acting_as(CAROL):
+                    # After the refusal: the approval goes back to approved, and this approve gets a receipt.
+                    await self.manager.approve(approval_id, comment="go on")
+                raise refusal
+
+        # The record keeps the approver the withdraw restores; the receipt is of the withdraw, and names its operator.
+        self.assertEqual((await self.manager.approvals.get(approval_id)).decided_by, "bob")
+        self.assertEqual(
+            await self._decision_receipts(),
+            [("approve", "approved", "bob", "operator", "bob"), ("approve", "approved", "carol", "operator", "carol")],
         )
 
     async def test_with_no_named_credential_the_views_show_none(self) -> None:

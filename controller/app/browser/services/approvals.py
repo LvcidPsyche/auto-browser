@@ -148,6 +148,7 @@ class BrowserApprovalService:
                     action="approve",
                     comment=comment,
                     decided_via=decided_via,
+                    decided_by=verified_operator(),  # of this withdraw: the record names the approver it restores
                 )
             return {**approval.model_dump(), "message": message}
         await self.manager.audit.append(
@@ -164,7 +165,9 @@ class BrowserApprovalService:
                 **approval_provenance(approval),
             },
         )
-        await self._decision_receipt(approval, action="approve", comment=comment, decided_via=decided_via)
+        await self._decision_receipt(
+            approval, action="approve", comment=comment, decided_via=decided_via, decided_by=approval.decided_by
+        )
         return approval.model_dump()
 
     async def reject(
@@ -214,17 +217,24 @@ class BrowserApprovalService:
                 **approval_provenance(approval),
             },
         )
-        await self._decision_receipt(approval, action="reject", comment=comment, decided_via=decided_via)
+        await self._decision_receipt(
+            approval, action="reject", comment=comment, decided_via=decided_via, decided_by=approval.decided_by
+        )
         return approval.model_dump()
 
     async def rejection_receipt(self, approval: ApprovalRecord) -> None:
         """The witness receipt of an operator's reject that a give-back applied (ApprovalStore.record_given_back).
 
         The reject came while the action held the approval, and was recorded
-        only as deferred; this is the receipt it gets once it took effect.
+        only as deferred; this is the receipt it gets once it took effect. Written
+        by the execution's task, as its operator: decided_by names who rejected.
         """
         await self._decision_receipt(
-            approval, action="reject", comment=approval.decision_comment, decided_via=approval.decided_via
+            approval,
+            action="reject",
+            comment=approval.decision_comment,
+            decided_via=approval.decided_via,
+            decided_by=approval.decided_by,
         )
 
     async def _decision_receipt(
@@ -234,8 +244,13 @@ class BrowserApprovalService:
         action: str,
         comment: str | None,
         decided_via: ApprovalDecider | None,
+        decided_by: str | None,
     ) -> None:
-        """Record a decision on ``approval`` in its session's witness chain, if the session is live."""
+        """Record a decision on ``approval`` in its session's witness chain, if the session is live.
+
+        ``decided_by`` is the operator a named credential proved for the decision (None without one): the
+        receipt's own operator is whoever's task writes it, which for a give-back is not who decided.
+        """
         session = self.manager.sessions.get(approval.session_id)
         if session is None:
             return
@@ -252,7 +267,7 @@ class BrowserApprovalService:
                 reason=approval.reason,
             ),
             target={"kind": approval.kind, "action": approval.action.action, **approval_provenance(approval)},
-            metadata={"comment": comment, "decided_via": decided_via},
+            metadata={"comment": comment, "decided_via": decided_via, "decided_by": decided_by},
             approved_action=approval.action,
         )
 
