@@ -253,7 +253,8 @@ All notable changes to auto-browser are documented here.
   or hash reaches any API, MCP or log surface, nor an audit or witness record: a key is answered once, by the call
   that makes it. `POST /crons/{id}/webhook-key/rotate` and `DELETE /crons/{id}/webhook-key`, and the `cron` pack's
   `browser.rotate_cron_webhook_key` and `browser.revoke_cron_webhook_key` (governed as `write` and `destructive`),
-  replace or remove a key, on a job the caller may use, and each change writes an audit event. See the upgrade
+  replace or remove a key, on a job the caller may use, and each change writes an audit event. Both tools are
+  annotated `destructiveHint: true`: a rotation ends the working key at once, as a revoke does. See the upgrade
   note. (STORE-16)
 - **The cron webhook trigger no longer tells an unknown job from a wrong key.** `POST /crons/{id}/trigger` answered
   `404` for an id that does not exist and `403` for a wrong key or a job with no webhook, so anyone with the bearer

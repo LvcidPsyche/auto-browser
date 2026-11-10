@@ -516,12 +516,22 @@ class CronWebhookKeyMcpTests(unittest.IsolatedAsyncioTestCase):
         rotate = tools["browser.rotate_cron_webhook_key"]["annotations"]
         revoke = tools["browser.revoke_cron_webhook_key"]["annotations"]
 
-        self.assertEqual(
-            rotate, {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
-        )
-        self.assertEqual(
-            revoke, {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False}
-        )
+        # A rotation ends the working key at once, as a revoke does: a client that runs tools without asking when they
+        # say they destroy nothing must ask for both. Rotating stays governed as a write.
+        destroys = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False}
+        self.assertEqual(rotate, destroys)
+        self.assertEqual(revoke, destroys)
+        specs = self.gateway._registry.tools
+        self.assertEqual(specs["browser.rotate_cron_webhook_key"].governed_kind, "write")
+        self.assertEqual(specs["browser.revoke_cron_webhook_key"].governed_kind, "destructive")
+
+    async def test_no_tool_that_changes_something_is_advertised_as_idempotent(self) -> None:
+        # The rule the registry applies: only a read is advertised as safe to repeat. A second revoke changes nothing
+        # more, and so does a second delete or close; none of them says so, and the revoke tool follows them.
+        for tool in self.gateway.list_tools():
+            hints = tool["annotations"]
+            if not hints["readOnlyHint"]:
+                self.assertFalse(hints["idempotentHint"], tool["name"])
 
     async def test_the_tools_validate_job_id_as_the_routes_do(self) -> None:
         for name in ("browser.rotate_cron_webhook_key", "browser.revoke_cron_webhook_key"):

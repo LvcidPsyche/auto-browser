@@ -766,7 +766,10 @@ comments decisions were given with, though not a reason or a tool call's argumen
 
 The cron tools are governed too: `browser.create_cron_job`, `browser.trigger_cron_job` and
 `browser.rotate_cron_webhook_key` are `write`, and `browser.delete_cron_job` and
-`browser.revoke_cron_webhook_key` are `destructive`. A job keeps the `workflow_profile` of the call that
+`browser.revoke_cron_webhook_key` are `destructive`. In `tools/list`, the rotate tool's annotations say
+`destructiveHint: true` all the same, as the delete and revoke tools' do: it ends the working key at
+once, so a client that runs tools without asking when they say they destroy nothing asks first. A job
+keeps the `workflow_profile` of the call that
 created it, and every run, scheduled or triggered, starts under it, so a job created by a `governed`
 caller cannot be used to run writes without approval. Likewise, a run or step queued by a `governed`
 `browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.

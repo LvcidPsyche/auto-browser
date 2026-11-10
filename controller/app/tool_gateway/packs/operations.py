@@ -86,6 +86,8 @@ def register(registry, gateway):
             input_model=CronJobIdInput,
             handler=gateway._rotate_cron_webhook_key,
             governed_kind="write",
+            # It ends the working key at once: a client that runs non-destructive tools without asking must ask.
+            destructive_hint=True,
             pack="cron",
         ),
         ToolSpec(
