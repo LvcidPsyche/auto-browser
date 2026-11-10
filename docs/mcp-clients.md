@@ -640,6 +640,27 @@ the same controller process (the 24-hour case), the text is held again and that 
 approved. After a reject, a restart, or on another worker, asking again queues a new approval for the
 operator to decide, and the old one can no longer be approved.
 
+The digest a tool call's approval binds is kept keyed. The record's `action.text` reads
+`<tool> hmac-sha256:<key id>:<digest>`: an HMAC, under a key only the controller holds, over the tool's
+name and the SHA-256 of the call's own arguments, so a value the preview leaves out cannot be guessed
+against what `GET /approvals`, the approval tools or the `approval_required` answer serve. The key is 32
+random bytes, written in hex at the first start to `.tool-call-digest.key` in `APPROVAL_ROOT` (there too
+when `STATE_DB_PATH` holds the records), created with mode 0600, read at every start and never
+replaced; whoever can read `APPROVAL_ROOT` itself reads the key with the records. Records that 1.17.0
+and earlier stored with the plain SHA-256 are rewritten at the first start that finds them, in both
+stores, and cover the same call as before; one that cannot be rewritten is logged, still matches its
+call, and is taken at the next start. An approval kept under a key the controller no longer holds (the
+file was removed or replaced before a start; a running controller goes on with the key it read) cannot
+be matched to any call. Approving it is refused before the record changes ("its arguments' digest is
+kept under another key than this controller holds ..."), a call that presents one approved earlier is
+refused with the same reason and told to repeat the call without `approval_id`, which asks for a new
+approval, and each start logs how many such approvals are pending or approved; rejecting them ends that
+warning. An operator's rejection kept under that key no longer stops an agent's own approval of the same
+call under `AUTONOMOUS_APPROVALS`. When the file cannot be used at a start (it holds no key, cannot be
+read, or cannot be written where there is none), the start logs it and keys with a key of its own: its
+tool call approvals work until that process ends, and are refused the same way after a restart. A file
+that holds no key is left as it is, and has to be removed before a start writes a new one.
+
 In the dashboard (the queue, the confirm dialog, the arguments viewer and the run replay), in the
 `action_summary`, and in the webhook's and the SSE event's `reason`, a character that would hide or
 reorder the text is shown as its code point (`[U+202E]`): format characters such as bidi overrides and

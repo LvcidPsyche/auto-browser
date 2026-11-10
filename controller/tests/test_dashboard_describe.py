@@ -180,6 +180,16 @@ def test_a_tool_call_is_named_by_the_server_origin_only() -> None:
     assert forged.startswith('request_human_takeover · text="browser.eval_js sha256:')
 
 
+def test_a_tool_call_stored_with_its_digest_keyed_is_named_as_one() -> None:
+    # As the approval store keeps it since 1.18.0 (ApprovalStore._keyed): the digest keyed, after its key's id.
+    stand_in = {"action": "request_human_takeover", "text": "browser.eval_js hmac-sha256:0a1b2c3d:" + "ab" * 32}
+
+    tool_call, forged = describe((stand_in, "tool_call"), (stand_in, "action"))
+
+    assert tool_call == "tool call browser.eval_js (arguments under Reason)"
+    assert forged.startswith('request_human_takeover · text="browser.eval_js hmac-sha256:0a1b2c3d:')
+
+
 def test_the_confirm_dialog_is_short_names_the_target_first_and_points_to_the_row() -> None:
     approval = {
         "kind": "post",

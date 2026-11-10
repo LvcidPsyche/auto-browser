@@ -128,6 +128,19 @@ All notable changes to auto-browser are documented here.
   now stops there until an operator approves (or the agent itself, under `AUTONOMOUS_APPROVALS`). A form submit with
   no such label still runs unattended, recorded as `write`. The table, and what it does not catch, are in
   `docs/production-hardening.md`.
+- **Approvals for tool calls are now matched under a key file, `.tool-call-digest.key` in `APPROVAL_ROOT`: back it up
+  with the records.** The first start after the upgrade writes the key there (also when `STATE_DB_PATH` holds the
+  records) and rewrites every stored approval whose `action.text` reads `<tool> sha256:<digest>` to
+  `<tool> hmac-sha256:<key id>:<digest>`, in both stores. Pending and approved ones go on covering the same call, and
+  a client that reads the tool's name out of `action.text` has the new form to parse. Back up and restore
+  `APPROVAL_ROOT` whole, the dot file included. Restored without the key file, or with another one, pending and
+  approved approvals for tool calls are refused with a message that says so and the agent asks again; each start logs
+  how many there are, and rejecting them ends that warning. An operator's earlier rejection of a tool call then no
+  longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`. A start that can neither read
+  a key from the file nor write one logs a warning and keys with a key of its own, so its approvals for tool calls
+  do not outlive that process; a file that holds no key is left as it is, to be removed by hand. After a downgrade to
+  1.17.0, an approval for a tool call that 1.18.0 stored matches no call there (the call answers that the approval
+  does not match the requested action), and the agent asks again.
 
 ### Security
 
@@ -214,6 +227,20 @@ All notable changes to auto-browser are documented here.
   `post`) asks for that kind's approval, and a form's submit button labelled `read` is recorded as `write`. A link,
   a longer label, bare `Close` or `Cancel`, and a target that cannot be read (the click then runs as labelled) are
   not classified, and a click inside a governed run's approval is not read again. See the upgrade note. (STORE-42)
+- **A tool call's approval no longer stores a digest that its arguments alone reproduce.** An approval for a governed
+  tool call binds the call through a stand-in action whose text was `<tool> sha256:<digest>`, a plain SHA-256 of the
+  call's whole arguments, the credentials its preview leaves out included. `GET /approvals`, `browser.list_approvals`
+  and the `approval_required` answer serve that text, so whoever could read an approval could guess a short cookie
+  value or password offline against it. The store now keeps `<tool> hmac-sha256:<key id>:<digest>`: an HMAC of that
+  text under a 32-byte key the controller creates in `APPROVAL_ROOT/.tool-call-digest.key` (mode 0600, written once,
+  read at every start), so the same call still matches its approval after a restart, with either store. The plain
+  digest is no longer written to a store or served, and the approval webhook, the SSE event, audit entries and
+  witness receipts do not carry it. A record an earlier version stored still matches its call, and the first start
+  that finds it rewrites it keyed, in both stores (one that cannot be rewritten is logged, and the next start tries
+  again). An approval kept under a key the controller no longer holds cannot be matched to a call: an approve of it,
+  and a call that presents one approved earlier, are refused with a message that says so, and the agent asks again.
+  The key lies beside the records, so a reader of `APPROVAL_ROOT` itself can still guess: the change protects what
+  the API, the MCP tools and a copy of the database alone show. See the upgrade note.
 
 ### Fixed
 

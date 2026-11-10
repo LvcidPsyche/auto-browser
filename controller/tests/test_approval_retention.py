@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app import browser_manager
 from app.app_factory import build_controller_services
+from app.approval_backends import DIGEST_KEY_FILE
 from app.approvals import CONTROLLER_SCOPE, ApprovalStore
 from app.audit import get_current_operator
 from app.browser_manager import BrowserManager, BrowserSession
@@ -204,7 +205,8 @@ class RetentionTests(RetentionBase):
         self.assertEqual(await self.store.prune_decided(), 1)
 
         self.assertFalse(await self.store.file_store.has_arguments(approval.id))
-        self.assertEqual(list(self.root.iterdir()), [])
+        # Nothing of the approval: the store's own key is all the root holds.
+        self.assertEqual([path.name for path in self.root.iterdir()], [DIGEST_KEY_FILE])
 
     async def test_an_approval_still_good_for_its_action_is_kept(self) -> None:
         # Approved long ago and not expired (an APPROVAL_TTL_MINUTES longer than the retention, or stored with no

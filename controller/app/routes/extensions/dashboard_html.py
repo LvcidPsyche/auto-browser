@@ -677,11 +677,14 @@ const describeAction = (action, origin, cut) => {
   if (!action || typeof action !== 'object') return '—';
   // A governed tool call (eval_js, set_cookies, ...) is approved through a
   // stand-in action whose text is "<tool> sha256:<digest of its arguments>"
-  // (McpToolGateway._governed_call_decision); its reason previews the arguments.
+  // (McpToolGateway._governed_call_decision), stored with that digest keyed
+  // ("<tool> hmac-sha256:<key id>:<digest>", ApprovalStore._keyed; plain in a
+  // record from before 1.18.0 that no start has rewritten); its reason previews
+  // the arguments.
   // Only the server's origin says the gateway built it: a caller can write the
   // same action, and then it is shown as the action it is.
   const toolCall = origin === 'tool_call'
-    && /^([a-z_.]+) sha256:[0-9a-f]{64}$/.exec(String(action.text || ''));
+    && /^([a-z_.]+) (?:sha256:|hmac-sha256:[0-9a-f]{8}:)[0-9a-f]{64}$/.exec(String(action.text || ''));
   if (toolCall) return shownText(`tool call ${toolCall[1]} (arguments under Reason)`);
   // Everything the approval covers (it must match exactly) is shown, the target first: a click by
   // coordinates, or an option picked behind an opaque element id, read as a bare "click".

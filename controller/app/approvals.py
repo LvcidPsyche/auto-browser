@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -13,7 +14,13 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from .approval_backends import ApprovalStoreBackend, FileApprovalStore, SQLiteApprovalStore, UnreadableRecord
+from .approval_backends import (
+    DIGEST_KEY_FILE,
+    ApprovalStoreBackend,
+    FileApprovalStore,
+    SQLiteApprovalStore,
+    UnreadableRecord,
+)
 from .approval_display import UNBOUND_FIELDS, approval_provenance
 
 # The execution side moved to approval_execution.py; importers keep reaching it here.
@@ -81,12 +88,26 @@ KEPT_OVER_THE_FILE = frozenset({"executed", "rejected"})
 SENSITIVE_TEXT_PREFIX = "[sensitive text] hmac-sha256:"
 # How long the text of an undecided sensitive approval is kept in memory.
 SENSITIVE_TEXT_RETENTION = timedelta(hours=24)
+# A tool call's stand-in text as the gateway writes it (McpToolGateway._governed_call_decision), and as an approval
+# keeps it (_keyed): the digest as an HMAC, after the id of the key it is under (_key_id).
+_PLAIN_STAND_IN = re.compile(r"(\S+) sha256:[0-9a-f]{64}")
+_KEYED_STAND_IN = re.compile(r"\S+ hmac-sha256:([0-9a-f]{8}):[0-9a-f]{64}")
+# What a refusal says of a digest whose key this process does not hold (_kept_under_another_key).
+_ANOTHER_KEY = (
+    f"kept under another key than this controller holds ({DIGEST_KEY_FILE} in APPROVAL_ROOT was replaced, or a "
+    "start could not read it)"
+)
 # What an approval of each origin authorises, as a refusal to spend it names it.
 _ORIGIN_NAMES: dict[str, str] = {"action": "a browser action", "tool_call": "a tool call"}
 
 
 def _text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _key_id(key: bytes) -> str:
+    """What names a tool call digest key in the records kept under it; it says nothing of the key."""
+    return hmac.new(key, b"tool call digest key id", hashlib.sha256).hexdigest()[:8]
 
 
 @dataclass(frozen=True)
@@ -156,6 +177,9 @@ class ApprovalStore:
         # worker or replica. The action asks again rather than matching an
         # unverifiable record.
         self._sensitive_text_key = secrets.token_bytes(32)
+        # The key a tool call's stand-in digest is kept under (_keyed): the file store's DIGEST_KEY_FILE, the same
+        # at every start, read at startup or at first use (_digest_key).
+        self._tool_call_key: bytes | None = None
         # The text itself stays in memory only, so an approved sensitive action
         # can still be run through execute_approval by this process.
         # Entries are dropped when the approval executes or is rejected, and
@@ -169,6 +193,7 @@ class ApprovalStore:
 
     async def startup(self) -> None:
         await self.file_store.startup()
+        await asyncio.to_thread(self._digest_key)
         self._primary = self.file_store
         if self.sqlite_store is not None:
             try:
@@ -187,6 +212,7 @@ class ApprovalStore:
                     )
                 else:
                     self._primary = self.sqlite_store
+        await self._key_stored_digests()
         await self._sweep_arguments(startup=True)
 
     async def _catch_sqlite_up(self) -> None:
@@ -250,6 +276,59 @@ class ApprovalStore:
         if kept.status == "executed":
             return True  # a spend is final at a start
         return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
+
+    async def _key_stored_digests(self) -> None:
+        """At a start, rewrite each record that keeps a stand-in's plain digest with the keyed one, in both stores.
+
+        Versions before 1.18.0 stored it plain, and a record is listed as it is stored. Nothing but the text
+        changes, so the stores agree as before (_catch_sqlite_up), and the same call still matches (_keyed). A record
+        that cannot be rewritten stays, still matches, and is taken at the next start; the pass never stops one.
+
+        Also says, once a start, how many approvals that could still run are kept under a key this process does not
+        hold (_kept_under_another_key): nothing else tells an operator before one of them is refused.
+        """
+        try:
+            async with self._lock:
+                rewritten = 0
+                failed: list[str] = []
+                unreadable = 0
+                for record in await self._primary.list():
+                    keyed = self._keyed(record.action)
+                    if keyed is record.action:
+                        if record.status in {"pending", "approved"} and self._kept_under_another_key(record.action):
+                            unreadable += 1
+                        continue
+                    record.action = keyed
+                    try:
+                        await self._write(record)
+                    except Exception as exc:
+                        failed.append(f"{record.id} ({exc!r})")
+                    else:
+                        rewritten += 1
+        except Exception:
+            logger.exception("approval store: could not look for tool call digests an earlier version stored plain")
+            return
+        if rewritten:
+            logger.info(
+                "approval store: %d approval record(s) stored before 1.18.0 now keep their tool call digest keyed",
+                rewritten,
+            )
+        if failed:
+            logger.warning(
+                "approval store: %d approval record(s) stored before 1.18.0 still keep a tool call digest unkeyed, "
+                "as they could not be rewritten; the next start tries again. The first: %s",
+                len(failed),
+                failed[0],
+            )
+        if unreadable:
+            logger.warning(
+                "approval store: %d pending or approved approval(s) for tool calls are kept under another key than "
+                "%s now holds (replaced since, or unreadable at an earlier start): none can be approved or run, and "
+                "the agent asks again; reject them to end this warning. An operator's rejection kept under that key "
+                "no longer matches the call it refused",
+                unreadable,
+                self.file_store.root / DIGEST_KEY_FILE,
+            )
 
     async def _sweep_arguments(self, *, startup: bool = False) -> None:
         """Remove the arguments no approve or call will read again: at each create (under the lock) and at startup.
@@ -440,7 +519,7 @@ class ApprovalStore:
                 approval.arguments_sha256 = await asyncio.to_thread(_text_sha256, arguments)
                 await self.file_store.write_arguments(approval.id, arguments)
             await self._persist(approval)
-            if approval.action is not action:
+            if self._needs_held_text(approval):
                 self._prune_sensitive_texts()
                 self._sensitive_texts[approval.id] = (action.text or "", time.monotonic())
             return approval
@@ -699,6 +778,12 @@ class ApprovalStore:
         if not held:
             self._ensure_not_expired(approval)
         if not self._actions_match(approval.action, action):
+            if self._kept_under_another_key(approval.action):
+                # Not "does not match": the call may be the very one it was asked for.
+                raise PermissionError(
+                    f"approval {approval_id} can no longer be matched to a call: its arguments' digest is "
+                    f"{_ANOTHER_KEY}; repeat the call without approval_id to ask for a new approval"
+                )
             raise PermissionError(f"approval {approval_id} does not match the requested action")
         return approval
 
@@ -788,11 +873,16 @@ class ApprovalStore:
         A tool call's arguments, kept until the call spends the approval (a reject
         is not final): gone, the operator could not read what they approve. A
         sensitive text, dropped by a reject or a restart: gone, execute_approval
-        could not type it.
+        could not type it. The key a tool call's digest is kept under
+        (_kept_under_another_key): gone, no call could be matched to the approval.
         """
         if approval.arguments_size is not None and not await self.file_store.has_arguments(approval.id):
             raise ServerStateRefusal(
                 f"approval {approval.id}: its arguments are no longer stored; the agent asks again"
+            )
+        if self._kept_under_another_key(approval.action):
+            raise ServerStateRefusal(
+                f"approval {approval.id}: its arguments' digest is {_ANOTHER_KEY}; the agent asks again"
             )
         if self._needs_held_text(approval) and self._held_text(approval) is None:
             raise ServerStateRefusal(f"approval {approval.id}: its text is no longer held; the agent asks again")
@@ -850,11 +940,13 @@ class ApprovalStore:
         # Whatever the rejected record's origin: a rejection only ever restricts,
         # and one stored before origin existed loads as an action approval, so
         # comparing origins dropped every rejection an operator made before the upgrade.
-        requested = approval.action.model_dump(exclude=UNBOUND_FIELDS)
+        # Both keyed (_keyed): a stand-in rejected before 1.18.0 was stored with its plain digest. One kept under a
+        # key that is gone matches nothing, as a sensitive text's digest matches nothing after a restart.
+        requested = self._keyed(approval.action).model_dump(exclude=UNBOUND_FIELDS)
         return any(
             other.kind == approval.kind
             and other.decided_via != "agent"
-            and other.action.model_dump(exclude=UNBOUND_FIELDS) == requested
+            and self._keyed(other.action).model_dump(exclude=UNBOUND_FIELDS) == requested
             for other in await self.list(status="rejected", session_id=approval.session_id)
             # Controller scope is shared by every operator: only the same
             # requester's rejection counts, not another operator's.
@@ -881,7 +973,7 @@ class ApprovalStore:
         return None
 
     def _stored_action(self, action: BrowserActionDecision) -> BrowserActionDecision:
-        """The action as an approval records it: sensitive text only as a keyed digest.
+        """The action as an approval records it: a sensitive text, and a tool call's digest, only as a keyed digest.
 
         Approvals are written to APPROVAL_ROOT, listed by GET /approvals and the
         approvals MCP tool, and shown to whoever approves. A `type` marked
@@ -889,9 +981,54 @@ class ApprovalStore:
         while the witness chain and action logs already redacted it.
         """
         if not (action.sensitive and action.text):
-            return action
+            return self._keyed(action)
         digest = hmac.new(self._sensitive_text_key, action.text.encode("utf-8"), hashlib.sha256).hexdigest()
         return action.model_copy(update={"text": f"{SENSITIVE_TEXT_PREFIX}{digest}"})
+
+    def _keyed(self, action: BrowserActionDecision) -> BrowserActionDecision:
+        """``action`` with a tool call stand-in's plain digest (_PLAIN_STAND_IN) as an HMAC under _digest_key.
+
+        The gateway's sha256 covers the call's whole arguments, credentials included, and the preview beside it shows
+        every field but those: kept as it is, a short cookie value or password could be guessed offline against the
+        stored text. Matching keys both sides, so a record stored plain before 1.18.0 still matches its call. Any
+        takeover whose text is a stand-in's, whatever asked for it: a record stored before approvals had an origin
+        is one too, and the services queue no other (_refuse_unrunnable).
+        """
+        if action.action != "request_human_takeover":
+            return action
+        plain = _PLAIN_STAND_IN.fullmatch(action.text or "")
+        if plain is None:
+            return action
+        key = self._digest_key()
+        digest = hmac.new(key, plain.group(0).encode("utf-8"), hashlib.sha256).hexdigest()
+        return action.model_copy(update={"text": f"{plain.group(1)} hmac-sha256:{_key_id(key)}:{digest}"})
+
+    def _kept_under_another_key(self, action: BrowserActionDecision) -> bool:
+        """Whether ``action`` is a stand-in whose digest is keyed by a key this process does not hold.
+
+        The key file was replaced or removed before this start, or one start could not read it and keyed with a
+        key of its own (_digest_key). Whether a call is the one such an approval was asked for cannot be told.
+        """
+        if action.action != "request_human_takeover":
+            return False
+        keyed = _KEYED_STAND_IN.fullmatch(action.text or "")
+        return keyed is not None and keyed.group(1) != _key_id(self._digest_key())
+
+    def _digest_key(self) -> bytes:
+        """The tool call digest key: the file store's, or this process's own, with a warning, when that is unusable."""
+        if self._tool_call_key is None:
+            try:
+                self._tool_call_key = self.file_store.digest_key()
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "approval store: %s cannot be used (%s), so tool call approvals are keyed by this process alone: "
+                    "after a restart they are refused, and the agent asks again. Restart once it can be read, or "
+                    "written where there is none; a file that holds no key has to be removed first",
+                    self.file_store.root / DIGEST_KEY_FILE,
+                    exc,
+                )
+                self._tool_call_key = secrets.token_bytes(32)
+        return self._tool_call_key
 
     def _prune_sensitive_texts(self) -> None:
         cutoff = time.monotonic() - SENSITIVE_TEXT_RETENTION.total_seconds()
@@ -923,7 +1060,7 @@ class ApprovalStore:
         return action.model_copy(update={"text": text})
 
     def _actions_match(self, stored: BrowserActionDecision, requested: BrowserActionDecision) -> bool:
-        return stored.model_dump(exclude=UNBOUND_FIELDS) == self._stored_action(requested).model_dump(
+        return self._keyed(stored).model_dump(exclude=UNBOUND_FIELDS) == self._stored_action(requested).model_dump(
             exclude=UNBOUND_FIELDS
         )
 

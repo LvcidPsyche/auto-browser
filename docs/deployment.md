@@ -1258,7 +1258,7 @@ Back up at least:
 - `/data/audit/`
 - `/data/witness/`, whole: the chains with their `*.anchor.json` files, `.anchors-migrated` and `keys/` (since 1.11.2 a chain restored without its anchor fails verification, and receipts verify only against the key that signed them)
 - `/data/crons/` if you use cron jobs
-- `/data/approvals/` if pending approvals and operators' rejections should survive a restore; a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
+- `/data/approvals/` if pending approvals and operators' rejections should survive a restore, whole, with its `.tool-call-digest.key` (a glob such as `approvals/*` leaves a dot file out): approvals for tool calls are matched under that key, also when `/data/db/` holds the records, and restored without it they are refused and asked for again, and an operator's rejection of a tool call no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`; a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
 
 ## Cleanup
 

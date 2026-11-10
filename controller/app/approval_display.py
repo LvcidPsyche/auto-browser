@@ -180,10 +180,14 @@ def shown_code_points(text: str) -> str:
 
 
 def approval_tool(approval: ApprovalRecord) -> str | None:
-    """The governed tool a tool-call approval is for, as its stand-in names it; None for an action approval."""
+    """The governed tool a tool-call approval is for, as its stand-in names it; None for an action approval.
+
+    The stand-in's digest is keyed ("<tool> hmac-sha256:<key id>:<digest>", ApprovalStore._keyed), or plain
+    ("<tool> sha256:<digest>") in a record stored before 1.18.0 that no start has rewritten yet.
+    """
     if approval.origin != "tool_call":
         return None
-    return (approval.action.text or "").split(" sha256:", 1)[0] or None
+    return re.split(" (?:hmac-)?sha256:", approval.action.text or "", maxsplit=1)[0] or None
 
 
 def approval_provenance(approval: ApprovalRecord) -> dict[str, str]:

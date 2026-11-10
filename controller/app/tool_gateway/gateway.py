@@ -786,7 +786,8 @@ class McpToolGateway:
         canonical arguments are now hashed into ``text``, which matching compares,
         and previewed in the reason the operator reads. Credential-bearing fields
         are left out of the preview (approvals are stored and sent to webhooks);
-        the hash still covers them.
+        the hash still covers them, so the approval store keeps it only keyed
+        (ApprovalStore._keyed): a short credential could be guessed against it.
 
         ``arguments_size`` is the length of the whole text View all shows
         (_governed_call_arguments), which a cut preview names: its own one-line
