@@ -151,7 +151,8 @@ class FileApprovalStore:
     async def remove_many(self, approval_ids: list[str]) -> list[str]:
         """Remove these records, each with its arguments (the retention): the ids whose record is gone.
 
-        One that cannot be removed is logged and left out of the answer, so its SQLite record stays with it.
+        One that cannot be removed, or whose arguments cannot, is logged and left out of the answer, so its
+        SQLite record stays with it and the next pass takes it.
         """
         return await asyncio.to_thread(self._remove_many_sync, approval_ids)
 
@@ -159,16 +160,26 @@ class FileApprovalStore:
         removed: list[str] = []
         for approval_id in approval_ids:
             try:
-                self._path(approval_id).unlink(missing_ok=True)
-            except (OSError, KeyError) as exc:  # a KeyError: a stored id that names no file of this store
+                arguments, record = self._arguments_path(approval_id), self._path(approval_id)
+            except KeyError as exc:  # a stored id that names no file of this store
+                logger.warning("approval %s could not be removed: %r", approval_id, exc)
+                continue
+            try:
+                # The arguments first: with the record gone no later pass finds them, only a start's sweep.
+                arguments.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "the arguments of approval %s could not be removed, so its record stays for the next pass: %r",
+                    approval_id,
+                    exc,
+                )
+                continue
+            try:
+                record.unlink(missing_ok=True)
+            except OSError as exc:
                 logger.warning("approval %s could not be removed: %r", approval_id, exc)
                 continue
             removed.append(approval_id)
-            try:
-                self._arguments_path(approval_id).unlink(missing_ok=True)
-            except OSError as exc:
-                # The startup sweep removes arguments whose record is gone.
-                logger.warning("the arguments of approval %s could not be removed: %r", approval_id, exc)
         return removed
 
     def _list_sync(

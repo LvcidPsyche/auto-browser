@@ -290,7 +290,7 @@ class RetentionTests(RetentionBase):
         unlink = Path.unlink
 
         def refusing_unlink(path: Path, missing_ok: bool = False) -> None:
-            if path.stem == stuck:
+            if path.name == f"{stuck}.json":
                 raise PermissionError(13, "Permission denied", str(path))
             unlink(path, missing_ok=missing_ok)
 
@@ -304,6 +304,41 @@ class RetentionTests(RetentionBase):
         self.assertNotIn(gone, self._in_sqlite())
         self.assertTrue(any(stuck in line for line in logged.output), logged.output)
         self.assertEqual(self.audit.events[-1]["details"]["count"], 1)
+
+    async def test_arguments_that_cannot_be_removed_keep_their_record_for_the_next_pass(self) -> None:
+        # The record went first and was counted: with it gone no pass could find its arguments again, and they
+        # stayed until a restart's sweep.
+        action = BrowserActionDecision(action="request_human_takeover", reason="browser.eval_js sha256:0", text="t")
+        approval = await self.store.create_or_reuse_pending(
+            session_id=SESSION, kind="write", reason="r", action=action, origin="tool_call", arguments='{"a": 1}'
+        )
+        await self.store.approve(approval.id)
+        await _age(self.store, approval.id, days=31)
+        gone = await self._decided("executed", days=31)
+        unlink = Path.unlink
+
+        def refusing_unlink(path: Path, missing_ok: bool = False) -> None:
+            if path.name == f"{approval.id}.arguments":
+                raise PermissionError(13, "The process cannot access the file", str(path))
+            unlink(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", refusing_unlink):
+            with self.assertLogs("app.approval_backends", level="WARNING") as logged:
+                removed = await self.store.prune_decided()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(await self._ids(), {approval.id})
+        self.assertEqual(self._on_disk(), {approval.id})
+        self.assertEqual(self._in_sqlite(), {approval.id})
+        self.assertTrue(await self.store.file_store.has_arguments(approval.id))
+        self.assertNotIn(gone, self._on_disk())
+        self.assertTrue(any(approval.id in line for line in logged.output), logged.output)
+        self.assertEqual(self.audit.events[-1]["details"]["count"], 1)
+
+        # The next pass, with no restart between, removes both.
+        self.assertEqual(await self.store.prune_decided(), 1)
+        self.assertEqual([path.name for path in self.root.iterdir()], [DIGEST_KEY_FILE])
+        self.assertEqual(self._in_sqlite(), set())
 
     async def test_a_pass_that_fails_is_logged_and_raises_nothing(self) -> None:
         old = await self._decided("executed", days=31)
