@@ -293,7 +293,11 @@ class ListedOperatorTests(unittest.TestCase):
         self.assertEqual(len(self._warnings("alice,bob", tokens="")), 2)
 
     def test_no_warning_holds_a_token(self) -> None:
-        for warning in self._warnings("Alice,carol"):
+        warnings = self._warnings("Alice,carol")
+
+        # Both are there to be read: with no warning at all, the loop below passed over nothing.
+        self.assertEqual(len(warnings), 2, warnings)
+        for warning in warnings:
             self.assertNotIn("a" * 40, warning)
             self.assertNotIn("b" * 40, warning)
 
