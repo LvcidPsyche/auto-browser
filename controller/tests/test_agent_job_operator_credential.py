@@ -101,12 +101,19 @@ class QueuedOperatorCredentialTests(unittest.IsolatedAsyncioTestCase):
 
 class QueuedOperatorCredentialWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_controller_wires_the_check_to_its_settings(self) -> None:
-        services = build_controller_services(Settings(API_BEARER_TOKENS="alice:token-a"), version="test")
+        # A job store of its own: this starts a real queue, and one on the suite's shared root would first queue
+        # again, and run, whatever other tests left there, inside the bound below.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        settings = Settings(API_BEARER_TOKENS="alice:token-a", JOB_STORE_ROOT=str(Path(tmp.name) / "jobs"))
+        services = build_controller_services(settings, version="test")
         queue = services.job_queue
+        self.assertEqual(queue.store.root, Path(tmp.name) / "jobs")
         queue.orchestrator = FakeOrchestrator()
         queue.session_accessible = every_session_usable
         await queue.startup()
         self.addAsyncCleanup(queue.shutdown)
+        self.assertEqual(await queue.store.list(), [])
 
         async def run_as(operator: OperatorIdentity) -> str:
             with acting_as(operator):
