@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .auth_policy import (
     BIND_SCOPE_EXPOSED,
     Credential,
+    credential_names_operator,
     credentials_for,
     is_local_only_host,
     resolve_bind_scope,
@@ -221,11 +222,33 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
         report.errors.append(str(exc))
 
 
+def _warn_listed_operators_no_credential_proves(settings: Settings, report: RuntimePolicyReport) -> None:
+    """APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS is compared to the proven operator id exactly (ApprovalStore), so a
+    listed id that no named credential proves refuses nobody, and nothing else would say so."""
+    named = {credential.operator_id for credential in credentials_for(settings) if credential.operator_id}
+    for listed in sorted(settings.approval_refuse_self_approval_operator_ids):
+        if credential_names_operator(settings, listed):
+            continue
+        warning = (
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists '{listed}', which no credential in API_BEARER_TOKENS "
+            "proves, so it refuses nobody: a listed id is compared to the operator's id exactly"
+        )
+        if listed in named:
+            warning += (
+                ". Its token is also an earlier entry's, and a token listed twice proves only the first operator "
+                "listed with it"
+            )
+        elif by_case := sorted(name for name in named if name.casefold() == listed.casefold()):
+            warning += f". It differs from '{by_case[0]}' only by case"
+        report.warnings.append(warning)
+
+
 def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
     report = RuntimePolicyReport()
 
     _validate_api_authentication(settings, report)
     _validate_cdp_connect_url(settings, report)
+    _warn_listed_operators_no_credential_proves(settings, report)
 
     if getattr(settings, "codex_allow_host_exec", False):
         report.warnings.append(

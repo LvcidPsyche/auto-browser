@@ -221,7 +221,9 @@ All notable changes to auto-browser are documented here.
   waiting on it included; their rejections, and an agent's approval under `AUTONOMOUS_APPROVALS`, are not affected.
   Another operator can approve it only where one can reach it, in a session nobody owns: in a session the asker
   owns, and in controller scope, it stays pending, so list only operators whose calls run in unowned sessions.
-  (AUTH-36)
+  A listed id is compared to the operator's id exactly, case included: one that no credential in
+  `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id and says when it
+  differs from a credential's only by case. (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read` or
   `write` asked for no approval, and that label is written by a model reading the page, which the page can steer.
   Before the approval decision the click's target is now read in the controller's isolated world, where no page

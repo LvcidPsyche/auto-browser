@@ -23,6 +23,7 @@ from app.audit import get_current_operator
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, OperatorIdentity
+from app.runtime_policy import validate_runtime_policy
 from app.session_ownership import acting_as
 from app.utils import UTC
 
@@ -245,6 +246,56 @@ class RefuseSelfApprovalTests(StoreBase):
                 session_id=SESSION, kind="payment", reason="r", action=_action(99)
             )
             self.assertEqual((await store.approve(approval.id)).decided_by, "alice")
+
+
+class ListedOperatorTests(unittest.TestCase):
+    """A start names each listed id that refuses nobody: the list is compared to the proven operator id exactly."""
+
+    TOKENS = "alice:" + "a" * 40 + ",bob:" + "b" * 40
+
+    def _warnings(self, listed: str, tokens: str = TOKENS) -> list[str]:
+        settings = Settings(
+            _env_file=None,
+            API_BIND_SCOPE="loopback",
+            API_BEARER_TOKENS=tokens,
+            APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS=listed,
+        )
+        warnings = validate_runtime_policy(settings).warnings
+        return [warning for warning in warnings if "APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS" in warning]
+
+    def test_a_listed_id_a_credential_proves_is_not_warned_about(self) -> None:
+        self.assertEqual(self._warnings("alice, bob"), [])
+        self.assertEqual(self._warnings(""), [])
+
+    def test_a_listed_id_no_credential_proves_is_named(self) -> None:
+        warnings = self._warnings("alice,carol,dave")
+
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertIn("'carol'", warnings[0])
+        self.assertIn("'dave'", warnings[1])
+        self.assertIn("refuses nobody", warnings[0])
+        self.assertNotIn("only by case", warnings[0])
+
+    def test_an_id_that_differs_from_a_credentials_only_by_case_says_so(self) -> None:
+        [warning] = self._warnings("Alice,bob")
+
+        self.assertIn("'Alice'", warning)
+        self.assertIn("differs from 'alice' only by case", warning)
+
+    def test_an_id_whose_token_an_earlier_entry_repeats_is_proved_by_no_credential(self) -> None:
+        # A request with that token proves the first operator listed with it, so nobody is ever bob.
+        [warning] = self._warnings("alice,bob", tokens="alice:" + "a" * 40 + ",bob:" + "a" * 40)
+
+        self.assertIn("'bob'", warning)
+        self.assertIn("proves only the first operator listed with it", warning)
+
+    def test_with_no_named_credential_every_listed_id_is_named(self) -> None:
+        self.assertEqual(len(self._warnings("alice,bob", tokens="")), 2)
+
+    def test_no_warning_holds_a_token(self) -> None:
+        for warning in self._warnings("Alice,carol"):
+            self.assertNotIn("a" * 40, warning)
+            self.assertNotIn("b" * 40, warning)
 
 
 class FakePage:
