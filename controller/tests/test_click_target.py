@@ -234,6 +234,17 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send reset link to customer"),
         ("post", "Send code to verify payment"),
         ("post", "Send code to confirm account deletion"),
+        # A masked number is digits and marks: a name with a digit or an asterisk in it is somebody's name, and
+        # a word behind @ or # names a person or a channel, whatever the word is.
+        ("post", "Send code to team2"),
+        ("post", "Send code to user#123"),
+        ("post", "Send code to #general2"),
+        ("post", "Send code to *everyone*"),
+        ("post", "Send code to *all* *users*"),
+        ("post", "Send code to 5 *people*"),
+        ("post", "Send code to #work"),
+        ("post", "Send code to @backup"),
+        ("post", "Send code to (@backup)"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -317,6 +328,12 @@ class LabelRulesTests(unittest.TestCase):
         "Send code to a different number",
         "Send code to another device",
         "Send code again in 30s",
+        "Send code to ***-***-1234",
+        "Send code to xxx-xxx-1234",
+        "Send code to (555) 555-0199",
+        "Send code to number ending 1234.",
+        "Send code to phone #1234",
+        "Send code to *my* phone",
         "Send magic link to my inbox",
         "Send code to reset your password",
         "Send code to verify my email",

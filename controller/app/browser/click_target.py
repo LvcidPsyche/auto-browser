@@ -324,9 +324,16 @@ _SIGN_IN_SEND = re.compile(
     + f"|{_SEND_FILLERS} {_one_of(SEND_LINK_WORDS)}{_SEND_FILLERS} link)"
     + f"(?:$| {_one_of(SEND_TAIL_WORDS)}{_WORD_END})"
 )
-# An address as a page shows the user's own: with an at sign inside it, or masked, so with a digit, an asterisk
-# or a bullet in it ("j***@example.com", "+1", "***-1234"). "@channel" is neither.
-_SEND_ADDRESS = re.compile(r"[^\s@]+@\S+|[^\s@]*[\d*\u2022\u25cf\u00b7]\S*")
+# An address as a page shows the user's own: a name with an at sign after it, or a number as a page masks one,
+# made of digits, asterisks, bullets, x and a phone number's marks and nothing else ("j***@example.com", "+1",
+# "***-1234", "#1234"), or a count of seconds ("30s"). Any token with a digit or an asterisk in it passed for
+# one, so "Send code to team2" and "Send code to *everyone*" ran. "@channel" is none.
+_MASKED = r"\dx*\u2022\u25cf\u00b7+().:\-"
+_SEND_ADDRESS = re.compile(rf"\w[^\s@]*@\S+|#?[{_MASKED}]*[\d*\u2022\u25cf\u00b7][{_MASKED}]*|\d+s")
+# What a token opens with when it names somebody or a channel ("@backup", "#work"): the word behind the mark is
+# then a name, though it is a word of the list.
+_NAMES_SOMEBODY = ("@", "#")
+_OPENING_MARKS = "([{<\"'\u201c\u2018"
 _SEND_GOES_ON_WITH = frozenset(SEND_TAIL_WORDS) | frozenset(SEND_DESTINATION_WORDS)
 # What may stand around a word without being part of it: "phone.", "(sms)".
 _AROUND_A_WORD = string.punctuation + "\u2026\u201c\u201d\u2018\u2019"
@@ -569,7 +576,9 @@ def _says_only_where_it_goes(rest: str) -> bool:
     """Whether what follows Send's tail word names only the user's own address or the sign-in the code is for."""
     for token in rest.split():
         word = token.strip(_AROUND_A_WORD)
-        if word and word not in _SEND_GOES_ON_WITH and not _SEND_ADDRESS.fullmatch(token):
+        if not word or _SEND_ADDRESS.fullmatch(token) or _SEND_ADDRESS.fullmatch(word):
+            continue
+        if token.lstrip(_OPENING_MARKS).startswith(_NAMES_SOMEBODY) or word not in _SEND_GOES_ON_WITH:
             return False
     return True
 
