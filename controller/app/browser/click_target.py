@@ -324,6 +324,15 @@ DESCRIBE_TARGET_SCRIPT = r"""
   for (let index = 0; index < named.length && index < 4; index += 1) {
     for (const name of ['aria-label', 'title', 'alt']) labels.push(cut(named[index].getAttribute(name)));
   }
+  // An SVG carries its name in a <title>, which is not rendered, and shows text in <text>. innerText has neither
+  // where the button is an <svg> (an SVG element has no innerText), and no <title> anywhere.
+  let drawn = 0;
+  for (const node of target.querySelectorAll('title, text')) {
+    if (drawn >= 4) break;
+    if (node.namespaceURI !== 'http://www.w3.org/2000/svg') continue;
+    drawn += 1;
+    labels.push(cut((node.textContent || '').replace(/\s+/g, ' ').trim()));
+  }
   // innerText leaves out what a slot or a shadow root inside the button shows. That text is gathered here, a
   // line for each block as innerText makes them, and handed over only when there is such a slot or root.
   let crossed = false;

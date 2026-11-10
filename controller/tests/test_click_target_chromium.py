@@ -108,6 +108,10 @@ NAMED_BESIDE = """<title>start</title>
 <button id="image" onclick="document.title='PRESSED'"><img alt="Delete account" width="16" height="16"
   src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="></button>
 <button id="shadow" onclick="document.title='PRESSED'"><x-text id="text"></x-text></button>
+<button id="drawn" onclick="document.title='PRESSED'"><svg width="16" height="16"><title>
+  Delete account</title><path d="M0 0h16v16H0z"/></svg></button>
+<svg id="svg" role="button" tabindex="0" width="120" height="40" onclick="document.title='PRESSED'"><rect
+  width="120" height="40" fill="#ddd"/><text x="8" y="24">Remove member</text></svg>
 <button id="plain" title="Close this panel" onclick="document.title='CLOSED'">&#10005;</button>
 <script>
 document.getElementById('text').attachShadow({mode: 'open'}).innerHTML = `<span>Delete account</span>`;
@@ -488,7 +492,8 @@ async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that
     async with browser_env(tmp_path, {"/": NAMED_BESIDE}) as env:
         session_id = await env.create("/")
 
-        for button in ("#titled", "#icon", "#image", "#shadow"):
+        # And an SVG's name is its <title>, which is not rendered, or its <text>: innerText has neither.
+        for button in ("#titled", "#icon", "#image", "#shadow", "#drawn", "#svg"):
             with pytest.raises(ApprovalRequiredError) as asked:
                 await env.manager.execute_decision(session_id, _click("read", selector=button))
             assert asked.value.approval.kind == "destructive", button
