@@ -486,6 +486,21 @@ def test_unmapped_key_error_is_404_and_logged(client: TestClient, caplog: pytest
     assert logged[0].exc_info and logged[0].exc_info[0] is KeyError
 
 
+def test_an_unmapped_key_errors_log_line_shows_a_control_character_of_the_path_escaped(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # request.url.path drops a line feed and a carriage return and nothing else: an ESC or a vertical tab the caller
+    # put in the path reached the log as itself.
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        response = client.post("/approvals/no%1B[2Jpe%0B/execute")
+    assert response.status_code == 404, response.text
+    logged = [r for r in caplog.records if r.name == "app.main" and "unmapped KeyError" in r.getMessage()]
+    assert logged, "an unmapped KeyError was answered 404 without a log line"
+    message = logged[0].getMessage()
+    assert "\x1b" not in message and "\x0b" not in message
+    assert "\\x1b[2Jpe" in message
+
+
 def test_unknown_session_is_not_logged_as_an_unmapped_key_error(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:

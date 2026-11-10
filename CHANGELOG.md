@@ -187,6 +187,13 @@ All notable changes to auto-browser are documented here.
   leaves an archive behind, for a name a page can guess. Host names compare case-insensitively, a port equal to the
   `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
   See the upgrade note. (AUTH-24)
+- **A web page can no longer write a line of its own into the controller's log, or fill it.** The refusal above
+  logged the request's path decoded, so a path holding `%0A` ended the line and what followed read as a log line of
+  its own. The path is now logged quoted, a control character as its escape, and so are the path of a request
+  refused from a session's browser network and the path in the `unmapped KeyError` warning. The refusal also wrote
+  one warning a request, ahead of the rate limiter, so a page left open could write them without end: a client
+  host's first refusal is logged, later ones in the next 60 seconds are only counted, and the first after that is
+  logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count.
 - **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
   `GET /auth-profiles/{name}`, `GET /auth-profiles/{name}/export` and `POST /sessions` with `auth_profile` or a
   `storage_state_path` under `profiles/` answered `403` for a foreign profile and `404` for a missing one, and

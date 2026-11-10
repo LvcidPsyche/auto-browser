@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request
@@ -45,6 +46,33 @@ CROSS_SITE_WRITE_DETAIL = (
     "This controller has no API token, so it refuses a write sent from another web origin. Send a bearer token, or "
     "call it from the same origin."
 )
+# A page the operator's browser has open can send refused writes without end, and this layer answers ahead of the
+# rate limiter: one warning a source (the client host) a window, and the next one says how many were only counted.
+REFUSAL_LOG_WINDOW_SECONDS = 60.0
+REFUSAL_LOG_SOURCES_MAX = 1024
+
+
+class RefusalLogWindows:
+    """Which refused cross-site writes are logged: a source's first, then one a window with the count held back.
+
+    Bounded as the takeover-link refusals are (routes/sessions.py): the source logged longest ago is forgotten
+    first, with its count, and logs as new.
+    """
+
+    def __init__(self) -> None:
+        self._windows: OrderedDict[str, list[float]] = OrderedDict()  # source -> [window start, refusals counted]
+
+    def due(self, source: str, *, now: float) -> int | None:
+        """How many refusals the line due now reports as held back (0: none), or None: this one is only counted."""
+        window = self._windows.get(source)
+        if window is not None and now - window[0] < REFUSAL_LOG_WINDOW_SECONDS:
+            window[1] += 1
+            return None
+        self._windows[source] = [now, 0]
+        self._windows.move_to_end(source)
+        while len(self._windows) > REFUSAL_LOG_SOURCES_MAX:
+            self._windows.popitem(last=False)
+        return int(window[1]) if window is not None else 0
 
 
 class SessionNetworkPeerMiddleware:
@@ -71,7 +99,8 @@ class SessionNetworkPeerMiddleware:
         if not host or not self.refuses_peer(host):
             await self.app(scope, receive, send)
             return
-        logger.warning("refused a request from session network peer %s to %s", host, scope.get("path", ""))
+        # %r: a page in the session's browser chooses the path, and a line break in it must not start a log line.
+        logger.warning("refused a request from session network peer %s to %r", host, scope.get("path", ""))
         if scope["type"] == "websocket":
             await WebSocketClose(code=1008, reason="session network peer")(scope, receive, send)
             return
@@ -295,6 +324,7 @@ def install_controller_http_middleware(
     # Evaluated per request against the same policy as the auth gate, so a
     # deployment with a bearer credential is unaffected.
     configured_hosts = list(getattr(settings, "controller_allowed_host_patterns", None) or [])
+    refusal_log = RefusalLogWindows()
 
     # Installed before the Host check, so it runs after it: a rebinding hostname is refused there as a Host error, and
     # the refusal here spends no rate-limit budget. Sits with the Host check for the same reason: a page reaches a
@@ -310,7 +340,14 @@ def install_controller_http_middleware(
             or not _comes_from_another_origin(request)
         ):
             return await call_next(request)
-        logger.warning("refused a write to %s from another web origin", _request_path(request))
+        held_back = refusal_log.due(request.client.host if request.client else "unknown", now=time.monotonic())
+        if held_back is not None:
+            # %r: the path is logged decoded, and a line break a page put in it (%0A) must not start a log line.
+            logger.warning(
+                "refused a write to %r from another web origin%s",
+                _request_path(request),
+                f" ({held_back} more from this client were refused since the last such line)" if held_back else "",
+            )
         return JSONResponse(status_code=403, content={"detail": CROSS_SITE_WRITE_DETAIL})
 
     @application.middleware("http")

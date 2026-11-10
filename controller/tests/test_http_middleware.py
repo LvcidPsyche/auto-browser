@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,7 +19,12 @@ from fastapi.testclient import TestClient
 from app.auth_policy import BIND_SCOPE_LOOPBACK
 from app.mcp_transport import McpHttpTransport
 from app.middleware.hosts import origin_matches_host
-from app.middleware.http import CROSS_SITE_WRITE_DETAIL, install_controller_http_middleware
+from app.middleware.http import (
+    CROSS_SITE_WRITE_DETAIL,
+    RefusalLogWindows,
+    SessionNetworkPeerMiddleware,
+    install_controller_http_middleware,
+)
 from app.routes.auth_profiles import create_auth_profiles_router
 from app.routes.mcp import create_mcp_router
 
@@ -27,6 +33,7 @@ SAME_ORIGIN = BASE_URL
 FOREIGN_ORIGIN = "https://evil.example"
 LISTED_ORIGIN = "https://console.example"
 TOKEN = "t" * 40
+MIDDLEWARE_LOGGER = "app.middleware.http"
 REFUSED = {"detail": CROSS_SITE_WRITE_DETAIL}
 WRITES = ("post", "put", "patch", "delete")
 INITIALIZE = {
@@ -452,6 +459,81 @@ class AProxyInFrontOfATokenlessControllerTests(unittest.TestCase):
             "/maintenance/cleanup", headers={**self.SAME_ORIGIN_THROUGH_PROXY, "Host": "localhost:8080"}
         )
         self.assertEqual((response.status_code, response.json()), (200, {"ok": True}))
+
+
+class TheRefusalsLogLineTests(unittest.TestCase):
+    """What a page on another origin can do to the controller's log: FR-B3-4 and B3-F9."""
+
+    def setUp(self) -> None:
+        self.client = _client()
+
+    def refuse(self, path: str = "/maintenance/cleanup") -> None:
+        response = self.client.post(path, headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual((response.status_code, response.json()), (403, REFUSED))
+
+    def test_a_path_holding_line_breaks_cannot_start_a_line_of_the_log(self) -> None:
+        # The path is logged decoded: %0A and %0D arrive as the characters, and with %s they ended the line.
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            self.refuse("/x/a%0AWARNING:app:forged by a page%0D%0Aline three%1B[2J")
+
+        self.assertEqual(len(logs.records), 1)
+        message = logs.records[0].getMessage()
+        for character in ("\n", "\r", "\x1b"):
+            self.assertNotIn(character, message)
+        self.assertIn("forged by a page", message)
+
+    def test_a_flood_from_one_client_writes_one_line_and_the_next_window_says_how_many_it_held_back(self) -> None:
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            for _ in range(5):
+                self.refuse()
+            self.assertEqual(len(logs.records), 1, logs.output)
+            self.assertNotIn("more", logs.records[0].getMessage())
+            with patch("app.middleware.http.REFUSAL_LOG_WINDOW_SECONDS", 0):  # the window is over
+                self.refuse()
+
+        self.assertEqual(len(logs.records), 2, logs.output)
+        self.assertIn("4 more", logs.records[1].getMessage())
+
+    def test_a_refusal_after_a_quiet_window_is_a_plain_line_again(self) -> None:
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            self.refuse()
+            with patch("app.middleware.http.REFUSAL_LOG_WINDOW_SECONDS", 0):
+                self.refuse()
+
+        self.assertEqual(len(logs.records), 2, logs.output)
+        self.assertNotIn("more", logs.records[1].getMessage())
+
+    def test_the_sources_remembered_are_bounded(self) -> None:
+        windows = RefusalLogWindows()
+
+        with patch("app.middleware.http.REFUSAL_LOG_SOURCES_MAX", 2):
+            for source in ("a", "b", "c"):
+                self.assertEqual(windows.due(source, now=0.0), 0)
+            self.assertIsNone(windows.due("c", now=1.0))
+            self.assertIsNone(windows.due("b", now=1.0))
+            # The oldest was forgotten, with whatever it had counted: it logs as new.
+            self.assertEqual(windows.due("a", now=1.0), 0)
+
+
+class ASessionNetworkPeersLogLineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_path_holding_line_breaks_cannot_start_a_line_of_the_log(self) -> None:
+        # A page in a session's browser chooses the path, and this refusal logs it.
+        sent: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        middleware = SessionNetworkPeerMiddleware(AsyncMock(), refuses_peer=lambda host: True)
+        scope = {"type": "http", "client": ("172.30.0.5", 1234), "path": "/x\nWARNING:app:forged\rline", "headers": []}
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            await middleware(scope, AsyncMock(), send)
+
+        self.assertEqual(sent[0]["status"], 403)
+        message = logs.records[0].getMessage()
+        self.assertNotIn("\n", message)
+        self.assertNotIn("\r", message)
+        self.assertIn("forged", message)
 
 
 class OnlyATokenlessControllerRefusesTests(unittest.TestCase):
