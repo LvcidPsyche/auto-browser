@@ -318,6 +318,28 @@ async def test_a_call_waits_for_the_session_another_call_is_opening_no_longer_th
     assert (instance._cdp, cdp.detached) == (cdp, 0)
 
 
+async def test_a_call_that_gives_up_the_wait_leaves_the_session_the_other_call_already_holds() -> None:
+    # The opener has attached and is asking for the frame tree when the waiting call's budget ends. The waiting call
+    # has no session of its own yet, whatever it asked for: dropping "the" session there took the opener's from
+    # under it, and the opener then sent its next message to nothing.
+    cdp = SlowCdp({"Page.getFrameTree": 3 * SLOW_S})
+    page, instance = slow_page(cdp), world()
+    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=LONG_MS))
+    async with asyncio.timeout(TEST_BOUND_S):
+        while "Page.getFrameTree" not in cdp.sent:
+            await asyncio.sleep(0.005)
+    assert instance._lock.locked()
+    assert (instance._cdp, instance._frame_id) == (cdp, None)
+
+    elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, setup_timeout_ms=SHORT_MS))
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert elapsed < 2 * SLOW_S  # the frame tree takes three
+    assert (instance._cdp, cdp.detached) == (cdp, 0)
+    assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
+    assert (instance._cdp, instance._frame_id, cdp.detached) == (cdp, "frame-1", 0)
+
+
 # -- a call past its bound, with another call in flight on the same session --------
 
 
