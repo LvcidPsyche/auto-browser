@@ -17,7 +17,9 @@ reason for them to wait too. A renderer that crashed leaves
 the session open with nothing answering, and a call with no deadline hung the
 request; now it fails with ``page_not_responding``. A session that timed out is
 detached and dropped, one that went away is dropped, and the next call opens a
-new one.
+new one. A call made with ``keep_session`` abandons only itself past its bound:
+the session is shared by every call on the page, and a read with a bound far
+inside ``ACTION_TIMEOUT_MS`` must not take it from the calls beside it.
 """
 
 from __future__ import annotations
@@ -214,6 +216,7 @@ class PageWorld:
         effect: str,
         timeout_ms: int | None = None,
         setup_timeout_ms: int | None = None,
+        keep_session: bool = False,
     ) -> Any:
         """Run ``declaration`` in the world with ``args``.
 
@@ -234,6 +237,11 @@ class PageWorld:
         have been made. A press or keys never go through the world at all. A
         message that gets no answer within its deadline raises
         ``page_not_responding`` and is never sent again.
+
+        ``keep_session`` is for a read whose bound is far inside
+        ``ACTION_TIMEOUT_MS`` and whose only cost of failing is that nothing was
+        read: past its bound the call is abandoned and the session left as it
+        was, not dropped and detached under the other calls in flight on it.
         """
         timeout_ms = self.timeout_ms if timeout_ms is None else timeout_ms
         setup = (
@@ -242,7 +250,7 @@ class PageWorld:
             else _SetupBudget(asyncio.get_running_loop().time() + setup_timeout_ms / 1000, setup_timeout_ms)
         )
         try:
-            return await self._call(page, declaration, args, timeout_ms, setup=setup)
+            return await self._call(page, declaration, args, timeout_ms, setup=setup, keep_session=keep_session)
         except _AnswerLost as exc:
             if effect not in _SENT_AGAIN:
                 raise BrowserActionError(
@@ -252,12 +260,12 @@ class PageWorld:
                     retryable=False,
                 ) from exc
             logger.debug("element ids: calling the world again after: %s", exc.message)
-            return await self._call(page, declaration, args, timeout_ms, setup=setup)
+            return await self._call(page, declaration, args, timeout_ms, setup=setup, keep_session=keep_session)
         except PlaywrightError as exc:
             if effect not in _SENT_AGAIN or not (_NO_FRAME in exc.message or session_gone(exc)):
                 raise
             logger.debug("element ids: calling the world again after: %s", exc.message)
-            return await self._call(page, declaration, args, timeout_ms, setup=setup)
+            return await self._call(page, declaration, args, timeout_ms, setup=setup, keep_session=keep_session)
 
     async def _call(
         self,
@@ -267,14 +275,19 @@ class PageWorld:
         timeout_ms: int,
         *,
         setup: _SetupBudget | None = None,
+        keep_session: bool = False,
     ) -> Any:
-        cdp, frame_id = await self._session(page, setup=setup)
+        cdp, frame_id = await self._session(page, setup=setup, keep_session=keep_session)
         # Asked for on every call rather than cached: Chromium answers with the
         # same world until the frame's document changes and a new one after, and
         # a cached context could outlive its document (the back/forward cache)
         # and answer for a page that is no longer shown.
         world = await self._send(
-            cdp, "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": WORLD_NAME}, setup=setup
+            cdp,
+            "Page.createIsolatedWorld",
+            {"frameId": frame_id, "worldName": WORLD_NAME},
+            setup=setup,
+            keep_session=keep_session,
         )
         try:
             reply = await self._send(
@@ -288,6 +301,7 @@ class PageWorld:
                     "awaitPromise": True,
                 },
                 timeout_ms,
+                keep_session=keep_session,
             )
         except PlaywrightError as exc:
             if _NO_FRAME in exc.message or session_gone(exc):
@@ -298,14 +312,16 @@ class PageWorld:
             raise PlaywrightError(_script_error(reply["exceptionDetails"]))
         return (reply.get("result") or {}).get("value")
 
-    async def _session(self, page: "Page", *, setup: _SetupBudget | None = None) -> tuple["CDPSession", str]:
+    async def _session(
+        self, page: "Page", *, setup: _SetupBudget | None = None, keep_session: bool = False
+    ) -> tuple["CDPSession", str]:
         if self._cdp is not None and self._frame_id is not None:
             return self._cdp, self._frame_id
         async with self._lock:
             if self._cdp is None:
                 self._cdp = await self._attach(page, setup=setup)
             if self._frame_id is None:
-                tree = await self._send(self._cdp, "Page.getFrameTree", None, setup=setup)
+                tree = await self._send(self._cdp, "Page.getFrameTree", None, setup=setup, keep_session=keep_session)
                 self._frame_id = tree["frameTree"]["frame"]["id"]
             return self._cdp, self._frame_id
 
@@ -328,9 +344,12 @@ class PageWorld:
         timeout_ms: int | None = None,
         *,
         setup: _SetupBudget | None = None,
+        keep_session: bool = False,
     ) -> dict[str, Any]:
         try:
-            return await self._within(cdp.send(method, params), method, timeout_ms, cdp, setup=setup)
+            return await self._within(
+                cdp.send(method, params), method, timeout_ms, cdp, setup=setup, keep_session=keep_session
+            )
         except PlaywrightError as exc:
             # A call still in flight on a session another call already dropped
             # leaves the session that replaced it alone.
@@ -348,6 +367,7 @@ class PageWorld:
         cdp: "CDPSession | None" = None,
         *,
         setup: _SetupBudget | None = None,
+        keep_session: bool = False,
     ) -> Any:
         # A setup message waits what is left of its call's budget; the error names the whole budget, as a retry after
         # it was spent read "within 0 ms". details["waited_ms"] says what this message itself waited.
@@ -356,10 +376,12 @@ class PageWorld:
         try:
             return await asyncio.wait_for(awaitable, waited_ms / 1000)
         except asyncio.TimeoutError:
-            if cdp is None or self._cdp is cdp:
-                self._reset()
-            if cdp is not None:
-                spawn_background_task(_detach(cdp))
+            # keep_session: only this message is given up. The session may be answering the calls beside it.
+            if not keep_session:
+                if cdp is None or self._cdp is cdp:
+                    self._reset()
+                if cdp is not None:
+                    spawn_background_task(_detach(cdp))
             raise BrowserActionError(
                 f"The page did not answer within {named_ms} ms ({what}): it may have crashed or hung, "
                 "and nothing more was sent to it. Reload the page or open a new tab before acting again.",

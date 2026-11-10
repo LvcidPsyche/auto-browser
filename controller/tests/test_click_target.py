@@ -165,6 +165,8 @@ class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual({key: value for key, value in arg.items() if key != "limit"}, expected)
                 kwargs = element_ids.evaluate.await_args.kwargs
                 self.assertEqual((kwargs["timeout_ms"], kwargs["setup_timeout_ms"]), (READ_TIMEOUT_MS, READ_TIMEOUT_MS))
+                # Past its bound the read gives up itself, not the session the page's other calls are on.
+                self.assertIs(kwargs["keep_session"], True)
         self.assertEqual(page.located, [])
 
     async def test_a_selector_is_read_on_the_element_the_click_would_find(self) -> None:

@@ -161,6 +161,8 @@ async def read_click_target(element_ids: ElementIds, page: Page, decision: Brows
             {**arg, "limit": _LABEL_CUT},
             timeout_ms=READ_TIMEOUT_MS,
             setup_timeout_ms=READ_TIMEOUT_MS,
+            # Past its bound only this read is given up: the page's session stays for the calls beside it.
+            keep_session=True,
         )
     except Exception as exc:
         logger.debug(

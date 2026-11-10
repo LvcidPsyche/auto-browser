@@ -172,13 +172,13 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
         session_id = await env.create("/")
         delete = await env.element(session_id, "Delete account")
         evaluate = env.manager.element_ids.evaluate
-        bounds: list[tuple[int, int]] = []
+        bounds: list[tuple[int, int, bool]] = []
 
-        async def hung_read(page, script, arg=None, *, timeout_ms=None, setup_timeout_ms=None):
+        async def hung_read(page, script, arg=None, *, timeout_ms=None, setup_timeout_ms=None, keep_session=False):
             if script != CLICK_TARGET_SCRIPT:
                 return await evaluate(page, script, arg, timeout_ms=timeout_ms, setup_timeout_ms=setup_timeout_ms)
             # What the world raises once a message's deadline passes with no answer (element_world.py).
-            bounds.append((timeout_ms, setup_timeout_ms))
+            bounds.append((timeout_ms, setup_timeout_ms, keep_session))
             await asyncio.sleep(0.2)
             raise BrowserActionError("The page did not answer", code=PAGE_NOT_RESPONDING, retryable=False)
 
@@ -189,7 +189,7 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
             env.manager.execute_decision(session_id, _click("read", element_id=delete["element_id"])), 20
         )
 
-        assert bounds == [(READ_TIMEOUT_MS, READ_TIMEOUT_MS)]
+        assert bounds == [(READ_TIMEOUT_MS, READ_TIMEOUT_MS, True)]
         assert await _title(env, session_id) == "DELETED"
         assert await env.manager.approvals.list() == []
 

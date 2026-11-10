@@ -23,7 +23,7 @@ from playwright.async_api import Error as PlaywrightError
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.browser.element_ids import ElementIds
 from app.browser.element_target import ElementTarget
-from app.browser.element_world import READ, PageWorld
+from app.browser.element_world import CHANGES_PAGE, READ, PageWorld
 from app.tool_gateway import drag
 from app.tool_inputs import FindElementsInput, GetPageHtmlInput
 from tests.test_allowed_hosts_reads import gateway_for, manager_for, read_session
@@ -286,6 +286,113 @@ async def test_a_setup_message_that_would_start_after_the_budget_is_spent_fails_
     assert f"within {budget_ms} ms" in str(error)
     assert "within 0 ms" not in str(error)
     assert failed_after_s < 0.5  # a retry with a budget of its own would have waited a whole second
+
+
+# -- a call past its bound, with another call in flight on the same session --------
+
+
+class SharedCdp(SlowCdp):
+    """A session whose script messages take the delays given, in the order they are sent, and whose detach fails the
+    ones still in flight, as a real session's does."""
+
+    def __init__(self, script_delays: list[float]) -> None:
+        super().__init__({})
+        self._script_delays = list(script_delays)
+        self._closed = asyncio.Event()
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if method != SCRIPT:
+            return await super().send(method, params)
+        self.sent.append(method)
+        try:
+            await asyncio.wait_for(self._closed.wait(), self._script_delays.pop(0))
+        except asyncio.TimeoutError:
+            return {"result": {"value": self.script_value}}
+        raise PlaywrightError("Target closed")
+
+    async def detach(self) -> None:
+        await super().detach()
+        self._closed.set()
+
+
+async def a_change_in_flight_beside(instance: PageWorld, page: Any) -> asyncio.Task[Any]:
+    """A slow change (a focus, a selection) sent on the world's session and not yet answered."""
+    change = asyncio.ensure_future(instance.call(page, "decl", effect=CHANGES_PAGE, timeout_ms=LONG_MS))
+    await asyncio.sleep(0.05)
+    return change
+
+
+async def test_a_call_past_its_bound_drops_the_session_under_the_call_beside_it() -> None:
+    # What every caller gets unless it asks otherwise: the session may be dead, so it is dropped and detached, and
+    # a change in flight on it can no longer be confirmed.
+    cdp = SharedCdp([SLOW_S, HUNG_S])
+    page, instance = slow_page(cdp), world()
+    change = await a_change_in_flight_beside(instance, page)
+
+    _elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, timeout_ms=SHORT_MS))
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert (instance._cdp, instance._frame_id) == (None, None)
+    with pytest.raises(BrowserActionError) as unconfirmed:
+        await asyncio.wait_for(change, timeout=TEST_BOUND_S)
+    assert unconfirmed.value.code == "change_unconfirmed"
+    assert cdp.detached == 1
+
+
+async def test_a_read_that_keeps_the_session_abandons_only_itself_past_its_bound() -> None:
+    # STORE-42's read of a click's target has a 2 s bound, far inside ACTION_TIMEOUT_MS: a page busy that long lost
+    # its session at every read or write click, under whatever else was in flight on it.
+    cdp = SharedCdp([SLOW_S, HUNG_S])
+    page, instance = slow_page(cdp), world()
+    change = await a_change_in_flight_beside(instance, page)
+
+    _elapsed, error = await timed_failure(
+        instance.call(page, "decl", effect=READ, timeout_ms=SHORT_MS, keep_session=True)
+    )
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert (instance._cdp, instance._frame_id) == (cdp, "frame-1")
+    assert await asyncio.wait_for(change, timeout=TEST_BOUND_S) == "read"
+    assert cdp.detached == 0
+
+
+@pytest.mark.parametrize("step", SETUP_STEPS)
+async def test_a_read_that_keeps_the_session_fails_at_a_hung_setup_step_with_nothing_detached(step: str) -> None:
+    page, cdp = one_slow_step(step, SLOW_S)
+    instance = world()
+
+    _elapsed, error = await timed_failure(
+        instance.call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=SHORT_MS, keep_session=True)
+    )
+
+    assert error.code == PAGE_NOT_RESPONDING
+    await asyncio.sleep(SLOW_S + 0.1)
+    # A session that answered is kept for the next call; an attach that lands late was never the world's, and is
+    # detached as any late attach is.
+    assert cdp.detached == (1 if step == ATTACH else 0)
+    assert instance._cdp is (None if step == ATTACH else cdp)
+    cdp.delays.clear()
+    assert await instance.call(slow_page(cdp), "decl", effect=READ) == "read"
+
+
+class _KeyedPage:
+    """A page ElementIds can key a world by (it holds its pages weakly, which a SimpleNamespace does not allow)."""
+
+    def __init__(self, cdp: SlowCdp) -> None:
+        self.context = slow_page(cdp).context
+
+
+async def test_element_ids_hands_keep_session_to_the_world() -> None:
+    cdp = SharedCdp([HUNG_S])
+    ids = ElementIds(SimpleNamespace(action_timeout_ms=DEFAULT_MS))
+    page = _KeyedPage(cdp)
+
+    _elapsed, error = await timed_failure(
+        ids.evaluate(page, "() => 1", timeout_ms=SHORT_MS, setup_timeout_ms=SHORT_MS, keep_session=True)
+    )
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert cdp.detached == 0
 
 
 # -- at the gateway: under bounded(), not at the default action timeout ------------
