@@ -65,6 +65,14 @@ document.getElementById('outer').srcdoc = `<body style="margin: 0">
   <button id="shallow" style="display: block" onclick="top.document.title = 'CLOSED'">Close</button>`;
 </script>
 """
+# A button whose icon is a component with a shadow root of its own: the element at the icon is inside that root.
+ICON_COMPONENT = """<title>start</title>
+<button id="delete" onclick="document.title='DELETED'"><x-icon id="icon"></x-icon> Delete account</button>
+<script>
+document.getElementById('icon').attachShadow({mode: 'open'}).innerHTML =
+  `<span class="glyph" style="display: inline-block; width: 24px; height: 24px; background: #c00"></span>`;
+</script>
+"""
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
 # PAGE with a button before the others that only a selector piercing an open shadow root finds.
@@ -215,6 +223,20 @@ async def test_a_point_inside_frames_of_the_pages_origin_is_read_there(tmp_path:
         # One frame down, a harmless button runs as labelled.
         await env.manager.execute_decision(session_id, _click("write", **shallow))
         assert await _title(env, session_id) == "CLOSED"
+
+
+async def test_an_element_in_a_shadow_root_inside_a_button_counts_as_the_button(tmp_path: Path) -> None:
+    # closest() stops at a shadow root: the glyph of an icon component found no button around it, and a click
+    # aimed at the icon of "Delete account" (by its point, or by a selector that pierces the root) was not read.
+    async with browser_env(tmp_path, {"/": ICON_COMPONENT}) as env:
+        session_id = await env.create("/")
+        glyph = await _centre(env.page(session_id).locator("#icon .glyph"))
+
+        for target in (glyph, {"selector": "#icon .glyph"}):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", **target))
+            assert asked.value.approval.kind == "destructive", target
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_point_inside_a_frame_of_another_origin_is_not_read(tmp_path: Path) -> None:

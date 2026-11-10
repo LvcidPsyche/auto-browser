@@ -143,7 +143,15 @@ _MAX_SKIPPED_TOKENS = 2
 DESCRIBE_TARGET_SCRIPT = r"""
 (el, limit) => {
   if (!el || !el.closest) return null;
-  const target = el.closest('button, input, [role="button" i], a[href]') || el;
+  // closest() stops at a shadow root, so it is asked again from each host on the way out: the glyph of an icon
+  // component sits in the button its host sits in.
+  let target = null;
+  for (let node = el, hosts = 0; node && node.closest && !target && hosts <= 8; hosts += 1) {
+    target = node.closest('button, input, [role="button" i], a[href]');
+    const root = node.getRootNode();
+    node = root && root.host ? root.host : null;
+  }
+  target = target || el;
   const tag = target.localName;
   const type = tag === 'button' || tag === 'input' ? String(target.type || '').toLowerCase() : '';
   const role = (target.getAttribute('role') || '').trim().split(/\s+/)[0].toLowerCase();
