@@ -280,6 +280,36 @@ SEND_DESTINATION_WORDS: tuple[str, ...] = (
     "continue",
     "account",
     "identity",
+    "you",
+    "it's",
+    "it’s",
+    "into",
+    "proceed",
+    "access",
+    "trusted",
+    "saved",
+    "same",
+    "file",
+    "browser",
+    "computer",
+    "we",
+    "have",
+    "of",
+    "for",
+    "associated",
+    "linked",
+    "above",
+    "below",
+    "last",
+    "digits",
+    "landline",
+    "telephone",
+    "notification",
+    "push",
+    "seconds",
+    "second",
+    "minutes",
+    "minute",
 )
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40
@@ -576,7 +606,10 @@ def _says_only_where_it_goes(rest: str) -> bool:
     """Whether what follows Send's tail word names only the user's own address or the sign-in the code is for."""
     for token in rest.split():
         word = token.strip(_AROUND_A_WORD)
-        if not word or _SEND_ADDRESS.fullmatch(token) or _SEND_ADDRESS.fullmatch(word):
+        # A token with no letter and no digit says nothing: an arrow, a tick, a dash, a mask alone.
+        if not any(char.isalnum() for char in word):
+            continue
+        if _SEND_ADDRESS.fullmatch(token) or _SEND_ADDRESS.fullmatch(word):
             continue
         if token.lstrip(_OPENING_MARKS).startswith(_NAMES_SOMEBODY) or word not in _SEND_GOES_ON_WITH:
             return False
