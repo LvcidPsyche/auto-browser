@@ -113,6 +113,16 @@ NAMED_BESIDE = """<title>start</title>
 document.getElementById('text').attachShadow({mode: 'open'}).innerHTML = `<span>Delete account</span>`;
 </script>
 """
+# A row's menu as the component libraries build one: its commands are menu items on a li, not buttons.
+MENU = """<title>start</title>
+<style>li { display: block; width: 220px; height: 30px; margin: 6px }</style>
+<ul role="menu">
+  <li id="rename" role="menuitem" tabindex="-1" onclick="document.title='RENAMED'"><span>Rename</span></li>
+  <li id="item" role="menuitem" tabindex="-1" onclick="document.title='DELETED'"><span id="word">Delete
+    account</span></li>
+  <li id="choice" role="menuitemradio" tabindex="-1" onclick="document.title='CHOSEN'">Pay monthly</li>
+</ul>
+"""
 # A label for a button, and one around a button: a press on either is a press on the button, as HTML has it.
 LABELLED = """<title>start</title>
 <style>label { display: block; margin: 12px }</style>
@@ -450,6 +460,26 @@ async def test_a_button_is_read_by_its_label_and_a_label_from_inside_a_shadow_ro
                 await env.manager.execute_decision(session_id, _click("read", **target))
             assert asked.value.approval.kind == "destructive", target
         assert await _title(env, session_id) == "start"
+
+
+async def test_a_menu_item_is_read_as_a_button_is(tmp_path: Path) -> None:
+    # role=menuitem was no button: the "Delete account" of a menu ran as labelled, by the item, by the text in it
+    # and by a point on it.
+    async with browser_env(tmp_path, {"/": MENU}) as env:
+        session_id = await env.create("/")
+        word = await _centre(env.page(session_id).locator("#word"))
+
+        for target in ({"selector": "#item"}, {"selector": "#word"}, word):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", **target))
+            assert asked.value.approval.kind == "destructive", target
+        assert await _title(env, session_id) == "start"
+
+        # A menu item the table has no word for runs, and so does a choice in a menu, which is no command.
+        await env.manager.execute_decision(session_id, _click("read", selector="#rename"))
+        assert await _title(env, session_id) == "RENAMED"
+        await env.manager.execute_decision(session_id, _click("read", selector="#choice"))
+        assert await _title(env, session_id) == "CHOSEN"
 
 
 async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that_name(tmp_path: Path) -> None:

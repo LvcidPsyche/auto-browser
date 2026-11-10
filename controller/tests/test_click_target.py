@@ -110,6 +110,17 @@ class ClassifiedRiskTests(unittest.TestCase):
         self.assertIsNone(classified_risk(button("Delete your account", tag="a", type=""), "read"))
         self.assertIsNone(classified_risk(button("Delete", tag="input", type="text"), "read"))
 
+    def test_a_menu_item_counts_as_a_button_and_a_choice_in_a_menu_or_a_list_does_not(self) -> None:
+        # The "Delete" of a row's menu is a menu item in the common component libraries, on a li or a div.
+        item = button("Delete account", tag="li", type="", role="menuitem")
+        self.assertEqual(classified_risk(item, "read"), "destructive")
+        self.assertEqual(classified_risk(button("Send", tag="div", type="", role="menuitem"), "write"), "post")
+        self.assertIsNone(classified_risk(button("Rename", tag="li", type="", role="menuitem"), "read"))
+        # What chooses or switches is not a command: a billing period, a list's option, a tab.
+        for role in ("menuitemradio", "menuitemcheckbox", "option", "tab", "switch"):
+            with self.subTest(role=role):
+                self.assertIsNone(classified_risk(button("Pay monthly", tag="li", type="", role=role), "read"))
+
     def test_a_read_labelled_form_submit_is_recorded_as_write(self) -> None:
         submit = button("Search", type="submit", submits=True)
         self.assertEqual(classified_risk(submit, "read"), "write")

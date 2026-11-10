@@ -223,6 +223,9 @@ MAX_LABEL_LINES = 3
 # How much of each label the page hands over: room for the lines read, long ones too.
 _LABEL_CUT = MAX_LABEL_CHARS * 10
 _BUTTON_INPUT_TYPES = frozenset({"button", "submit", "image", "reset"})
+# The roles that make an element a button here: a menu item is a menu's command (a row's "Delete" is one in the
+# common component libraries). A checked or radio menu item, an option, a tab and a switch choose, and are not read.
+_BUTTON_ROLES = frozenset({"button", "menuitem"})
 # A phrase ends where its last word does: a hyphen goes on with the word ("Pay-as-you-go", "Post-processing").
 _WORD_END = r"(?![\w\-\u2010\u2011])"
 
@@ -275,7 +278,7 @@ DESCRIBE_TARGET_SCRIPT = r"""
   // (the glyph of an icon component sits in the button its host sits in), and from what a page slots into a
   // component to the slot's place in that component's tree (a design system's button is a shadow button around
   // a slot). closest() sees neither.
-  const BUTTONS = 'button, input, [role="button" i], a[href]';
+  const BUTTONS = 'button, input, [role="button" i], [role="menuitem" i], a[href]';
   let target = null;
   let label = null;
   for (let node = el, steps = 0; node && steps < 256; steps += 1) {
@@ -528,7 +531,7 @@ def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | N
     if not isinstance(target, dict) or label not in CHECKED_LABELS:
         return None
     tag, kind_of_input, role = (str(target.get(name) or "") for name in ("tag", "type", "role"))
-    button_like = tag == "button" or (tag == "input" and kind_of_input in _BUTTON_INPUT_TYPES) or role == "button"
+    button_like = tag == "button" or (tag == "input" and kind_of_input in _BUTTON_INPUT_TYPES) or role in _BUTTON_ROLES
     if button_like:
         labels = target.get("labels")
         labels = [text for text in labels if isinstance(text, str)] if isinstance(labels, list) else []
