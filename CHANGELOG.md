@@ -541,6 +541,17 @@ All notable changes to auto-browser are documented here.
   reached the client as `500` `Internal error`. Both now answer `503` `Service unavailable`, as
   `POST /agent/jobs/{id}/resume` does at a full queue: try again later. The refused job is recorded `failed`, as
   before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
+- **One approval record with a time that cannot be read no longer stops the others.** A rejected tool call keeps its
+  arguments until the rejection is older than the approval TTL, and the pass that removes them runs at every start
+  and inside every request for an approval. It read the record's `decided_at` with nothing caught, so one record whose
+  `decided_at` is not a time (or has no offset and lies before 1970, on Windows) failed the start of the approval
+  store, and every request for an approval, for as long as the record existed. Such a record now keeps its arguments
+  and is named once in the log, and the pass goes on. A start also compares SQLite's record of a rejection with the
+  file store's by their `updated_at`: one that cannot be read ended the comparison for every record, the controller
+  ran on the file records alone (logged as a fallback), and that approval read as its file record had it, approved
+  where SQLite held the rejection. The rejection now stands, the log names the record, and SQLite stays in use.
+  An `updated_at` that cannot be read still fails a decision on that one record, and an `approved_expires_at` that
+  cannot, a call that presents it.
 
 ### Changed
 

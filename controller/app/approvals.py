@@ -170,6 +170,8 @@ class ApprovalStore:
         self.retention_days = retention_days
         # What the retention has said once and does not repeat at every pass.
         self._retention_unreadable: set[str] = set()
+        # The same for the arguments sweep, which runs at every create (_rejection_has_lapsed).
+        self._sweep_unreadable: set[str] = set()
         self._retention_waits_for_sqlite = False
         # Keyed per process, so a stored digest cannot be brute-forced offline.
         # An approval for sensitive text therefore only works in the process
@@ -275,7 +277,16 @@ class ApprovalStore:
             return False
         if kept.status == "executed":
             return True  # a spend is final at a start
-        return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
+        try:
+            return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
+        except (ValueError, OverflowError, OSError):
+            # Neither record can be shown to be the later one, and the rule errs toward rejected. Raised from here,
+            # the error ended the catch-up, and the start went on with the file records alone: all of them, this
+            # one read by its file record. OSError: Windows, for a time with no offset before 1970 or far ahead.
+            logger.warning(
+                "approval %s: a time of its file or SQLite record cannot be read, so the rejection stands", record.id
+            )
+            return True
 
     async def _key_stored_digests(self) -> None:
         """At a start, rewrite each record that keeps a stand-in's plain digest with the keyed one, in both stores.
@@ -380,10 +391,22 @@ class ApprovalStore:
                 await self.discard_arguments(approval_id)
 
     def _rejection_has_lapsed(self, approval: ApprovalRecord) -> bool:
-        """Whether a rejection is older than the approval TTL, after which its tool call's arguments go."""
+        """Whether a rejection is older than the approval TTL, after which its tool call's arguments go.
+
+        One whose decision time cannot be read has not: its arguments stay, and the record is named in the log once,
+        as the retention does (_past_retention). Raised from here, the error left the sweep, and with it the start
+        or the request for an approval the sweep ran in, for as long as the record existed.
+        """
         if approval.decided_at is None:
             return False
-        return self._parse_timestamp(approval.decided_at) + self.approval_ttl <= datetime.now(UTC)
+        try:
+            return self._parse_timestamp(approval.decided_at) + self.approval_ttl <= datetime.now(UTC)
+        except (ValueError, OverflowError, OSError):
+            # OSError: a time with no offset is read as local time, which Windows refuses before 1970 or far ahead.
+            if approval.id not in self._sweep_unreadable:
+                self._sweep_unreadable.add(approval.id)
+                logger.warning("kept the arguments of approval %s: its decision time cannot be read", approval.id)
+            return False
 
     async def prune_decided(self, *, open_sessions: Iterable[str] = ()) -> int:
         """Delete the approvals decided more than ``retention_days`` ago, from both stores: how many went.
