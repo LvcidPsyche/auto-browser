@@ -40,43 +40,103 @@ logger = logging.getLogger(__name__)
 
 # The labels the fast profile asks no approval for: a click with one has its target read.
 CHECKED_LABELS = frozenset({"read", "write"})
-# Deliberately narrow: matched case-insensitively, as whole words, at the start of a button's label. Bare "Close",
-# "Cancel", "Dismiss", "OK", "Continue", "Next" and "Accept" are left out on purpose: they are on nearly every page
-# and mostly harmless, and an approval on each would make the fast profile unusable.
+# Deliberately narrow: matched case-insensitively, as whole words, at the start of a line of a button's label
+# (_label_kind has the rules). A comma in a phrase may be left out of the label. Bare "Close", "Cancel", "Dismiss",
+# "OK", "Continue", "Next" and "Accept" are left out on purpose: they are on nearly every page and mostly harmless,
+# and an approval on each would make the fast profile unusable. So are "Checkout" and "Proceed to checkout" (they
+# open a page), "Subscribe", "Unsubscribe", "Submit", "Confirm", "Save changes" and "Clear".
 CLICK_LABEL_PHRASES: dict[ApprovalKind, tuple[str, ...]] = {
     "payment": (
         "pay",
+        "buy",
+        "purchase",
         "place order",
-        "buy now",
+        "place your order",
+        "order now",
+        "confirm order",
         "confirm payment",
         "confirm purchase",
+        "confirm and pay",
+        "complete order",
         "complete purchase",
-        "purchase",
+        "submit order",
+        "submit payment",
+        "donate",
+        "transfer",
     ),
     "destructive": (
         "delete",
         "remove",
+        "erase",
         "permanently delete",
+        "yes, delete",
+        "yes, remove",
+        "confirm delete",
+        "confirm deletion",
+        "empty trash",
         "cancel subscription",
         "close account",
-        "deactivate account",
+        "deactivate",
     ),
     "account_change": ("change password", "update password", "reset password", "change email", "update email"),
     "post": ("publish", "post", "send"),
 }
+# Labels that start with a phrase of the table and are harmless all the same, matched the same way and before
+# it: a filter or a basket line taken away, a page of past orders, a plan's name, a form field's name.
+HARMLESS_LABEL_PHRASES: tuple[str, ...] = (
+    "remove filter",
+    "remove filters",
+    "remove all filters",
+    "remove from cart",
+    "remove from basket",
+    "remove from compare",
+    "remove from wishlist",
+    "remove from favorites",
+    "remove from favourites",
+    "purchase history",
+    "purchase order",
+    "purchase orders",
+    "pay as you go",
+    "post code",
+)
+# "Send" asks nothing when its label goes on to one of these words: a login form's "Send code", "Send me a login
+# link", "Send reset link". Without it no login by a one-time code ran unattended.
+HARMLESS_AFTER_SEND: tuple[str, ...] = ("code", "link", "otp", "passcode", "verification")
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40
 # The read's bound, for the message that runs it and, apart, for the messages that set it up: past it the click
 # goes on unclassified.
 READ_TIMEOUT_MS = 2000
-# How much of each label the page hands over: enough for the lines the label rules read.
-_LABEL_CUT = MAX_LABEL_CHARS * 4
+# The lines of a label that are read, each by itself: a button's name, then what is written under it.
+MAX_LABEL_LINES = 3
+# How much of each label the page hands over: room for the lines read, long ones too.
+_LABEL_CUT = MAX_LABEL_CHARS * 10
 _BUTTON_INPUT_TYPES = frozenset({"button", "submit", "image", "reset"})
-_PHRASE_PATTERNS = {
-    kind: re.compile("^(?:" + "|".join(re.escape(phrase) for phrase in phrases) + r")(?!\w)")
-    for kind, phrases in CLICK_LABEL_PHRASES.items()
-}
+# A phrase ends where its last word does: a hyphen goes on with the word ("Pay-as-you-go", "Post-processing").
+_WORD_END = r"(?![\w\-\u2010\u2011])"
+
+
+def _starting_with(phrases: tuple[str, ...]) -> str:
+    return "^(?:" + "|".join(re.escape(phrase).replace(",", ",?") for phrase in phrases) + ")" + _WORD_END
+
+
+_PHRASE_PATTERNS = {kind: re.compile(_starting_with(phrases)) for kind, phrases in CLICK_LABEL_PHRASES.items()}
+_HARMLESS_PATTERN = re.compile(
+    _starting_with(HARMLESS_LABEL_PHRASES)
+    + "|"
+    + _starting_with(("send",))
+    + r"(?=.*\b(?:"
+    + "|".join(re.escape(word) for word in HARMLESS_AFTER_SEND)
+    + r")\b)"
+)
 _LEADING_SYMBOLS = re.compile(r"^[^\w]+")
+# Characters that show nothing and would split a word from the table's: zero-width space, non-joiner and joiner,
+# word joiner, byte order mark, soft hyphen.
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"))
+# A token that is no word of the label: a number or a mark ("1", "\N{MIDDLE DOT}"), or an icon font's ligature
+# name, which has an underscore ("shopping_cart"). Up to this many are skipped before the label's first word.
+_NOT_A_WORD = re.compile(r"[\W\d]+|\S*_\S*")
+_MAX_SKIPPED_TOKENS = 2
 
 # (el, limit) => what a click on el lands on, or null. The element counts as the button, input or link it sits in,
 # as a click on it is one on them. Both reads below describe their element with it, so they cannot drift apart.
@@ -145,13 +205,44 @@ SAME_ELEMENT_TIMEOUT_MS = 500
 
 
 def _label_kind(label: str) -> ApprovalKind | None:
-    shown = _LEADING_SYMBOLS.sub("", " ".join(label.split())).casefold()
+    """The kind of the first phrase of the table a label starts with, read whole and line by line; None for none.
+
+    The label is read as its whole text on one line (a phrase a line break splits is still one), and then each of
+    its first MAX_LABEL_LINES lines by itself: a button whose name stands over a sentence about it is longer than
+    a name, and was skipped whole.
+    """
+    lines = [line for line in label.translate(_INVISIBLE).splitlines() if line.strip()]
+    for text in (" ".join(lines), *lines[:MAX_LABEL_LINES]) if len(lines) > 1 else lines:
+        kind = _line_kind(text)
+        if kind is not None:
+            return kind
+    return None
+
+
+def _line_kind(line: str) -> ApprovalKind | None:
+    shown = _LEADING_SYMBOLS.sub("", " ".join(line.split())).casefold()
     if not shown or len(shown) > MAX_LABEL_CHARS:
+        return None
+    shown = _from_its_first_word(shown)
+    if _HARMLESS_PATTERN.match(shown):
         return None
     for kind, pattern in _PHRASE_PATTERNS.items():
         if pattern.match(shown):
             return kind
     return None
+
+
+def _from_its_first_word(shown: str) -> str:
+    """``shown`` without the tokens before its first word that are not words; one that is all the label has is
+    read with its underscores as spaces ("delete_forever", an icon font's name for the icon it draws)."""
+    tokens = shown.split(" ")
+    skipped = 0
+    while skipped < _MAX_SKIPPED_TOKENS and len(tokens) > 1 and _NOT_A_WORD.fullmatch(tokens[0]):
+        tokens = tokens[1:]
+        skipped += 1
+    if len(tokens) == 1 and "_" in tokens[0]:
+        return " ".join(tokens[0].replace("_", " ").split())
+    return _LEADING_SYMBOLS.sub("", " ".join(tokens))
 
 
 def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | None:

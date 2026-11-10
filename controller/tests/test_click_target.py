@@ -23,6 +23,8 @@ from app.browser.click_target import (
     CLICK_LABEL_PHRASES,
     CLICK_TARGET_SCRIPT,
     DESCRIBE_TARGET_SCRIPT,
+    HARMLESS_AFTER_SEND,
+    HARMLESS_LABEL_PHRASES,
     MAX_LABEL_CHARS,
     READ_TIMEOUT_MS,
     classified_reason,
@@ -103,6 +105,148 @@ class ClassifiedRiskTests(unittest.TestCase):
         for target in (None, "button", [], {"tag": 1, "labels": "Delete"}, {}):
             with self.subTest(target=target):
                 self.assertIsNone(classified_risk(target, "read"))
+
+
+class LabelRulesTests(unittest.TestCase):
+    """The rules a label is read by, one table of labels that must ask and one of labels that must not."""
+
+    MUST_ASK = (
+        # Each line on its own: a name on one line and a sentence under it.
+        ("destructive", "Delete account\nThis permanently removes your profile and all of its data"),
+        ("payment", "Premium plan, billed monthly until you cancel it\nPay $20.00\nCancel anytime"),
+        ("post", "Share\n\n\nPublish"),
+        # A phrase a line break splits is still read whole.
+        ("payment", "Place\norder"),
+        # Leading tokens that are not words: a number, an icon font's ligature name.
+        ("destructive", "1 Delete"),
+        ("destructive", "2 \N{MIDDLE DOT} Remove"),
+        ("payment", "shopping_cart Buy now"),
+        ("payment", "credit_card Pay now"),
+        ("destructive", "delete_forever"),
+        ("destructive", "remove_circle_outline"),
+        # Invisible characters.
+        ("destructive", "De​lete"),
+        ("payment", "Pay­ now"),
+        ("destructive", "﻿Remove"),
+        ("post", "Pu‌blish"),
+        ("post", "Se‍nd"),
+        ("payment", "⁠Purchase"),
+        # The phrases added.
+        ("payment", "Place your order"),
+        ("payment", "Buy it now"),
+        ("payment", "Buy tickets"),
+        ("payment", "Confirm order"),
+        ("payment", "Confirm and pay"),
+        ("payment", "Complete order"),
+        ("payment", "Submit payment"),
+        ("payment", "Submit order"),
+        ("payment", "Order now"),
+        ("payment", "Donate"),
+        ("payment", "Transfer"),
+        ("destructive", "Yes, delete"),
+        ("destructive", "Yes delete it"),
+        ("destructive", "Yes, remove"),
+        ("destructive", "Confirm delete"),
+        ("destructive", "Confirm deletion"),
+        ("destructive", "Erase"),
+        ("destructive", "Empty trash"),
+        ("destructive", "Deactivate"),
+        ("destructive", "Deactivate account"),
+        # What a harmless continuation must not swallow.
+        ("post", "Send"),
+        ("post", "Send message"),
+        ("post", "Send codes of conduct"),
+        ("destructive", "Remove"),
+        ("destructive", "Remove member"),
+        ("destructive", "Remove filtered items"),
+        ("destructive", "Delete draft"),
+        ("payment", "Pay"),
+        ("payment", "Pay - $20.00"),
+        ("payment", "Purchase"),
+        ("post", "Post"),
+    )
+    MUST_NOT_ASK = (
+        # A hyphen is part of a word.
+        "Pay-as-you-go",
+        "Post-processing",
+        "Send-off party",
+        "Delete‐protected",
+        # Harmless continuations of a phrase.
+        "Send code",
+        "Send me a login link",
+        "Send reset link",
+        "Send OTP",
+        "Send one-time passcode",
+        "Send verification email",
+        "Remove filter",
+        "Remove filters",
+        "Remove all filters",
+        "Remove from cart",
+        "Remove from basket",
+        "Remove from compare",
+        "Remove from wishlist",
+        "Remove from favorites",
+        "Remove from favourites",
+        "Purchase history",
+        "Purchase order",
+        "Purchase orders",
+        "Pay as you go",
+        "Post code",
+        # Left out on purpose.
+        "Close",
+        "Cancel",
+        "Dismiss",
+        "OK",
+        "Continue",
+        "Next",
+        "Accept",
+        "Cancel anytime",
+        "Checkout",
+        "Proceed to checkout",
+        "Subscribe",
+        "Unsubscribe",
+        "Submit",
+        "Confirm",
+        "Save changes",
+        "Clear",
+        # Not a label at all.
+        "1",
+        "shopping_cart",
+        "arrow_back more_vert",
+        "​",
+        # Past the first three lines, or a line that is a sentence.
+        "Settings\nProfile\nSecurity\nDelete account",
+        "Account\nDelete everything you have ever stored with us, for good",
+    )
+
+    def test_labels_that_must_ask(self) -> None:
+        for kind, label in self.MUST_ASK:
+            with self.subTest(label=label):
+                self.assertEqual(classified_risk(button(label), "read"), kind)
+
+    def test_labels_that_must_not_ask(self) -> None:
+        for label in self.MUST_NOT_ASK:
+            with self.subTest(label=label):
+                self.assertIsNone(classified_risk(button(label), "write"))
+
+    def test_no_phrase_is_covered_by_a_shorter_one_of_its_kind(self) -> None:
+        # "buy now" beside "buy" matches nothing "buy" does not: the table stays what is needed.
+        for kind, phrases in CLICK_LABEL_PHRASES.items():
+            for phrase in phrases:
+                covering = [other for other in phrases if other != phrase and phrase.startswith(other + " ")]
+                with self.subTest(kind=kind, phrase=phrase):
+                    self.assertEqual(covering, [])
+
+    def test_every_harmless_continuation_starts_with_a_phrase_of_the_table(self) -> None:
+        # One that starts with none is dead weight: the table would not have matched it.
+        phrases = [phrase for kind in CLICK_LABEL_PHRASES.values() for phrase in kind]
+        for harmless in (*HARMLESS_LABEL_PHRASES, "send"):
+            with self.subTest(harmless=harmless):
+                self.assertTrue(any(harmless == phrase or harmless.startswith(phrase + " ") for phrase in phrases))
+        self.assertTrue(HARMLESS_AFTER_SEND)
+
+    def test_the_page_hands_over_enough_of_a_label_for_three_lines(self) -> None:
+        self.assertGreaterEqual(click_target._LABEL_CUT, 3 * (MAX_LABEL_CHARS + 1))
 
 
 class ClassifiedReasonTests(unittest.TestCase):
@@ -192,7 +336,7 @@ class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_selector_is_read_on_the_element_the_click_would_find(self) -> None:
         element_ids = AsyncMock()
-        limit = MAX_LABEL_CHARS * 4
+        limit = click_target._LABEL_CUT
 
         for selector in ("#delete", "text=Delete account", 'role=button[name="Delete"]', "xpath=//button"):
             with self.subTest(selector=selector):

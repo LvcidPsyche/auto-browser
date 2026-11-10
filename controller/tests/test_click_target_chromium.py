@@ -39,6 +39,13 @@ SMALL_CONTROL = """<title>start</title>
 <button id="delete" onclick="document.title = 'DELETED'">Delete account<span id="dot"
   onclick="event.stopPropagation(); window.dots = (window.dots || 0) + 1"></span></button>
 """
+# Buttons whose text is more than a name: a sentence under it, an icon font's ligature before it.
+WORDY = """<title>start</title>
+<button id="two" onclick="document.title='GONE'"><strong>Delete account</strong><br>
+  <small>This permanently removes your profile and all of its data</small></button>
+<button id="icon" onclick="document.title='PAID'"><span class="material-icons">credit_card</span> Pay now</button>
+<button id="code" onclick="document.title='SENT'">Send code</button>
+"""
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
 # PAGE with a button before the others that only a selector piercing an open shadow root finds.
@@ -86,7 +93,7 @@ async def test_a_read_labelled_click_on_a_delete_button_asks_for_its_approval(tm
         # The operator is told who chose the kind, before the account of the model that was steered.
         assert approval.reason == (
             'The controller reads this click\'s target as a button of kind "destructive"; the agent labelled the '
-            'click "read". The agent\'s reason: the model\'s word'
+            "click \"read\". The agent's reason: the model's word"
         )
         assert await _title(env, session_id) == "start"
 
@@ -151,6 +158,21 @@ async def test_a_selector_that_matches_nothing_is_not_classified_and_fails_as_th
         assert loop.time() - started < (READ_TIMEOUT_MS + 3000) / 1000 + 3
         assert await env.manager.approvals.list() == []
         assert await _title(env, session_id) == "start"
+
+
+async def test_a_name_over_a_sentence_and_a_name_after_an_icons_ligature_are_read(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/": WORDY}) as env:
+        session_id = await env.create("/")
+
+        for selector, kind in (("#two", "destructive"), ("#icon", "payment")):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", selector=selector))
+            assert asked.value.approval.kind == kind
+        assert await _title(env, session_id) == "start"
+
+        # A login form's "Send code" is not a post: it runs unattended.
+        await env.manager.execute_decision(session_id, _click("write", selector="#code"))
+        assert await _title(env, session_id) == "SENT"
 
 
 async def test_a_close_button_and_a_link_run_as_labelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
