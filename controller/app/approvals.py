@@ -860,12 +860,15 @@ class ApprovalStore:
         """Refuse an operator of APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS an approve of what they asked for.
 
         Both named by credentials: an unowned request, or a decider no credential proves, is no one's own.
+        The store cannot tell whether anyone else can reach the approval (the services decide that from its
+        session's owner), so the refusal says where one can.
         """
         if decided_by is None or decided_by != approval.owner or decided_by not in self.refuse_self_approval:
             return
         raise ServerStateRefusal(
             f"approval {approval.id}: operator {decided_by} asked for it and may not approve it "
-            "(APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS); another operator decides it"
+            "(APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS). Another operator approves it where one can reach it, in a "
+            f"session nobody owns; in a session {decided_by} owns, or in controller scope, no other operator can"
         )
 
     async def _refuse_what_is_no_longer_whole(self, approval: ApprovalRecord) -> None:

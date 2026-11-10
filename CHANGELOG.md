@@ -219,6 +219,8 @@ All notable changes to auto-browser are documented here.
   `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS` (operator ids, comma-separated, empty by default) refuses a
   listed operator's approve of an approval they asked for with `409` and the reason, the withdraw of a rejection
   waiting on it included; their rejections, and an agent's approval under `AUTONOMOUS_APPROVALS`, are not affected.
+  Another operator can approve it only where one can reach it, in a session nobody owns: in a session the asker
+  owns, and in controller scope, it stays pending, so list only operators whose calls run in unowned sessions.
   (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read` or
   `write` asked for no approval, and that label is written by a model reading the page, which the page can steer.
