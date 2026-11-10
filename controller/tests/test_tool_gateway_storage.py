@@ -312,6 +312,36 @@ class GatewayWriteRecordTests(SpendBase):
         with self.assertRaisesRegex(OSError, "disk full"):
             await self.gateway._set_cookies(payload)
 
+    async def test_a_cookie_holding_a_lone_surrogate_is_refused_before_the_page_is_touched(self) -> None:
+        # Chromium stores such a cookie with U+FFFD in the surrogate's place, so it is not the cookie that was sent;
+        # browser.set_local_storage refuses one in its key and value the same way.
+        good = {"name": "sid", "value": "v", "domain": "example.com", "path": "/"}
+        cases = {
+            "name": {**good, "name": "sid\ud800"},
+            "value": {**good, "value": "v\udfff"},
+            "domain": {**good, "domain": "example.com\ud800"},
+            "path": {**good, "path": "/\ud800"},
+            "url": {"name": "sid", "value": "v", "url": "https://example.com/\ud800"},
+            "nested": {**good, "partitionKey": {"topLevelSite": ["https://example.com\ud800"]}},
+        }
+        for field, cookie in cases.items():
+            with self.subTest(field=field):
+                # A good cookie in the same call is not set either.
+                response = await self.call("browser.set_cookies", session_id=SESSION, cookies=[good, cookie])
+
+                self.assertTrue(response.isError)
+                self.assertIn("cookies[1] must not hold a lone surrogate", response.content[0].text)
+                response.content[0].text.encode("utf-8")
+        self.context.add_cookies.assert_not_awaited()
+        self.assertEqual(await self.records("browser.set_cookies"), ([], []))
+
+    def test_a_cookie_of_ordinary_text_passes_whatever_its_value_types(self) -> None:
+        cookie = {"name": "sid", "value": "né €\U0001f600", "domain": "example.com", "expires": 1.5, "secure": True}
+
+        payload = SetCookiesInput(session_id=SESSION, cookies=[cookie, {**cookie, "sameSite": None}])
+
+        self.assertEqual(payload.cookies[0], cookie)
+
     async def test_a_cookie_named_with_a_lone_surrogate_still_leaves_its_audit_entry_and_receipt(self) -> None:
         # FR-B2-1. Past the input model (which refuses one now): the audit store raised on the name after the cookies
         # were set, so the write left no audit entry, no receipt and no log line.

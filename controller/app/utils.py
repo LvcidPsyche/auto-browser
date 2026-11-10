@@ -69,6 +69,17 @@ def without_lone_surrogates(value: Any) -> Any:
     return value
 
 
+def holds_lone_surrogate(value: Any) -> bool:
+    """Whether a string anywhere in ``value``, a dict key included, holds a lone surrogate."""
+    if isinstance(value, str):
+        return _LONE_SURROGATE.search(value) is not None
+    if isinstance(value, dict):
+        return any(holds_lone_surrogate(key) or holds_lone_surrogate(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(holds_lone_surrogate(item) for item in value)
+    return False
+
+
 def record_json(record: BaseModel, *, indent: int | None = None) -> str:
     """``record`` as the JSON a store writes, with each lone surrogate in its strings replaced by U+FFFD.
 

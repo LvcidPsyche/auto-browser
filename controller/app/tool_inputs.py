@@ -35,6 +35,7 @@ from .models import (
 from .regex_guard import catastrophic_repeat
 from .result_shaping import ResultDetail
 from .url_safety import refuse_ambiguous_host, refuse_another_navigation_host
+from .utils import holds_lone_surrogate
 
 __all__ = [
     "AgentJobIdInput",
@@ -486,6 +487,11 @@ class SetCookiesInput(SessionIdInput):
         for index, cookie in enumerate(self.cookies):
             if not isinstance(cookie, dict):
                 raise ValueError(f"cookies[{index}] must be an object")
+            # A cookie's values are free (Any), so pydantic does not refuse one as it does in a str field, such as
+            # set_local_storage's key and value: the browser would store U+FFFD in its place, another cookie than
+            # the one sent. What was sent is not repeated.
+            if holds_lone_surrogate(cookie):
+                raise ValueError(f"cookies[{index}] must not hold a lone surrogate (half of a UTF-16 pair)")
             name = str(cookie.get("name") or "").strip()
             value = cookie.get("value")
             domain = str(cookie.get("domain") or "").strip()

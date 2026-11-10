@@ -302,7 +302,10 @@ All notable changes to auto-browser are documented here.
   store had the same fault and write U+FFFD too: a session whose page title held one could not have its record
   saved, at its close included, and an agent run that finished with one in its result was recorded `failed` with no
   result, though its steps had run. A tool write whose record still cannot be written (a full disk) is now logged
-  at ERROR with the tool and the session, whatever the error's class.
+  at ERROR with the tool and the session, whatever the error's class. `browser.set_cookies` also refuses a cookie
+  with a lone surrogate in any of its strings before anything reaches the browser, as `browser.set_local_storage`
+  refuses one in its key or value: Chromium stored such a cookie with U+FFFD in the surrogate's place, and a good
+  cookie sent in the same call with it.
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
   and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and
