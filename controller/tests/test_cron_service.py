@@ -607,6 +607,7 @@ class CronRunOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
 
 ALICE = OperatorIdentity(id="alice", source="token")
+BOB = OperatorIdentity(id="bob", source="token")
 OWNER_CREDENTIAL_GONE = "refused: owner credential removed"
 
 
@@ -673,6 +674,67 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(name):
                 self.manager.audit.append.reset_mock()
                 self._assert_refused(await fire())
+
+    def _audit_as_whoever_is_current(self) -> list[tuple[str, str]]:
+        audited_as: list[tuple[str, str]] = []
+
+        async def append(**_kwargs) -> None:
+            audited_as.append(_who())
+
+        self.manager.audit.append = append
+        return audited_as
+
+    async def test_a_scheduled_fires_refusal_is_audited_as_the_system_not_as_who_last_woke_the_scheduler(self) -> None:
+        # APScheduler's timer keeps the context of the request that last re-armed it (bob creating a job of his own),
+        # and the refusal was audited as that operator.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        audited_as = self._audit_as_whoever_is_current()
+
+        with acting_as(BOB):
+            await self.service._scheduled_run(self.job["id"])
+            self.assertEqual(_who(), ("bob", "token"), "the scheduled run left its identity behind")
+
+        self.assertEqual(audited_as, [("system", "system")])
+
+    async def test_a_scheduled_fire_with_no_request_behind_it_is_the_systems_too(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        audited_as = self._audit_as_whoever_is_current()
+
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(audited_as, [("system", "system")])
+
+    async def test_a_callers_own_trigger_is_still_refused_in_the_callers_name(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        audited_as = self._audit_as_whoever_is_current()
+
+        with acting_as(BOB):
+            await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertEqual(audited_as, [("bob", "token")])
+
+    async def test_a_scheduled_fire_that_is_not_refused_still_runs_as_its_owner(self) -> None:
+        seen: dict[str, tuple[str, str]] = {}
+
+        async def create_session(**_kwargs) -> dict[str, str]:
+            seen["session"] = _who()
+            return {"id": "session-1"}
+
+        async def enqueue_run(_session_id, _request, **_kwargs) -> dict[str, str]:
+            seen["agent_job"] = _who()
+            return {"id": "agent-job-1"}
+
+        self.manager.create_session = create_session
+        self.queue.enqueue_run = enqueue_run
+        unowned = await self.service.create_job(name="shared", goal="g")
+
+        with acting_as(BOB):
+            await self.service._scheduled_run(self.job["id"])
+            self.assertEqual(seen, {"session": ("alice", "token"), "agent_job": ("alice", "token")})
+            seen.clear()
+            await self.service._scheduled_run(unowned["id"])
+
+        self.assertEqual(seen, {"session": ("anonymous", "anonymous"), "agent_job": ("anonymous", "anonymous")})
 
     async def test_a_deployment_moved_to_the_shared_token_or_to_none_refuses_named_owners(self) -> None:
         for tokens, shared in (("", "the-shared-token"), ("", None), ("malformed-without-a-colon", None)):

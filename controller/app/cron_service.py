@@ -430,12 +430,18 @@ class CronService:
             logger.warning("failed to register cron job %s: %s", job["id"], exc)
 
     async def _scheduled_run(self, job_id: str) -> None:
-        """Called by APScheduler on cron trigger."""
+        """Called by APScheduler on cron trigger.
+
+        As the system, as the controller's other housekeeping is: APScheduler's timer keeps the context of whichever
+        request last re-armed it (a create, an update), so a refusal here was audited as that request's operator.
+        The run itself still enters its owner's identity where a triggered one does (_run_job_now).
+        """
         try:
-            jobs = self._load()
-            if job_id not in jobs:
-                return
-            await self._run_job_now(jobs[job_id])
+            with as_system():
+                jobs = self._load()
+                if job_id not in jobs:
+                    return
+                await self._run_job_now(jobs[job_id])
         except Exception as exc:
             logger.error("cron job %s failed: %s", job_id, exc)
 
