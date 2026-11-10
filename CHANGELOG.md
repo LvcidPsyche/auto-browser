@@ -592,7 +592,10 @@ All notable changes to auto-browser are documented here.
   written), and stops only these shapes; that bound stays for the rest. It does not tell a pattern that hangs from
   an everyday one of the same shape: `\d+(\.\d+)*` and `\w+(\s+\w+)*` are refused, and
   `\$\d+(,\d{3})*(\.\d{2})?`, whose inner repeat is bounded, passes. The message says how to bound the group's
-  repeat or each repeat inside it (`{1,50}` in place of `+`, `{0,50}` in place of `*`). (MCP-24)
+  repeat or each repeat inside it (`{1,50}` in place of `+`, `{0,50}` in place of `*`). Selectors are not covered: a
+  Playwright selector can carry a regular expression of its own (`text=/(a+)+$/`, `:text-matches("(a+)+$")`,
+  `role=button[name=/(a+)+$/]`), and one given to an action or to `browser.wait_for_selector` reaches the page as
+  written, where such a pattern can still hang the page. (MCP-24)
 - **`GET /sessions/{id}/trace` no longer names `trace_path`.** The field held the trace file's absolute path on the
   controller, which a client has no use for; `trace_url` and `viewer_command` already name the file. A client that
   read `trace_path` should use `trace_url`. (AUTH-35)

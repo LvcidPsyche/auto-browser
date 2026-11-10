@@ -13,6 +13,18 @@ Canonicalize folds it. A malformed pattern is passed through for the page's RegE
 nested group's parentheses are compared as they are written, so \\x61 against a, [a] against a, or (a) against a is not
 seen, and a group's inline modifiers ((?-i:...)) are not read: its letters fold as the whole pattern's do. That is the
 check's limit: it stops the classic shapes and is not a proof a pattern is safe, and the 10 s guard stays.
+
+Selectors are not covered. A Playwright selector carries regular expressions of its own, and one given to an action or
+to browser.wait_for_selector reaches the page as written: text=/(a+)+$/, :text-matches("(a+)+$") and
+role=button[name=/(a+)+$/] each left a page of thirty letters answering nothing (real Chromium, Playwright 1.64).
+Nothing here scans them, because the pattern is not always in the selector's text as written. Playwright 1.64 reads
+one from a /.../ body (text, internal:text, internal:has-text, internal:has-not-text,
+internal:label), from an attribute value (role, internal:role, internal:attr, internal:testid), from the string given
+to the CSS function :text-matches(), also inside :has() or :is(), where its CSS tokenizer first decodes
+escapes in the function's name and in the string (:text-m\\61 tches("\\28 a+\\29 +$") hung the page the same), from a
+selector nested as a JSON string (internal:has, internal:has-not, internal:and, internal:or, internal:chain, left-of,
+right-of, above, below, near, where "text=/\\u0028a+)+$/" hung it too), and from the JSON template of aria-template=.
+A scan that misses none of them reads a selector as Playwright's own parsers do, at every version of them.
 """
 
 from __future__ import annotations
