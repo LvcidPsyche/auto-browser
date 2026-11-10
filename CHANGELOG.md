@@ -562,8 +562,8 @@ All notable changes to auto-browser are documented here.
   discard now does that itself, once, when no worker holds the run; it waits up to 5 seconds for the close, which
   goes on if the caller gives up, and `last_status` then reads `cancelled` or `discarded`.
 - **Queuing an agent job at a full queue answers `503`, where it answered `500`.** With 100 jobs already waiting,
-  `POST /sessions/{id}/agent/jobs/run` and `POST /sessions/{id}/agent/jobs/step` refused the new job and the refusal
-  reached the client as `500` `Internal error`. Both now answer `503` `Service unavailable`, as
+  `POST /sessions/{id}/agent/jobs/run` and `POST /sessions/{id}/agent/jobs/step` refused the new job and the request
+  answered `500`. Both now answer `503` `Service unavailable`, as
   `POST /agent/jobs/{id}/resume` does at a full queue: try again later. The refused job is recorded `failed`, as
   before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
   Only the full queue is answered so. The resume route answered every `RuntimeError` as `503` with nothing logged, so
