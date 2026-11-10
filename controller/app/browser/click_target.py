@@ -312,14 +312,18 @@ CLICK_TARGET_SCRIPT = (
 """
 )
 # Runs in the isolated world: (arg) => whether a press at (otherX, otherY) lands on the very element one at (x, y)
-# does, found as the classifier finds a point's.
+# does, found as the classifier finds a point's. Not where that cannot be told: nothing at the point, or a frame
+# or plugin the read stops at (another origin's, or a fourth frame down), inside which two points may be two
+# controls.
 SAME_ELEMENT_SCRIPT = (
     r"""
 (arg) => {
   const elementAt = """
     + _ELEMENT_AT_SCRIPT
     + r""";
-  return elementAt(arg.x, arg.y) === elementAt(arg.otherX, arg.otherY);
+  const el = elementAt(arg.x, arg.y);
+  if (!el || ['iframe', 'frame', 'object', 'embed'].includes(el.localName)) return false;
+  return el === elementAt(arg.otherX, arg.otherY);
 }
 """
 )

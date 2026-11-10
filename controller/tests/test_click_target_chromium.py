@@ -17,7 +17,7 @@ import pytest
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
-from app.browser.click_target import CLICK_TARGET_SCRIPT, READ_TIMEOUT_MS
+from app.browser.click_target import CLICK_TARGET_SCRIPT, READ_TIMEOUT_MS, same_element_at
 from app.browser.services import actions as actions_module
 from app.models import BrowserActionDecision
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
@@ -77,7 +77,8 @@ document.getElementById('icon').attachShadow({mode: 'open'}).innerHTML =
 # page (text=Delete account finds the label, or the component), and one whose name and note are separate blocks.
 SLOTTED = """<title>start</title>
 <x-button id="host"><span id="label">Delete account</span></x-button>
-<x-button id="noted"><div>Delete account</div><div>This permanently removes your profile and all its data</div></x-button>
+<x-button id="noted"><div>Delete account</div>
+  <div>This permanently removes your profile and all its data</div></x-button>
 <x-button id="filter"><span>Remove</span> <b>filter</b></x-button>
 <script>
 for (const host of document.querySelectorAll('x-button')) {
@@ -312,6 +313,23 @@ async def test_a_point_inside_a_frame_of_another_origin_is_not_read(tmp_path: Pa
         await env.manager.execute_decision(session_id, _click("read", **sealed))
 
         assert await env.manager.approvals.list() == []
+
+
+async def test_two_points_are_not_one_element_where_neither_can_be_read(tmp_path: Path) -> None:
+    # Inside a frame of another origin every point reads as the frame, and off the page every point reads as
+    # nothing: two controls side by side in such a frame compared as one element, and the jittered press was kept.
+    async with browser_env(tmp_path, {"/": FRAMES}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        ids = env.manager.element_ids
+        sealed = await _centre(page.frame_locator("#apart").locator("#sealed"))
+        shallow = await _centre(page.frame_locator("#outer").locator("#shallow"))
+
+        assert await same_element_at(ids, page, (sealed["x"], sealed["y"]), (sealed["x"] + 2, sealed["y"] + 2)) is False
+        assert await same_element_at(ids, page, (-50.0, -50.0), (-48.0, -48.0)) is False
+        # Where the frame can be read, two points on one button are one element.
+        near = (shallow["x"] + 2, shallow["y"] + 2)
+        assert await same_element_at(ids, page, (shallow["x"], shallow["y"]), near) is True
 
 
 async def test_a_close_button_and_a_link_run_as_labelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
