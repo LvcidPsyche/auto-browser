@@ -480,10 +480,10 @@ class BrowserActionService:
     async def _click_risk_from_its_target(
         self, session: "BrowserSession", decision: BrowserActionDecision
     ) -> tuple[BrowserActionDecision, str | None]:
-        """A click labelled read or write, as what it lands on records it (app/browser/click_target.py), and the
+        """A click labelled read, write or upload, as what it lands on records it (click_target.py), and the
         reason of the approval it asks for when its target gave it a kind that asks (None otherwise).
 
-        Before the approval decision, so a button the model called read or write that deletes, pays, posts or
+        Before the approval decision, so a button the model gave such a label that deletes, pays, posts or
         changes the account asks for approval as an honest label would, and a form submit called read is recorded
         as a write. Not inside an outer layer's approval: a governed run's, which an operator gave for this very
         click, or the one execute_approval runs, whose click was read when it was asked for.

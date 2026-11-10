@@ -168,6 +168,7 @@ async def test_a_write_labelled_click_by_selector_or_point_is_read_too(tmp_path:
 
         for decision, kind in (
             (_click("write", selector="#delete"), "destructive"),
+            (_click("upload", selector="#delete"), "destructive"),
             (_click("write", x=box["x"] + box["width"] / 2, y=box["y"] + box["height"] / 2), "payment"),
         ):
             with pytest.raises(ApprovalRequiredError) as asked:

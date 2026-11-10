@@ -1,13 +1,14 @@
 """What a fast-profile click lands on, read from the page, not taken from the model's label (STORE-42).
 
 In the fast profile a decision's own ``risk_category`` decides whether its click asks for approval, and
-``read`` and ``write`` ask for nothing. That label is written by a model reading the page it acts on, and text on
-the page can steer it to call a click on "Delete account" either one. So before the approval decision, a click so
-labelled has its target read: a button with a line of its label starting with a phrase of CLICK_LABEL_PHRASES is
-recorded with that phrase's kind, and asks for approval as an honest label does, with a reason that says the
-controller chose the kind (classified_reason); a form's submit button labelled ``read`` is recorded as ``write``,
-which the fast profile does not ask about. A target that is not there, or cannot be read (a page that does not
-answer, which is logged at info), changes nothing, and the click reports its own failure.
+``read``, ``write`` and, on a click, ``upload`` ask for nothing. That label is written by a model reading the page
+it acts on, and text on the page can steer it to call a click on "Delete account" any of them. So before the
+approval decision, a click so labelled has its target read: a button with a line of its label starting with a
+phrase of CLICK_LABEL_PHRASES is recorded with that phrase's kind, and asks for approval as an honest label does,
+with a reason that says the controller chose the kind (classified_reason); a form's submit button labelled
+``read`` is recorded as ``write``, which the fast profile does not ask about. A target that is not there, or cannot
+be read (a page that does not answer, which is logged at info), changes nothing, and the click reports its own
+failure.
 
 The target is found as the click will find it. One named by element id or by a point is read in the controller's
 isolated world (element_world.py), where no page script runs; a point is followed through open shadow roots and
@@ -45,8 +46,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The labels the fast profile asks no approval for: a click with one has its target read.
-CHECKED_LABELS = frozenset({"read", "write"})
+# The labels the fast profile asks no approval for on a click: a click with one has its target read. "upload"
+# is one of them: only the upload action asks for that kind.
+CHECKED_LABELS = frozenset({"read", "write", "upload"})
 # Deliberately narrow: matched case-insensitively, as whole words, at the start of a line of a button's label
 # (_label_kind has the rules). A comma in a phrase may be left out of the label. Bare "Close", "Cancel", "Dismiss",
 # "OK", "Continue", "Next" and "Accept" are left out on purpose: they are on nearly every page and mostly harmless,

@@ -11,7 +11,8 @@ import asyncio
 import gc
 import logging
 import unittest
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 
 from playwright.async_api import Error as PlaywrightError
@@ -21,6 +22,7 @@ from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approval_display import APPROVAL_SUMMARY_CUT
 from app.browser import click_target
 from app.browser.click_target import (
+    CHECKED_LABELS,
     CLICK_LABEL_PHRASES,
     CLICK_TARGET_SCRIPT,
     DESCRIBE_TARGET_SCRIPT,
@@ -34,7 +36,8 @@ from app.browser.click_target import (
     classified_risk,
     read_click_target,
 )
-from app.models import BrowserActionDecision
+from app.browser.services.actions import BrowserActionService
+from app.models import BrowserActionDecision, RiskCategory
 
 
 def button(*labels: str, tag: str = "button", type: str = "button", role: str = "", submits: bool = False) -> dict:
@@ -51,7 +54,7 @@ class ClassifiedRiskTests(unittest.TestCase):
             ("account_change", "Change password"),
             ("post", "Publish"),
         ):
-            for label_as in ("read", "write"):
+            for label_as in ("read", "write", "upload"):
                 with self.subTest(label=label, label_as=label_as):
                     self.assertEqual(classified_risk(button("", label), label_as), kind)
 
@@ -102,12 +105,22 @@ class ClassifiedRiskTests(unittest.TestCase):
         self.assertIsNone(classified_risk(button("Show more"), "read"))
 
     def test_other_labels_and_unreadable_targets_change_nothing(self) -> None:
-        for label in ("payment", "post", "account_change", "destructive", "upload", None):
+        for label in ("payment", "post", "account_change", "destructive", None):
             with self.subTest(label=label):
                 self.assertIsNone(classified_risk(button("Delete", type="submit", submits=True), label))
         for target in (None, "button", [], {"tag": 1, "labels": "Delete"}, {}):
             with self.subTest(target=target):
                 self.assertIsNone(classified_risk(target, "read"))
+
+    def test_every_label_a_click_can_carry_asks_by_itself_or_has_its_target_read(self) -> None:
+        # "upload" on a click asked for nothing (only the upload action asks for that kind) and was not read: a
+        # third label under which "Delete account" ran as the model called it.
+        settings = SimpleNamespace(require_approval_for_uploads=True)
+        service = BrowserActionService(SimpleNamespace(settings=settings))
+        for label in get_args(RiskCategory):
+            click = BrowserActionDecision(action="click", reason="r", risk_category=label, selector="#delete")
+            with self.subTest(label=label):
+                self.assertTrue(service.approval_kind_for_decision(click) is not None or label in CHECKED_LABELS)
 
 
 class LabelRulesTests(unittest.TestCase):

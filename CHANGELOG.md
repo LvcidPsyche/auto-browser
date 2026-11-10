@@ -163,7 +163,8 @@ All notable changes to auto-browser are documented here.
   `APPROVAL_RETENTION_DAYS=0` before upgrading, or copy `APPROVAL_ROOT` and the database first. A negative value
   stops the controller at startup.
 - **A fast-profile click on a pay, delete, post or account button now asks for approval, whatever its label.** A
-  click labelled `read` or `write` (an unlabelled click is `write`) on a button whose label starts with a phrase such
+  click labelled `read`, `write` or `upload` (an unlabelled click is `write`) on a button whose label starts with a
+  phrase such
   as `Pay`, `Buy`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers `approval_required` of
   that kind, as the same click labelled honestly did. An agent loop that ran such clicks unattended in the fast
   profile now stops there until an operator approves (or the agent itself, under `AUTONOMOUS_APPROVALS`). A form
@@ -294,8 +295,9 @@ All notable changes to auto-browser are documented here.
   A listed id is compared to the operator's id exactly, case included: one that no credential in
   `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id and says when it
   differs from a credential's only by case. (AUTH-36)
-- **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read` or
-  `write` asked for no approval, and that label is written by a model reading the page, which text on the page can
+- **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read`,
+  `write` or `upload` asked for no approval, and that label is written by a model reading the page, which text on
+  the page can
   steer. Before the approval decision the click's target is now read, found as the click will find it: an
   `element_id` or a point in the controller's isolated world, where no page script runs (a point through open
   shadow roots and into frames of the page's own origin), and a selector by Playwright's own resolution, so `text=`,

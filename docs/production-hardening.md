@@ -102,7 +102,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     `browser.cdp_attach`) is held in a controller-wide scope and belongs to the operator who
     asked, as described in `docs/mcp-clients.md`.
 - In the fast profile a click's `risk_category` is the model's word, and text on a page can steer the model, so a
-  click labelled `read` or `write` (an unlabelled click is `write`) has its target read first, found as the click
+  click labelled `read`, `write` or `upload` (an unlabelled click is `write`; only the upload action asks for
+  `upload`) has its target read first, found as the click
   will find it. An `element_id` or a point is read in the controller's isolated world, a point through open shadow
   roots and into frames of the page's own origin (three deep). A selector is resolved by Playwright, as the click
   resolves it (CSS through open shadow roots, `text=`, `role=`, `xpath=`, `>>` chains), and its element is
