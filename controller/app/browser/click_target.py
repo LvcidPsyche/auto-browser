@@ -107,7 +107,15 @@ CLICK_LABEL_PHRASES: dict[ApprovalKind, tuple[str, ...]] = {
         "close account",
         "deactivate",
     ),
-    "account_change": ("change password", "update password", "reset password", "change email", "update email"),
+    "account_change": (
+        "change password",
+        "update password",
+        "reset password",
+        "change email",
+        "change e-mail",
+        "update email",
+        "update e-mail",
+    ),
     "post": ("publish", "post", "send"),
 }
 # Labels that start with a phrase of the table and are harmless all the same, matched the same way and before

@@ -54,6 +54,8 @@ class ClassifiedRiskTests(unittest.TestCase):
             ("destructive", "Delete account"),
             ("destructive", "Cancel subscription"),
             ("account_change", "Change password"),
+            ("account_change", "Change e-mail"),
+            ("account_change", "Update e-mail address"),
             ("post", "Publish"),
         ):
             for label_as in ("read", "write", "upload"):

@@ -123,7 +123,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       `Submit order`, `Submit payment`, `Donate`, `Transfer`
     - `destructive`: `Delete`, `Remove`, `Erase`, `Permanently delete`, `Yes, delete`, `Yes, remove`,
       `Confirm delete`, `Confirm deletion`, `Empty trash`, `Cancel subscription`, `Close account`, `Deactivate`
-    - `account_change`: `Change password`, `Update password`, `Reset password`, `Change email`, `Update email`
+    - `account_change`: `Change password`, `Update password`, `Reset password`, `Change email`, `Change e-mail`,
+      `Update email`, `Update e-mail`
     - `post`: `Publish`, `Post`, `Send`
     - Not asked about, though each starts with a phrase above: `Remove filter`, `Remove filters`,
       `Remove all filters`, `Remove from cart`, `Remove from basket`, `Remove from bag`, `Remove from compare`,
