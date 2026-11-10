@@ -15,7 +15,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -23,13 +25,22 @@ import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app import session_isolation
+from app.audit import get_current_operator
 from app.browser_manager import BrowserManager
 from app.main import handle_key_not_found
-from app.models import McpToolCallRequest
+from app.models import McpToolCallRequest, OperatorIdentity
 from app.routes.extensions import _DASHBOARD_HTML
 from app.routes.operations import create_operations_router
-from app.routes.sessions import TAKEOVER_LINK_REFUSED_DETAIL, TakeoverRefusalWindows, create_sessions_router
+from app.routes.sessions import (
+    TAKEOVER_LINK_REFUSED_DETAIL,
+    HeldBack,
+    RefusedCall,
+    TakeoverRefusalWindows,
+    create_sessions_router,
+    write_held_takeover_refusals,
+)
 from app.session_isolation import DockerBrowserNodeProvisioner
 from app.tool_gateway.gateway import McpToolGateway
 from tests._bash import BASH, NO_BASH_REASON
@@ -90,7 +101,8 @@ class _Isolated(unittest.IsolatedAsyncioTestCase):
         self.gateway = McpToolGateway(manager=manager, orchestrator=Mock(), job_queue=Mock(), tool_profile="full")
         app = FastAPI()
         app.add_exception_handler(KeyError, handle_key_not_found)  # the controller's own: an unknown session is 404
-        app.include_router(create_sessions_router(manager=manager))
+        self.refusal_windows = TakeoverRefusalWindows()
+        app.include_router(create_sessions_router(manager=manager, refusal_windows=self.refusal_windows))
         app.include_router(create_operations_router(manager=manager, proxy_store=Mock(), cron_service=Mock()))
         self.app = app
         self.client = TestClient(app)
@@ -281,42 +293,167 @@ class TakeoverTokenTests(_Isolated):
         self.assertEqual(allowed.status_code, 200, allowed.text)
 
 
+NOBODY = OperatorIdentity(id="anonymous", source="anonymous")
+NONE_HELD = HeldBack(0, False)
+
+
+def refused_call(session_id: str = "s1", reason: str = "wrong takeover token") -> RefusedCall:
+    return RefusedCall(session_id=session_id, reason=reason, operator=NOBODY)
+
+
 class TakeoverRefusalWindowsEventNotWrittenTests(unittest.TestCase):
     SOURCE = "host:203.0.113.9"
 
     def setUp(self) -> None:
         self.windows = TakeoverRefusalWindows()
 
+    def record(self, now: float, source: str = SOURCE) -> HeldBack | None:
+        return self.windows.record(source, refused_call(), now=now)
+
     def test_a_window_whose_event_was_not_written_does_not_stand(self) -> None:
-        self.assertEqual(self.windows.record(self.SOURCE, now=1000.0), 0)
+        self.assertEqual(self.record(1000.0), NONE_HELD)
 
-        self.windows.event_not_written(self.SOURCE, reported=0)
+        self.windows.event_not_written(self.SOURCE, refused_call(), NONE_HELD)
 
-        self.assertEqual(self.windows.record(self.SOURCE, now=1001.0), 1)  # the refusal whose event was lost
-        self.assertIsNone(self.windows.record(self.SOURCE, now=1002.0))  # that event opened the window
+        self.assertEqual(self.record(1001.0), HeldBack(1, False))  # the refusal whose event was lost
+        self.assertIsNone(self.record(1002.0))  # that event opened the window
 
     def test_what_the_lost_event_was_to_report_is_kept_with_this_refusal(self) -> None:
-        self.windows.record(self.SOURCE, now=1000.0)
-        self.windows.record(self.SOURCE, now=1001.0)
-        reported = self.windows.record(self.SOURCE, now=1060.0)
-        self.assertEqual(reported, 1)
+        self.record(1000.0)
+        self.record(1001.0)
+        reported = self.record(1060.0)
+        self.assertEqual(reported, HeldBack(1, False))
 
-        self.windows.event_not_written(self.SOURCE, reported=reported)
+        self.windows.event_not_written(self.SOURCE, refused_call(), reported)
 
-        self.assertEqual(self.windows.record(self.SOURCE, now=1061.0), 2)
+        self.assertEqual(self.record(1061.0), HeldBack(2, False))
 
     def test_counts_added_while_the_append_failed_are_kept(self) -> None:
-        self.assertEqual(self.windows.record(self.SOURCE, now=1000.0), 0)
-        self.assertIsNone(self.windows.record(self.SOURCE, now=1000.5))  # concurrent, during the append
+        self.assertEqual(self.record(1000.0), NONE_HELD)
+        self.assertIsNone(self.record(1000.5))  # concurrent, during the append
 
-        self.windows.event_not_written(self.SOURCE, reported=0)
+        self.windows.event_not_written(self.SOURCE, refused_call(), NONE_HELD)
 
-        self.assertEqual(self.windows.record(self.SOURCE, now=1001.0), 2)
+        self.assertEqual(self.record(1001.0), HeldBack(2, False))
 
     def test_a_source_pushed_out_meanwhile_audits_as_new(self) -> None:
-        self.windows.event_not_written("host:never-seen", reported=0)  # nothing to undo, and no error
+        self.windows.event_not_written("host:never-seen", refused_call(), NONE_HELD)  # nothing to undo, and no error
 
-        self.assertEqual(self.windows.record("host:never-seen", now=1000.0), 0)
+        self.assertEqual(self.record(1000.0, "host:never-seen"), NONE_HELD)
+
+
+class TakeoverRefusalWindowsHeldTests(unittest.TestCase):
+    """What was only counted can be taken to be written without waiting for the source's next refusal."""
+
+    SOURCE = "host:203.0.113.9"
+
+    def setUp(self) -> None:
+        self.windows = TakeoverRefusalWindows()
+
+    def refuse(self, now: float, session_id: str = "s1", source: str = SOURCE, reason: str = "wrong takeover token"):
+        return self.windows.record(source, refused_call(session_id, reason), now=now)
+
+    def test_nothing_is_taken_while_the_window_runs_and_all_of_it_once_it_is_over(self) -> None:
+        for second in range(5):
+            self.refuse(1000.0 + second)
+
+        self.assertEqual(self.windows.take_held(now=1059.9), [])
+        taken = self.windows.take_held(now=1060.0)
+
+        # The event is the last counted refusal's, and it reports the three counted before it: with the first
+        # refusal's own event, five.
+        self.assertEqual(taken, [(self.SOURCE, refused_call(), HeldBack(3, False))])
+        self.assertEqual(self.windows.take_held(now=1061.0), [])  # taken once
+
+    def test_one_counted_refusal_is_its_own_event_with_no_count(self) -> None:
+        self.refuse(1000.0)
+        self.refuse(1001.0, reason="missing takeover token")
+
+        taken = self.windows.take_held(now=1060.0)
+
+        self.assertEqual(taken, [(self.SOURCE, refused_call(reason="missing takeover token"), NONE_HELD)])
+
+    def test_a_window_with_nothing_counted_gives_nothing(self) -> None:
+        self.refuse(1000.0)
+
+        self.assertEqual(self.windows.take_held(now=2000.0), [])
+        self.assertEqual(self.windows.take_held(), [])
+
+    def test_with_no_time_every_window_is_taken_running_or_not(self) -> None:
+        for source in ("host:a", "host:b"):
+            self.refuse(1000.0, source=source)
+            self.refuse(1001.0, source=source)
+
+        self.assertEqual([source for source, _call, _held in self.windows.take_held()], ["host:a", "host:b"])
+
+    def test_one_source_is_taken_while_its_window_runs_and_the_window_stands(self) -> None:
+        self.refuse(1000.0)
+        self.refuse(1001.0)
+        self.refuse(1002.0, source="host:other")
+        self.refuse(1003.0, source="host:other")
+
+        taken = self.windows.take_held(source=self.SOURCE)
+
+        self.assertEqual(taken, [(self.SOURCE, refused_call(), NONE_HELD)])
+        self.assertIsNone(self.refuse(1004.0))  # still inside the minute: counted again
+        self.assertEqual(self.windows.take_held(source="host:never-seen"), [])
+
+    def test_the_refusal_after_a_window_that_was_taken_reports_nothing_held(self) -> None:
+        self.refuse(1000.0)
+        self.refuse(1001.0)
+        self.windows.take_held(now=1060.0)
+
+        self.assertEqual(self.refuse(1061.0), NONE_HELD)
+
+    def test_counted_refusals_that_named_another_session_are_said_to(self) -> None:
+        self.refuse(1000.0, "s1")
+        self.refuse(1001.0, "s2")
+        self.refuse(1002.0, "s3")
+
+        ((_source, call, held),) = self.windows.take_held(now=1060.0)
+
+        self.assertEqual((call.session_id, held), ("s3", HeldBack(1, True)))
+
+    def test_the_next_refusals_event_says_when_what_it_counts_named_another_session(self) -> None:
+        self.refuse(1000.0, "s1")
+        self.refuse(1001.0, "s2")
+        self.assertEqual(self.refuse(1060.0, "s1"), HeldBack(1, True))  # the one counted named s2, the event s1
+
+        self.refuse(1061.0, "s1")
+        self.assertEqual(self.refuse(1120.0, "s1"), HeldBack(1, False))  # all of them named s1
+
+    def test_what_a_failed_write_was_to_report_is_taken_at_the_next_try(self) -> None:
+        self.refuse(1000.0, "s1")
+        self.refuse(1001.0, "s2")
+        self.refuse(1002.0, "s2")
+        ((source, call, held),) = self.windows.take_held(source=self.SOURCE)  # while the window runs
+
+        self.windows.event_not_written(source, call, held)
+
+        # Held again, and the window no longer stands: the next try takes it whatever the time.
+        self.assertEqual(self.windows.take_held(now=1003.0), [(self.SOURCE, refused_call("s2"), HeldBack(1, False))])
+
+    def test_a_refusal_counted_while_a_write_failed_is_the_event_of_the_next_try(self) -> None:
+        self.refuse(1000.0, "s1")
+        self.refuse(1001.0, "s1")
+        ((source, call, held),) = self.windows.take_held(source=self.SOURCE)
+        self.refuse(1002.0, "s9")  # during the write
+
+        self.windows.event_not_written(source, call, held)
+
+        self.assertEqual(self.windows.take_held(now=1003.0), [(self.SOURCE, refused_call("s9"), HeldBack(1, True))])
+
+    @patch("app.routes.sessions.TAKEOVER_REFUSAL_SOURCES_MAX", 3)
+    def test_the_map_keeps_its_bound_with_refusals_held_and_taken(self) -> None:
+        for index in range(10):
+            self.refuse(1000.0 + index, source=f"host:{index}")
+            self.refuse(1000.5 + index, source=f"host:{index}")
+            self.assertLessEqual(len(self.windows._windows), 3)
+
+        taken = self.windows.take_held(now=2000.0)
+
+        self.assertEqual([source for source, _call, _held in taken], ["host:7", "host:8", "host:9"])
+        self.assertEqual(len(self.windows._windows), 3)
 
 
 class TakeoverRefusalWindowTests(_Isolated):
@@ -372,19 +509,164 @@ class TakeoverRefusalWindowTests(_Isolated):
         wrong = {"reason": "wrong takeover token"}
         self.assertEqual(self.refused(), [wrong, {**wrong, "count": 1}, {**wrong, "count": 2}, wrong])
 
-    async def test_the_right_token_is_audited_every_time_and_leaves_the_window_alone(self) -> None:
+    async def test_the_right_token_is_audited_every_time_and_leaves_the_window_standing(self) -> None:
         self.refuse()
         self.refuse()
         for _ in range(3):
             self.assertEqual(self.link(self.session_id).status_code, 200)
         viewed = [c for c in self.audit.await_args_list if c.kwargs.get("event_type") == "takeover_link_viewed"]
         self.assertEqual(len(viewed), 3)
+        self.assertEqual(len(self.refused()), 2)  # the first read wrote the refusal that had only been counted
 
-        self.refuse()
-        self.assertEqual(len(self.refused()), 1)
+        self.refuse()  # still inside the minute: only counted
+        self.assertEqual(len(self.refused()), 2)
         self.now += 60
         self.refuse()
-        self.assertEqual(self.refused()[-1]["count"], 2)
+        self.assertEqual(self.refused()[-1]["count"], 1)
+
+    def events(self) -> list[tuple[str, str | None, dict]]:
+        """Every takeover-link audit event so far, as (event type, session id, details)."""
+        return [
+            (c.kwargs["event_type"], c.kwargs.get("session_id"), c.kwargs["details"])
+            for c in self.audit.await_args_list
+            if c.kwargs.get("event_type", "").startswith("takeover_link_")
+        ]
+
+    def refusals_reported(self) -> int:
+        """What an alert adds up: each event is one refusal, and its count the others it reports."""
+        return sum(1 + details.get("count", 0) for details in self.refused())
+
+    async def sweep(self) -> None:
+        """What the maintenance sweep runs: the windows that are over."""
+        await write_held_takeover_refusals(self.manager, self.refusal_windows, finished_only=True)
+
+    async def shut_down(self) -> None:
+        """What a clean shutdown runs: every window."""
+        await write_held_takeover_refusals(self.manager, self.refusal_windows)
+
+    async def test_a_burst_then_silence_is_reported_in_full_once_its_minute_is_over(self) -> None:
+        for _ in range(5):
+            self.refuse()
+        self.assertEqual(self.refusals_reported(), 1)  # four are only counted so far
+
+        self.now += 59  # the minute still runs
+        await self.sweep()
+        self.assertEqual(self.refusals_reported(), 1)
+        self.now += 1
+        await self.sweep()
+
+        wrong = {"reason": "wrong takeover token"}
+        self.assertEqual(self.refused(), [wrong, {**wrong, "count": 3}])
+        self.assertEqual(self.refusals_reported(), 5)
+        self.now += 60
+        await self.sweep()  # written once
+        self.assertEqual(self.refusals_reported(), 5)
+
+        self.refuse()  # a refusal after that carries nothing: what was held is written
+        self.assertEqual(self.refused()[2:], [wrong])
+
+    async def test_a_burst_that_ends_with_the_right_token_reports_its_tail_before_the_read(self) -> None:
+        for _ in range(4):
+            self.refuse(token=None)
+
+        self.assertEqual(self.link(self.session_id).status_code, 200)
+
+        missing = {"reason": "missing takeover token"}
+        self.assertEqual(
+            self.events(),
+            [
+                ("takeover_link_refused", self.session_id, missing),
+                ("takeover_link_refused", self.session_id, {**missing, "count": 2}),
+                ("takeover_link_viewed", self.session_id, {}),
+            ],
+        )
+        self.assertEqual(self.refusals_reported(), 4)
+
+    async def test_a_right_token_for_a_session_that_is_not_there_reports_the_tail_too(self) -> None:
+        self.refuse()
+        self.refuse()
+
+        response = self.client.get("/sessions/no-such-session/takeover-link", headers={"X-Takeover-Token": TAKEOVER})
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(self.refusals_reported(), 2)
+
+    async def test_a_read_writes_only_its_own_sources_tail(self) -> None:
+        other = self.from_host("203.0.113.7")
+        self.refuse(other)
+        self.refuse(other)
+
+        self.assertEqual(self.link(self.session_id).status_code, 200)  # from the test client's own host
+
+        self.assertEqual(self.refusals_reported(), 1)
+
+    async def test_the_event_of_counted_refusals_names_the_last_and_says_others_named_another_session(self) -> None:
+        for session_id in ("walked-1", "walked-2", "walked-3", "walked-4"):
+            response = self.client.get(f"/sessions/{session_id}/takeover-link", headers={"X-Takeover-Token": "x"})
+            self.assertEqual(response.status_code, 403, response.text)
+
+        await self.shut_down()
+
+        wrong = {"reason": "wrong takeover token"}
+        self.assertEqual(
+            self.events(),
+            [
+                ("takeover_link_refused", "walked-1", wrong),
+                ("takeover_link_refused", "walked-4", {**wrong, "count": 2, "counted_other_sessions": True}),
+            ],
+        )
+
+    async def test_a_clean_shutdown_writes_what_a_running_window_holds(self) -> None:
+        self.refuse()
+        self.refuse()
+        self.refuse()
+
+        await self.shut_down()  # every window, over or not
+
+        self.assertEqual(self.refusals_reported(), 3)
+
+    async def test_what_was_counted_is_written_as_the_operator_who_was_refused(self) -> None:
+        alice = OperatorIdentity(id="alice", name="Alice", source="token")
+        written_as: list[OperatorIdentity] = []
+        self.audit.side_effect = lambda **_kwargs: written_as.append(get_current_operator())
+        self.refusal_windows.record("operator:alice", RefusedCall("s1", "wrong takeover token", alice), now=self.now)
+        self.refusal_windows.record("operator:alice", RefusedCall("s1", "wrong takeover token", alice), now=self.now)
+
+        await self.shut_down()  # from the shutdown or the sweep: no request, so nobody is acting
+
+        self.assertEqual(written_as, [alice])
+        self.assertEqual(get_current_operator().id, "anonymous")
+
+    async def test_a_write_that_fails_is_logged_and_what_it_was_to_report_is_written_at_the_next_try(self) -> None:
+        for _ in range(3):
+            self.refuse()
+        self.audit.side_effect = RuntimeError("audit store down")
+
+        with self.assertLogs("app.routes.sessions", level="WARNING") as logged:
+            self.now += 60
+            await self.sweep()  # raises nothing: no request waits on it
+
+        self.assertEqual(len(logged.records), 1)
+        self.assertIn("2 refused takeover-link calls", logged.records[0].getMessage())
+        self.audit.side_effect = None
+        self.audit.reset_mock()
+        await self.sweep()
+
+        self.assertEqual(self.refused(), [{"reason": "wrong takeover token", "count": 1}])
+
+    async def test_a_tail_that_cannot_be_written_fails_the_read_as_its_own_event_would(self) -> None:
+        self.refuse()
+        self.refuse()
+        self.audit.side_effect = RuntimeError("audit store down")
+        client = TestClient(self.app, raise_server_exceptions=False)
+
+        response = client.get(f"/sessions/{self.session_id}/takeover-link", headers={"X-Takeover-Token": TAKEOVER})
+
+        self.assertEqual(response.status_code, 500, response.text)
+        self.audit.side_effect = None
+        self.audit.reset_mock()
+        self.assertEqual(self.link(self.session_id).status_code, 200)
+        self.assertEqual(self.refused(), [{"reason": "wrong takeover token"}])  # the tail, at the next read
 
     async def test_each_client_host_has_its_own_window(self) -> None:
         first, second = self.from_host("203.0.113.1"), self.from_host("203.0.113.2")
@@ -500,6 +782,70 @@ class TakeoverRefusalWindowTests(_Isolated):
         self.assertEqual(len(self.refused()), 4)
         self.refuse(b)  # forgotten, so it audits as new
         self.assertEqual(len(self.refused()), 5)
+
+
+class TheControllerWritesWhatItsRouteHoldsTests(unittest.TestCase):
+    """app.main gives the route, the maintenance sweep and the shutdown the same windows."""
+
+    SOURCE = "host:203.0.113.9"
+
+    def setUp(self) -> None:
+        self.windows = main_module.takeover_refusals
+        self.windows._windows.clear()
+        self.addCleanup(self.windows._windows.clear)
+        self.audit = AsyncMock()
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(main_module.manager.audit, "append", new=self.audit))
+        stack.enter_context(patch.object(main_module.manager.settings, "takeover_token", TAKEOVER))
+        stack.enter_context(
+            patch.object(main_module, "validate_runtime_policy", return_value=Mock(errors=[], warnings=[]))
+        )
+        for service in (main_module.manager, main_module.job_queue, main_module.cron_service, main_module.maintenance):
+            for name in ("startup", "shutdown"):
+                stack.enter_context(patch.object(service, name, new=AsyncMock()))
+
+    def hold_two(self, *, started: float) -> None:
+        """A first refusal, whose event is taken as written, and two that are only counted."""
+        for _ in range(3):
+            self.windows.record(self.SOURCE, refused_call("s1"), now=started)
+
+    def refused(self) -> list[dict]:
+        calls = self.audit.await_args_list
+        return [c.kwargs["details"] for c in calls if c.kwargs.get("event_type") == "takeover_link_refused"]
+
+    def test_a_refusal_through_the_app_is_counted_in_the_windows_the_sweep_and_the_shutdown_write(self) -> None:
+        client = TestClient(main_module.app, base_url="http://127.0.0.1", client=("203.0.113.9", 50000))
+
+        for _ in range(3):
+            response = client.get("/sessions/s1/takeover-link", headers={"X-Takeover-Token": "wrong"})
+            self.assertEqual(response.status_code, 403, response.text)
+
+        ((source, call, held),) = self.windows.take_held()
+        self.assertEqual((source, call.session_id, held), (self.SOURCE, "s1", HeldBack(1, False)))
+
+    def test_the_sweep_writes_a_window_that_is_over_and_leaves_one_that_runs(self) -> None:
+        self.hold_two(started=time.monotonic())
+
+        asyncio.run(main_module.maintenance.write_held_refusals())
+        self.assertEqual(self.refused(), [])
+
+        self.windows._windows.clear()
+        self.hold_two(started=time.monotonic() - 61)
+        asyncio.run(main_module.maintenance.write_held_refusals())
+
+        self.assertEqual(self.refused(), [{"reason": "wrong takeover token", "count": 1}])
+
+    def test_a_clean_shutdown_writes_a_window_that_still_runs_before_the_manager_is_shut_down(self) -> None:
+        order: list[str] = []
+        self.audit.side_effect = lambda **_kwargs: order.append("refusals written")
+        main_module.manager.shutdown.side_effect = lambda: order.append("manager shut down")
+        with TestClient(main_module.app, base_url="http://127.0.0.1"):
+            self.hold_two(started=time.monotonic())
+            self.assertEqual(self.refused(), [])
+
+        self.assertEqual(self.refused(), [{"reason": "wrong takeover token", "count": 1}])
+        self.assertEqual(order, ["refusals written", "manager shut down"])
 
 
 class AgentPackagesTests(unittest.TestCase):

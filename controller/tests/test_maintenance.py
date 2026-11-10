@@ -98,6 +98,20 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
             self.service.settings = settings
         self.assertTrue(old_run.exists())
 
+    async def test_the_sweep_writes_the_held_takeover_refusals_once_app_main_has_set_how(self) -> None:
+        await self.service.run_cleanup()  # none set: a sweep as before
+        written: list[str] = []
+
+        async def write_held_refusals() -> None:
+            written.append("written")
+
+        self.service.write_held_refusals = write_held_refusals
+
+        await self.service.run_cleanup()
+        await self.service.run_cleanup()
+
+        self.assertEqual(written, ["written", "written"])
+
     async def test_an_entry_that_cannot_be_removed_is_counted_and_the_sweep_goes_on(self) -> None:
         # P3#8: one PermissionError used to abort the whole sweep: later roots were never swept.
         from unittest.mock import patch

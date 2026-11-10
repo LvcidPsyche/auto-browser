@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterable
 
 from .config import Settings
 from .utils import UTC
@@ -67,6 +67,9 @@ class MaintenanceService:
         self._last_report: CleanupReport | None = None
         # Set once the convergence harness is initialized (after startup); its old runs go in each sweep.
         self.harness_service = None
+        # Set by app.main: writes the refused takeover-link calls that were only counted, once their window is over
+        # (routes/sessions.py). Run in each sweep; it logs its own failures and raises none.
+        self.write_held_refusals: Callable[[], Awaitable[None]] | None = None
 
     @property
     def last_report(self) -> dict | None:
@@ -137,6 +140,8 @@ class MaintenanceService:
                 reports.append(await asyncio.to_thread(self._cleanup_root, Path(root), retention, protected_roots))
             await self._prune_harness()
             await self._prune_approvals()
+            if self.write_held_refusals is not None:
+                await self.write_held_refusals()
             completed = datetime.now(UTC)
             self._last_report = CleanupReport(
                 started_at=started.isoformat().replace("+00:00", "Z"),

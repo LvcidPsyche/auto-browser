@@ -98,9 +98,12 @@ All notable changes to auto-browser are documented here.
   `GET /sessions/{id}/network/requests` does, where it waited without limit, and
   `GET /sessions/{id}/network/requests` answers `404` for a session that has gone, as for one with no inspector,
   where it read the log of a session being closed.
-- **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one a minute, and
-  the next carries `details.count`, the refusals held back since. An alert that counts these events must add that
-  field.
+- **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one for its first
+  refusal in a minute and at most one more for the rest of that minute's, which carries `details.count`: the
+  refusals it reports beside its own. An alert that counts these events must add that field: events and counts
+  add up to the refusals. The second event can come late (with the source's next call, at a maintenance sweep or at
+  a clean shutdown: see Fixed), so an alert on a rate should read `details.count` when it arrives, and a controller
+  that is killed loses what it had only counted.
 - **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
   replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
@@ -451,11 +454,18 @@ All notable changes to auto-browser are documented here.
   frames are part of the message.
 - **Repeated refused calls to `GET /sessions/{id}/takeover-link` no longer write an audit event each.** The first
   refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
-  seconds are only counted, and the first refusal after that writes one event whose `details.count` says how many
-  were held back. An event that cannot be written opens no window: the next refusal writes one, carrying the refusal
-  it lost. A refusal still answers `403` (`500`, as before, when its audit write fails), `takeover_link_viewed` is
-  written every time, and at most 1024 sources are remembered: the oldest is forgotten first, with its count. See the
-  upgrade note. (R5C-6)
+  seconds are only counted, and one event reports them. It is the source's first refusal after that, whose
+  `details.count` says how many were held back; or, when no refusal has come, the event of the last of them, with
+  the others as its `details.count`, written when the source next reads the link with the right token (before that
+  read's own event), at the first maintenance sweep after the 60 seconds (`CLEANUP_INTERVAL_SECONDS`, an hour by
+  default; with `0` no sweep runs) and at a clean shutdown. Either way each refusal is one event or one of an
+  event's count, so the two add up to the refusals. An event written late names the operator who was refused, and
+  its time is when it was written. `details.counted_other_sessions` is `true` when some of the refusals an event
+  counts named another session than the event does. An event that cannot be written opens no window: the next
+  refusal, read, sweep or shutdown writes one, carrying what it lost. A refusal still answers `403` (`500`, as
+  before, when its audit write fails, and so does a read whose source's held refusals cannot be written),
+  `takeover_link_viewed` is written every time, and at most 1024 sources are remembered: the oldest is forgotten
+  first, with its count. A controller that is killed loses what it had only counted. See the upgrade note. (R5C-6)
 - **A start that races another for the mesh or Witness key no longer trips over the other's files.** The loser of
   the race raised `FileExistsError`, which failed that start; it now loads the key the other start made, retrying
   for up to 2 seconds while the file is still being written, and the public key and `node_meta.json` are published

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -25,7 +26,7 @@ from .routes.auth_profiles import create_auth_profiles_router
 from .routes.mcp import create_mcp_router
 from .routes.operations import create_operations_router
 from .routes.session_diagnostics import create_session_diagnostics_router
-from .routes.sessions import create_sessions_router
+from .routes.sessions import TakeoverRefusalWindows, create_sessions_router, write_held_takeover_refusals
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
 from .safe_json_response import SafeJSONResponse, safe_http_exception_handler, safe_validation_exception_handler
@@ -64,6 +65,10 @@ rate_limiter = services.rate_limiter
 metrics = services.metrics
 maintenance = services.maintenance
 mcp_transport = services.mcp_transport
+# The takeover-link refusals that are only counted. The route counts them and writes them at the source's next call;
+# the maintenance sweep writes those of a window that is over, and the shutdown below writes the rest.
+takeover_refusals = TakeoverRefusalWindows()
+maintenance.write_held_refusals = partial(write_held_takeover_refusals, manager, takeover_refusals, finished_only=True)
 
 
 @asynccontextmanager
@@ -110,6 +115,7 @@ async def lifespan(application: FastAPI):
         await maintenance.shutdown()
         await cron_service.shutdown()
         await job_queue.shutdown()
+        await write_held_takeover_refusals(manager, takeover_refusals)
         await manager.shutdown()
 
 
@@ -119,7 +125,7 @@ app.include_router(create_mcp_router(mcp_transport=mcp_transport, tool_gateway=t
 app.include_router(create_agent_router(manager=manager, orchestrator=orchestrator, job_queue=job_queue), tags=["agent"])
 app.include_router(create_auth_profiles_router(manager=manager, settings=settings), tags=["auth profiles"])
 app.include_router(create_session_diagnostics_router(manager=manager, settings=settings), tags=["diagnostics"])
-app.include_router(create_sessions_router(manager=manager), tags=["sessions"])
+app.include_router(create_sessions_router(manager=manager, refusal_windows=takeover_refusals), tags=["sessions"])
 app.include_router(
     create_share_router(manager=manager, share_manager=share_manager, settings=settings), tags=["sharing"]
 )
