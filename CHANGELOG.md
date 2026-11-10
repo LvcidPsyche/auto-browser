@@ -73,8 +73,11 @@ All notable changes to auto-browser are documented here.
   checks one on such a controller, and a page on another origin cannot send one to a controller that has a token
   either, since no route answers a CORS preflight. A browser extension, or a non-browser client that names an
   origin, needs the controller to have a token, and sends it. A loopback reverse proxy in front of
-  such a controller must pass the browser's `Host` through, or the controller needs a token: one that rewrites `Host`
-  leaves the browser's `Origin` naming another host, and is refused. A request with neither header (curl, an SDK) is
+  such a controller must pass the browser's `Host` through with its port, or the controller needs a token: one that
+  rewrites `Host`, or listens on a port other than the scheme's default and forwards the name without it, leaves
+  the browser's `Origin` naming another host or port, and every write from the dashboard it serves is refused,
+  where 1.17.0 served them. In nginx that is `proxy_set_header Host $http_host;` (`$host` drops the port).
+  A request with neither header (curl, an SDK) is
   served as before, and so is one whose `Origin` matches its `Host` with `Sec-Fetch-Site` `same-origin` or `none`.
   `/mesh/receive` is signed and not checked; `/mcp` (and `/mcp/`, which only redirects to it, behind a `root_path` as
   well) keeps its own Origin check and `MCP_ALLOWED_ORIGINS`, so a browser MCP client on a listed origin goes on
@@ -86,18 +89,20 @@ All notable changes to auto-browser are documented here.
   `browser.create_session` answer their not-found text, where they named the owner. A client that took `403` to mean
   "it exists but is not yours" must treat `404` as either. A save over such a profile and an import that overwrites
   one stay refused (`403`), and the refusal no longer names the owner. `profile_dir` and `auth_state.path` are gone
-  from the answers of `GET /auth-profiles/{name}`, `GET /auth-profiles` and `browser.get_auth_profile`: use
-  `profile_name`. `GET /sessions/{id}/auth-state` keeps its `path`.
+  from the answers of `GET /auth-profiles/{name}`, `GET /auth-profiles`, `browser.get_auth_profile` and
+  `browser.list_auth_profiles`: use `profile_name`. `GET /sessions/{id}/auth-state` keeps its `path`.
 - **The network log of a page `ALLOWED_HOSTS` refuses is now refused, as a raw CDP read of it is.**
   `GET /sessions/{id}/network/requests` and `GET /sessions/{id}/network-log` answer `403` with the same fixed text as
   the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. The page
   is checked before the read and again after it, so one that moves onto a refused host meanwhile is refused too, and
   so is a session whose active page has closed, as any page read is. A session whose open page is allowed gets its
   log as before, and one whose page is refused gets it again once the page is navigated to an allowed URL.
-  `GET /sessions/{id}/network-log` now answers `409` for a session another call holds past the bound, as
-  `GET /sessions/{id}/network/requests` does, where it waited without limit, and
-  `GET /sessions/{id}/network/requests` answers `404` for a session that has gone, as for one with no inspector,
-  where it read the log of a session being closed.
+  Both routes now wait up to 10 seconds for a session another call holds and then answer `409` (`The session is
+  busy with another call. Try again.`): at 1.17.0 `GET /sessions/{id}/network/requests` answered at once, whatever
+  held the session, and `GET /sessions/{id}/network-log` waited without limit. A client that polls either one while
+  an action or an agent step runs must take `409` to mean "try again". `GET /sessions/{id}/network/requests` also
+  answers `404` for a session that has gone, as for one with no inspector, where it read the log of a session
+  being closed.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one for its first
   refusal in a minute and at most one more for the rest of that minute's, which carries `details.count`: the
   refusals it reports beside its own. An alert that counts these events must add that field: events and counts
@@ -107,17 +112,23 @@ All notable changes to auto-browser are documented here.
 - **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
   replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
-  no usable key. A backup or quarantined copy of the store from before the upgrade still holds the keys: rotate them
-  if such a copy may have been read. `GET /crons`, `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and
-  `browser.create_cron_job` answered the key's first 8 characters in `webhook_key_preview`: they now answer
+  no usable key. A backup or quarantined copy of the store from before the upgrade still holds the keys, and so does a
+  `.crons.json.*.tmp` file beside the store, which a 1.17.0 save that was killed part-way leaves there and nothing
+  removes: delete any such file, and rotate the keys if a copy may have been read. `GET /crons`,
+  `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and `browser.create_cron_job` answered the key's first
+  8 characters in `webhook_key_preview`: they now answer
   `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key
   cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
   makes a new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
   `browser.revoke_cron_webhook_key` removes it.
-- **Cron schedules now run in `CRON_TIMEZONE`, `UTC` by default, not in the host's zone.** A controller whose host was
-  not on UTC fires its jobs at a different hour after upgrading: a `0 9 * * *` job meant nine by the host's clock and
-  now means nine UTC. To keep the old hours, set `CRON_TIMEZONE` to the host's zone name (`America/Chicago`,
-  `Europe/Berlin`). A name the zone database does not know stops the controller at startup.
+- **Cron schedules now run in `CRON_TIMEZONE`, `UTC` by default, not in the controller process's zone.** 1.17.0 gave
+  the scheduler no zone, so it used the one its own process saw. In the shipped image that is UTC whatever the
+  Docker host's clock says (neither the image nor the compose files set `TZ` or mount `/etc/localtime`), so a
+  Docker deployment that added neither keeps its hours: leave `CRON_TIMEZONE` unset there, since setting it to the
+  host's zone would move jobs that never moved. A controller run straight on a host that is not on UTC, or in a
+  container given a zone of its own (`TZ`), fires its jobs at a different hour after upgrading: a `0 9 * * *` job
+  meant nine in that zone and now means nine UTC. To keep the old hours there, set `CRON_TIMEZONE` to that zone's
+  name (`America/Chicago`, `Europe/Berlin`). A name the zone database does not know stops the controller at startup.
 - **`POST /crons/{id}/trigger` no longer answers `404` for an unknown job.** A caller without the key could tell
   which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`):
   treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved.
@@ -176,8 +187,10 @@ All notable changes to auto-browser are documented here.
   downgrade to 1.17.0, an approval for a tool call that 1.18.0 stored or rewrote matches no call there (the call
   answers that the approval does not match the requested action), and the agent asks again. Nor does an operator's
   rejection of a tool call that 1.18.0 stored or rewrote stop an agent's own approval of that call there under
-  `AUTONOMOUS_APPROVALS`, with the key file kept or not: 1.17.0 compares the stored text as it is. Reject the call
-  again there, or leave `AUTONOMOUS_APPROVALS` off across the downgrade.
+  `AUTONOMOUS_APPROVALS` once the call is asked for again on 1.17.0, with the key file kept or not: 1.17.0 compares
+  the stored text as it is (so a pending approval that 1.18.0 stored, approved by its id after the downgrade, is
+  still stopped by such a rejection). Reject the call again there, or leave `AUTONOMOUS_APPROVALS` off across the
+  downgrade.
 - **The image now starts uvicorn with `--timeout-graceful-shutdown 5`: start it your own way, and you must pass it
   too.** A stop waits at most 5 seconds for the requests in flight and then runs the controller's cleanup; without
   the option, a stop with an event stream open (`GET /mcp`, `GET /sessions/{id}/events`) never reaches the cleanup
@@ -238,7 +251,8 @@ All notable changes to auto-browser are documented here.
   `browser.get_auth_profile` and `browser.create_session` named the owner. Each now answers as it does for a profile
   that does not exist (see the upgrade note), and a refused save over such a profile, or an import that would
   overwrite one, no longer names its owner. `profile_dir` and `auth_state.path`, the profile's absolute paths on the
-  controller, are no longer in the answer of `GET /auth-profiles/{name}` or `GET /auth-profiles`, and the
+  controller, are no longer in the answer of `GET /auth-profiles/{name}` or `GET /auth-profiles`, nor in that of
+  `browser.get_auth_profile` or `browser.list_auth_profiles`, which answer what those routes do, and the
   `browser.get_auth_profile` tool no longer promises them. The audit log stays operator-wide, as
   `docs/production-hardening.md` says: an export's or a save's event there still names the profile. (AUTH-31)
 - **A page `ALLOWED_HOSTS` refuses no longer shows in the network log, on any surface.** The log holds the URL of
@@ -439,7 +453,8 @@ All notable changes to auto-browser are documented here.
 - **A `RuntimeError` behind a `409 Conflict` from `POST /sessions` or a fork is logged.** The answer stays `409`
   `Conflict`; its cause, which nothing recorded, now goes in the log with its traceback. (AUTH-21)
 - **More routes that call the browser manager answer its errors as the others do.** `GET /sessions`, `GET` of a
-  session, the screenshot and tab routes, the session auth-state and auth-profile routes, `/remote-access`,
+  session, the screenshot and tab routes, the session auth-state route, `GET /auth-profiles/{name}` and
+  `POST /sessions/{id}/auth-profiles` (the profile list, `GET /auth-profiles`, is not one of them), `/remote-access`,
   `/audit/events`, the approval reads, `/pii-scrubber` and the agent and job routes let a `PermissionError`, a
   `ValueError` or a `FileNotFoundError` reach the client as a bare `500`. They now answer as the rest do: a typed
   error keeps its status and `code`, a refusal is a generic `403`, a bad value `400`, a missing file `404`, and
@@ -492,7 +507,10 @@ All notable changes to auto-browser are documented here.
   write that fails when the run has already ended is logged too, and the answer stays `triggered: true`. (D7-6)
 - **A cron job's `last_status` now says how its last run ended.** It stayed `queued` after the run was over. The agent
   job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
-  when the job's record cannot say, also for a run that finishes while its trigger is still answering. A run that is
+  when the job's record cannot say, also for a run that finishes while its trigger is still answering. `completed`
+  is the job record's status, so it means the run ended without an error, not that it reached its goal: a run that
+  stopped at its step limit, or to wait for an approval or a takeover, reads `completed` too, and the agent job's
+  `result.status` says which. A run that is
   no longer the job's latest leaves the newer run's status alone, and a store that cannot be read or saved at that
   moment is logged and the session is still closed. A run the controller loses before it can report the end (a crash,
   or a run still waiting in the queue at a restart) keeps `queued`. (STORE-15)
@@ -527,7 +545,8 @@ All notable changes to auto-browser are documented here.
 ### Changed
 
 - **Cron schedules are read in one zone, `CRON_TIMEZONE`, and a late fire still runs.** Schedules and the scheduler
-  used the host's zone. `CRON_TIMEZONE` (default `UTC`, an IANA name, checked at startup) now sets it for both: see
+  used the zone the controller's process saw (UTC in the shipped image, the machine's zone for a controller run
+  straight on a host). `CRON_TIMEZONE` (default `UTC`, an IANA name, checked at startup) now sets it for both: see
   the upgrade note. The scheduler also runs a fire it reaches up to five minutes late, where one more than a second
   late used to be skipped. (STORE-18)
 - **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller

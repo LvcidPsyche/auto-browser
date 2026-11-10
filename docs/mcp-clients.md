@@ -658,8 +658,11 @@ replaced; whoever can read `APPROVAL_ROOT` itself reads the key with the records
 made offline, against a listing or a copy of the records without the key, and not one made through the
 controller: the keyed text is the same for the same tool and arguments in every session (`session_id`
 is no part of it), so a caller who can read an approval and may make governed calls can still try a
-value one request at a time, each miss leaving a pending approval and the record of its request (a
-witness receipt in a session, while `WITNESS_ENABLED` is on; an audit event in controller scope).
+value one request at a time. A try made without `approval_id` leaves a pending approval and the record
+of its request (a witness receipt in a session, while `WITNESS_ENABLED` is on; an audit event in
+controller scope). A try that presents an approved `approval_id` with other arguments leaves nothing: a
+miss is refused ("does not match the requested action") and writes no approval, receipt or audit event,
+and the right value runs the approved call and spends the approval.
 
 Records that 1.17.0 and earlier stored with the plain SHA-256 are rewritten at the first start that
 finds them, in both stores, and cover the same call as before; one that cannot be rewritten is logged,
@@ -676,9 +679,10 @@ approvals are pending or approved; rejecting them ends that warning. An operator
 that key no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`, and each
 start logs, in a warning of its own, how many such rejections are stored (one made to end the first
 warning is one of them): reject the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or
-restore the key file. That warning repeats while the rejections are stored: the retention
-(`APPROVAL_RETENTION_DAYS`) removes one made in a session that has closed, and keeps one in controller
-scope. When the file cannot be used at a start (it holds no key, cannot be read, or cannot be written
+restore the key file. That warning repeats while the rejections are stored: the retention removes one
+made in a session that has closed once it is older than `APPROVAL_RETENTION_DAYS` (never when that is
+`0`), and keeps one in controller scope. When the file cannot be used at a start (it holds no key,
+cannot be read, or cannot be written
 where there is none), the start logs it and keys with a key of its own: its tool call approvals work
 until that process ends, and are refused the same way after a restart. A file that holds no key is left
 as it is, and has to be removed before a start writes a new one. A start that dies between creating the

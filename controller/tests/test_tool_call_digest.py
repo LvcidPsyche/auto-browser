@@ -37,8 +37,9 @@ GUESSES = ("letmein", "hunter2", SECRET, "password")
 KEYED = r"^browser\.set_cookies hmac-sha256:[0-9a-f]{8}:[0-9a-f]{64}$"
 ANOTHER_KEY = "kept under another key"
 BACKENDS = ("file", "sqlite")
-# A known answer (test_a_known_key_and_call_keep_a_known_text): a key file's text, a call's stand-in as the gateway
-# writes it, and what a store holding that key keeps for it. Worked out once with hmac alone, apart from the store.
+# A known answer (test_a_known_key_and_call_keep_a_known_text): a key file's text, a made-up stand-in in the format the
+# gateway writes (its digest is the SHA-256 of the one byte "a", where the gateway hashes a call's arguments as a JSON
+# object), and what a store holding that key keeps for it. Worked out once with hmac alone, apart from the store.
 # They change only with what is stored, and an approval stored before such a change matches no call after it.
 KNOWN_KEY_FILE = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 KNOWN_PLAIN = "browser.set_cookies sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"

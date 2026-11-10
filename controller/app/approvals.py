@@ -280,10 +280,11 @@ class ApprovalStore:
     async def _key_stored_digests(self) -> None:
         """At a start, rewrite each record that keeps a stand-in's plain digest with the keyed one, in both stores.
 
-        Versions before 1.18.0 stored it plain. Nothing hands it out so (_handed_out), which is why the records are
-        read from the backend here, but the stores would hold it until each record's next write. Nothing but the text
-        changes, so the stores agree as before (_catch_sqlite_up), and the same call still matches (_keyed). A record
-        that cannot be rewritten stays, still matches, and is taken at the next start; the pass never stops one.
+        Versions before 1.18.0 stored it plain. Nothing hands out the plain text (get and list key what they return:
+        _handed_out), so this pass reads the backend itself to find it; left alone, the stores would hold it until
+        each record's next write. Nothing but the text changes, so the stores agree as before (_catch_sqlite_up), and
+        the same call still matches (_keyed). A record that cannot be rewritten stays, still matches, and is taken at
+        the next start; the pass never stops one.
 
         Also says, once a start, how many approvals that could still run are kept under a key this process does not
         hold (_kept_under_another_key), and how many rejections by an operator: nothing else tells an operator

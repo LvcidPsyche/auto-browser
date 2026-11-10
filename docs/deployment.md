@@ -91,8 +91,10 @@ token, from either source.
   `GET /auth-profiles/{name}/export`, which writes an archive, is refused the same way when a browser marks it so.
   A request with neither header (curl, an SDK) is served. `/mesh/receive` is signed, and `/mcp` keeps its own Origin
   check and `MCP_ALLOWED_ORIGINS`. A loopback reverse proxy in front of such a controller must pass the browser's
-  `Host` through, or the controller needs a token: a proxy that rewrites `Host` leaves the browser's `Origin` naming
-  another host, so its writes are refused.
+  `Host` through with its port, or the controller needs a token: a proxy that rewrites `Host`, or listens on a port
+  other than the scheme's default and forwards the name without it, leaves the browser's `Origin` naming another host
+  or port, so every write from the dashboard it serves is refused. In nginx, use `proxy_set_header Host $http_host;`:
+  `$host` drops the port.
 - `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
 ## Chromium's sandbox (BROWSER_SANDBOX)
@@ -1255,8 +1257,9 @@ ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
 Schedules are read in the zone `CRON_TIMEZONE` names, `UTC` by default, whatever the host's own zone is: set it to an
 IANA zone name such as `America/Chicago` for a job to fire at that zone's hour. A name the zone database does not know
 stops the controller at startup, and the name is in the message. The controller image carries the zone database. In a
-zone with daylight saving time, a job set inside the hour the clocks skip fires an hour later by the clock, and one set
-inside the hour they repeat can fire twice.
+zone with daylight saving time, a job set inside the hour the clocks skip fires an hour later by the clock that night,
+and one set inside the hour they repeat fires twice, once in each pass of that hour (`30 1 * * *` in `America/Chicago`
+runs at 01:30 before the change and again at 01:30 after it).
 
 A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (on a controller with a
 token, the bearer token is needed as well, as on any route). The key is 256 random bits, answered once by the call that
@@ -1273,6 +1276,12 @@ another operator's job answers as one that does not exist. A key made before 1.1
 first start after the upgrade and goes on working; if the store cannot be re-saved then, the job keeps working from
 the plaintext key still in the file, and the failure is logged and retried at the next start.
 
+A job's `last_status` reads `queued` from the fire that queued a run until that run is over, and then the agent
+job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`), or `unknown` when its record
+cannot say.
+`completed` means the run ended without an error, not that it reached its goal: a run that stopped at its step limit,
+or to wait for an approval or a takeover, reads `completed` too, and the agent job's `result.status` says which.
+
 ## Backups
 
 Back up at least:
@@ -1284,7 +1293,7 @@ Back up at least:
 - `/data/audit/`
 - `/data/witness/`, whole: the chains with their `*.anchor.json` files, `.anchors-migrated` and `keys/` (since 1.11.2 a chain restored without its anchor fails verification, and receipts verify only against the key that signed them)
 - `/data/crons/` if you use cron jobs
-- `/data/approvals/` if pending approvals and operators' rejections should survive a restore, whole, with its `.tool-call-digest.key` (a glob such as `approvals/*` leaves a dot file out): approvals for tool calls are matched under that key, also when `/data/db/` holds the records, and restored without it they are refused and asked for again, and an operator's rejection of a tool call no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS` (each start then logs a warning with how many approvals, and another with how many rejections, are kept under the lost key); a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
+- `/data/approvals/` if pending approvals and operators' rejections should survive a restore, whole, with its `.tool-call-digest.key` (a glob such as `approvals/*` leaves a dot file out): approvals for tool calls are matched under that key, also when `/data/db/` holds the records, and restored without it they are refused and asked for again, and an operator's rejection of a tool call no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS` (each start then logs a warning with how many pending or approved approvals are kept under the lost key, if there are any, and another with how many operator rejections are, if there are any); a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
 
 ## Cleanup
 
