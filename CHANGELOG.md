@@ -41,12 +41,16 @@ All notable changes to auto-browser are documented here.
 - **A garbled reply from `browser.find_by_vision`'s model is now a tool error, where it read as `found: false`.** That
   is a reply that is not a JSON object, one with no `found` or a `found` that is neither true nor false, or a
   `found: true` reply whose point is not usable (see Changed). A client that took `found: false` to cover those must
-  handle the error, by retrying the call or finding the element another way. A reply of `found: false` stays a normal
-  answer.
+  handle the error, by retrying the call or finding the element another way. Two of those replies were answered as
+  found at 1.17.0, with the point, and are errors too: one whose numbers are quoted (`"x": "640"`) and one whose
+  `found` is a non-empty string (`"found": "true"`). A reply of `found: false` stays a normal answer, and its
+  `confidence` is now always 0.0, where the reply's own was passed through.
 - **A `browser.find_elements` pattern that ran can now be refused.** With `regex=true`, a pattern whose group repeats
   without bound and holds an unbounded repeat of its own or overlapping alternatives, at any depth (`(a+)+$`,
   `(a|aa)+`, `((a|aa))+`), fails validation with a message naming the group and why, where it used to reach the
-  page. Rewrite the group (`a+`, not `(a+)+`), or pass `regex=false` to match the text literally.
+  page. Everyday patterns of that shape, with a separator between the two repeats, are refused too (`\d+(\.\d+)*`,
+  `\w+(\s+\w+)*`). Bound the group's repeat or each repeat inside it, as the message says (`\d+(\.\d{1,50})*`, with
+  `{1,50}` in place of `+`), or pass `regex=false` to match the text literally.
 - **A controller with no token now refuses a write from another web origin.** On a tokenless loopback controller
   (`API_ALLOW_TOKENLESS_LOOPBACK=true`), a POST, PUT, PATCH or DELETE that a browser marks `Sec-Fetch-Site:
   cross-site` or `same-site`, or whose `Origin` names another host or port than its `Host` (`Origin: null` and one
@@ -357,7 +361,7 @@ All notable changes to auto-browser are documented here.
   reported. (N7)
 - **`page_not_responding` names the whole setup budget.** A call whose setup messages share one budget named what was
   left of it, so a retry after the budget was spent read "did not answer within 0 ms". The message now names the
-  budget, and `details.waited_ms` says what that message itself waited. (N7)
+  budget, and `waited_ms`, beside `code` in the error, says what that message itself waited. (N7)
 - **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
   candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the
@@ -460,17 +464,22 @@ All notable changes to auto-browser are documented here.
 - **A garbled reply from `browser.find_by_vision`'s model is now an error, where it was `found: false`.** A reply that
   was not a JSON object, a `found` that was missing or neither true nor false, or a `found: true` reply whose `x`, `y`
   or `confidence` was not a finite number (a boolean is not one) or whose point fell outside the screenshot read as a
-  normal not-found or failed with a raw Python error. Each is now a tool error with a fixed message that does not
-  quote the reply; `found: false` stays a normal answer, and its coordinates are not read. The reply is no longer
-  logged whole or returned as `raw_response`: only its length and the failure's class are logged, as a reply is model
-  output about a page. A `confidence` left out still reads as 0.0. (STORE-32)
+  normal not-found or failed with a raw Python error, but for two that were answered as found, with the point: a
+  reply whose numbers were quoted (`"x": "640"`) and one whose `found` was a non-empty string (`"found": "true"`).
+  Each is now a tool error with a fixed message that does not quote the reply; `found: false` stays a normal answer,
+  its coordinates are not read, and its `confidence` is always 0.0, where the reply's own was passed through. The
+  reply is no longer logged whole or returned as `raw_response`: only its length and the failure's class are logged,
+  as a reply is model output about a page. A `confidence` left out still reads as 0.0. (STORE-32)
 - **`browser.find_elements` refuses the classic catastrophic regular expressions.** With `regex=true`, a pattern with
   a group that repeats without bound and either holds an unbounded repeat of its own (`(a+)+$`, `(.*)*`) or has
   overlapping alternatives, its own or those of a group inside it at any depth (`(a|aa)+`, `((a|aa))+`), now fails
   validation, with a message naming the group and why. It used to reach the page, where it could hang the page's
   JavaScript thread after the controller's 10-second bound had stopped waiting for it. The check reads the pattern's
   own syntax, folds case as the page's case-insensitive RegExp does (for an escape or a class it compares the text as
-  written), and stops only these shapes; that bound stays for the rest. (MCP-24)
+  written), and stops only these shapes; that bound stays for the rest. It does not tell a pattern that hangs from
+  an everyday one of the same shape: `\d+(\.\d+)*` and `\w+(\s+\w+)*` are refused, and
+  `\$\d+(,\d{3})*(\.\d{2})?`, whose inner repeat is bounded, passes. The message says how to bound the group's
+  repeat or each repeat inside it (`{1,50}` in place of `+`, `{0,50}` in place of `*`). (MCP-24)
 - **`GET /sessions/{id}/trace` no longer names `trace_path`.** The field held the trace file's absolute path on the
   controller, which a client has no use for; `trace_url` and `viewer_command` already name the file. A client that
   read `trace_path` should use `trace_url`. (AUTH-35)

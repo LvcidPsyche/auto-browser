@@ -88,6 +88,38 @@ def test_a_catastrophic_pattern_is_refused_and_the_message_says_what_and_why(pat
 
     message = str(raised.value)
     assert why in message and "backtrack catastrophically" in message
+    # And how to get an everyday pattern of that shape past it: "Rewrite the group" did not say.
+    assert "{1,50} in place of +" in message and "regex=false" in message
+
+
+# What the refusal says to do, done: most refused patterns are everyday ones (a separator between two repeats).
+BOUNDED_AS_THE_REFUSAL_SAYS = (
+    (r"\d+(\.\d+)*", r"\d+(\.\d{1,50})*"),  # each repeat inside the group
+    (r"\d+(\.\d+)*", r"\d+(\.\d+){0,50}"),  # the group's own
+    (r"\w+(\s+\w+)*", r"\w+(\s{1,50}\w{1,50})*"),
+    (r"(\w+,\s*)+\w+", r"(\w{1,50},\s{0,50})+\w+"),
+    ("(Mr|Mrs)+", "(Mr|Mrs){1,50}"),
+    ("((a|aa))+", "((a|aa)){1,50}"),
+)
+
+
+@pytest.mark.parametrize(("refused", "bounded"), BOUNDED_AS_THE_REFUSAL_SAYS)
+def test_a_pattern_bounded_as_the_refusal_says_passes(refused: str, bounded: str) -> None:
+    assert catastrophic_repeat(refused) is not None
+    assert catastrophic_repeat(bounded) is None
+    FindElementsInput(session_id=SESSION, query=bounded, regex=True)
+
+
+def test_bounding_one_of_two_repeats_inside_the_group_is_not_enough() -> None:
+    # Why the refusal says "each": the group still holds an unbounded repeat.
+    assert catastrophic_repeat(r"\w+(\s{1,50}\w+)*") is not None
+
+
+def test_the_refusal_of_overlapping_alternatives_names_the_groups_repeat_only() -> None:
+    message = catastrophic_repeat("(Mr|Mrs)+")
+
+    assert "Bound the group's repeat ({1,50} in place of +" in message
+    assert "each repeat inside it" not in message
 
 
 @pytest.mark.parametrize("pattern", ALLOWED)

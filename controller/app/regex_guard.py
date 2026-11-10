@@ -75,19 +75,23 @@ def catastrophic_repeat(pattern: str) -> str | None:
 
 def _refusal(pattern: str, group: _Group, closed_at: int) -> str | None:
     text = pattern[group.opened_at : closed_at + 1]
+    # How, for the everyday patterns this refuses too (a separator between two repeats, as in \d+(\.\d+)*): what the
+    # scan above stops counting is a repeat with an upper bound.
     if group.holds_repeat:
         why = "repeats without bound and its body holds an unbounded repeat of its own"
+        how = "Bound the group's repeat or each repeat inside it"
     elif group.holds_overlap or _alternatives_overlap(group.alternatives):
         why = (
             "repeats without bound and its alternatives, or those of a group inside it, overlap (one is a prefix of "
             "another, or they are equal)"
         )
+        how = "Bound the group's repeat"
     else:
         return None
     return (
         f"refused: the group {text!r} at index {group.opened_at} {why}, so this regular expression can backtrack "
-        "catastrophically on the page's text and hang the page. Rewrite the group, or use regex=false to match the "
-        "text literally."
+        f"catastrophically on the page's text and hang the page. {how} ({{1,50}} in place of +, {{0,50}} in place of "
+        "*), or use regex=false to match the text literally."
     )
 
 
