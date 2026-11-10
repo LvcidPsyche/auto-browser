@@ -168,6 +168,10 @@ PAST_THE_MIDDLE = """<title>start</title>
   onclick="document.title='REMOVED'">Remove member</button> <span class="tail">tail</span></span></div>
 <div id="wide"><button onclick="document.title='DELETED'">Delete account</button></div>
 """
+# A wrapper with no box of its own: its children are laid out in its place.
+NO_BOX = """<title>start</title>
+<div id="wrap" style="display: contents"><button onclick="document.title='DELETED'">Delete account</button></div>
+"""
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -717,6 +721,26 @@ async def test_a_wrapper_whose_middle_is_not_where_its_click_lands_asks_at_the_p
         await page.evaluate("document.title = 'start'")
         await env.manager.click(session_id, selector=wrapper)
         assert await _title(env, session_id) in ("DELETED", "REMOVED")
+
+
+async def test_a_wrapper_with_no_box_of_its_own_is_refused_by_name_and_not_pressed(tmp_path: Path) -> None:
+    # Playwright places a click on such a wrapper on one of its children, and there is no box to count that point
+    # from, so the press cannot be read where it would land. It was pressed unread; then, with the step taken
+    # apart, it failed as any action does ("Action failed"), which told the agent nothing it could act on.
+    async with browser_env(tmp_path, {"/": NO_BOX}) as env:
+        session_id = await env.create("/")
+        assert await env.page(session_id).locator("#wrap").bounding_box() is None
+
+        for decision in (_click("read", selector="#wrap"), _type("write", selector="#wrap")):
+            with pytest.raises(BrowserActionError) as refused:
+                await env.manager.execute_decision(session_id, decision)
+            assert refused.value.code == "target_has_no_box", decision
+            assert "Name an element inside it" in str(refused.value)
+        assert await _title(env, session_id) == "start"
+
+        # The click route, which reads nothing, still clicks as Playwright places it.
+        await env.manager.click(session_id, selector="#wrap")
+        assert await _title(env, session_id) == "DELETED"
 
 
 async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(tmp_path: Path) -> None:

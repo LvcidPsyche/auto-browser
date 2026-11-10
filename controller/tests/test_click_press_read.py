@@ -138,11 +138,11 @@ def _service(under_the_pointer: Any) -> tuple[BrowserActionService, SimpleNamesp
 
 BOX = {"x": 20, "y": 30, "width": 40, "height": 40}
 # Where the page says Playwright's click lands, from the corner of the padding box, and the border at that corner.
-PLACE = {"x": 12, "y": 7, "border": [3, 2]}
+PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False}
 PLACED_AT = (20 + 3 + 12.0, 30 + 2 + 7.0)
 
 
-def _locator(done: list[str], *, box: Any = BOX) -> SimpleNamespace:
+def _locator(done: list[str], *, box: Any = BOX, place: dict[str, Any] = PLACE) -> SimpleNamespace:
     async def hover(**given: Any) -> None:
         done.append(f"hover at {given['position']}")
 
@@ -151,7 +151,7 @@ def _locator(done: list[str], *, box: Any = BOX) -> SimpleNamespace:
 
     async def evaluate(script: str, *_args: Any) -> Any:
         assert script == _PRESS_PLACE_SCRIPT
-        return PLACE
+        return place
 
     return SimpleNamespace(hover=hover, click=click, evaluate=evaluate, bounding_box=AsyncMock(return_value=box))
 
@@ -194,6 +194,14 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
         await service.click_as_playwright_places_it(session, _locator(done))
         assert done == ["click"]
         service.manager.element_ids.evaluate.assert_not_awaited()
+
+        # A target with no box of its own has no point to count from: refused before the pointer is put anywhere.
+        service, session, done = _service(CLOSE)
+        boxless = _locator(done, box=None, place={**PLACE, "boxless": True})
+        with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as refused:
+            await service.click_as_playwright_places_it(session, boxless)
+        assert refused.value.code == "target_has_no_box"
+        assert done == ["trial click"]
 
 
 async def test_a_target_with_no_box_once_the_pointer_is_on_it_is_not_pressed() -> None:

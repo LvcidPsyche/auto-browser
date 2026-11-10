@@ -72,6 +72,21 @@ def _target_left_the_pointer() -> BrowserActionError:
     )
 
 
+def _target_has_no_box() -> BrowserActionError:
+    """The target has no box of its own (display: contents): Playwright places a click on it on one of its children.
+
+    A position is counted from the corner of a box, so there is none to give Playwright, and the point it picks
+    itself it does not tell: where the press would land cannot be read.
+    """
+    return BrowserActionError(
+        "Nothing was pressed: the target has no box of its own (its children are laid out in its place), so where a "
+        "press on it would land cannot be read. Name an element inside it.",
+        code="target_has_no_box",
+        status_code=409,
+        retryable=False,
+    )
+
+
 # Times the human-like mouse path's 4-18 ms gaps. perf_counter, not the event
 # loop's clock: that is time.monotonic, which ticks every 15.6 ms on Windows
 # before Python 3.13, coarser than what is being measured.
@@ -103,6 +118,7 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
 # el's first box that its frame's viewport shows (an inline element broken over lines has a box a line), counted
 # from the corner of its padding box, with the widths of the border at that corner. Playwright presses a position
 # where it is given, so the controller knows the point; the point Playwright picks itself it cannot ask for.
+# ``boxless``: el has no box at all (display: contents), so there is no corner to count from.
 _PRESS_PLACE_SCRIPT = """(el) => {
   const view = el.ownerDocument.defaultView;
   const style = view.getComputedStyle(el);
@@ -117,6 +133,7 @@ _PRESS_PLACE_SCRIPT = """(el) => {
     x: middle(first.left, first.right, view.innerWidth) - whole.left - border[0],
     y: middle(first.top, first.bottom, view.innerHeight) - whole.top - border[1],
     border,
+    boxless: el.getClientRects().length === 0,
   };
 }"""
 
@@ -1097,6 +1114,8 @@ class BrowserActionService:
             return
         await locator.click(trial=True, timeout=timeout_ms)
         place = await locator.evaluate(_PRESS_PLACE_SCRIPT)
+        if place["boxless"]:
+            raise _target_has_no_box()
         position = {"x": float(place["x"]), "y": float(place["y"])}
         await locator.hover(position=position, timeout=timeout_ms)
         box = await locator.bounding_box()
