@@ -182,6 +182,18 @@ PAST_THE_MIDDLE = """<title>start</title>
   onclick="document.title='REMOVED'">Remove member</button> <span class="tail">tail</span></span></div>
 <div id="wide"><button onclick="document.title='DELETED'">Delete account</button></div>
 """
+# A wrapper whose middle is on the screen, under the site's fixed bar, with a button where Playwright's click
+# lands: the middle of what the viewport shows of it.
+COVERED = """<title>start</title>
+<style>
+  body { margin: 0 }
+  #zone { position: relative; height: 150vh }
+  #zone button { position: absolute; left: calc(50vw - 40px); top: calc(50vh - 20px); width: 80px; height: 40px }
+  #bar { position: fixed; left: 0; right: 0; top: 70vh; height: 10vh; background: #eee }
+</style>
+<div id="zone"><button onclick="document.title='DELETED'">Delete account</button></div>
+<div id="bar">Cookies and such</div>
+"""
 # A wrapper with no box of its own: its children are laid out in its place.
 NO_BOX = """<title>start</title>
 <div id="wrap" style="display: contents"><button onclick="document.title='DELETED'">Delete account</button></div>
@@ -756,6 +768,23 @@ async def test_a_wrapper_whose_middle_is_not_where_its_click_lands_asks_at_the_p
         await page.evaluate("document.title = 'start'")
         await env.manager.click(session_id, selector=wrapper)
         assert await _title(env, session_id) in ("DELETED", "REMOVED")
+
+
+async def test_a_wrapper_covered_at_its_middle_asks_at_the_press(tmp_path: Path) -> None:
+    # The third way into the click Playwright places (after a middle off the screen and a box in pieces): the
+    # middle of the wrapper is under something else. Read there, the read saw the site's bar.
+    async with browser_env(tmp_path, {"/": COVERED}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        box = await page.locator("#zone").bounding_box()
+        middle = [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2]
+        assert await page.evaluate("([x, y]) => document.elementFromPoint(x, y).id", middle) == "bar"
+
+        for decision in (_click("read", selector="#zone"), _type("write", selector="#zone")):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, decision)
+            assert asked.value.approval.kind == "destructive", decision
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_wrapper_with_no_box_of_its_own_is_refused_by_name_and_not_pressed(tmp_path: Path) -> None:
