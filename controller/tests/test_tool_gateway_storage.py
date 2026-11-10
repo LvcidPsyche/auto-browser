@@ -343,7 +343,7 @@ class GatewayWriteRecordTests(SpendBase):
         self.assertEqual(payload.cookies[0], cookie)
 
     async def test_a_cookie_named_with_a_lone_surrogate_still_leaves_its_audit_entry_and_receipt(self) -> None:
-        # FR-B2-1. Past the input model (which refuses one now): the audit store raised on the name after the cookies
+        # Past the input model (which refuses one now): the audit store raised on the name after the cookies
         # were set, so the write left no audit entry, no receipt and no log line.
         payload = SetCookiesInput.model_construct(
             session_id=SESSION, cookies=[{"name": "sid\ud800", "value": CANARY, "domain": "example.com"}]
