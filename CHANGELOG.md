@@ -399,6 +399,11 @@ All notable changes to auto-browser are documented here.
 - **The session replay page's URL line now shows, and links only an http(s) URL.** The page read a key a session
   summary and a stored record do not have (`url`, not `current_url`), so its URL line never rendered. It now shows
   the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)
+- **The REST cron routes answer an auth profile the caller cannot use, where they answered `500`.** `POST /crons`
+  naming another operator's auth profile now answers `403` `Not permitted` and creates nothing. With the right key,
+  `POST /crons/{id}/trigger` now answers `409` when the job's auth profile does not exist or has become another
+  operator's since the job was made, in one fixed text for both that names no profile, path or owner; 1.17.0
+  answered `403` for a profile that had become another operator's, and `500` for a missing one.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit

@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 CRON_TRIGGER_SESSION_LIMIT_DETAIL = (
     "Session limit reached: the job's run could not start a session. Close a session or raise MAX_SESSIONS."
 )
+# The job's auth profile is gone, or is another operator's since the job was made: a read answers both as missing
+# (FileNotFoundError), and the trigger had no case for it. One text for both, which names no profile, path or owner.
+CRON_TRIGGER_AUTH_PROFILE_DETAIL = (
+    "The job's run could not start: its auth profile does not exist, or the job's owner may not open it. Save the "
+    "profile as the job's owner, or delete the job and create it again with another profile."
+)
 
 
 def create_operations_router(
@@ -169,6 +175,12 @@ def create_operations_router(
                     # REST callers are operators: the profile the body names, fast by default.
                     workflow_profile=payload.workflow_profile,
                 )
+        except PermissionError as exc:
+            # Another operator's auth profile, or one whose owner cannot be checked: a write refuses openly, and only
+            # a read answers "missing". One the OS raises carries an errno: the store's fault, not the caller's.
+            if exc.errno is not None:
+                raise
+            raise HTTPException(status_code=403, detail="Not permitted") from None
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
@@ -223,6 +235,12 @@ def create_operations_router(
             raise HTTPException(status_code=404, detail="Not found") from None
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
+        except FileNotFoundError as exc:
+            # A lookup's own (the job's auth profile) has no errno; one the OS raises names a server path and is not
+            # a state the caller can change.
+            if exc.errno is not None:
+                raise
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_AUTH_PROFILE_DETAIL) from None
         except CronJobDisabledError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
