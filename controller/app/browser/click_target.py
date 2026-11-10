@@ -6,26 +6,35 @@ it acts on, and text on the page can steer it to call a click on "Delete account
 approval decision, a click so labelled has its target read: a button with a line of its label starting with a
 phrase of CLICK_LABEL_PHRASES is recorded with that phrase's kind, and asks for approval as an honest label does,
 with a reason that says the controller chose the kind (classified_reason); a form's submit button labelled
-``read`` is recorded as ``write``, which the fast profile does not ask about. A target that is not there, or cannot
-be read (a page that does not answer, which is logged at info), changes nothing, and the click reports its own
-failure.
+``read`` is recorded as ``write``, which the fast profile does not ask about. A type is read the same way: it puts
+the caret in its target by a press on it. A target that is not there, or cannot be read (a page that does not
+answer, which is logged at info), changes nothing: the action goes on as labelled, to succeed or fail by itself.
 
 The target is found as the click will find it. One named by element id or by a point is read in the controller's
 isolated world (element_world.py), where no page script runs; a point is followed through open shadow roots and
-into frames of the page's own origin, and a click by coordinates is then pressed on that very element
-(same_element_at). One named by a selector is resolved by Playwright, as the click resolves it
-(``page.locator(selector).first``: CSS that pierces open shadow roots, ``text=``, ``role=``, ``xpath=``, ``>>``
+into frames of the page's own origin, and a click by coordinates keeps its jitter only while the same element is
+under the moved point (same_element_at). One named by a selector is resolved by Playwright, as the click resolves
+it (``page.locator(selector).first``: CSS that pierces open shadow roots, ``text=``, ``role=``, ``xpath=``, ``>>``
 chains), and described where Playwright evaluates, which is where the page's own script runs. Reading it as CSS in
 the isolated world missed every other dialect, and could read another element than the one clicked (for ``.a, .b``
 Playwright's first match may sit in a shadow root that ``document.querySelector`` never enters). The text that
 steers a model is content on an honest site, not the site's script; a page whose own script is hostile can falsify
 this read, as it can name its button "Continue" or change it after any read.
 
-Not caught: a label the table lacks; a frame of another origin; a control pressed by a key or a drag; a clickable
-element that is not a button, and a link; a label given only by aria-labelledby, an image, or text that CSS or a
-canvas draws; look-alike characters; a page that changes the target between the read and the press, or between
-the ask and the retry. docs/production-hardening.md lists the table and these, and a test keeps its list the
-table's (tests/test_click_target_doc.py).
+The press is read once more (reading_presses, refuse_press_not_asked_about). What the action names is not always
+what the mouse goes down on: the button that fills a wrapper the click named, one the page shows as the pointer
+arrives, another match of a selector resolved a second time. With the pointer in place, what is under it is read in
+the isolated world, and a button of a kind the action has no approval for is not pressed (PressNeedsApproval): the
+action asks for that approval. Retried with it, the action takes its kind from the approval it presents, with no
+read of the target before the decision, so a read that fails on the retry cannot run the click unasked and leave
+the approval unspent.
+
+Not caught: a label the table lacks (it is English); a frame of another origin; a control pressed by a key or a
+drag; a clickable element that is not a button, and a link; a label given only by aria-labelledby, an image with
+no alt text, or text that CSS or a canvas draws; a name past the cut of a label (_LABEL_CUT) or below its third
+line; look-alike characters; a page whose script changes what is under the pointer between the read at the press
+and the press. docs/production-hardening.md lists the table and these, and a test keeps its list the table's
+(tests/test_click_target_doc.py).
 """
 
 from __future__ import annotations

@@ -663,6 +663,28 @@ async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(
         assert await _title(env, session_id) == "GONE"
 
 
+async def test_an_approval_for_one_kind_does_not_press_a_button_of_another(tmp_path: Path) -> None:
+    # Approved to delete, the click finds "Pay now" under the pointer: not pressed, asked about as a payment, and
+    # the approval it ran under is spent, since its action had begun.
+    async with browser_env(tmp_path, {"/": UNDER_THE_POINTER}) as env:
+        session_id = await env.create("/")
+        click = _click("read", selector="#panel")
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, click)
+        to_delete = asked.value.approval
+        await env.manager.approve(to_delete.id)
+        await env.page(session_id).evaluate("document.querySelector('#panel button').textContent = 'Pay now'")
+
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, click, approval_id=to_delete.id)
+
+        assert asked.value.approval.kind == "payment"
+        assert await _title(env, session_id) == "start"
+        assert (await env.manager.approvals.get(to_delete.id)).status == "executed"
+        with pytest.raises(PermissionError, match="was spent"):
+            await env.manager.execute_decision(session_id, click, approval_id=to_delete.id)
+
+
 async def test_inside_an_outer_approval_the_click_is_not_asked_about_again(tmp_path: Path) -> None:
     # A governed run's approval: the operator approved this very click, labelled write, as a write.
     async with browser_env(tmp_path, {"/": PAGE}) as env:

@@ -103,15 +103,21 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     asked, as described in `docs/mcp-clients.md`.
 - In the fast profile a click's `risk_category` is the model's word, and text on a page can steer the model, so a
   click labelled `read`, `write` or `upload` (an unlabelled click is `write`; only the upload action asks for
-  `upload`) has its target read first, found as the click
-  will find it. An `element_id` or a point is read in the controller's isolated world, a point through open shadow
-  roots and into frames of the page's own origin (three deep). A selector is resolved by Playwright, as the click
-  resolves it (CSS through open shadow roots, `text=`, `role=`, `xpath=`, `>>` chains), and its element is
-  described where the page's script runs.
-  - A button (`button`, an `input` of type `button`, `submit`, `image` or `reset`, or `role=button`; an element
-    inside one counts as the button) asks for a kind's approval, as an honest label does, when its label (its
-    `aria-label`, its visible text, or an input's value or alt text) starts, as whole words, with a phrase of that
-    kind in `controller/app/browser/click_target.py`:
+  `upload`) has its target read first, found as the click will find it. So has a `type`: it puts the caret in its
+  target by a press on it, and aimed at a button it presses the button. This covers what carries a label: an agent
+  step, `browser.execute_action` and `POST /sessions/{id}/actions/execute`. The direct routes
+  (`POST /sessions/{id}/actions/click` and `/actions/type`) carry none and ask for nothing, as before. An
+  `element_id` or a point is read in the controller's isolated world, a point through open shadow roots and into
+  frames of the page's own origin (three deep). A selector is resolved by Playwright, as the click resolves it
+  (CSS through open shadow roots, `text=`, `role=`, `xpath=`, `>>` chains), and its element is described where
+  the page's script runs.
+  - A button (`button`, an `input` of type `button`, `submit`, `image` or `reset`, or `role=button`) asks for a
+    kind's approval, as an honest label does, when one of its names starts, as whole words, with a phrase of that
+    kind in `controller/app/browser/click_target.py`. An element inside a button counts as the button, and so do
+    a `label` for or around one, text a page slots into a component's button, and a component whose shadow tree
+    puts all it is given into one button. A button's names are its `aria-label`, its visible text (with what a
+    slot or a shadow root inside it shows), its `title`, an input's value or alt text, the text of its `label`,
+    and an `aria-label`, `title` or alt text on up to four elements inside it (an icon's name). The table:
     - `payment`: `Pay`, `Buy`, `Purchase`, `Place order`, `Place your order`, `Order now`, `Confirm order`,
       `Confirm payment`, `Confirm purchase`, `Confirm and pay`, `Complete order`, `Complete purchase`,
       `Submit order`, `Submit payment`, `Donate`, `Transfer`
@@ -137,14 +143,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       do "Send email", "Send SMS", "Send again" and "Send PIN" (a pin is also what a map or a board sends).
   - A label is read as its whole text on one line, and then each of its first three lines by itself, so a name
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
-    of over 40 characters is a sentence, not a name, and is not matched. A line the table matches is let go when
-    the label from that line on is one of the harmless continuations, however the page breaks it ("Remove" over
-    "filter"). Case and spacing do not count; characters that show nothing (zero-width ones, soft hyphens, the
-    marks that set a text's direction) are removed; up to two leading tokens that are a number, a mark or an icon
-    font's ligature name are skipped ("1 Delete", "credit_card Pay now"), and a label that is one ligature name is
-    read with its underscores as spaces ("delete_forever"; one with a dot is a file's name, "delete_me.txt"); a
-    hyphen goes on with its word ("Pay-as-you-go" is not "Pay"; a dash does not, so "Pay – as you go" asks); the
-    comma of `Yes, delete` may be missing.
+    of over 40 characters is a sentence, not a name, and is not matched, and the page hands over the first 400
+    characters of each name. A line the table matches is let go when the label from that line on is one of the
+    harmless continuations, however the page breaks it ("Remove" over "filter"). Case and spacing do not count;
+    characters that show nothing (zero-width ones, soft hyphens, the marks that set a text's direction) are
+    removed; up to two leading tokens that are a number, a mark or an icon font's ligature name are skipped
+    ("1 Delete", "credit_card Pay now"), and a label that is one ligature name is read with its underscores as
+    spaces ("delete_forever"; one with a dot is a file's name, "delete_me.txt"); a hyphen goes on with its word
+    ("Pay-as-you-go" is not "Pay"; a dash does not, so "Pay – as you go" asks); the comma of `Yes, delete` may be
+    missing.
   - An icon font's name of one word stands on the label's line as a word in lower case ("payment Pay now",
     "warning Delete account"). So where one or two such words lead up to a capitalised one, the line is read
     from that one too, and asks when either reading does: "delete Remove filter" and "send Send code" ask,
@@ -160,25 +167,48 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     search boxes and login forms keep working unattended: `Search`, `Sign in`, `Continue` and `Send code` run. A
     form whose button says `Reset password` asks, as the table says. One labelled `write` is untouched.
   - An approval asked for this way says so: its reason opens with the controller's sentence, which names the kind
-    the target reads as and the label the agent gave the click, and the agent's own reason follows, named as the
-    agent's. Nothing read from the page is in it.
-  - A click by coordinates is pressed on the element that was read: the press lands a little off its point, as a
-    hand's does, only while the same element is under it, and on the point itself otherwise.
-  - It does not catch: a label the table lacks, the phrases left out above among them; a frame of another origin
-    (a point inside one is read as the frame), and a frame that CSS scales or rotates (read at a point that is
-    off); a control pressed by a key (Enter or Space on a focused button, Enter in a form field) or by a drag; a
-    clickable element that is not a button (a `div` with a handler and no role) and a link ("How to delete your
-    account" is an article); a label given only by `aria-labelledby`, by an image, or by text that CSS or a canvas
-    draws; look-alike characters (a Cyrillic "е" in "Delete"); and a page whose own script falsifies the read of a
-    selector's element, or changes the target between the read and the press, or between the ask and the retry.
-    Such a page can as well name its button "Continue": the read answers text that steers the model, not a site
-    that is itself hostile.
+    the target reads as and the label the agent gave the action, and the agent's own reason follows, named as the
+    agent's. Nothing read from the page is in the controller's sentence; the agent's reason may repeat what the
+    page said, and an agent can write the same sentence itself, so only the approval's `kind` is the controller's
+    word.
+  - The press is read once more. The read above describes the element the action names, as the page stood before
+    the approval decision; the press lands on what is under the pointer when the mouse goes down, and that can be
+    another element: the button that fills a `div` the click named, or a row's `Delete` that the page shows only
+    while the pointer is over the row. So with the pointer in place and the mouse still up, the element under it
+    is read in the isolated world, and a button of a kind the action has no approval for is not pressed: the
+    action answers `approval_required` of that kind, as above. Where the controller falls back to Playwright's
+    own click (an element with no box, or one that something covers at its centre), Playwright's hover puts the
+    pointer first and the read is made before the click. This read has half a second to set up and half a second
+    to run; when it fails or runs past either, the press goes on, and an info-level log line says so.
+  - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
+    approved, and its target is not read again before the decision: a page that had stopped answering turned the
+    retry into a click that asked for nothing and left its approval unspent. At the press the button must read as
+    the kind approved or as no kind of the table; a button of another kind asks again, and the approval presented
+    is spent.
+  - A click by coordinates lands a little off its point, as a hand's does, only while the same element is under
+    the moved point. Otherwise, or when that cannot be told (half a second to set the comparison up, half a
+    second to make it), it lands on the point itself. Two points inside a frame of another origin, or off the
+    page, are never taken for one element.
+  - It does not catch: a label the table lacks, the phrases left out above among them (the table is English, and
+    has no `Place bid`, `Book now`, `Withdraw`, `Reply` or `Terminate`); a name that stands after the first 400
+    characters of a label or below its third line; a frame of another origin (a point inside one is read as the
+    frame), and a frame that CSS scales or rotates (read at a point that is off); a control pressed by a key
+    (Enter or Space on a focused button, Enter in a form field) or by a drag; a clickable element that is not a
+    button (a `div` with a handler and no role) and a link ("How to delete your account" is an article); a label
+    given only by `aria-labelledby`, by an image with no alt text, or by text that CSS or a canvas draws;
+    look-alike characters (a Cyrillic "е" in "Delete"); and a page whose own script falsifies the read of a
+    selector's element, or changes what is under the pointer between the read at the press and the press. Such a
+    page can as well name its button "Continue": the read answers text that steers the model, not a site that is
+    itself hostile.
+  - It asks more than it must where a harmless label starts with a phrase and no exception lists it: `Transfer
+    files`, a `Post` tab that only opens a form, a counter ("1 Post"), a dash where a hyphen would have joined
+    the words ("Pay – as you go"), a tile whose name and description together start with one.
   - A target that is not there (no element at the point, an `element_id` the page no longer has) is not
     classified, and neither is one that cannot be read: a page that does not answer within 2 seconds (for an
     `element_id` or a point, 2 to set the read up and 2 more to run it), or a selector that matches nothing in
-    those 2 seconds. Either way the click runs as labelled; when the read failed, one info-level log line names
-    the session and the kind of failure. Inside a governed run's approval, which an operator gave for that very
-    click, it is not read again.
+    those 2 seconds. Either way the action goes on as labelled, to succeed or fail by itself, and its press is
+    read as above; when a read failed, one info-level log line names the session and the kind of failure. Inside
+    a governed run's approval, which an operator gave for that very action, neither read is made.
   - A navigation off `ALLOWED_HOSTS` needs no rule of its own: with `PRE_REQUEST_BLOCKING` on (the default) it is
     refused whatever its label.
 - Request-rate limiting with 429 responses and reset headers

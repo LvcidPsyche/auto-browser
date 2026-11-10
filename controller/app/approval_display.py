@@ -1,8 +1,9 @@
 """What an operator, an auditor and a notification are shown of an approval: written by the server.
 
-The reason of an action approval is the agent's own words; what is here comes
-from the record itself, with the characters that could make it read as
-something else written as their code points.
+The reason of an action approval is the agent's own words, after the controller's
+sentence when the controller chose the kind (click_target.classified_reason); what
+is here comes from the record itself, with the characters that could make it read
+as something else written as their code points.
 """
 
 from __future__ import annotations
@@ -204,9 +205,10 @@ def approval_provenance(approval: ApprovalRecord) -> dict[str, str]:
 def approval_summary(approval: ApprovalRecord) -> str:
     """What an approval is for, written by the server: the tool for a tool call, else the action and its fields.
 
-    The reason is the agent's own words for an action approval, and a
-    notification that carried only the reason read the same for a coordinate
-    click as for the tool call whose reason it copied.
+    The reason of an action approval is the agent's own words (a sentence of the
+    controller's may open it), and a notification that carried only the reason
+    read the same for a coordinate click as for the tool call whose reason it
+    copied.
     """
     tool = approval_tool(approval)
     if tool is not None:
