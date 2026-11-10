@@ -631,6 +631,12 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
     def _stored(self) -> dict:
         return self.service._load()[self.job["id"]]
 
+    def _forget_the_refusal(self) -> None:
+        """The job as it is before its first refusal: a refusal is audited when it changes the job's status."""
+        jobs = self.service._load()
+        jobs[self.job["id"]]["last_status"] = None
+        self.service._save(jobs)
+
     def _assert_refused(self, result: dict | None) -> None:
         if result is not None:
             self.assertEqual(
@@ -673,6 +679,7 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
         for name, fire in (("scheduled", scheduled), ("webhook", webhook), ("trigger", trigger_tool)):
             with self.subTest(name):
                 self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
                 self._assert_refused(await fire())
 
     def _audit_as_whoever_is_current(self) -> list[tuple[str, str]]:
@@ -736,10 +743,85 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen, {"session": ("anonymous", "anonymous"), "agent_job": ("anonymous", "anonymous")})
 
+    async def test_three_fires_of_an_orphaned_job_leave_one_audit_event(self) -> None:
+        # One event a fire filled the audit log: a job on * * * * * wrote 10,000 of them in a week.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        with self.assertLogs("app.cron_service", level="DEBUG") as logged:
+            for _ in range(3):
+                await self.service._scheduled_run(self.job["id"])
+
+        self._assert_refused(None)  # awaited once
+        refusals = [record for record in logged.records if "refused" in record.getMessage()]
+        self.assertEqual([record.levelname for record in refusals], ["WARNING", "DEBUG", "DEBUG"])
+
+    async def test_a_job_refused_then_allowed_then_refused_again_leaves_two(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        self.manager.create_session.assert_awaited_once()
+        self.service._active_runs.clear()  # that run is over
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_an_allowed_fire_that_starts_nothing_still_ends_the_refusal_it_follows(self) -> None:
+        # Neither of these writes last_status, which still reads refused when the credential goes again.
+        for name, starts_nothing in (
+            ("the session cannot be created", {"create_session": AsyncMock(side_effect=RuntimeError("no browser"))}),
+            ("a previous run is active", {}),
+        ):
+            with self.subTest(name):
+                self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+                await self.service._scheduled_run(self.job["id"])
+                self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+                if starts_nothing:
+                    with patch.object(self.manager, "create_session", starts_nothing["create_session"]):
+                        await self.service._scheduled_run(self.job["id"])
+                else:
+                    self.service._active_runs[self.job["id"]] = "session-0"
+                    await self.service._scheduled_run(self.job["id"])
+                    self.service._active_runs.clear()
+                self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+                await self.service._scheduled_run(self.job["id"])
+
+                self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_restart_does_not_audit_a_job_that_was_already_refused(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        restarted = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+
+        result = await restarted.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertEqual(result["reason"], "owner_credential_removed")
+        self.manager.audit.append.assert_awaited_once()
+
+    async def test_a_refusal_whose_status_could_not_be_saved_is_audited_again(self) -> None:
+        # The store is what remembers a refusal: one it could not take is recorded again rather than not at all.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        with patch.object(self.service, "_save", side_effect=OSError("disk full")):
+            with self.assertLogs("app.cron_service", level="ERROR"):
+                await self.service._scheduled_run(self.job["id"])
+                await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
     async def test_a_deployment_moved_to_the_shared_token_or_to_none_refuses_named_owners(self) -> None:
         for tokens, shared in (("", "the-shared-token"), ("", None), ("malformed-without-a-colon", None)):
             with self.subTest(tokens=tokens, shared=shared):
                 self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
                 self.manager.settings.api_bearer_tokens = tokens
                 self.manager.settings.api_bearer_token = shared
 

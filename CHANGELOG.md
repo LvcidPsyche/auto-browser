@@ -106,13 +106,16 @@ All notable changes to auto-browser are documented here.
   fire now checks `API_BEARER_TOKENS` as it is then, where a token listed twice proves only the first operator
   listed with it. An owner no credential names is refused: the answer is
   `{"triggered": false, "reason": "owner_credential_removed"}`, `last_status` reads
-  `refused: owner credential removed`, no session is opened, and one `cron_job_refused` audit event is written, as
-  the operator `system` for a scheduled fire and as its caller for a trigger. A job
+  `refused: owner credential removed`, no session is opened, and a `cron_job_refused` audit event is written when
+  the job becomes refused, as the operator `system` for a scheduled fire and as its caller for a trigger; later
+  fires of a job still refused write no event and are logged at debug. A job
   a named operator queued fails when a worker takes it, with an error that says so, if that credential has gone
   meanwhile. Moving to the shared `API_BEARER_TOKEN` or to no token counts: every job a named operator created is then
   refused. Give the owner a named credential again, or delete the job and create it again under a credential that
-  stays. A job created on the shared token or with no token is unowned and runs as before, as does a job queued by an
-  operator named only by a header.
+  stays. Deleting it needs the owner's credential as well, as listing it does: give the credential back for the
+  delete, or stop the controller and remove the job's entry from the cron store (`CRON_STORE_PATH`,
+  `/data/crons/crons.json` by default). A job created on the shared token or with no token is unowned and runs as
+  before, as does a job queued by an operator named only by a header.
 - **A resumed agent run now gets its first run's `max_steps`, where it got what was left of them.**
   `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` with no `max_steps` queued a run of the steps the
   first had not used, and of one step when it had used them all. They now queue a run of the first run's whole
