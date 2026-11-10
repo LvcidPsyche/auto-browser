@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import time
 from pathlib import Path
 from typing import Any
 
@@ -568,16 +567,16 @@ async def test_a_read_given_up_on_a_busy_page_keeps_the_session_and_its_answers_
         session = world._cdp
         assert session is not None
 
-        # The page's main thread is taken for 1.2 s, shortly after this returns.
-        await page.evaluate("() => { setTimeout(() => window.spin(1200), 30); }")
-        await asyncio.sleep(0.15)
+        # The page's main thread is taken for 2.5 s, and the page says so as that starts: waited for by a fixed
+        # sleep, a stalled machine sent the reads after the page was free again.
+        async with page.expect_console_message(lambda message: message.text == "spinning", timeout=10_000):
+            await page.evaluate("() => { setTimeout(() => { console.log('spinning'); window.spin(2500); }, 30); }")
         beside = asyncio.ensure_future(ids.evaluate(page, DOUBLE, {"n": 21}, timeout_ms=8000, setup_timeout_ms=8000))
-        started = time.monotonic()
         with pytest.raises(BrowserActionError) as given_up:
             await ids.evaluate(page, DOUBLE, {"n": 100}, timeout_ms=300, setup_timeout_ms=300, keep_session=True)
 
         assert given_up.value.code == PAGE_NOT_RESPONDING
-        assert time.monotonic() - started < 1.0
+        assert not beside.done()  # given up while the page was still busy, not answered late
         assert world._cdp is session
         # The call beside it, on the same session, gets its own answer once the page is free, and so does every
         # call after it.

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,7 @@ SLOW_S = 0.3  # past the default and SHORT_MS, well inside LONG_MS
 HUNG_S = 30.0
 ACTION_WAIT_MS = 2000  # what an element action's script waits on the page by itself
 TEST_BOUND_S = 10.0
+OPENER_MS = 8000  # the setup budget of a call a test holds open: it is let go long before
 
 ATTACH = "attach"
 SCRIPT = "Runtime.callFunctionOn"
@@ -78,6 +80,39 @@ def slow_page(cdp: SlowCdp, attach_s: float = 0.0) -> Any:
 
 def world() -> PageWorld:
     return PageWorld(SimpleNamespace(action_timeout_ms=DEFAULT_MS))
+
+
+class HeldCdp(SlowCdp):
+    """A session that keeps its answer to one method back until the test lets it go."""
+
+    def __init__(self, held: str) -> None:
+        super().__init__({})
+        self.held = held
+        self.let_go = asyncio.Event()
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if method != self.held:
+            return await super().send(method, params)
+        self.sent.append(method)
+        await self.let_go.wait()
+        return ANSWERS[method]
+
+
+def held_page(cdp: SlowCdp, let_go: asyncio.Event) -> Any:
+    """A page whose CDP session attaches only once the test lets it."""
+
+    async def new_cdp_session(_page: Any) -> SlowCdp:
+        await let_go.wait()
+        return cdp
+
+    return SimpleNamespace(context=SimpleNamespace(new_cdp_session=new_cdp_session))
+
+
+async def until(happened: Callable[[], bool]) -> None:
+    """Wait for what a test is about to act on: a fixed sleep was a guess at how long a loaded machine takes."""
+    async with asyncio.timeout(TEST_BOUND_S):
+        while not happened():
+            await asyncio.sleep(0.005)
 
 
 def one_slow_step(step: str, seconds: float, script_value: Any = "read") -> tuple[Any, SlowCdp]:
@@ -291,51 +326,44 @@ async def test_a_setup_message_that_would_start_after_the_budget_is_spent_fails_
 async def test_a_call_waits_for_the_session_another_call_is_opening_no_longer_than_its_setup_budget() -> None:
     # The session is opened under a lock, and the wait for the lock was no setup message: a read with a budget of
     # 120 ms waited as long as the call beside it took to attach.
-    cdp = SlowCdp({})
-    page, instance = slow_page(cdp, attach_s=3 * SLOW_S), world()
-    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=LONG_MS))
-    await asyncio.sleep(0.05)
-    assert instance._lock.locked()
+    # The attach is held until the waiting call has given up: timed instead, a stalled machine let the attach
+    # finish first, and the waiting call then had nothing to wait for.
+    for keeps in (True, False):  # whatever the waiting call asked for: it has no session of its own to drop yet
+        cdp, attached = SlowCdp({}), asyncio.Event()
+        page, instance = held_page(cdp, attached), world()
+        opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=OPENER_MS))
+        await until(instance._lock.locked)
 
-    elapsed, error = await timed_failure(
-        instance.call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=SHORT_MS, keep_session=True)
-    )
+        _elapsed, error = await timed_failure(
+            instance.call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=SHORT_MS, keep_session=keeps)
+        )
 
-    assert error.code == PAGE_NOT_RESPONDING
-    assert f"within {SHORT_MS} ms" in str(error)
-    assert elapsed < 2 * SLOW_S  # the attach takes three
-    # Only the call that waited gave up: the one that was opening the session gets it, and its answer.
-    assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
-    assert (instance._cdp, instance._frame_id) == (cdp, "frame-1")
-    assert cdp.detached == 0
-    # Whatever the waiting call asked for: one that does not keep the session has none of its own to drop yet.
-    page, instance = slow_page(cdp, attach_s=3 * SLOW_S), world()
-    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=LONG_MS))
-    await asyncio.sleep(0.05)
-    _elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, setup_timeout_ms=SHORT_MS))
-    assert error.code == PAGE_NOT_RESPONDING
-    assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
-    assert (instance._cdp, cdp.detached) == (cdp, 0)
+        assert error.code == PAGE_NOT_RESPONDING
+        assert f"within {SHORT_MS} ms" in str(error)
+        assert not opening.done()  # it gave up while the other call was still attaching
+        # Only the call that waited gave up: the one that was opening the session gets it, and its answer.
+        attached.set()
+        assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
+        assert (instance._cdp, instance._frame_id, cdp.detached) == (cdp, "frame-1", 0)
 
 
 async def test_a_call_that_gives_up_the_wait_leaves_the_session_the_other_call_already_holds() -> None:
     # The opener has attached and is asking for the frame tree when the waiting call's budget ends. The waiting call
     # has no session of its own yet, whatever it asked for: dropping "the" session there took the opener's from
     # under it, and the opener then sent its next message to nothing.
-    cdp = SlowCdp({"Page.getFrameTree": 3 * SLOW_S})
+    cdp = HeldCdp("Page.getFrameTree")
     page, instance = slow_page(cdp), world()
-    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=LONG_MS))
-    async with asyncio.timeout(TEST_BOUND_S):
-        while "Page.getFrameTree" not in cdp.sent:
-            await asyncio.sleep(0.005)
+    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=OPENER_MS))
+    await until(lambda: "Page.getFrameTree" in cdp.sent)
     assert instance._lock.locked()
     assert (instance._cdp, instance._frame_id) == (cdp, None)
 
-    elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, setup_timeout_ms=SHORT_MS))
+    _elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, setup_timeout_ms=SHORT_MS))
 
     assert error.code == PAGE_NOT_RESPONDING
-    assert elapsed < 2 * SLOW_S  # the frame tree takes three
+    assert not opening.done()  # it gave up while the other call was still asking
     assert (instance._cdp, cdp.detached) == (cdp, 0)
+    cdp.let_go.set()
     assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
     assert (instance._cdp, instance._frame_id, cdp.detached) == (cdp, "frame-1", 0)
 
