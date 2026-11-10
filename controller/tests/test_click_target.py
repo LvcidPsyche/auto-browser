@@ -143,7 +143,7 @@ class _Page:
 class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
     async def _read(self, element_ids: Any, page: _Page | None = None, **fields: Any) -> Any:
         decision = BrowserActionDecision(action="click", reason="r", risk_category="read", **fields)
-        return await read_click_target(element_ids, page or _Page(), decision)
+        return await read_click_target(element_ids, page or _Page(), decision, session_id="session-7")
 
     async def test_an_element_id_or_a_point_is_read_in_the_world_and_bounded(self) -> None:
         element_ids = AsyncMock()
@@ -214,14 +214,38 @@ class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(page.left, 1)
 
-    async def test_a_page_that_does_not_answer_classifies_nothing_and_is_logged_at_debug(self) -> None:
-        element_ids = AsyncMock()
-        element_ids.evaluate.side_effect = BrowserActionError("no answer", code=PAGE_NOT_RESPONDING)
+    async def test_an_unread_click_is_logged_at_info_by_session_and_kind_of_failure_never_its_text(self) -> None:
+        # A page that does not answer, a navigation in flight, a selector nothing matches: each runs as labelled,
+        # and a deployment could not tell "read and found harmless" from "not read". An exception's text can hold
+        # the page's, so only debug carries it.
+        page_text = "Delete account <b>now</b>"
+        for fields, failure, kind in (
+            ({"x": 10.0, "y": 20.0}, BrowserActionError(page_text, code=PAGE_NOT_RESPONDING), "BrowserActionError"),
+            ({"x": 10.0, "y": 20.0}, PlaywrightError(page_text), "Error"),
+            ({"selector": "text=Gone"}, PlaywrightTimeoutError(page_text), "TimeoutError"),
+        ):
+            with self.subTest(failure=failure):
+                element_ids = AsyncMock()
+                element_ids.evaluate.side_effect = failure
 
-        with self.assertLogs("app.browser.click_target", level=logging.DEBUG) as logged:
-            self.assertIsNone(await self._read(element_ids, x=10.0, y=20.0))
+                with self.assertLogs("app.browser.click_target", level=logging.DEBUG) as logged:
+                    self.assertIsNone(await self._read(element_ids, _Page(failure), **fields))
 
-        self.assertEqual([record.levelno for record in logged.records], [logging.DEBUG])
+                levels = [record.levelno for record in logged.records]
+                self.assertEqual(sorted(levels), [logging.DEBUG, logging.INFO])
+                info = next(record for record in logged.records if record.levelno == logging.INFO).getMessage()
+                self.assertIn("session-7", info)
+                self.assertIn(kind, info)
+                self.assertIn("read click", info)
+                self.assertNotIn("Delete account", info)
+
+    async def test_a_target_that_is_read_logs_nothing_whatever_it_is(self) -> None:
+        for answer in ({"tag": "button", "labels": ["Delete"]}, {"tag": "a"}, None):
+            with self.subTest(answer=answer):
+                element_ids = AsyncMock()
+                element_ids.evaluate.return_value = answer
+                with self.assertNoLogs("app.browser.click_target", level=logging.DEBUG):
+                    self.assertEqual(await self._read(element_ids, x=10.0, y=20.0), answer)
 
     async def test_a_malformed_element_id_classifies_nothing(self) -> None:
         element_ids = AsyncMock()

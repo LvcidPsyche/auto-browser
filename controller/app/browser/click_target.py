@@ -171,9 +171,16 @@ def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | N
     return None
 
 
-async def read_click_target(element_ids: ElementIds, page: Page, decision: BrowserActionDecision) -> Any:
-    """What the click ``decision`` makes would land on (DESCRIBE_TARGET_SCRIPT's answer), or None, logged at debug,
-    when it cannot be read. The target is named as the click names it: an element id, else a selector, else a point."""
+async def read_click_target(
+    element_ids: ElementIds, page: Page, decision: BrowserActionDecision, *, session_id: str
+) -> Any:
+    """What the click ``decision`` makes would land on (DESCRIBE_TARGET_SCRIPT's answer), or None when it cannot be
+    read. The target is named as the click names it: an element id, else a selector, else a point.
+
+    A read that fails is logged at info, by session and by the kind of failure, since the click then runs as
+    labelled: without the line nothing tells a click that was read and found harmless from one that was not read.
+    The failure's text goes to debug only: it can hold text of the page.
+    """
     try:
         element_id = target_element_id(selector=decision.selector, element_id=decision.element_id)
         if decision.selector and not element_id:
@@ -189,9 +196,13 @@ async def read_click_target(element_ids: ElementIds, page: Page, decision: Brows
             keep_session=True,
         )
     except Exception as exc:
-        logger.debug(
-            "the target of a %s click could not be read; it is not classified: %r", decision.risk_category, exc
+        logger.info(
+            "session %s: the target of a %s click could not be read (%s); the click runs as labelled, unclassified",
+            session_id,
+            decision.risk_category,
+            type(exc).__name__,
         )
+        logger.debug("session %s: reading the target of a click failed with: %r", session_id, exc)
         return None
 
 

@@ -483,7 +483,7 @@ class BrowserActionService:
             return decision
         if held_action_approval() is not None or held_tool_call_approval() is not None:
             return decision
-        target = await read_click_target(self.manager.element_ids, session.page, decision)
+        target = await read_click_target(self.manager.element_ids, session.page, decision, session_id=session.id)
         risk = classified_risk(target, decision.risk_category)
         return decision if risk is None else decision.model_copy(update={"risk_category": risk})
 
