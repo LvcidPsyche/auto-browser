@@ -275,18 +275,15 @@ DESCRIBE_TARGET_SCRIPT = r"""
   // a slot). closest() sees neither.
   const BUTTONS = 'button, input, [role="button" i], a[href]';
   let target = null;
+  let label = null;
   for (let node = el, steps = 0; node && steps < 256; steps += 1) {
     if (node.nodeType === 1 && node.matches(BUTTONS)) { target = node; break; }
+    if (!label && node.nodeType === 1 && node.localName === 'label') label = node;
     node = node.assignedSlot || node.parentNode || node.host || null;
   }
-  // A press on a label is one on its control: a label for a button, or around one, is that button, and its text
-  // one of the button's names.
-  let labelled = '';
-  const label = target ? null : el.closest('label');
-  if (label && label.control && label.control.matches('button, input')) {
-    target = label.control;
-    labelled = label.innerText;
-  }
+  // A press on a label is one on its control: a label for a button, or around one, is that button. The label is
+  // looked for along the same walk: one that holds a component's glyph is outside the tree the glyph is in.
+  if (!target && label && label.control && label.control.matches('button, input')) target = label.control;
   // A component that is a button: all the page gives it sits, slotted, in one button of its own tree. Text given
   // to it with no element around is under the pointer as the component, and the walk above starts outside its tree.
   if (!target && el.shadowRoot) {
@@ -314,7 +311,9 @@ DESCRIBE_TARGET_SCRIPT = r"""
   const cut = (value) => (typeof value === 'string' ? value.slice(0, limit) : '');
   const labels = [cut(target.getAttribute('aria-label')), cut(target.innerText), cut(target.getAttribute('title'))];
   if (tag === 'input') labels.push(cut(target.value), cut(target.getAttribute('alt')));
-  if (labelled) labels.push(cut(labelled));
+  // Its label elements name it too, whichever of the two was pressed: an icon button is often named by one.
+  const outside = target.labels ? Array.from(target.labels).slice(0, 4) : [];
+  for (const one of outside) labels.push(cut(one.innerText));
   // An icon button is often named on what is inside it: a label, a title or alt text on the icon.
   const named = target.querySelectorAll('[aria-label], [title], [alt]');
   for (let index = 0; index < named.length && index < 4; index += 1) {

@@ -121,6 +121,14 @@ LABELLED = """<title>start</title>
 <label id="for" for="del">Erase my data</label>
 <label id="around">Billing <input id="pay" type="button" value="Pay now" onclick="document.title='PAID'"></label>
 <label id="field">Your name <input id="name"></label>
+<button id="bin" onclick="document.title='EMPTIED'">&#128465;</button>
+<label id="named" for="bin">Empty trash</label>
+<button id="wipe" onclick="document.title='WIPED'">Delete everything</button>
+<label id="drawn" for="wipe"><x-glyph id="glyph"></x-glyph></label>
+<script>
+document.getElementById('glyph').attachShadow({mode: 'open'}).innerHTML =
+  `<span class="mark" style="display: inline-block; width: 24px; height: 24px">&#128465;</span>`;
+</script>
 """
 # What a press lands on that the read before it did not describe: the button that fills a wrapper the click names
 # (a div, and a focusable row with an element id of its own), and a button a row shows only while the pointer is
@@ -423,6 +431,22 @@ async def test_a_label_of_a_button_is_read_as_that_button(tmp_path: Path) -> Non
         # A label of a field is no button: the click runs, and puts the caret in the field.
         await env.manager.execute_decision(session_id, _click("read", selector="#field"))
         assert await page.evaluate("document.activeElement.id") == "name"
+
+
+async def test_a_button_is_read_by_its_label_and_a_label_from_inside_a_shadow_root(tmp_path: Path) -> None:
+    # The label was read only when the press was on the label. A button that shows an icon and is named by a
+    # label beside it had no name when the click named the button, and a label holding a component's glyph was
+    # not found from the glyph: closest() stops at the shadow root the glyph is in.
+    async with browser_env(tmp_path, {"/": LABELLED}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        mark = await _centre(page.locator("#glyph .mark"))
+
+        for target in ({"selector": "#bin"}, await _centre(page.locator("#bin")), {"selector": "#glyph .mark"}, mark):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", **target))
+            assert asked.value.approval.kind == "destructive", target
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that_name(tmp_path: Path) -> None:
