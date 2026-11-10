@@ -9,6 +9,7 @@ target read as the click will find it (app/browser/click_target.py). Same harnes
 from __future__ import annotations
 
 import asyncio
+import random
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,16 @@ PAGE = """<title>start</title>
 <div id="pay" role="button" onclick="document.title='PAID'"><span>Pay now</span></div>
 <a id="article" href="/article">Delete your account: how it works</a>
 <form id="search" action="/results"><input name="q" value="shoes"><button id="go">Search</button></form>
+"""
+# A 3 px control of its own inside a button: by its side, every way, is "Delete account".
+SMALL_CONTROL = """<title>start</title>
+<style>
+  body { margin: 0 }
+  #delete { position: absolute; left: 40px; top: 40px; width: 240px; height: 80px }
+  #dot { position: absolute; left: 120px; top: 30px; width: 3px; height: 3px; background: #000 }
+</style>
+<button id="delete" onclick="document.title = 'DELETED'">Delete account<span id="dot"
+  onclick="event.stopPropagation(); window.dots = (window.dots || 0) + 1"></span></button>
 """
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
@@ -230,3 +241,25 @@ async def test_a_read_labelled_navigation_off_the_list_is_refused(tmp_path: Path
         # The gate fails the request: Chromium shows its error page, never the page off the list.
         assert await _title(env, session_id) != "ARTICLE"
         assert not env.page(session_id).url.startswith(f"http://localhost:{env.port}")
+
+
+async def test_no_click_aimed_at_a_small_control_presses_the_button_around_it(tmp_path: Path) -> None:
+    # The classifier reads the element at the point a click names; the press used to land up to 2.5 px from it
+    # each way, on a neighbour nobody had read (tests/test_click_jitter.py pins the fallback).
+    clicks = 12
+    state = random.getstate()
+    random.seed(20261110)
+    try:
+        async with browser_env(tmp_path, {"/": SMALL_CONTROL}) as env:
+            session_id = await env.create("/")
+            page = env.page(session_id)
+            box = await page.locator("#dot").bounding_box()
+            x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+            for _ in range(clicks):
+                await env.manager.click(session_id, x=x, y=y)
+
+            # Unchecked, a jittered press stays on a 3 px control about one time in three.
+            assert (await page.title(), await page.evaluate("window.dots")) == ("start", clicks)
+    finally:
+        random.setstate(state)

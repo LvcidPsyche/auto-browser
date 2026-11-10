@@ -27,7 +27,7 @@ from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
-from ..click_target import CHECKED_LABELS, classified_risk, read_click_target
+from ..click_target import CHECKED_LABELS, classified_risk, read_click_target, same_element_at
 from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from ..element_world import READ
@@ -892,10 +892,21 @@ class BrowserActionService:
         session.mouse_position = (x, y)
 
     async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
+        """Click at (x, y), a little off it as a hand is, but never on another element than the one at (x, y).
+
+        The press used to land up to JITTER_PX from the point each way, on whatever was there: a click aimed at a
+        small control pressed its neighbour, which nothing had read (the fast profile's classifier reads the
+        element at the point the click names, click_target.py). The comparison runs once the pointer has arrived
+        and the pause before the press is over; when the elements differ, or cannot be compared, the pointer
+        goes to the point itself.
+        """
         jitter_x = x + random.uniform(-JITTER_PX, JITTER_PX)
         jitter_y = y + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, jitter_x, jitter_y)
         await self.pause_before_press()
+        if not await same_element_at(self.manager.element_ids, session.page, (x, y), (jitter_x, jitter_y)):
+            jitter_x, jitter_y = x, y
+            await session.page.mouse.move(x, y)
         await self.press_mouse(session, jitter_x, jitter_y)
 
     @staticmethod

@@ -95,6 +95,18 @@ DESCRIBE_TARGET_SCRIPT = r"""
   return { tag, type, role, submits: Boolean(submits && target.form), labels };
 }
 """
+# (x, y) => the element a press at that point lands on, or null: the innermost one, through open shadow roots.
+_ELEMENT_AT_SCRIPT = r"""
+(x, y) => {
+  let el = document.elementFromPoint(x, y);
+  for (let depth = 0; el && el.shadowRoot && depth < 8; depth += 1) {
+    const inner = el.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === el) break;
+    el = inner;
+  }
+  return el;
+}
+"""
 # Runs in the isolated world: (arg, registry) => what the click would land on, or null. arg names the target as
 # the click does when it names no selector: {elementId} or {x, y}.
 CLICK_TARGET_SCRIPT = (
@@ -105,12 +117,9 @@ CLICK_TARGET_SCRIPT = (
     const found = registry.find(arg.elementId);
     el = found.status === 'ok' ? found.element : null;
   } else {
-    el = document.elementFromPoint(arg.x, arg.y);
-    for (let depth = 0; el && el.shadowRoot && depth < 8; depth += 1) {
-      const inner = el.shadowRoot.elementFromPoint(arg.x, arg.y);
-      if (!inner || inner === el) break;
-      el = inner;
-    }
+    el = ("""
+    + _ELEMENT_AT_SCRIPT
+    + r""")(arg.x, arg.y);
   }
   return ("""
     + DESCRIBE_TARGET_SCRIPT
@@ -118,6 +127,21 @@ CLICK_TARGET_SCRIPT = (
 }
 """
 )
+# Runs in the isolated world: (arg) => whether a press at (otherX, otherY) lands on the very element one at (x, y)
+# does, found as the classifier finds a point's.
+SAME_ELEMENT_SCRIPT = (
+    r"""
+(arg) => {
+  const elementAt = """
+    + _ELEMENT_AT_SCRIPT
+    + r""";
+  return elementAt(arg.x, arg.y) === elementAt(arg.otherX, arg.otherY);
+}
+"""
+)
+# The comparison's bound, for its message and, apart, for the messages that set it up. Past it the press goes to
+# the point itself, which costs nothing but the jitter, so it is short: the pointer is already there, waiting.
+SAME_ELEMENT_TIMEOUT_MS = 500
 
 
 def _label_kind(label: str) -> ApprovalKind | None:
@@ -169,6 +193,29 @@ async def read_click_target(element_ids: ElementIds, page: Page, decision: Brows
             "the target of a %s click could not be read; it is not classified: %r", decision.risk_category, exc
         )
         return None
+
+
+async def same_element_at(
+    element_ids: ElementIds, page: Page, point: tuple[float, float], other: tuple[float, float]
+) -> bool:
+    """Whether a press at ``other`` lands on the element one at ``point`` does; False when that cannot be told.
+
+    For a click by coordinates, whose press is moved a little from its point (click_human_like): the element at the
+    point is the one that was read, and asked about when it needed an approval.
+    """
+    try:
+        same = await element_ids.evaluate(
+            page,
+            SAME_ELEMENT_SCRIPT,
+            {"x": point[0], "y": point[1], "otherX": other[0], "otherY": other[1]},
+            timeout_ms=SAME_ELEMENT_TIMEOUT_MS,
+            setup_timeout_ms=SAME_ELEMENT_TIMEOUT_MS,
+            keep_session=True,
+        )
+    except Exception as exc:
+        logger.debug("the elements at a click's point and at its jittered point could not be compared: %r", exc)
+        return False
+    return same is True
 
 
 async def _read_selected(page: Page, selector: str) -> Any:
