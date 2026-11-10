@@ -148,14 +148,16 @@ _MAX_SKIPPED_TOKENS = 2
 # as a click on it is one on them. Both reads below describe their element with it, so they cannot drift apart.
 DESCRIBE_TARGET_SCRIPT = r"""
 (el, limit) => {
-  if (!el || !el.closest) return null;
-  // closest() stops at a shadow root, so it is asked again from each host on the way out: the glyph of an icon
-  // component sits in the button its host sits in.
+  if (!el || el.nodeType !== 1) return null;
+  // The button the element sits in, looked for along the tree as it is shown: out of a shadow root to its host
+  // (the glyph of an icon component sits in the button its host sits in), and from what a page slots into a
+  // component to the slot's place in that component's tree (a design system's button is a shadow button around
+  // a slot). closest() sees neither.
+  const BUTTONS = 'button, input, [role="button" i], a[href]';
   let target = null;
-  for (let node = el, hosts = 0; node && node.closest && !target && hosts <= 8; hosts += 1) {
-    target = node.closest('button, input, [role="button" i], a[href]');
-    const root = node.getRootNode();
-    node = root && root.host ? root.host : null;
+  for (let node = el, steps = 0; node && steps < 256; steps += 1) {
+    if (node.nodeType === 1 && node.matches(BUTTONS)) { target = node; break; }
+    node = node.assignedSlot || node.parentNode || node.host || null;
   }
   target = target || el;
   const tag = target.localName;
@@ -164,8 +166,45 @@ DESCRIBE_TARGET_SCRIPT = r"""
   const submits = (tag === 'button' && type === 'submit')
     || (tag === 'input' && (type === 'submit' || type === 'image'));
   const cut = (value) => (typeof value === 'string' ? value.slice(0, limit) : '');
-  const labels = [cut(target.getAttribute('aria-label')), cut(target.innerText)];
+  const labels = [cut(target.getAttribute('aria-label')), cut(target.innerText), cut(target.getAttribute('title'))];
   if (tag === 'input') labels.push(cut(target.value), cut(target.getAttribute('alt')));
+  // An icon button is often named on what is inside it: a label, a title or alt text on the icon.
+  const named = target.querySelectorAll('[aria-label], [title], [alt]');
+  for (let index = 0; index < named.length && index < 4; index += 1) {
+    for (const name of ['aria-label', 'title', 'alt']) labels.push(cut(named[index].getAttribute(name)));
+  }
+  // innerText leaves out what a slot or a shadow root inside the button shows. That text is gathered here, a
+  // line for each block as innerText makes them, and handed over only when there is such a slot or root.
+  let crossed = false;
+  let budget = 256;
+  const shown = [];
+  const gather = (node) => {
+    if (budget <= 0) return;
+    budget -= 1;
+    if (node.nodeType === 3) { shown.push(node.nodeValue.replace(/\s+/g, ' ')); return; }
+    if (node.nodeType === 11) { node.childNodes.forEach(gather); return; }
+    if (node.nodeType !== 1) return;
+    const name = node.localName;
+    if (name === 'script' || name === 'style' || name === 'template') return;
+    if (name === 'br') { shown.push('\n'); return; }
+    const display = node.ownerDocument.defaultView.getComputedStyle(node).display;
+    if (display === 'none') return;
+    const block = !/^(inline|contents)/.test(display);
+    if (block) shown.push('\n');
+    const assigned = name === 'slot' ? node.assignedNodes({ flatten: true }) : [];
+    if (assigned.length) {
+      crossed = true;
+      assigned.forEach(gather);
+    } else if (node.shadowRoot) {
+      crossed = true;
+      gather(node.shadowRoot);
+    } else {
+      node.childNodes.forEach(gather);
+    }
+    if (block) shown.push('\n');
+  };
+  gather(target);
+  if (crossed) labels.push(cut(shown.join('')));
   return { tag, type, role, submits: Boolean(submits && target.form), labels };
 }
 """

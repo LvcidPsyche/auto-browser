@@ -73,6 +73,33 @@ document.getElementById('icon').attachShadow({mode: 'open'}).innerHTML =
   `<span class="glyph" style="display: inline-block; width: 24px; height: 24px; background: #c00"></span>`;
 </script>
 """
+# A design system's button: a component whose shadow tree is a button around a slot, its label slotted in from the
+# page (text=Delete account finds the label, or the component), and one whose name and note are separate blocks.
+SLOTTED = """<title>start</title>
+<x-button id="host"><span id="label">Delete account</span></x-button>
+<x-button id="noted"><div>Delete account</div><div>This permanently removes your profile and all its data</div></x-button>
+<x-button id="filter"><span>Remove</span> <b>filter</b></x-button>
+<script>
+for (const host of document.querySelectorAll('x-button')) {
+  host.attachShadow({mode: 'open'}).innerHTML = `<button class="inner"><slot></slot></button>`;
+  host.shadowRoot.querySelector('.inner').addEventListener('click', () => { document.title = 'PRESSED ' + host.id; });
+}
+</script>
+"""
+# Buttons that show an icon and are named beside it: by a title, by a label on the icon, by an image's alt text,
+# and by text in the shadow root of a component inside the button.
+NAMED_BESIDE = """<title>start</title>
+<style>button { display: block; width: 60px; height: 40px; margin: 8px }</style>
+<button id="titled" title="Delete account" onclick="document.title='PRESSED'">&#128465;</button>
+<button id="icon" onclick="document.title='PRESSED'"><i aria-label="Delete account">&#128465;</i></button>
+<button id="image" onclick="document.title='PRESSED'"><img alt="Delete account" width="16" height="16"
+  src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="></button>
+<button id="shadow" onclick="document.title='PRESSED'"><x-text id="text"></x-text></button>
+<button id="plain" title="Close this panel" onclick="document.title='CLOSED'">&#10005;</button>
+<script>
+document.getElementById('text').attachShadow({mode: 'open'}).innerHTML = `<span>Delete account</span>`;
+</script>
+"""
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
 # PAGE with a button before the others that only a selector piercing an open shadow root finds.
@@ -237,6 +264,42 @@ async def test_an_element_in_a_shadow_root_inside_a_button_counts_as_the_button(
                 await env.manager.execute_decision(session_id, _click("read", **target))
             assert asked.value.approval.kind == "destructive", target
         assert await _title(env, session_id) == "start"
+
+
+async def test_a_label_slotted_into_a_shadow_button_is_read_as_that_buttons(tmp_path: Path) -> None:
+    # closest() and innerText both stay inside one tree: the label a page slots into a component's shadow button
+    # found no button around it, and that button read as having no text. Every "Delete account" of a design
+    # system built this way ran as labelled.
+    async with browser_env(tmp_path, {"/": SLOTTED}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        label = await _centre(page.locator("#label"))
+
+        for target in ({"selector": "#label"}, label, {"selector": "#host .inner"}, {"selector": "#noted .inner"}):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", **target))
+            assert asked.value.approval.kind == "destructive", target
+        assert await _title(env, session_id) == "start"
+
+        # A harmless continuation split over two elements is still one: it runs.
+        await env.manager.execute_decision(session_id, _click("write", selector="#filter .inner"))
+        assert await _title(env, session_id) == "PRESSED filter"
+
+
+async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that_name(tmp_path: Path) -> None:
+    # An icon button's name is its title, a label or alt text on the icon, or text a component inside it shows:
+    # the read took the button's own aria-label and innerText only, and each of these ran as labelled.
+    async with browser_env(tmp_path, {"/": NAMED_BESIDE}) as env:
+        session_id = await env.create("/")
+
+        for button in ("#titled", "#icon", "#image", "#shadow"):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", selector=button))
+            assert asked.value.approval.kind == "destructive", button
+        assert await _title(env, session_id) == "start"
+
+        await env.manager.execute_decision(session_id, _click("read", selector="#plain"))
+        assert await _title(env, session_id) == "CLOSED"
 
 
 async def test_a_point_inside_a_frame_of_another_origin_is_not_read(tmp_path: Path) -> None:
