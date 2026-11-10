@@ -1,9 +1,9 @@
 """What a fast-profile click lands on, read from the page, not taken from the model's label (STORE-42).
 
 In the fast profile a decision's own ``risk_category`` decides whether its click asks for approval, and
-``read``, ``write`` and, on a click, ``upload`` ask for nothing. That label is written by a model reading the page
-it acts on, and text on the page can steer it to call a click on "Delete account" any of them. So before the
-approval decision, a click so labelled has its target read: a button with a line of its label starting with a
+``read``, ``write`` and, on a click or a type, ``upload`` ask for nothing. That label is written by a model reading
+the page it acts on, and text on the page can steer it to call a click on "Delete account" any of them. So before
+the approval decision, a click so labelled has its target read: a button with a line of its label starting with a
 phrase of CLICK_LABEL_PHRASES is recorded with that phrase's kind, and asks for approval as an honest label does,
 with a reason that says the controller chose the kind (classified_reason); a form's submit button labelled
 ``read`` is recorded as ``write``, which the fast profile does not ask about. A type is read the same way: it puts
@@ -25,7 +25,9 @@ The press is read once more (reading_presses, refuse_press_not_asked_about). Wha
 what the mouse goes down on: the button that fills a wrapper the click named, one the page shows as the pointer
 arrives, another match of a selector resolved a second time. With the pointer in place, what is under it is read in
 the isolated world, and a button of a kind the action has no approval for is not pressed (PressNeedsApproval): the
-action asks for that approval. Retried with it, the action takes its kind from the approval it presents, with no
+action asks for that approval. A click Playwright has to place is taken apart for this: Playwright puts the pointer,
+at a point the controller gives it, and the press is the controller's (click_as_playwright_places_it in
+services/actions.py). Retried with the approval, the action takes its kind from the approval it presents, with no
 read of the target before the decision, so a read that fails on the retry cannot run the click unasked and leave
 the approval unspent.
 

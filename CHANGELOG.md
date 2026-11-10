@@ -169,7 +169,8 @@ All notable changes to auto-browser are documented here.
   button, and a click that names a container when the press lands on such a button inside it. An agent loop that
   ran such clicks unattended in the fast profile now stops there until an operator approves (or the agent itself,
   under `AUTONOMOUS_APPROVALS`). A form submit with no such label still runs unattended, recorded as `write`, and
-  so do `Send code`, `Remove filter`, `Purchase history` and the other harmless continuations. The direct routes
+  so do `Send code`, `Remove filter`, `Purchase history` and the other harmless continuations (`Send link` by
+  itself asks: it is also the button of a share dialog). The direct routes
   (`POST /sessions/{id}/actions/click` and `/actions/type`) carry no label and are not read. The whole table, how
   a label is read, and what the read does not catch, are in `docs/production-hardening.md`.
 - **Approvals for tool calls are now matched under a key file, `.tool-call-digest.key` in `APPROVAL_ROOT`: back it up
@@ -307,13 +308,16 @@ All notable changes to auto-browser are documented here.
   `account_change`, `post`) asks for that kind's approval, and a form's submit button labelled `read` is recorded
   as `write`. An element inside a button counts as the button, and so do a `label` of one, text slotted into a
   component's button, and a component that is one; its label is any of its `aria-label`, its text, its `title`,
-  an input's value or alt text, and a name on an icon inside it. A label is read whole and by each of its first
-  three lines, at most 40 characters a line, past a leading number or icon name and without the characters that
-  show nothing, and harmless continuations of a phrase (`Send code`, `Remove filter`, `Purchase history`) are not
-  asked about.
+  an input's value or alt text, the text of its `label` elements, and a name on an icon inside it. A label is
+  read whole and by each of its first three lines, at most 40 characters a line, past a leading number or icon
+  name and without the characters that show nothing, and harmless continuations of a phrase (`Send code`,
+  `Remove filter`, `Purchase history`) are not asked about, unless the same line goes on to a phrase of the
+  table.
   - The press is read once more, with the pointer in place and the mouse still up: a click that names the `div`
     around a "Delete account" button, or a row whose "Delete" shows only under the pointer, lands on a button the
     first read never saw. A button of a kind the action has no approval for is not pressed, and the action asks.
+    A click that Playwright has to place (on a wrapper wider than the viewport, or one broken over two lines) is
+    pressed by the controller at the point Playwright would have picked, so it is read where it lands too.
   - The approval's reason opens with the controller's sentence, which says what the target reads as and what the
     agent labelled the action, before the agent's own reason; the dashboard's confirm dialog now labels a reason
     "what an agent wrote in it is unverified" rather than "as the agent wrote it". Retried with that approval, the

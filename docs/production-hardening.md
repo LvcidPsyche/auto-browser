@@ -173,26 +173,35 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     `Unsubscribe`, `Submit`, `Confirm`, `Save changes` and `Clear`.
   - A form's submit button with no such label, labelled `read`, is recorded as `write`, which asks for nothing, so
     search boxes and login forms keep working unattended: `Search`, `Sign in`, `Continue` and `Send code` run. A
-    form whose button says `Reset password` asks, as the table says. One labelled `write` is untouched.
+    form whose button says `Reset password` asks, as the table says. One labelled `write` is untouched, and one
+    found only at the press (the click named a wrapper around it) keeps `read` in its record.
   - An approval asked for this way says so: its reason opens with the controller's sentence, which names the kind
     the target reads as and the label the agent gave the action, and the agent's own reason follows, named as the
     agent's. Nothing read from the page is in the controller's sentence; the agent's reason may repeat what the
     page said, and an agent can write the same sentence itself, so only the approval's `kind` is the controller's
-    word.
+    word. An approval already pending for the same action and kind is reused as it stands, with the reason it was
+    first asked with.
   - The press is read once more. The read above describes the element the action names, as the page stood before
     the approval decision; the press lands on what is under the pointer when the mouse goes down, and that can be
     another element: the button that fills a `div` the click named, or a row's `Delete` that the page shows only
     while the pointer is over the row. So with the pointer in place and the mouse still up, the element under it
     is read in the isolated world, and a button of a kind the action has no approval for is not pressed: the
-    action answers `approval_required` of that kind, as above. Where the controller falls back to Playwright's
-    own click (an element with no box, or one that something covers at its centre), Playwright's hover puts the
-    pointer first and the read is made before the click. This read has half a second to set up and half a second
-    to run; when it fails or runs past either, the press goes on, and an info-level log line says so.
+    action answers `approval_required` of that kind, as above. Where the element is not what the pointer finds
+    at the middle of its box (a wrapper wider than the viewport, a link broken over two lines, something over its
+    middle), the click is one Playwright places, at a point it picks itself. For an action that is read,
+    Playwright then only puts the pointer, at that point, which the controller gives it, and the press is the
+    controller's own, read where it lands as any other; a target that has left the page by then is not pressed
+    (`target_moved`, retryable). This read has half a second to set up and half a second to run; when it fails
+    or runs past either, the press goes on, and an info-level log line says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as
     the kind approved or as no kind of the table; a button of another kind asks again, and the approval presented
     is spent.
+  - Neither read is made for an action whose own label already asks (`payment`, `destructive`, `account_change`,
+    `post`): it is approved, and pressed, as the agent labelled it. Nor for an approval run by
+    `POST /approvals/{id}/execute` or `browser.execute_approval`, which presses what is at the approved target
+    then, whatever it reads as: only a retry of the action with its `approval_id` is read at the press.
   - A click by coordinates lands a little off its point, as a hand's does, only while the same element is under
     the moved point. Otherwise, or when that cannot be told (half a second to set the comparison up, half a
     second to make it), it lands on the point itself. Two points inside a frame of another origin, or off the
