@@ -568,7 +568,8 @@ All notable changes to auto-browser are documented here.
   before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
   Only the full queue is answered so. The resume route answered every `RuntimeError` as `503` with nothing logged, so
   a fault after the job was queued read as "try again later" with the job left queued: on all three routes any other
-  error now answers `500` `Internal error` and is logged.
+  error now answers `500` `Internal error` and is logged. A full queue's `503` is logged as well, on all three: one
+  warning that names the session, or the job for a resume, with no traceback.
 - **One approval record with a time that cannot be read no longer stops the others.** A rejected tool call keeps its
   arguments until the rejection is older than the approval TTL, and the pass that removes them runs at every start
   and inside every request for an approval. It read the record's `decided_at` with nothing caught, so one record whose

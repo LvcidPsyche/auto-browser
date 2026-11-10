@@ -258,9 +258,17 @@ class AgentHttpTests(unittest.TestCase):
         ):
             for path in ("/sessions/session-1/agent/jobs/run", "/sessions/session-1/agent/jobs/step"):
                 with self.subTest(path=path):
-                    response = self.client.post(path, json={"provider": "openai", "goal": "g"})
+                    with self.assertLogs("app.routes.agent", level="WARNING") as logged:
+                        response = self.client.post(path, json={"provider": "openai", "goal": "g"})
 
                     self.assertEqual((response.status_code, response.json()), (503, {"detail": "Service unavailable"}))
+                    # One line that says why, and for which session: the 500 this replaced was logged, and a 503
+                    # that passes through the route's error handling is not. No traceback: nothing is broken.
+                    (record,) = logged.records
+                    self.assertEqual(record.levelname, "WARNING")
+                    self.assertIn("queue is full", record.getMessage())
+                    self.assertIn("session-1", record.getMessage())
+                    self.assertIsNone(record.exc_info)
         # Neither refused job is left queued for a restart to run.
         self.assertEqual([record.status for record in store._list_sync(None, None)], ["failed", "failed"])
 
@@ -277,9 +285,16 @@ class AgentHttpTests(unittest.TestCase):
             self.client.post("/sessions/session-1/agent/jobs/run", json={"provider": "openai", "goal": "g"})
             (refused,) = store._list_sync(None, None)
 
-            response = self.client.post(f"/agent/jobs/{refused.id}/resume")
+            with self.assertLogs("app.routes.agent", level="WARNING") as logged:
+                response = self.client.post(f"/agent/jobs/{refused.id}/resume")
 
         self.assertEqual((response.status_code, response.json()), (503, {"detail": "Service unavailable"}))
+        # The route names a job and no session, so the line names the job.
+        (record,) = logged.records
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertIn("queue is full", record.getMessage())
+        self.assertIn(refused.id, record.getMessage())
+        self.assertIsNone(record.exc_info)
 
     def test_an_error_that_is_not_the_full_queue_answers_500_and_is_logged(self) -> None:
         # Each route that queues answered every RuntimeError as a full queue, 503 and unlogged: an audit write that

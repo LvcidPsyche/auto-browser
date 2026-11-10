@@ -12,6 +12,16 @@ from ._utils import typed_route_errors
 logger = logging.getLogger(__name__)
 
 
+def _queue_full(refused: str, subject: str) -> HTTPException:
+    """The 503 a full job queue is answered with, after one line in the log that says so.
+
+    The HTTPException passes through typed_route_errors as it is, so nothing else logs the refusal. A warning with
+    no traceback: nothing is broken, and the caller is told to try again.
+    """
+    logger.warning("the agent job queue is full: refused %s %s", refused, subject)
+    return HTTPException(status_code=503, detail="Service unavailable")
+
+
 def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> APIRouter:
     router = APIRouter()
 
@@ -56,7 +66,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             try:
                 return await job_queue.enqueue_step(session_id, payload)
             except AgentJobQueueFull:  # and only that: any other RuntimeError is a fault, answered 500 and logged
-                raise HTTPException(status_code=503, detail="Service unavailable") from None
+                raise _queue_full("a step for session", session_id) from None
 
     @router.post("/sessions/{session_id}/agent/run")
     async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict[str, Any]:
@@ -87,7 +97,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             try:
                 return await job_queue.enqueue_run(session_id, payload)
             except AgentJobQueueFull:
-                raise HTTPException(status_code=503, detail="Service unavailable") from None
+                raise _queue_full("a run for session", session_id) from None
 
     @router.post("/agent/jobs/{job_id}/resume", status_code=202)
     async def resume_agent_job(job_id: str, payload: AgentResumeRequest | None = None) -> dict[str, Any]:
@@ -100,7 +110,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             except AgentJobQueueFull:
-                raise HTTPException(status_code=503, detail="Service unavailable") from None
+                raise _queue_full("the resume of job", job_id) from None
 
     @router.post("/agent/jobs/{job_id}/discard")
     async def discard_agent_job(job_id: str) -> dict[str, Any]:
