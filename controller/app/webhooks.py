@@ -1,10 +1,13 @@
 """
 webhooks.py — Approval webhook dispatcher for auto-browser.
 
-When APPROVAL_WEBHOOK_URL is configured, POSTs a signed JSON payload
-every time an approval is created or its status changes.
+When APPROVAL_WEBHOOK_URL is configured, POSTs a JSON payload each time an
+action or a governed tool call is held for approval: it came without an
+approval_id and needs one, and the pending approval it waits on is a new one
+or the same one asked for again (actions.py, _require_decision_approval).
+Approving, rejecting or executing an approval posts nothing.
 
-Signature: X-Webhook-Signature: sha256=<hex>
+Signature, when APPROVAL_WEBHOOK_SECRET is set: X-Webhook-Signature: sha256=<hex>
 The signature covers the raw request body using HMAC-SHA256 with
 APPROVAL_WEBHOOK_SECRET as the key (Slack-compatible format).
 """

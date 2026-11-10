@@ -398,7 +398,7 @@ class Settings(BaseSettings):
         alias="USER_AGENT_POOL",
     )
 
-    # Approval webhooks — notified when approvals are created or decided
+    # Approval webhooks — notified each time a call is held for a pending approval, not when one is decided
     approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL", repr=False)
     approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET", repr=False)
     # Off: a webhook host that is, or resolves to, any address that is not global is refused (app/webhooks.py). On,
