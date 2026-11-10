@@ -427,7 +427,8 @@ browser.get_console is in the devtools tool pack, which this controller does not
 ```
 
 `browser.queue_agent_run` (pack `agent_jobs`) accepts `workflow_profile`
-(`fast` or `governed`) and `browser.resume_agent_job` resumes interrupted,
+(`fast` or `governed`; any other value is refused and nothing is queued) and
+`browser.resume_agent_job` resumes interrupted,
 failed, or step-limited background runs from persisted checkpoints.
 
 Use `workflow_profile=governed` when starting convergence against a live browser session. `harness.graduate` writes only a staged candidate; promotion to the production skill corpus remains a separate governed review step.
@@ -769,6 +770,10 @@ The cron tools are governed too: `browser.create_cron_job`, `browser.trigger_cro
 created it, and every run, scheduled or triggered, starts under it, so a job created by a `governed`
 caller cannot be used to run writes without approval. Likewise, a run or step queued by a `governed`
 `browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.
+These three tools refuse a `workflow_profile` (or `policy_profile`) other than `fast` or `governed`, as
+every governed tool does, and create or queue nothing: read as `fast`, a mistyped value stored or queued
+`fast`. The two queue tools are not governed and their `tools/list` schema does not show the argument;
+they take it all the same.
 A job created through REST (`POST /crons`) stores the `workflow_profile` the request body names, `fast`
 by default. A job created before this release stores `fast`: it keeps running as `fast` unless
 `FORCE_GOVERNED_APPROVALS=true` (below). A job's profile is fixed when it is created (jobs cannot be

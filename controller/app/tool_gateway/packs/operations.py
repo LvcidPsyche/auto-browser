@@ -52,7 +52,9 @@ def register(registry, gateway):
             description=(
                 "Create a browser automation job that runs on a cron schedule "
                 "and/or via an HTTP webhook trigger. "
-                "The agent will pursue 'goal' for up to max_steps actions."
+                "The agent will pursue 'goal' for up to max_steps actions. "
+                "Every run of the job, scheduled or triggered, starts under this call's workflow_profile "
+                "(governed whatever it says where the deployment forces governed approvals)."
             ),
             input_model=CreateCronJobInput,
             handler=gateway._create_cron_job,

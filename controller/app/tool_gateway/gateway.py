@@ -690,12 +690,14 @@ class McpToolGateway:
     def _pop_policy_profile(spec: ToolSpec, raw_arguments: dict[str, Any]) -> str:
         """The call's profile, from policy_profile or workflow_profile: fast when neither names one (None is unset).
 
-        A governed tool refuses anything else, in words that do not repeat what was sent: read as fast, a typo
-        silently dropped the approval it asked for. A tool that is not governed ignores the argument.
+        A tool the profile changes something for refuses anything else, in words that do not repeat what was sent:
+        read as fast, a typo silently dropped the approval it asked for. Those are the governed tools (the cron job a
+        governed caller creates stores it) and the two that queue an agent run or step, which a governed caller's
+        profile forces governed (_call_tool). Any other tool ignores the argument.
         """
         policy_profile = raw_arguments.pop("policy_profile", None)
         workflow_profile = raw_arguments.get("workflow_profile")
-        if spec.governed_kind is not None:
+        if spec.governed_kind is not None or spec.name in QUEUE_TOOLS:
             for value in (policy_profile, workflow_profile):
                 if value is not None and value not in _WORKFLOW_PROFILES:
                     raise ValueError(f"workflow_profile must be one of: {', '.join(_WORKFLOW_PROFILES)}")

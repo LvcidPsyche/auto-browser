@@ -37,7 +37,9 @@ All notable changes to auto-browser are documented here.
 - **A governed tool now refuses a `workflow_profile` other than `fast` or `governed`.** Any other value (a typo, the
   wrong case, a non-string) used to read as `fast`, so the call ran without the approval it asked for. It now answers
   an error that names the two values, and nothing runs: send one of them, or leave the argument out (`null` counts as
-  left out). Tools that are not governed do not check the value, as before.
+  left out). `browser.queue_agent_run` and `browser.queue_agent_step` refuse such a value too: neither is governed,
+  but a `governed` call queues its run or step governed, and a mistyped one queued it as `fast`. Any other tool that
+  is not governed does not check the value, as before.
 - **A garbled reply from `browser.find_by_vision`'s model is now a tool error, where it read as `found: false`.** That
   is a reply that is not a JSON object, one with no `found` or a `found` that is neither true nor false, or a
   `found: true` reply whose point is not usable (see Changed). A client that took `found: false` to cover those must
@@ -187,8 +189,11 @@ All notable changes to auto-browser are documented here.
 - **A governed tool no longer reads an unknown `workflow_profile` as `fast`.** The argument is how a caller asks for
   an operator's approval, so a mistyped value (`Governed`, `strict`, a non-string) silently ran the call without one.
   A tool with a governed kind now refuses it, and `policy_profile` likewise, before anything runs, with a message that
-  names the two allowed values and does not repeat what was sent (see the upgrade note). The argument's description
-  in `tools/list` now says what the profile does in every configuration. (MCP-20)
+  names the two allowed values and does not repeat what was sent (see the upgrade note). So do
+  `browser.queue_agent_run` and `browser.queue_agent_step`, which have no governed kind and act on the argument all
+  the same: a mistyped profile queued the run as `fast`, and every write of that run went without an approval. The
+  argument's description in `tools/list` now says what the profile does in every configuration, and
+  `browser.create_cron_job`'s description says that the job's runs start under the creating call's profile. (MCP-20)
 - **A controller with no token refuses a write a web page sends from another origin.** A page on any site could POST
   to a tokenless loopback controller: CORS stops a page reading the answer, not sending the request, and the API has
   no cookies to check, so a form or a no-cors `fetch` reached `POST /maintenance/cleanup` and every action route. The

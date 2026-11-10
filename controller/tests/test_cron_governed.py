@@ -9,6 +9,7 @@ Entry point: McpToolGateway.call_tool, with a real CronService.
 
 from __future__ import annotations
 
+import itertools
 import json
 import tempfile
 import unittest
@@ -25,6 +26,9 @@ from app.models import McpToolCallRequest
 from app.routes.operations import create_operations_router
 from app.tool_gateway.gateway import McpToolGateway
 from tests.test_browser_manager_create_session import _settings
+
+# What a governed tool refuses as a profile, where it read each as fast: a typo, the wrong case, a non-string.
+UNKNOWN_PROFILES = ("Governed", "strict", "", 1, True, ["governed"])
 
 
 class CronGovernedTests(unittest.IsolatedAsyncioTestCase):
@@ -131,6 +135,18 @@ class CronGovernedTests(unittest.IsolatedAsyncioTestCase):
         self.queue.enqueue_run.assert_awaited_once()
         request = self.queue.enqueue_run.await_args.args[1]
         self.assertEqual(request.workflow_profile, "governed")
+
+    async def test_a_job_created_under_a_mistyped_profile_is_refused_and_nothing_is_created(self) -> None:
+        # The job would store `fast`, and every run of it would go without the approval its creator asked for.
+        for field, profile in itertools.product(("workflow_profile", "policy_profile"), UNKNOWN_PROFILES):
+            with self.subTest(field=field, profile=repr(profile)):
+                response = await self._call(
+                    "browser.create_cron_job", {"name": "j", "goal": "g", "webhook_enabled": True, field: profile}
+                )
+
+                self.assertTrue(response.isError, response.structuredContent)
+                self.assertEqual(response.structuredContent["error"], "workflow_profile must be one of: fast, governed")
+        self.assertFalse(self.store.exists(), "a job was stored")
 
     async def test_policy_profile_alias_is_stored_too(self) -> None:
         created = await self._call_approved(
@@ -272,6 +288,45 @@ class QueuedAgentJobGovernedTests(unittest.IsolatedAsyncioTestCase):
         for requested in ("fast", "governed"):
             profile = await self._queued_profile("browser.queue_agent_run", self.queue.enqueue_run, "fast", requested)
             self.assertEqual(profile, requested)
+
+    async def _assert_a_mistyped_profile_queues_nothing(self, tool: str, enqueue: AsyncMock) -> None:
+        # Read as fast, a mistyped top-level profile queued the run as fast: every write of that run went without
+        # the approval its caller asked for. A queue tool has no governed kind, so the governed tools' check missed it.
+        for field, profile in itertools.product(("workflow_profile", "policy_profile"), UNKNOWN_PROFILES):
+            with self.subTest(field=field, profile=repr(profile)):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(
+                        name=tool,
+                        arguments={
+                            "session_id": "s1",
+                            field: profile,
+                            "request": {"provider": "openai", "goal": "delete the account"},
+                        },
+                    )
+                )
+
+                self.assertTrue(response.isError, response.structuredContent)
+                self.assertEqual(response.structuredContent["error"], "workflow_profile must be one of: fast, governed")
+        enqueue.assert_not_awaited()
+
+    async def test_a_run_queued_under_a_mistyped_profile_is_refused_and_nothing_is_queued(self) -> None:
+        await self._assert_a_mistyped_profile_queues_nothing("browser.queue_agent_run", self.queue.enqueue_run)
+
+    async def test_a_step_queued_under_a_mistyped_profile_is_refused_and_nothing_is_queued(self) -> None:
+        await self._assert_a_mistyped_profile_queues_nothing("browser.queue_agent_step", self.queue.enqueue_step)
+
+    async def test_a_profile_left_out_or_null_still_queues_as_fast(self) -> None:
+        for arguments in ({}, {"workflow_profile": None}, {"policy_profile": None}):
+            with self.subTest(arguments=arguments):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(
+                        name="browser.queue_agent_run",
+                        arguments={"session_id": "s1", "request": {"provider": "openai", "goal": "g"}, **arguments},
+                    )
+                )
+
+                self.assertFalse(response.isError, response.structuredContent)
+                self.assertEqual(self.queue.enqueue_run.await_args.args[1].workflow_profile, "fast")
 
 
 class RestCronProfileTests(unittest.IsolatedAsyncioTestCase):
