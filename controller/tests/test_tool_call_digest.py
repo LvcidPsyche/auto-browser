@@ -37,6 +37,12 @@ GUESSES = ("letmein", "hunter2", SECRET, "password")
 KEYED = r"^browser\.set_cookies hmac-sha256:[0-9a-f]{8}:[0-9a-f]{64}$"
 ANOTHER_KEY = "kept under another key"
 BACKENDS = ("file", "sqlite")
+# A known answer (test_a_known_key_and_call_keep_a_known_text): a key file's text, a call's stand-in as the gateway
+# writes it, and what a store holding that key keeps for it. Worked out once with hmac alone, apart from the store.
+# They change only with what is stored, and an approval stored before such a change matches no call after it.
+KNOWN_KEY_FILE = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+KNOWN_PLAIN = "browser.set_cookies sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+KNOWN_KEPT = "browser.set_cookies hmac-sha256:a97fdeac:bec717b52415e20def2ba54beb0a57d5786bd21eaab269a1264297c5e1e7d903"
 
 
 def _plain(arguments: str, tool: str = "browser.set_cookies") -> str:
@@ -411,6 +417,19 @@ class StoredDigestTests(unittest.IsolatedAsyncioTestCase):
         # Under the same key the same call reads the same, whichever process keyed it; a key's id is no part of it.
         self.assertEqual(third._stored_action(_stand_in(plain)).text, ours)
         self.assertNotIn(_key_id(ours), (self._paths("file")[0] / DIGEST_KEY_FILE).read_text(encoding="ascii"))
+
+    async def test_a_known_key_and_call_keep_a_known_text(self) -> None:
+        # Nothing else fixes what a given key and call store: with the HMAC's input or the key's id changed, every
+        # other test here passes, and every approval stored before the change matches no call after it.
+        root, _ = self._paths("file")
+        root.mkdir(parents=True)
+        (root / DIGEST_KEY_FILE).write_text(KNOWN_KEY_FILE, encoding="ascii")
+        store = await self._store()
+
+        asked = await self._asked(store, KNOWN_PLAIN)
+
+        self.assertEqual(asked.action.text, KNOWN_KEPT)
+        self.assertIn(KNOWN_KEPT, self._raw("file"))
 
     async def test_a_start_rewrites_what_an_earlier_version_stored_plain(self) -> None:
         for backend in BACKENDS:
