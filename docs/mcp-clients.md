@@ -635,8 +635,11 @@ them whole, with the same credentials left out, to whoever may read the approval
 the approval binds, which covers the call's own arguments (so a cookie's or a storage value is approved
 without being viewable). The file is removed when the call that spends the approval ends, or at the next
 start for a call whose process died, or whose removal failed (that is logged, and leaves the file), and
-for a file no record names. Until then it stays: an approval left pending, or approved and never run,
-keeps its file, and nothing else sweeps it (expiry is not a final state in the store: one past its
+for a file no record names. The retention removes it too, ahead of the record, when it deletes an
+approval: at a start and in each maintenance sweep, once the decision is older than
+`APPROVAL_RETENTION_DAYS` (`0` deletes nothing). Until then it stays, and nothing else sweeps it: an
+approval left pending keeps its file at any age, and one approved and never run keeps it until it has
+expired and its decision is that old (expiry is not a final state in the store: one past its
 expiry stays `approved`, and is refused when used); a rejected one keeps it for the approval TTL
 (`APPROVAL_TTL_MINUTES`) after the rejection, since an operator may approve it again meanwhile, and the
 file goes at the next approval request or start after that. An approve of one whose arguments are gone
