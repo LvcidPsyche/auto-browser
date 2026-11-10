@@ -20,17 +20,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.action_errors import BrowserActionError, BrowserUnreachableError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError
+from app.audit import FileAuditStore
 from app.auth_state import AuthStateDecryptError
 from app.browser.services.session_creation import SessionLimitError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
-from app.routes._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL
+from app.routes._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
+from app.routes.operations import create_operations_router
 
 SID = "s-missing"
 
@@ -462,6 +465,98 @@ def test_unexpected_error_is_logged_and_answers_generically(
         logged = [r for r in caplog.records if r.name.startswith("app.routes") and r.exc_info]
         assert logged, "the route answered 500 without logging the exception"
         assert logged[0].exc_info[0] is RuntimeError
+
+
+# The three errors a route answers with a fixed text. A server-side fault raises them too (a state file that no longer
+# decodes is a ValueError, one the process may not read a PermissionError), and the answer says nothing of the cause.
+FIXED_ANSWERS = {PermissionError: (403, "Not permitted"), ValueError: (400, "Invalid request")}
+FIXED_ANSWERS[FileNotFoundError] = (404, "Not found")
+LIST_SESSIONS = Route("get", "/sessions", None, "list_sessions")
+
+
+def _warnings_of(caplog: pytest.LogCaptureFixture, logger: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == logger and r.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize("error", FIXED_ANSWERS, ids=lambda error: error.__name__)
+def test_an_error_answered_with_a_fixed_text_leaves_its_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture, error: type[Exception]
+) -> None:
+    status, detail = FIXED_ANSWERS[error]
+    with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(LIST_SESSIONS, error("boom-cause")):
+        response = _call(client, LIST_SESSIONS)
+
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    (logged,) = _warnings_of(caplog, "app.routes.sessions")
+    first, *where = logged.getMessage().splitlines()
+    assert first == f"list sessions failed: answered {status} for {error.__name__}: 'boom-cause'"
+    # Where it was raised: the frames of a traceback, the route's own among them.
+    assert where and all(line.startswith("  ") for line in where), where
+    assert any("sessions.py" in line for line in where), where
+
+
+def test_a_state_file_that_no_longer_decodes_is_answered_as_before_and_logged(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A kill in the middle of an append can leave a multi-byte character cut in two. The route takes no input a
+    # store could refuse, so "Invalid request" was all anyone was told, and the log held nothing.
+    (tmp_path / "events.jsonl").write_bytes(b'{"half": "caf\xc3')
+    store = FileAuditStore(tmp_path, max_events=1000)
+
+    async def list_audit_events(**kwargs):
+        return [event.model_dump() for event in await store.list(**kwargs)]
+
+    application = FastAPI()
+    manager = SimpleNamespace(list_audit_events=list_audit_events, sessions={})
+    application.include_router(
+        create_operations_router(manager=manager, proxy_store=SimpleNamespace(), cron_service=SimpleNamespace())
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.routes.operations"):
+        response = TestClient(application, raise_server_exceptions=False).get("/audit/events")
+
+    assert (response.status_code, response.json()) == (400, {"detail": "Invalid request"})
+    (logged,) = _warnings_of(caplog, "app.routes.operations")
+    first, *where = logged.getMessage().splitlines()
+    assert first.startswith("audit events listing failed: answered 400 for UnicodeDecodeError: "), first
+    assert "can't decode byte 0xc3" in first
+    assert any("audit.py" in line for line in where), where
+
+
+def test_a_line_break_in_a_routes_argument_or_in_the_errors_text_starts_no_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Both are the caller's as often as not: an id from the path, which an error then quotes.
+    logger = logging.getLogger("app.routes.sessions")
+    theirs = "a1\nWARNING:app.main:a line of the caller's own\r\x1b[2J"
+
+    with caplog.at_level(logging.WARNING, logger=logger.name), pytest.raises(HTTPException) as answered:
+        with typed_route_errors(logger, "get approval failed for approval %s", theirs):
+            raise PermissionError(f"approval {theirs} is not approved")
+
+    assert (answered.value.status_code, answered.value.detail) == (403, "Not permitted")
+    (logged,) = _warnings_of(caplog, logger.name)
+    message = logged.getMessage()
+    first, *where = message.splitlines()
+    assert "\r" not in message and "\x1b" not in message
+    assert first.count("a line of the caller's own") == 2, first
+    assert where and all(line.startswith("  ") for line in where), where
+
+
+def test_an_error_that_keeps_its_own_answer_is_not_logged_as_a_hidden_cause(caplog: pytest.LogCaptureFixture) -> None:
+    logger = logging.getLogger("app.routes.sessions")
+    kept = [
+        (HTTPException(status_code=409, detail="busy"), HTTPException),
+        (SessionNotFoundError("s1"), SessionNotFoundError),
+        (BrowserUnreachableError("down"), HTTPException),
+    ]
+
+    for error, answered_as in kept:
+        with caplog.at_level(logging.WARNING, logger=logger.name), pytest.raises(answered_as):
+            with typed_route_errors(logger, "observe failed for session %s", "s1"):
+                raise error
+
+    assert _warnings_of(caplog, logger.name) == []
 
 
 def test_unknown_approval_is_404(client: TestClient) -> None:

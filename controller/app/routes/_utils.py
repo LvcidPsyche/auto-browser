@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from logging import Logger
@@ -109,6 +110,22 @@ def internal_error(logger: Logger, message: str, *args: object) -> HTTPException
     return HTTPException(status_code=500, detail="Internal error")
 
 
+def _log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str, args: tuple[object, ...]) -> None:
+    """Log what a fixed 4xx text hides: the route's message, the error, and where it was raised.
+
+    A server-side fault raises the same three errors as a caller's mistake (a state file that no longer decodes is
+    a ValueError, one the process may not read a PermissionError), and the fixed text told the operator nothing of
+    it. A warning and not an error, since most of them are the caller's.
+
+    The route's arguments and the error's text are the caller's as often as not (an id from the path, which the
+    error then quotes), so each is written as its repr: a line break in one starts no line of its own in the log.
+    That is why the traceback is written here and not by exc_info, which prints the error's text as it is.
+    """
+    shown = tuple(repr(arg) if isinstance(arg, str) else arg for arg in args)
+    where = "".join(traceback.format_tb(cause.__traceback__)).rstrip()
+    logger.warning(message + ": answered %d for %s: %r\n%s", *shown, status, type(cause).__name__, str(cause), where)
+
+
 @contextmanager
 def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[None]:
     """Answer a manager call's typed errors as themselves; log and hide the rest.
@@ -124,6 +141,7 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
       app handlers, which keep their status, ``code`` and payload.
     - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404,
       ``BrowserUnreachableError`` -> 503. The texts are fixed: the exceptions' own messages can carry hosts and paths.
+      The first three are logged with *message* before they are answered (_log_hidden_cause).
     - Anything else is logged with *message* and answers 500 "Internal error".
 
     A route that maps an error differently on purpose (a 409 for a refused
@@ -134,11 +152,14 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
         yield
     except (HTTPException, BrowserActionError, KeyError):
         raise
-    except PermissionError:
+    except PermissionError as cause:
+        _log_hidden_cause(logger, 403, cause, message, args)
         raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ValueError:
+    except ValueError as cause:
+        _log_hidden_cause(logger, 400, cause, message, args)
         raise HTTPException(status_code=400, detail="Invalid request") from None
-    except FileNotFoundError:
+    except FileNotFoundError as cause:
+        _log_hidden_cause(logger, 404, cause, message, args)
         raise HTTPException(status_code=404, detail="Not found") from None
     except BrowserUnreachableError:
         raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None

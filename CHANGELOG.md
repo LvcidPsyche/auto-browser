@@ -441,6 +441,14 @@ All notable changes to auto-browser are documented here.
   error keeps its status and `code`, a refusal is a generic `403`, a bad value `400`, a missing file `404`, and
   anything else a logged `500`. What a route answered on purpose (a tab another tab refused, a job's own `400`, a
   run's `503`) is unchanged. (AUTH-10)
+- **A route's fixed `400`, `403` or `404` now leaves its cause in the log.** A route answers the manager's
+  `ValueError`, `PermissionError` or `FileNotFoundError` with a fixed text and logged nothing, and a server-side
+  fault raises the same errors: an audit file whose last line a kill cut short no longer decodes, which is a
+  `ValueError`, so `GET /audit/events` (one of the routes the entry above adds to those) would have answered
+  `Invalid request` with nothing in the log. Each is now logged at WARNING before it is answered: the route's
+  message, the error's class and text, and the frames it was raised through. A caller's own mistake is logged the
+  same way. The error's text and the route's arguments can be the caller's, so both are written escaped, and the
+  frames are part of the message.
 - **Repeated refused calls to `GET /sessions/{id}/takeover-link` no longer write an audit event each.** The first
   refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
   seconds are only counted, and the first refusal after that writes one event whose `details.count` says how many
