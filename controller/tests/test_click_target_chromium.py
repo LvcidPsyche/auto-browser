@@ -131,6 +131,10 @@ def _click(risk: str, **target: Any) -> BrowserActionDecision:
     return BrowserActionDecision(action="click", reason="the model's word", risk_category=risk, **target)
 
 
+def _type(risk: str, **target: Any) -> BrowserActionDecision:
+    return BrowserActionDecision(action="type", reason="the model's word", risk_category=risk, text="x", **target)
+
+
 async def _title(env, session_id: str) -> str:
     return await env.page(session_id).title()
 
@@ -187,6 +191,29 @@ async def test_a_write_labelled_click_by_selector_or_point_is_read_too(tmp_path:
                 await env.manager.execute_decision(session_id, decision)
             assert asked.value.approval.kind == kind
         assert await _title(env, session_id) == "start"
+
+
+async def test_a_type_aimed_at_a_button_asks_as_a_click_on_it_does(tmp_path: Path) -> None:
+    # A type puts the caret in its target by a press on it, whatever the target is: aimed at "Delete account" it
+    # pressed the button, which nothing had read. A steered model had only to say "type" where it meant "click".
+    async with browser_env(tmp_path, {"/": PAGE}) as env:
+        session_id = await env.create("/")
+        pay = await env.element(session_id, "Pay now")
+
+        for decision, kind in (
+            (_type("write", selector="#delete"), "destructive"),
+            (_type("read", element_id=pay["element_id"]), "payment"),
+        ):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, decision)
+            assert asked.value.approval.kind == kind
+            assert asked.value.approval.reason.startswith("The controller reads this type action's target as a button")
+        assert await _title(env, session_id) == "start"
+
+        # A field is no button: the type runs as labelled.
+        await env.manager.execute_decision(session_id, _type("write", selector="[name=q]"))
+        assert await env.page(session_id).input_value("[name=q]") == "x"
+        assert await env.manager.approvals.list(status="approved") == []
 
 
 async def test_a_selector_in_any_dialect_the_click_accepts_is_read(tmp_path: Path) -> None:

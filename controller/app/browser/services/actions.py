@@ -30,6 +30,7 @@ from ...witness import WitnessApproval
 from ..click_target import (
     CHECKED_LABELS,
     CLICK_LABEL_PHRASES,
+    TARGET_READ_ACTIONS,
     classified_reason,
     classified_risk,
     read_click_target,
@@ -481,14 +482,15 @@ class BrowserActionService:
         self, session: "BrowserSession", decision: BrowserActionDecision
     ) -> tuple[BrowserActionDecision, str | None]:
         """A click labelled read, write or upload, as what it lands on records it (click_target.py), and the
-        reason of the approval it asks for when its target gave it a kind that asks (None otherwise).
+        reason of the approval it asks for when its target gave it a kind that asks (None otherwise). A type
+        too: it puts the caret in its target by a press on it, and aimed at a button it pressed the button.
 
         Before the approval decision, so a button the model gave such a label that deletes, pays, posts or
         changes the account asks for approval as an honest label would, and a form submit called read is recorded
         as a write. Not inside an outer layer's approval: a governed run's, which an operator gave for this very
         click, or the one execute_approval runs, whose click was read when it was asked for.
         """
-        if decision.action != "click" or decision.risk_category not in CHECKED_LABELS:
+        if decision.action not in TARGET_READ_ACTIONS or decision.risk_category not in CHECKED_LABELS:
             return decision, None
         if held_action_approval() is not None or held_tool_call_approval() is not None:
             return decision, None
@@ -498,7 +500,9 @@ class BrowserActionService:
             return decision, None
         # The operator is asked in the controller's words: the agent's reason alone is the steered model's.
         reason = (
-            classified_reason(risk, decision.risk_category, decision.reason) if risk in CLICK_LABEL_PHRASES else None
+            classified_reason(risk, decision.risk_category, decision.reason, decision.action)
+            if risk in CLICK_LABEL_PHRASES
+            else None
         )
         return decision.model_copy(update={"risk_category": risk}), reason
 

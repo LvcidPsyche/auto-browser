@@ -317,13 +317,20 @@ class ClassifiedReasonTests(unittest.TestCase):
             '"write". The agent\'s reason: opening the help panel',
         )
 
+    def test_it_names_a_type_as_a_type(self) -> None:
+        self.assertEqual(
+            classified_reason("destructive", "write", "filling in the form", "type"),
+            'The controller reads this type action\'s target as a button of kind "destructive"; the agent labelled '
+            'the type action "write". The agent\'s reason: filling in the form',
+        )
+
     def test_the_controllers_sentence_fits_what_a_short_account_of_an_approval_shows(self) -> None:
         # The dashboard's confirm dialog and the summaries cut a field at APPROVAL_SUMMARY_CUT characters: a
         # long reason of the agent's must not push the controller's sentence out of them.
         for kind in CLICK_LABEL_PHRASES:
-            for label in ("read", "write"):
-                with self.subTest(kind=kind, label=label):
-                    reason = classified_reason(kind, label, "x" * 1000)
+            for label, action in (("read", "click"), ("write", "click"), ("upload", "type")):
+                with self.subTest(kind=kind, label=label, action=action):
+                    reason = classified_reason(kind, label, "x" * 1000, action)
                     self.assertLess(reason.index("x" * 1000), APPROVAL_SUMMARY_CUT)
                     self.assertTrue(reason.endswith("The agent's reason: " + "x" * 1000))
 
@@ -484,7 +491,7 @@ class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
                 info = next(record for record in logged.records if record.levelno == logging.INFO).getMessage()
                 self.assertIn("session-7", info)
                 self.assertIn(kind, info)
-                self.assertIn("read click", info)
+                self.assertIn("click labelled read", info)
                 self.assertNotIn("Delete account", info)
 
     async def test_a_target_that_is_read_logs_nothing_whatever_it_is(self) -> None:

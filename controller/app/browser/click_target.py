@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 # The labels the fast profile asks no approval for on a click: a click with one has its target read. "upload"
 # is one of them: only the upload action asks for that kind.
 CHECKED_LABELS = frozenset({"read", "write", "upload"})
+# The actions that press the mouse on a target the agent names: a click, and a type, which puts the caret in its
+# target by a press on it, whatever the target is. Each has its target read.
+TARGET_READ_ACTIONS = frozenset({"click", "type"})
 # Deliberately narrow: matched case-insensitively, as whole words, at the start of a line of a button's label
 # (_label_kind has the rules). A comma in a phrase may be left out of the label. Bare "Close", "Cancel", "Dismiss",
 # "OK", "Continue", "Next" and "Accept" are left out on purpose: they are on nearly every page and mostly harmless,
@@ -434,29 +437,31 @@ def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | N
     return None
 
 
-def classified_reason(kind: RiskCategory, label: RiskCategory | None, agent_reason: str) -> str:
-    """The reason of the approval a click asks for when its target, not its label, gave it the kind ``kind``.
+def classified_reason(kind: RiskCategory, label: RiskCategory | None, agent_reason: str, action: str = "click") -> str:
+    """The reason of the approval a click (or a type) asks for when its target, not its label, gave it ``kind``.
 
     Asked with the agent's reason alone, the operator read the account of the model that was steered ("opening the
     help panel") beside a kind of ``destructive``, and nothing said who chose the kind. The controller's sentence
     comes first, short enough for what a short account of an approval shows (APPROVAL_SUMMARY_CUT), and the
     agent's reason follows, named as the agent's. Nothing read from the page is in it.
     """
+    what = "click" if action == "click" else f"{action} action"
     return (
-        f'The controller reads this click\'s target as a button of kind "{kind}"; '
-        f'the agent labelled the click "{label}". The agent\'s reason: {agent_reason}'
+        f'The controller reads this {what}\'s target as a button of kind "{kind}"; '
+        f'the agent labelled the {what} "{label}". The agent\'s reason: {agent_reason}'
     )
 
 
 async def read_click_target(
     element_ids: ElementIds, page: Page, decision: BrowserActionDecision, *, session_id: str
 ) -> Any:
-    """What the click ``decision`` makes would land on (DESCRIBE_TARGET_SCRIPT's answer), or None when it cannot be
-    read. The target is named as the click names it: an element id, else a selector, else a point.
+    """What the press ``decision`` makes (a click's, or a type's on its target) would land on, as
+    DESCRIBE_TARGET_SCRIPT answers, or None when it cannot be read. The target is named as the action names it: an
+    element id, else a selector, else a point.
 
-    A read that fails is logged at info, by session and by the kind of failure, since the click then runs as
-    labelled: without the line nothing tells a click that was read and found harmless from one that was not read.
-    The failure's text goes to debug only: it can hold text of the page.
+    A read that fails is logged at info, by session and by the kind of failure, since the action then goes on as
+    labelled: without the line nothing tells one that was read and found harmless from one that was not read. The
+    failure's text goes to debug only: it can hold text of the page.
     """
     try:
         element_id = target_element_id(selector=decision.selector, element_id=decision.element_id)
@@ -473,13 +478,15 @@ async def read_click_target(
             keep_session=True,
         )
     except Exception as exc:
+        # "Goes on", not "runs": a target that cannot be read may not be there for the action either.
         logger.info(
-            "session %s: the target of a %s click could not be read (%s); the click runs as labelled, unclassified",
+            "session %s: the target of a %s labelled %s could not be read (%s); it goes on as labelled, unclassified",
             session_id,
+            decision.action,
             decision.risk_category,
             type(exc).__name__,
         )
-        logger.debug("session %s: reading the target of a click failed with: %r", session_id, exc)
+        logger.debug("session %s: reading the target of a %s failed with: %r", session_id, decision.action, exc)
         return None
 
 
