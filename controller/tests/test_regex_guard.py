@@ -88,11 +88,16 @@ def test_a_catastrophic_pattern_is_refused_and_the_message_says_what_and_why(pat
 
     message = str(raised.value)
     assert why in message and "backtrack catastrophically" in message
-    # And how to get an everyday pattern of that shape past it: "Rewrite the group" did not say.
-    assert "{1,50} in place of +" in message and "regex=false" in message
+    # A bound is no cure, and the message handed one out as if it were ((a{1,50})+$ passes the check and is as slow
+    # as what was refused). It says which patterns a bound gets past the check, and that the others stay slow.
+    assert "cannot match the same text in two ways" in message and "{1,50} in place of +" in message
+    assert "is as slow with those bounds, which this check does not count" in message
+    assert "Bound the group" not in message
+    assert "regex=false" in message
 
 
-# What the refusal says to do, done: most refused patterns are everyday ones (a separator between two repeats).
+# The patterns a bound is for: everyday ones the check refuses too (a separator between two repeats), which were
+# never slow. Bounded as the refusal says, they pass.
 BOUNDED_AS_THE_REFUSAL_SAYS = (
     (r"\d+(\.\d+)*", r"\d+(\.\d{1,50})*"),  # each repeat inside the group
     (r"\d+(\.\d+)*", r"\d+(\.\d+){0,50}"),  # the group's own
@@ -118,8 +123,25 @@ def test_bounding_one_of_two_repeats_inside_the_group_is_not_enough() -> None:
 def test_the_refusal_of_overlapping_alternatives_names_the_groups_repeat_only() -> None:
     message = catastrophic_repeat("(Mr|Mrs)+")
 
-    assert "Bound the group's repeat ({1,50} in place of +" in message
+    assert "with an upper bound on its repeat ({1,50} in place of +" in message
     assert "each repeat inside it" not in message
+
+
+def test_the_refusal_of_a_repeat_inside_the_group_names_both_ways_to_bound_it() -> None:
+    message = catastrophic_repeat(r"\d+(\.\d+)*")
+
+    assert "with an upper bound on its repeat or on each repeat inside it ({1,50} in place of +" in message
+    assert r"a separator between its repeats, as in \d+(\.\d+)*" in message
+
+
+# What the check does not count, and the refusal now says so: a repeat with an upper bound, on either side. Each of
+# these is as slow as the pattern it bounds ((a{1,50})+$ took Python's re 11 s on 26 letters and a miss).
+BOUNDED_AND_AS_SLOW = ("(a{1,50})+$", "(a+){1,50}$", "(a|aa){1,50}$")
+
+
+@pytest.mark.parametrize("pattern", BOUNDED_AND_AS_SLOW)
+def test_a_bound_gets_a_slow_pattern_past_the_check_too(pattern: str) -> None:
+    assert catastrophic_repeat(pattern) is None
 
 
 @pytest.mark.parametrize("pattern", ALLOWED)

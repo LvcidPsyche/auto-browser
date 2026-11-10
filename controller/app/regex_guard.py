@@ -14,6 +14,11 @@ nested group's parentheses are compared as they are written, so \\x61 against a,
 seen, and a group's inline modifiers ((?-i:...)) are not read: its letters fold as the whole pattern's do. That is the
 check's limit: it stops the classic shapes and is not a proof a pattern is safe, and the 10 s guard stays.
 
+A repeat with an upper bound is not counted, around the group or inside it: (a{1,50})+$, (a+){1,50}$ and (a|aa){1,50}$
+pass, and each is as slow as the pattern it bounds ((a{1,50})+$ took Python's re 11 s on 26 letters and a miss). So the
+refusal offers a bound only for a group that cannot match the same text in two ways (a separator between its repeats,
+as in \\d+(\\.\\d+)*): such a pattern was never slow, is refused for its shape alone, and a bound gets it past.
+
 Selectors are not covered. A Playwright selector carries regular expressions of its own, and one given to an action or
 to browser.wait_for_selector reaches the page as written: text=/(a+)+$/, :text-matches("(a+)+$") and
 role=button[name=/(a+)+$/] each left a page of thirty letters answering nothing (real Chromium, Playwright 1.64).
@@ -87,23 +92,29 @@ def catastrophic_repeat(pattern: str) -> str | None:
 
 def _refusal(pattern: str, group: _Group, closed_at: int) -> str | None:
     text = pattern[group.opened_at : closed_at + 1]
-    # How, for the everyday patterns this refuses too (a separator between two repeats, as in \d+(\.\d+)*): what the
-    # scan above stops counting is a repeat with an upper bound.
+    # A bound is not offered as a cure: the scan stops counting a repeat with an upper bound, and (a{1,50})+$ is as
+    # slow as (a+)+$. It helps only the everyday patterns this refuses too, which were never slow: it gets them past.
     if group.holds_repeat:
         why = "repeats without bound and its body holds an unbounded repeat of its own"
-        how = "Bound the group's repeat or each repeat inside it"
+        unambiguous = (
+            "A group that cannot match the same text in two ways (a separator between its repeats, as in "
+            r"\d+(\.\d+)*)"
+        )
+        bound = "an upper bound on its repeat or on each repeat inside it"
     elif group.holds_overlap or _alternatives_overlap(group.alternatives):
         why = (
             "repeats without bound and its alternatives, or those of a group inside it, overlap (one is a prefix of "
             "another, or they are equal)"
         )
-        how = "Bound the group's repeat"
+        unambiguous = "A group that cannot match the same text in two ways"
+        bound = "an upper bound on its repeat"
     else:
         return None
     return (
         f"refused: the group {text!r} at index {group.opened_at} {why}, so this regular expression can backtrack "
-        f"catastrophically on the page's text and hang the page. {how} ({{1,50}} in place of +, {{0,50}} in place of "
-        "*), or use regex=false to match the text literally."
+        f"catastrophically on the page's text and hang the page. {unambiguous} passes this check with {bound} "
+        "({1,50} in place of +, {0,50} in place of *); one that can is as slow with those bounds, which this check "
+        "does not count. Or use regex=false to match the text literally."
     )
 
 

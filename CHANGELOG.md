@@ -62,8 +62,10 @@ All notable changes to auto-browser are documented here.
   without bound and holds an unbounded repeat of its own or overlapping alternatives, at any depth (`(a+)+$`,
   `(a|aa)+`, `((a|aa))+`), fails validation with a message naming the group and why, where it used to reach the
   page. Everyday patterns of that shape, with a separator between the two repeats, are refused too (`\d+(\.\d+)*`,
-  `\w+(\s+\w+)*`). Bound the group's repeat or each repeat inside it, as the message says (`\d+(\.\d{1,50})*`, with
-  `{1,50}` in place of `+`), or pass `regex=false` to match the text literally.
+  `\w+(\s+\w+)*`). Those were never slow, and an upper bound on the group's repeat, or on each repeat inside it,
+  gets them past the check (`\d+(\.\d{1,50})*`, with `{1,50}` in place of `+`); or pass `regex=false` to match the
+  text literally. A bound does not make a slow pattern fast: the check does not count a repeat with an upper bound,
+  so `(a{1,50})+$` passes it and can hang a page as `(a+)+$` did.
 - **A controller with no token now refuses a write from another web origin.** On a tokenless loopback controller
   (`API_ALLOW_TOKENLESS_LOOPBACK=true`), a POST, PUT, PATCH or DELETE that a browser marks `Sec-Fetch-Site:
   cross-site` or `same-site`, or whose `Origin` names another host or port than its `Host` (`Origin: null` and one
@@ -617,8 +619,12 @@ All notable changes to auto-browser are documented here.
   own syntax, folds case as the page's case-insensitive RegExp does (for an escape or a class it compares the text as
   written), and stops only these shapes; that bound stays for the rest. It does not tell a pattern that hangs from
   an everyday one of the same shape: `\d+(\.\d+)*` and `\w+(\s+\w+)*` are refused, and
-  `\$\d+(,\d{3})*(\.\d{2})?`, whose inner repeat is bounded, passes. The message says how to bound the group's
-  repeat or each repeat inside it (`{1,50}` in place of `+`, `{0,50}` in place of `*`). Selectors are not covered: a
+  `\$\d+(,\d{3})*(\.\d{2})?`, whose inner repeat is bounded, passes. A repeat with an upper bound is not counted,
+  around the group or inside it: `(a{1,50})+$`, `(a+){1,50}$` and `(a|aa){1,50}$` pass and backtrack as the patterns
+  they bound do, and in Chromium the first left a page of forty letters answering nothing for more than a minute
+  after the 10-second bound had ended the call. So the message offers a bound (`{1,50}` in place of `+`, `{0,50}` in
+  place of `*`) only for a group that cannot match the same text in two ways, as with a separator between its
+  repeats, and says that one which can stays as slow with it. Selectors are not covered: a
   Playwright selector can carry a regular expression of its own (`text=/(a+)+$/`, `:text-matches("(a+)+$")`,
   `role=button[name=/(a+)+$/]`), and one given to an action or to `browser.wait_for_selector` reaches the page as
   written, where such a pattern can still hang the page. (MCP-24)
