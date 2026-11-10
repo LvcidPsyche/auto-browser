@@ -312,6 +312,30 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("OPENAI_AUTH_MODE=bogus is invalid; expected one of: api, cli, host_bridge", report.errors)
 
+    def test_an_auth_mode_too_long_to_be_a_mistyped_mode_is_not_printed(self) -> None:
+        # .env.example has OPENAI_AUTH_MODE three lines under OPENAI_API_KEY: a key pasted on the wrong line would
+        # be in the error a refused start logs. A synthetic stand-in, not a key.
+        pasted = "sk-" + "K" * 40
+        settings = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
+            REQUIRE_OPERATOR_ID="true",
+            AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+            REQUIRE_AUTH_STATE_ENCRYPTION="true",
+            ALLOWED_HOSTS="example.com",
+            CONTROLLER_ALLOWED_HOSTS="controller.example.com",
+            OPENAI_AUTH_MODE=pasted,
+        )
+
+        report = validate_runtime_policy(settings)
+
+        [error] = [error for error in report.errors if "OPENAI_AUTH_MODE" in error]
+        self.assertIn("is invalid; expected one of: api, cli, host_bridge", error)
+        self.assertIn("43 characters", error)
+        self.assertNotIn("k" * 40, error.lower())
+
     def test_production_rejects_cli_mode_without_expected_auth_state(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             settings = Settings(

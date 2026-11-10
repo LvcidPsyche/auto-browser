@@ -34,6 +34,10 @@ class RuntimePolicyReport:
 # API_BEARER_TOKEN=x, which is not meaningfully different from no token.
 MIN_PRODUCTION_BEARER_TOKEN_LENGTH = 32
 
+# An invalid *_AUTH_MODE is quoted in the error up to this length. The longest mode is "host_bridge": a longer value
+# is no mistyped mode, and may be the provider's API key set on the wrong line, which a refused start would log.
+MAX_AUTH_MODE_QUOTED = 16
+
 CLI_PROVIDER_CHECKS = (
     {
         "provider": "openai",
@@ -83,7 +87,10 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         auth_mode = (getattr(settings, auth_mode_attr.lower()) or "").strip().lower()
         if auth_mode not in allowed_modes:
             supported = ", ".join(sorted(allowed_modes))
-            report.errors.append(f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: {supported}")
+            shown = f"={auth_mode or '<empty>'}"
+            if len(auth_mode) > MAX_AUTH_MODE_QUOTED:
+                shown = f" (a value of {len(auth_mode)} characters, not printed)"
+            report.errors.append(f"{auth_mode_attr}{shown} is invalid; expected one of: {supported}")
             continue
 
         if auth_mode == "api":
@@ -224,10 +231,26 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
 
 def _warn_listed_operators_no_credential_proves(settings: Settings, report: RuntimePolicyReport) -> None:
     """APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS is compared to the proven operator id exactly (ApprovalStore), so a
-    listed id that no named credential proves refuses nobody, and nothing else would say so."""
-    named = {credential.operator_id for credential in credentials_for(settings) if credential.operator_id}
+    listed id that no named credential proves refuses nobody, and nothing else would say so.
+
+    The warnings go to the log, and an entry can be a secret in the wrong place: API_BEARER_TOKENS pasted whole
+    (id:token pairs), or a token alone. Nothing after an entry's colon is printed, and no token of this deployment.
+    """
+    credentials = credentials_for(settings)
+    named = {credential.operator_id for credential in credentials if credential.operator_id}
+    tokens = {credential.token for credential in credentials}
+    pairs: set[str] = set()
+    listed_tokens = 0
     for listed in sorted(settings.approval_refuse_self_approval_operator_ids):
         if credential_names_operator(settings, listed):
+            continue
+        # An operator id holds no colon: parse_operator_tokens splits an entry at its first one.
+        before_colon = listed.partition(":")[0].strip()
+        if listed in tokens or before_colon in tokens:
+            listed_tokens += 1
+            continue
+        if ":" in listed:
+            pairs.add(before_colon)
             continue
         warning = (
             f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists '{listed}', which no credential in API_BEARER_TOKENS "
@@ -241,6 +264,17 @@ def _warn_listed_operators_no_credential_proves(settings: Settings, report: Runt
         elif by_case := sorted(name for name in named if name.casefold() == listed.casefold()):
             warning += f". It differs from '{by_case[0]}' only by case"
         report.warnings.append(warning)
+    for before_colon in sorted(pairs):
+        report.warnings.append(
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists an entry that begins '{before_colon}:' (the rest is not "
+            "printed). The setting takes operator ids, not id:token pairs: an operator id holds no colon, so the "
+            "entry refuses nobody"
+        )
+    if listed_tokens:
+        report.warnings.append(
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {listed_tokens} of this deployment's bearer tokens (not "
+            "printed) where it takes operator ids: a token there refuses nobody"
+        )
 
 
 def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:

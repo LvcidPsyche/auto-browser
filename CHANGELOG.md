@@ -248,6 +248,11 @@ All notable changes to auto-browser are documented here.
   one warning a request, ahead of the rate limiter, so a page left open could write them without end: a client
   host's first refusal is logged, later ones in the next 60 seconds are only counted, and the first after that is
   logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count.
+- **A refused start no longer quotes a long `*_AUTH_MODE` value.** With `APP_ENV=production`, an `OPENAI_AUTH_MODE`,
+  `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the start with an error that quoted the value,
+  and `.env.example` has each a few lines under its provider's API key: a key set on the wrong line was written to
+  the log. A value longer than 16 characters is now described by its length; a shorter one, a mistyped mode, is
+  quoted as before.
 - **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
   `GET /auth-profiles/{name}`, `GET /auth-profiles/{name}/export` and `POST /sessions` with `auth_profile` or a
   `storage_state_path` under `profiles/` answered `403` for a foreign profile and `404` for a missing one, and
@@ -295,7 +300,8 @@ All notable changes to auto-browser are documented here.
   Another operator can approve it only where one can reach it, in a session nobody owns: in a session the asker
   owns, and in controller scope, it stays pending, so list only operators whose calls run in unowned sessions.
   A listed id is compared to the operator's id exactly, case included: one that no credential in
-  `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id and says when it
+  `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id (an entry with a
+  colon only up to it, and a bearer token of the deployment not at all: the list takes ids alone) and says when it
   differs from a credential's only by case. (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read`,
   `write` or `upload` asked for no approval, and that label is written by a model reading the page, which text on

@@ -253,11 +253,12 @@ class ListedOperatorTests(unittest.TestCase):
 
     TOKENS = "alice:" + "a" * 40 + ",bob:" + "b" * 40
 
-    def _warnings(self, listed: str, tokens: str = TOKENS) -> list[str]:
+    def _warnings(self, listed: str, tokens: str = TOKENS, shared: str | None = None) -> list[str]:
         settings = Settings(
             _env_file=None,
             API_BIND_SCOPE="loopback",
             API_BEARER_TOKENS=tokens,
+            API_BEARER_TOKEN=shared,
             APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS=listed,
         )
         warnings = validate_runtime_policy(settings).warnings
@@ -300,6 +301,47 @@ class ListedOperatorTests(unittest.TestCase):
         for warning in warnings:
             self.assertNotIn("a" * 40, warning)
             self.assertNotIn("b" * 40, warning)
+
+    def test_a_list_pasted_as_id_token_pairs_is_named_by_its_ids_alone(self) -> None:
+        # .env.example calls the values "named credentials of API_BEARER_TOKENS": that list pasted whole holds every
+        # token, and a start writes its warnings to the log.
+        warnings = self._warnings(self.TOKENS)
+
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertIn("'alice:'", warnings[0])
+        self.assertIn("'bob:'", warnings[1])
+        for warning in warnings:
+            self.assertIn("not id:token pairs", warning)
+            self.assertIn("refuses nobody", warning)
+            self.assertNotIn("a" * 40, warning)
+            self.assertNotIn("b" * 40, warning)
+
+    def test_nothing_after_an_entrys_colon_is_printed(self) -> None:
+        # A token no credential here holds (another deployment's), one with a colon in it, and nothing before the colon.
+        other, halves = "c" * 40, "d" * 20 + ":" + "e" * 20
+        warnings = self._warnings(f"carol:{other}, alice:{halves}, :{other}, alice:{other}")
+
+        # The two entries that begin "alice:" read the same once cut, and are named once.
+        self.assertEqual(len(warnings), 3, warnings)
+        self.assertEqual(sum("'alice:'" in warning for warning in warnings), 1)
+        self.assertEqual(sum("'carol:'" in warning for warning in warnings), 1)
+        self.assertEqual(sum("':'" in warning for warning in warnings), 1)
+        for warning in warnings:
+            for secret in (other, "d" * 20, "e" * 20):
+                self.assertNotIn(secret, warning)
+
+    def test_a_listed_bearer_token_is_not_printed(self) -> None:
+        # A token in place of an id: a named credential's, the shared one, and one that holds a colon, which is not
+        # to be cut at it as an id:token pair is.
+        named, shared, with_colon = "a" * 40, "s" * 40, "f" * 20 + ":" + "g" * 20
+        tokens = f"alice:{named},bob:{with_colon}"
+        warnings = self._warnings(f"{named},{shared},{with_colon}", tokens=tokens, shared=shared)
+
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("3 of this deployment's bearer tokens", warnings[0])
+        self.assertIn("refuses nobody", warnings[0])
+        for secret in (named, shared, "f" * 20, "g" * 20):
+            self.assertNotIn(secret, warnings[0])
 
 
 class FakePage:
