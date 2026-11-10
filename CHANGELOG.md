@@ -326,6 +326,10 @@ All notable changes to auto-browser are documented here.
   what was sent) now carry U+FFFD in its place, as the controller's records already do: a strict JSON parser refuses a
   lone surrogate's own escape, and a page should not break a client's parser. A URI holding one answers `-32002`, not
   `500`. `GET /sessions/{id}/events` sent a page title holding one as that escape, and now sends U+FFFD too.
+- **A REST answer holding a NaN or an infinity now carries `null` in its place.** Neither is JSON, and the answer
+  raised after its handler had run: a route with no declared return type (`GET /sessions/{id}/network/requests` is
+  one) and a `BrowserActionError` whose details held one answered `500`. A tool result already sent `null` for one,
+  and a REST answer now goes through the same walk.
 - **A stop with a client listening on an event stream now reaches the cleanup.** On SIGTERM uvicorn waits for the
   responses in flight before it runs the controller's shutdown, with no limit unless it is given one, and the image
   gave none. An open `GET /mcp` stream, or `GET /sessions/{id}/events`, never ends by itself, so the maintenance

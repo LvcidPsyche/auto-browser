@@ -241,7 +241,8 @@ def create_controller_app(
         lifespan=lifespan,
         summary="Visual Auto Browser control plane for LLM workflows.",
         # Page text reaches every route's answer: a lone surrogate must not turn one into a 500 (safe_json_response).
-        # Naming a class also takes typed routes off FastAPI's direct JSON path, which raises on one too.
+        # Naming a class also takes typed routes off FastAPI's direct JSON path, which raises on one too. That path
+        # wrote a model's NaN or infinity as null, where json.dumps raises on one: the class answers null for it too.
         default_response_class=SafeJSONResponse,
         dependencies=[Depends(require_session_access)],
         # Served by install_docs_pages, with pinned, integrity-checked assets.
