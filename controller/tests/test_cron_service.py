@@ -193,6 +193,38 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_warning.call_args_list[0][0][0], "failed to remove cron job %s during update: %s")
         self.assertEqual(mock_warning.call_args_list[1][0][0], "failed to remove cron job %s during delete: %s")
 
+    async def test_a_job_the_scheduler_never_held_is_deleted_and_updated_without_a_warning(self) -> None:
+        # A webhook-only job has no schedule and a disabled one is not registered: asking the scheduler to remove
+        # either one failed, and the miss was logged as a warning at every delete and update.
+        service = CronService(self.store_path)
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+        webhook_only = await service.create_job(name="hook", goal="run", webhook_enabled=True)
+        disabled = await service.create_job(name="off", goal="run", schedule="0 9 * * *", enabled=False)
+        self.assertIsNone(service._scheduler.get_job(webhook_only["id"]))
+        self.assertIsNone(service._scheduler.get_job(disabled["id"]))
+
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await service.update_job(webhook_only["id"], {"name": "renamed"})
+            self.assertTrue(await service.delete_job(webhook_only["id"]))
+            self.assertTrue(await service.delete_job(disabled["id"]))
+
+    async def test_a_registered_job_is_still_taken_off_the_scheduler(self) -> None:
+        service = CronService(self.store_path)
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+        updated = await service.create_job(name="a", goal="run", schedule="0 9 * * *")
+        deleted = await service.create_job(name="b", goal="run", schedule="0 9 * * *")
+        self.assertIsNotNone(service._scheduler.get_job(updated["id"]))
+        self.assertIsNotNone(service._scheduler.get_job(deleted["id"]))
+
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await service.update_job(updated["id"], {"enabled": False})
+            await service.delete_job(deleted["id"])
+
+        self.assertIsNone(service._scheduler.get_job(updated["id"]))
+        self.assertIsNone(service._scheduler.get_job(deleted["id"]))
+
     async def test_invalid_schedule_is_rejected_not_silently_saved(self) -> None:
         service = CronService(self.store_path)
         with self.assertRaises(ValueError):

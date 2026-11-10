@@ -316,10 +316,7 @@ class CronService:
 
             # Re-register scheduler job if schedule/enabled changed
             if self._scheduler is not None:
-                try:
-                    self._scheduler.remove_job(job_id)
-                except Exception as exc:
-                    logger.warning("failed to remove cron job %s during update: %s", job_id, exc)
+                self._unregister_job(job_id, during="update")
                 if job.get("enabled") and job.get("schedule"):
                     self._register_job(job)
 
@@ -333,10 +330,7 @@ class CronService:
             del jobs[job_id]
             self._save(jobs)
             if self._scheduler is not None:
-                try:
-                    self._scheduler.remove_job(job_id)
-                except Exception as exc:
-                    logger.warning("failed to remove cron job %s during delete: %s", job_id, exc)
+                self._unregister_job(job_id, during="delete")
             return True
 
     # ── Webhook key ─────────────────────────────────────────────────────────
@@ -431,6 +425,15 @@ class CronService:
             logger.info("registered cron job %s: %s", job["id"], job["schedule"])
         except Exception as exc:
             logger.warning("failed to register cron job %s: %s", job["id"], exc)
+
+    def _unregister_job(self, job_id: str, *, during: str) -> None:
+        """Take the job off the scheduler, if it is on it: one with no schedule, or a disabled one, never was."""
+        try:
+            if self._scheduler.get_job(job_id) is None:
+                return
+            self._scheduler.remove_job(job_id)
+        except Exception as exc:
+            logger.warning("failed to remove cron job %s during " + during + ": %s", job_id, exc)
 
     async def _scheduled_run(self, job_id: str) -> None:
         """Called by APScheduler on cron trigger.

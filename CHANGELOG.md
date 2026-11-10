@@ -496,6 +496,10 @@ All notable changes to auto-browser are documented here.
   no longer the job's latest leaves the newer run's status alone, and a store that cannot be read or saved at that
   moment is logged and the session is still closed. A run the controller loses before it can report the end (a crash,
   or a run still waiting in the queue at a restart) keeps `queued`. (STORE-15)
+- **Deleting or updating a cron job that is not on the scheduler no longer logs a warning.** A job with no schedule
+  (a webhook-only job) or a disabled one was never registered, and each delete or update asked the scheduler to
+  remove it and logged `failed to remove cron job ...: 'No job by the id of ... was found'`. Only a registered job
+  is removed now, and a removal that fails is still logged.
 - **A resumed agent run gets the step budget of the run it resumes, and not its approval.** A resume with no
   `max_steps` queued a run of the steps the first had left, which could be one, too few to finish anything, and the
   new run kept the `approval_id` the first was queued with, so each of its steps presented an approval given for
