@@ -449,7 +449,9 @@ class BrowserActionService:
             # the gateway checked it), that approval is given back.
             refused_before_effect(exc)
             raise
-        decision, asked_for_its_target = await self._click_risk_from_its_target(session, decision)
+        decision, asked_for_its_target = await self._click_risk_from_its_target(
+            session, decision, approval_id=approval_id
+        )
         approval = await self.require_decision_approval(
             session_id,
             decision,
@@ -479,7 +481,7 @@ class BrowserActionService:
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
 
     async def _click_risk_from_its_target(
-        self, session: "BrowserSession", decision: BrowserActionDecision
+        self, session: "BrowserSession", decision: BrowserActionDecision, *, approval_id: str | None = None
     ) -> tuple[BrowserActionDecision, str | None]:
         """A click labelled read, write or upload, as what it lands on records it (click_target.py), and the
         reason of the approval it asks for when its target gave it a kind that asks (None otherwise). A type
@@ -488,12 +490,16 @@ class BrowserActionService:
         Before the approval decision, so a button the model gave such a label that deletes, pays, posts or
         changes the account asks for approval as an honest label would, and a form submit called read is recorded
         as a write. Not inside an outer layer's approval: a governed run's, which an operator gave for this very
-        click, or the one execute_approval runs, whose click was read when it was asked for.
+        click, or the one execute_approval runs, whose click was read when it was asked for. Nor when the
+        caller presents the approval this very action asked for: it runs under that one.
         """
         if decision.action not in TARGET_READ_ACTIONS or decision.risk_category not in CHECKED_LABELS:
             return decision, None
         if held_action_approval() is not None or held_tool_call_approval() is not None:
             return decision, None
+        presented = await self._kind_of_the_approval_presented(session, decision, approval_id)
+        if presented is not None:
+            return decision.model_copy(update={"risk_category": presented}), None
         target = await read_click_target(self.manager.element_ids, session.page, decision, session_id=session.id)
         risk = classified_risk(target, decision.risk_category)
         if risk is None:
@@ -505,6 +511,30 @@ class BrowserActionService:
             else None
         )
         return decision.model_copy(update={"risk_category": risk}), reason
+
+    async def _kind_of_the_approval_presented(
+        self, session: "BrowserSession", decision: BrowserActionDecision, approval_id: str | None
+    ) -> ApprovalKind | None:
+        """The kind of the approval the caller presents, when that approval was asked for this very action as
+        a button of a kind of the table; None for any other id, which changes nothing.
+
+        The retry read its target anew, and a target that could not be read then (a busy page) gave it no
+        kind: it ran asking for nothing, the approval it presented stayed approved, and that approval ran the
+        action again. The action now takes its kind from the approval, which require_approved then checks
+        and the run spends, whatever the target reads as by now.
+        """
+        if not approval_id:
+            return None
+        try:
+            approval = await self.manager.approvals.get(approval_id)
+        except KeyError:
+            return None
+        if approval.session_id != session.id or approval.origin != "action":
+            return None
+        if approval.kind not in CLICK_LABEL_PHRASES:
+            return None
+        asked = decision.model_copy(update={"risk_category": approval.kind})
+        return approval.kind if self.manager.approvals.covers(approval, asked) else None
 
     def _refuse_a_host_off_the_list(self, decision: BrowserActionDecision) -> None:
         """Refuse a navigate whose URL ALLOWED_HOSTS refuses, before an approval for it is asked for or spent.

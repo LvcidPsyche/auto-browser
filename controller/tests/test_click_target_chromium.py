@@ -473,6 +473,43 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
         assert await env.manager.approvals.list() == []
 
 
+async def test_an_approval_presented_for_its_click_is_spent_though_the_target_is_not_read_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The retry read its target anew, and a read that failed gave the click no kind: it ran asking for nothing,
+    # the approval it presented stayed approved, and the same approval ran the click again and again.
+    async with browser_env(tmp_path, {"/": PAGE}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        click = _click("read", selector="#delete")
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, click)
+        approval = asked.value.approval
+
+        async def unread(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(actions_module, "read_click_target", unread)
+        # Not yet approved, it runs nothing.
+        with pytest.raises(PermissionError, match="is not approved"):
+            await env.manager.execute_decision(session_id, click, approval_id=approval.id)
+        assert await _title(env, session_id) == "start"
+
+        await env.manager.approve(approval.id)
+        await env.manager.execute_decision(session_id, click, approval_id=approval.id)
+        assert await _title(env, session_id) == "DELETED"
+        assert (await env.manager.approvals.get(approval.id)).status == "executed"
+
+        await page.evaluate("document.title = 'start'")
+        with pytest.raises(PermissionError):
+            await env.manager.execute_decision(session_id, click, approval_id=approval.id)
+        assert await _title(env, session_id) == "start"
+
+        # An approval asked for another action is still only shown on one that needs none.
+        await env.manager.execute_decision(session_id, _click("write", selector="#close"), approval_id=approval.id)
+        assert await _title(env, session_id) == "CLOSED"
+
+
 async def test_inside_an_outer_approval_the_click_is_not_asked_about_again(tmp_path: Path) -> None:
     # A governed run's approval: the operator approved this very click, labelled write, as a write.
     async with browser_env(tmp_path, {"/": PAGE}) as env:

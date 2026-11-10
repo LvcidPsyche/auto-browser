@@ -1116,6 +1116,10 @@ class ApprovalStore:
             )
         return action.model_copy(update={"text": text})
 
+    def covers(self, approval: ApprovalRecord, action: BrowserActionDecision) -> bool:
+        """Whether ``approval`` was asked for ``action``, matched as require_approved matches them."""
+        return self._actions_match(approval.action, action)
+
     def _actions_match(self, stored: BrowserActionDecision, requested: BrowserActionDecision) -> bool:
         return self._keyed(stored).model_dump(exclude=UNBOUND_FIELDS) == self._stored_action(requested).model_dump(
             exclude=UNBOUND_FIELDS
