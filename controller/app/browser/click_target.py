@@ -1,24 +1,30 @@
 """What a fast-profile click lands on, read from the page, not taken from the model's label (STORE-42).
 
 In the fast profile a decision's own ``risk_category`` decides whether its click asks for approval, and
-``read`` and ``write`` ask for nothing. That label is written by a model reading the page it acts on, and a page
-can steer it to call a click on "Delete account" either one. So before the approval decision, a click so labelled
-has its target read: a button whose label starts with a phrase of CLICK_LABEL_PHRASES is recorded with that
-phrase's kind, and asks for approval as an honest label does; a form's submit button labelled ``read`` is recorded
-as ``write``, which the fast profile does not ask about. A target that cannot be read (none there, a page that
-does not answer) changes nothing, and the click reports its own failure.
+``read`` and ``write`` ask for nothing. That label is written by a model reading the page it acts on, and text on
+the page can steer it to call a click on "Delete account" either one. So before the approval decision, a click so
+labelled has its target read: a button with a line of its label starting with a phrase of CLICK_LABEL_PHRASES is
+recorded with that phrase's kind, and asks for approval as an honest label does, with a reason that says the
+controller chose the kind (classified_reason); a form's submit button labelled ``read`` is recorded as ``write``,
+which the fast profile does not ask about. A target that is not there, or cannot be read (a page that does not
+answer, which is logged at info), changes nothing, and the click reports its own failure.
 
 The target is found as the click will find it. One named by element id or by a point is read in the controller's
-isolated world (element_world.py), where no page script runs. One named by a selector is resolved by Playwright, as
-the click resolves it (``page.locator(selector).first``: CSS that pierces open shadow roots, ``text=``, ``role=``,
-``xpath=``, ``>>`` chains), and described where Playwright evaluates, which is where the page's own script runs.
-Reading it as CSS in the isolated world missed every other dialect, and could read another element than the one
-clicked (for ``.a, .b`` Playwright's first match may sit in a shadow root that ``document.querySelector`` never
-enters). The text that steers a model is content on an honest site, not the site's script; a page whose own script
-is hostile can falsify this read, as it can name its button "Continue" or change it after any read.
+isolated world (element_world.py), where no page script runs; a point is followed through open shadow roots and
+into frames of the page's own origin, and a click by coordinates is then pressed on that very element
+(same_element_at). One named by a selector is resolved by Playwright, as the click resolves it
+(``page.locator(selector).first``: CSS that pierces open shadow roots, ``text=``, ``role=``, ``xpath=``, ``>>``
+chains), and described where Playwright evaluates, which is where the page's own script runs. Reading it as CSS in
+the isolated world missed every other dialect, and could read another element than the one clicked (for ``.a, .b``
+Playwright's first match may sit in a shadow root that ``document.querySelector`` never enters). The text that
+steers a model is content on an honest site, not the site's script; a page whose own script is hostile can falsify
+this read, as it can name its button "Continue" or change it after any read.
 
-Not caught: a label the table lacks, a button drawn on a canvas, a link, a label given only by aria-labelledby, an
-icon or an image, and a form sent by Enter in one of its fields (a press, not a click).
+Not caught: a label the table lacks; a frame of another origin; a control pressed by a key or a drag; a clickable
+element that is not a button, and a link; a label given only by aria-labelledby, an image, or text that CSS or a
+canvas draws; look-alike characters; a page that changes the target between the read and the press, or between
+the ask and the retry. docs/production-hardening.md lists the table and these, and a test keeps its list the
+table's (tests/test_click_target_doc.py).
 """
 
 from __future__ import annotations
@@ -272,7 +278,7 @@ def _from_its_first_word(shown: str) -> str:
 
 
 def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | None:
-    """What a click labelled ``label`` on ``target`` (CLICK_TARGET_SCRIPT's answer) is recorded as; None keeps it."""
+    """What a click labelled ``label`` on ``target`` (DESCRIBE_TARGET_SCRIPT's answer) is recorded as; None keeps it."""
     if not isinstance(target, dict) or label not in CHECKED_LABELS:
         return None
     tag, kind_of_input, role = (str(target.get(name) or "") for name in ("tag", "type", "role"))

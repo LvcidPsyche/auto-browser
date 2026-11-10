@@ -126,11 +126,12 @@ All notable changes to auto-browser are documented here.
   stops the controller at startup.
 - **A fast-profile click on a pay, delete, post or account button now asks for approval, whatever its label.** A
   click labelled `read` or `write` (an unlabelled click is `write`) on a button whose label starts with a phrase such
-  as `Pay`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers `approval_required` of that
-  kind, as the same click labelled honestly did. An agent loop that ran such clicks unattended in the fast profile
-  now stops there until an operator approves (or the agent itself, under `AUTONOMOUS_APPROVALS`). A form submit with
-  no such label still runs unattended, recorded as `write`. The table, and what it does not catch, are in
-  `docs/production-hardening.md`.
+  as `Pay`, `Buy`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers `approval_required` of
+  that kind, as the same click labelled honestly did. An agent loop that ran such clicks unattended in the fast
+  profile now stops there until an operator approves (or the agent itself, under `AUTONOMOUS_APPROVALS`). A form
+  submit with no such label still runs unattended, recorded as `write`, and so do `Send code`, `Remove filter`,
+  `Purchase history` and the other harmless continuations. The whole table, how a label is read, and what the read
+  does not catch, are in `docs/production-hardening.md`.
 - **Approvals for tool calls are now matched under a key file, `.tool-call-digest.key` in `APPROVAL_ROOT`: back it up
   with the records.** The first start after the upgrade writes the key there (also when `STATE_DB_PATH` holds the
   records) and rewrites each stored tool call's stand-in, a `request_human_takeover` action whose `action.text` reads
@@ -234,13 +235,27 @@ All notable changes to auto-browser are documented here.
   `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id and says when it
   differs from a credential's only by case. (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read` or
-  `write` asked for no approval, and that label is written by a model reading the page, which the page can steer.
-  Before the approval decision the click's target is now read in the controller's isolated world, where no page
-  script runs: a button whose label (its `aria-label`, text, or an input's value) is at most 40 characters and
-  starts, as whole words, with a phrase of a narrow table per kind (`payment`, `destructive`, `account_change`,
-  `post`) asks for that kind's approval, and a form's submit button labelled `read` is recorded as `write`. A link,
-  a longer label, bare `Close` or `Cancel`, and a target that cannot be read (the click then runs as labelled) are
-  not classified, and a click inside a governed run's approval is not read again. See the upgrade note. (STORE-42)
+  `write` asked for no approval, and that label is written by a model reading the page, which text on the page can
+  steer. Before the approval decision the click's target is now read, found as the click will find it: an
+  `element_id` or a point in the controller's isolated world, where no page script runs (a point through open
+  shadow roots and into frames of the page's own origin), and a selector by Playwright's own resolution, so `text=`,
+  `role=`, `xpath=` and CSS through a shadow root are read as the click reads them, where the page's script runs. A
+  button, or an element inside one, whose label (its `aria-label`, text, or an input's value or alt text) starts, as
+  whole words, with a phrase of a table per kind (`payment`, `destructive`, `account_change`, `post`) asks for that
+  kind's approval, and a form's submit button labelled `read` is recorded as `write`. The label is read whole and by
+  each of its first three lines, at most 40 characters a line, past a leading number or icon ligature and without
+  invisible characters, and harmless continuations of a phrase (`Send code`, `Remove filter`, `Purchase history`)
+  are not asked about. The approval's reason opens with the controller's sentence, which says what the target reads
+  as and what the agent labelled the click, before the agent's own reason; the dashboard's confirm dialog now labels
+  a reason "what an agent wrote in it is unverified" rather than "as the agent wrote it". A link, bare `Close` or
+  `Cancel`, and a target that cannot be read (the click then runs as labelled, and an info-level log line says so)
+  are not classified, and a click inside a governed run's approval is not read again. See the upgrade note.
+  (STORE-42)
+- **A click by coordinates is pressed on the element at its point.** The press landed up to 2.5 pixels from the
+  point each way, as a hand's does, on whatever was there: a click aimed at a small control could press its
+  neighbour, which the read above had never seen. The moved point is now kept only while the same element is under
+  it (compared in the isolated world once the pointer has arrived); otherwise, or when that cannot be told within
+  half a second, the press is on the point itself.
 - **A tool call's approval no longer stores a digest that its arguments alone reproduce.** An approval for a governed
   tool call binds the call through a stand-in action whose text was `<tool> sha256:<digest>`, a plain SHA-256 of the
   call's whole arguments, the credentials its preview leaves out included. `GET /approvals`, `browser.list_approvals`
