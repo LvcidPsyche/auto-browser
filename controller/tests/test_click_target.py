@@ -28,6 +28,8 @@ from app.browser.click_target import (
     HARMLESS_LABEL_PHRASES,
     MAX_LABEL_CHARS,
     READ_TIMEOUT_MS,
+    SEND_FILLER_WORDS,
+    SEND_TAIL_WORDS,
     classified_reason,
     classified_risk,
     read_click_target,
@@ -132,6 +134,24 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Pu‌blish"),
         ("post", "Se‍nd"),
         ("payment", "⁠Purchase"),
+        ("destructive", "De\N{LEFT-TO-RIGHT MARK}lete account"),
+        ("destructive", "Rem\N{FIRST STRONG ISOLATE}ove"),
+        ("post", "Pub\N{COMBINING GRAPHEME JOINER}lish"),
+        # "Send" is let go only for a way to sign in: nothing else may stand before the code or the link, and
+        # only where it goes after it.
+        ("post", "Send payment link"),
+        ("post", "Send gift code"),
+        ("post", "Send invite link"),
+        ("post", "Send source code"),
+        ("post", "Send message with link"),
+        ("post", "Send a code review request"),
+        ("post", "Send code and delete the account"),
+        ("post", "Send verification documents"),
+        ("post", "Send verification"),
+        ("post", "Send email"),
+        # A harmless line does not excuse a dangerous one beside it.
+        ("destructive", "Remove filter\nDelete account"),
+        ("destructive", "Delete account\nRemove filter"),
         # The phrases added.
         ("payment", "Place your order"),
         ("payment", "Buy it now"),
@@ -179,6 +199,13 @@ class LabelRulesTests(unittest.TestCase):
         "Send OTP",
         "Send one-time passcode",
         "Send verification email",
+        "Send a new code",
+        "Send password reset link",
+        "Send SMS code",
+        "Send magic link",
+        "Send code to my phone",
+        "Send link by email",
+        "Send code again",
         "Remove filter",
         "Remove filters",
         "Remove all filters",
@@ -188,6 +215,17 @@ class LabelRulesTests(unittest.TestCase):
         "Remove from wishlist",
         "Remove from favorites",
         "Remove from favourites",
+        "Remove from playlist",
+        "Remove from queue",
+        "Remove from watchlist",
+        "Remove from library",
+        "Remove from list",
+        "Remove from bag",
+        # A harmless continuation is one however the page breaks its lines.
+        "Send\ncode",
+        "Remove\nfilter",
+        "Purchase\nhistory",
+        "Remove\nfilter for price, brand, colour and everything else on offer",
         "Purchase history",
         "Purchase order",
         "Purchase orders",
@@ -245,6 +283,14 @@ class LabelRulesTests(unittest.TestCase):
             with self.subTest(harmless=harmless):
                 self.assertTrue(any(harmless == phrase or harmless.startswith(phrase + " ") for phrase in phrases))
         self.assertTrue(HARMLESS_AFTER_SEND)
+
+    def test_what_send_may_be_followed_by_is_three_lists_that_do_not_overlap_in_use(self) -> None:
+        # "Send email" must ask: a word that may stand before the code or the link is not one that ends the
+        # exception by itself.
+        self.assertTrue(SEND_FILLER_WORDS)
+        self.assertTrue(SEND_TAIL_WORDS)
+        self.assertEqual(set(SEND_FILLER_WORDS) & set(HARMLESS_AFTER_SEND), set())
+        self.assertEqual(set(SEND_TAIL_WORDS) & (set(SEND_FILLER_WORDS) | set(HARMLESS_AFTER_SEND)), set())
 
     def test_the_page_hands_over_enough_of_a_label_for_three_lines(self) -> None:
         self.assertGreaterEqual(click_target._LABEL_CUT, 3 * (MAX_LABEL_CHARS + 1))

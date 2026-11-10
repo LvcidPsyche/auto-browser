@@ -11,13 +11,23 @@ import re
 import unittest
 from pathlib import Path
 
-from app.browser.click_target import CLICK_LABEL_PHRASES, HARMLESS_AFTER_SEND, HARMLESS_LABEL_PHRASES
+from app.browser.click_target import (
+    CLICK_LABEL_PHRASES,
+    HARMLESS_AFTER_SEND,
+    HARMLESS_LABEL_PHRASES,
+    SEND_FILLER_WORDS,
+    SEND_TAIL_WORDS,
+)
 
 _DOC = Path(__file__).resolve().parents[2] / "docs" / "production-hardening.md"
 # Where the classifier's section starts, and what each of its lists starts with.
 _SECTION = "- In the fast profile a click's `risk_category` is the model's word"
 _HARMLESS = "- Not asked about, though each starts with a phrase above:"
-_AFTER_SEND = "- Nor is `Send` asked about when its line goes on to one of:"
+_AFTER_SEND = "- Nor is `Send` asked about when it sends a way to sign in"
+_SEND_FILLERS = "- Between the two only these words may stand:"
+_SEND_TAILS = "- After it the label ends, or goes on with one of:"
+# A bullet that lists a kind's phrases: "- `payment`: ...".
+_KIND_BULLET = re.compile(r"^\s*- `(\w+)`:", re.MULTILINE)
 
 
 def _listed(section: str, start: str) -> list[str]:
@@ -44,13 +54,19 @@ class ClickTargetDocTests(unittest.TestCase):
         self.section = text[start : text.index("\n- ", start)]
 
     def test_each_kinds_phrases_are_the_tables(self) -> None:
+        # A kind the table lacks, listed all the same, is as wrong as a phrase too many.
+        self.assertEqual(sorted(_KIND_BULLET.findall(self.section)), sorted(CLICK_LABEL_PHRASES))
         for kind, phrases in CLICK_LABEL_PHRASES.items():
             with self.subTest(kind=kind):
                 self.assertEqual(sorted(_listed(self.section, f"- `{kind}`:")), sorted(phrases))
 
     def test_the_harmless_continuations_are_the_modules(self) -> None:
         self.assertEqual(sorted(_listed(self.section, _HARMLESS)), sorted(HARMLESS_LABEL_PHRASES))
+
+    def test_what_send_may_be_followed_by_is_the_modules(self) -> None:
         self.assertEqual(sorted(_listed(self.section, _AFTER_SEND)), sorted(HARMLESS_AFTER_SEND))
+        self.assertEqual(sorted(_listed(self.section, _SEND_FILLERS)), sorted(SEND_FILLER_WORDS))
+        self.assertEqual(sorted(_listed(self.section, _SEND_TAILS)), sorted(SEND_TAIL_WORDS))
 
 
 if __name__ == "__main__":

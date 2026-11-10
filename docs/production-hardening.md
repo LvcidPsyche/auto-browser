@@ -119,18 +119,27 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     - `account_change`: `Change password`, `Update password`, `Reset password`, `Change email`, `Update email`
     - `post`: `Publish`, `Post`, `Send`
     - Not asked about, though each starts with a phrase above: `Remove filter`, `Remove filters`,
-      `Remove all filters`, `Remove from cart`, `Remove from basket`, `Remove from compare`,
-      `Remove from wishlist`, `Remove from favorites`, `Remove from favourites`, `Purchase history`,
-      `Purchase order`, `Purchase orders`, `Pay as you go`, `Post code`
-    - Nor is `Send` asked about when its line goes on to one of: `code`, `link`, `otp`, `passcode`,
-      `verification` ("Send code", "Send me a login link", "Send reset link")
+      `Remove all filters`, `Remove from cart`, `Remove from basket`, `Remove from bag`, `Remove from compare`,
+      `Remove from wishlist`, `Remove from favorites`, `Remove from favourites`, `Remove from playlist`,
+      `Remove from queue`, `Remove from watchlist`, `Remove from library`, `Remove from list`,
+      `Purchase history`, `Purchase order`, `Purchase orders`, `Pay as you go`, `Post code`
+    - Nor is `Send` asked about when it sends a way to sign in ("Send code", "Send me a login link", "Send reset
+      link to my email"): the word itself, then nothing or words of the next list, then one of: `code`, `link`,
+      `otp`, `passcode`, `verification email`, `confirmation email`
+    - Between the two only these words may stand: `me`, `us`, `a`, `an`, `the`, `my`, `new`, `another`, `login`,
+      `log-in`, `sign-in`, `signin`, `magic`, `reset`, `password`, `verification`, `confirmation`, `activation`,
+      `security`, `one-time`, `single-use`, `recovery`, `authentication`, `2fa`, `mfa`, `sms`, `email`, `text`
+    - After it the label ends, or goes on with one of: `to`, `via`, `by`, `through`, `using`, `in`, `on`, `again`,
+      `now`, `instead`. So "Send payment link", "Send gift code" and "Send code review request" ask.
   - A label is read as its whole text on one line, and then each of its first three lines by itself, so a name
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
-    of over 40 characters is a sentence, not a name, and is not matched. Case and spacing do not count; zero-width
-    characters and soft hyphens are removed; up to two leading tokens that are a number, a mark or an icon font's
-    ligature name are skipped ("1 Delete", "credit_card Pay now"), and a label that is one ligature name is read
-    with its underscores as spaces ("delete_forever"); a hyphen goes on with its word ("Pay-as-you-go" is not
-    "Pay"); the comma of `Yes, delete` may be missing.
+    of over 40 characters is a sentence, not a name, and is not matched. A line the table matches is let go when
+    the label from that line on is one of the harmless continuations, however the page breaks it ("Remove" over
+    "filter"). Case and spacing do not count; characters that show nothing (zero-width ones, soft hyphens, the
+    marks that set a text's direction) are removed; up to two leading tokens that are a number, a mark or an icon
+    font's ligature name are skipped ("1 Delete", "credit_card Pay now"), and a label that is one ligature name is
+    read with its underscores as spaces ("delete_forever"); a hyphen goes on with its word ("Pay-as-you-go" is not
+    "Pay"; a dash does not, so "Pay – as you go" asks); the comma of `Yes, delete` may be missing.
   - Left out on purpose: bare `Close`, `Cancel`, `Dismiss`, `OK`, `Continue`, `Next` and `Accept` (they are
     everywhere and mostly harmless), `Checkout` and `Proceed to checkout` (they open a page), `Subscribe`,
     `Unsubscribe`, `Submit`, `Confirm`, `Save changes` and `Clear`.

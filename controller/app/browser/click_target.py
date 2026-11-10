@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from ..models import ApprovalKind, BrowserActionDecision, RiskCategory
@@ -99,15 +100,61 @@ HARMLESS_LABEL_PHRASES: tuple[str, ...] = (
     "remove from wishlist",
     "remove from favorites",
     "remove from favourites",
+    "remove from playlist",
+    "remove from queue",
+    "remove from watchlist",
+    "remove from library",
+    "remove from list",
+    "remove from bag",
     "purchase history",
     "purchase order",
     "purchase orders",
     "pay as you go",
     "post code",
 )
-# "Send" asks nothing when its label goes on to one of these words: a login form's "Send code", "Send me a login
-# link", "Send reset link". Without it no login by a one-time code ran unattended.
-HARMLESS_AFTER_SEND: tuple[str, ...] = ("code", "link", "otp", "passcode", "verification")
+# "Send" asks nothing when what it sends is a way to sign in: a login form's "Send code", "Send me a login link",
+# "Send reset link", "Send code to my phone". Without it no login by a one-time code ran unattended. Only words of
+# SEND_FILLER_WORDS may stand between "send" and one of HARMLESS_AFTER_SEND, and only a word of SEND_TAIL_WORDS may
+# follow it, so "Send payment link", "Send gift code" and "Send code review request" still ask.
+HARMLESS_AFTER_SEND: tuple[str, ...] = (
+    "code",
+    "link",
+    "otp",
+    "passcode",
+    "verification email",
+    "confirmation email",
+)
+SEND_FILLER_WORDS: tuple[str, ...] = (
+    "me",
+    "us",
+    "a",
+    "an",
+    "the",
+    "my",
+    "new",
+    "another",
+    "login",
+    "log-in",
+    "sign-in",
+    "signin",
+    "magic",
+    "reset",
+    "password",
+    "verification",
+    "confirmation",
+    "activation",
+    "security",
+    "one-time",
+    "single-use",
+    "recovery",
+    "authentication",
+    "2fa",
+    "mfa",
+    "sms",
+    "email",
+    "text",
+)
+SEND_TAIL_WORDS: tuple[str, ...] = ("to", "via", "by", "through", "using", "in", "on", "again", "now", "instead")
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40
 # The read's bound, for the message that runs it and, apart, for the messages that set it up: past it the click
@@ -126,19 +173,25 @@ def _starting_with(phrases: tuple[str, ...]) -> str:
     return "^(?:" + "|".join(re.escape(phrase).replace(",", ",?") for phrase in phrases) + ")" + _WORD_END
 
 
+def _one_of(words: tuple[str, ...]) -> str:
+    return "(?:" + "|".join(re.escape(word) for word in words) + ")"
+
+
 _PHRASE_PATTERNS = {kind: re.compile(_starting_with(phrases)) for kind, phrases in CLICK_LABEL_PHRASES.items()}
+# The label is matched with its spaces collapsed to one each, so a space here is any run of them.
 _HARMLESS_PATTERN = re.compile(
     _starting_with(HARMLESS_LABEL_PHRASES)
     + "|"
     + _starting_with(("send",))
-    + r"(?=.*\b(?:"
-    + "|".join(re.escape(word) for word in HARMLESS_AFTER_SEND)
-    + r")\b)"
+    + f"(?: {_one_of(SEND_FILLER_WORDS)})* {_one_of(HARMLESS_AFTER_SEND)}"
+    + f"(?:$| {_one_of(SEND_TAIL_WORDS)}{_WORD_END})"
 )
 _LEADING_SYMBOLS = re.compile(r"^[^\w]+")
-# Characters that show nothing and would split a word from the table's: zero-width space, non-joiner and joiner,
-# word joiner, byte order mark, soft hyphen.
-_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"))
+# Characters that show nothing and would split a word from the table's: Unicode's format characters (zero-width
+# space, joiner and non-joiner, word joiner, byte order mark, soft hyphen, the marks and isolates that set a text's
+# direction, tags) and the combining grapheme joiner.
+_FORMAT_CATEGORY = "Cf"
+_GRAPHEME_JOINER = "\u034f"
 # A token that is no word of the label: a number or a mark ("1", "\N{MIDDLE DOT}"), or an icon font's ligature
 # name, which has an underscore ("shopping_cart"). Up to this many are skipped before the label's first word.
 _NOT_A_WORD = re.compile(r"[\W\d]+|\S*_\S*")
@@ -280,18 +333,33 @@ def _label_kind(label: str) -> ApprovalKind | None:
 
     The label is read as its whole text on one line (a phrase a line break splits is still one), and then each of
     its first MAX_LABEL_LINES lines by itself: a button whose name stands over a sentence about it is longer than
-    a name, and was skipped whole.
+    a name, and was skipped whole. A line the table matches is let go when the label from that line on is a
+    harmless continuation: "Remove" over "filter" is "Remove filter", however the page breaks it.
     """
-    lines = [line for line in label.translate(_INVISIBLE).splitlines() if line.strip()]
-    for text in (" ".join(lines), *lines[:MAX_LABEL_LINES]) if len(lines) > 1 else lines:
-        kind = _line_kind(text)
-        if kind is not None:
+    lines = [_shown(line) for line in _without_invisible(label).splitlines()]
+    lines = [line for line in lines if line]
+    kind = _line_kind(" ".join(lines)) if len(lines) > 1 else None
+    if kind is not None:
+        return kind
+    for index, line in enumerate(lines[:MAX_LABEL_LINES]):
+        kind = _line_kind(line)
+        if kind is not None and not _HARMLESS_PATTERN.match(_from_its_first_word(" ".join(lines[index:]))):
             return kind
     return None
 
 
-def _line_kind(line: str) -> ApprovalKind | None:
-    shown = _LEADING_SYMBOLS.sub("", " ".join(line.split())).casefold()
+def _without_invisible(label: str) -> str:
+    return "".join(
+        char for char in label if char != _GRAPHEME_JOINER and unicodedata.category(char) != _FORMAT_CATEGORY
+    )
+
+
+def _shown(line: str) -> str:
+    """A line as it is matched: its spaces collapsed, the marks before its first word gone, its case folded."""
+    return _LEADING_SYMBOLS.sub("", " ".join(line.split())).casefold()
+
+
+def _line_kind(shown: str) -> ApprovalKind | None:
     if not shown or len(shown) > MAX_LABEL_CHARS:
         return None
     shown = _from_its_first_word(shown)
