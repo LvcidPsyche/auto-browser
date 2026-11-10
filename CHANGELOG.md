@@ -165,16 +165,19 @@ All notable changes to auto-browser are documented here.
   `APPROVAL_RETENTION_DAYS=0` before upgrading, or copy `APPROVAL_ROOT` and the database first. A negative value
   stops the controller at startup.
 - **A fast-profile click on a pay, delete, post or account button now asks for approval, whatever its label.** A
-  click labelled `read`, `write` or `upload` (an unlabelled click is `write`) on a button whose label starts with a
-  phrase such as `Pay`, `Buy`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers
+  click labelled `read`, `write` or `upload` (an unlabelled click is `write`) on a button whose label starts with
+  a phrase such as `Pay`, `Buy`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers
   `approval_required` of that kind, as the same click labelled honestly did. So does a `type` aimed at such a
   button, and a click that names a container when the press lands on such a button inside it. An agent loop that
   ran such clicks unattended in the fast profile now stops there until an operator approves (or the agent itself,
   under `AUTONOMOUS_APPROVALS`). A form submit with no such label still runs unattended, recorded as `write`, and
   so do `Send code`, `Remove filter`, `Purchase history` and the other harmless continuations (`Send link` by
-  itself asks: it is also the button of a share dialog). The direct routes
-  (`POST /sessions/{id}/actions/click` and `/actions/type`) carry no label and are not read. The whole table, how
-  a label is read, and what the read does not catch, are in `docs/production-hardening.md`.
+  itself asks: it is also the button of a share dialog; so does `Send code to all users`, since after `to` a label
+  may name only the user's own address or what the code is for). A menu's command (`role=menuitem`) is read as a
+  button is. A click or a type, so labelled, on a wrapper with no box of its own (`display: contents`) answers
+  `target_has_no_box`: name an element inside it. The direct routes (`POST /sessions/{id}/actions/click` and
+  `/actions/type`) carry no label and are not read. The whole table, how a label is read, and what the read does
+  not catch, are in `docs/production-hardening.md`.
 - **Approvals for tool calls are now matched under a key file, `.tool-call-digest.key` in `APPROVAL_ROOT`: back it up
   with the records.** The first start after the upgrade writes the key there (also when `STATE_DB_PATH` holds the
   records) and rewrites each stored tool call's stand-in, a `request_human_takeover` action whose `action.text` reads
@@ -321,22 +324,26 @@ All notable changes to auto-browser are documented here.
   the page's script runs. A `type` is read the same way: it puts the caret in its target by a press on it. A
   button whose label starts, as whole words, with a phrase of a table per kind (`payment`, `destructive`,
   `account_change`, `post`) asks for that kind's approval, and a form's submit button labelled `read` is recorded
-  as `write`. An element inside a button counts as the button, and so do a `label` of one, text slotted into a
-  component's button, and a component that is one; its label is any of its `aria-label`, its text, its `title`,
-  an input's value or alt text, the text of its `label` elements, and a name on an icon inside it. A label is
-  read whole and by each of its first three lines, at most 40 characters a line, past a leading number or icon
-  name and without the characters that show nothing, and harmless continuations of a phrase (`Send code`,
-  `Remove filter`, `Purchase history`) are not asked about, unless the same line goes on to a phrase of the
-  table.
+  as `write`. A button here is a `button`, a button `input`, `role=button` or `role=menuitem` (a menu's command).
+  An element inside a button counts as the button, and so do a `label` of one, text slotted into a component's
+  button, and a component that is one; its label is any of its `aria-label`, its text, its `title`, an input's
+  value or alt text, the text of its `label` elements, a name on an icon inside it, and the `title` or `text` of
+  an SVG in it. A label is read whole and by each of its first three lines, at most 40 characters a line, past a
+  leading number or icon name and without the characters that show nothing, and harmless continuations of a phrase
+  (`Send code`, `Remove filter`, `Purchase history`) are not asked about, unless the same line goes on to a phrase
+  of the table.
   - The press is read once more, with the pointer in place and the mouse still up: a click that names the `div`
     around a "Delete account" button, or a row whose "Delete" shows only under the pointer, lands on a button the
-    first read never saw. A button of a kind the action has no approval for is not pressed, and the action asks.
-    A click that Playwright has to place (on a wrapper wider than the viewport, or one broken over two lines) is
-    pressed by the controller at the point Playwright would have picked, so it is read where it lands too.
-  - The approval's reason opens with the controller's sentence, which says what the target reads as and what the
-    agent labelled the action, before the agent's own reason; the dashboard's confirm dialog now labels a reason
-    "what an agent wrote in it is unverified" rather than "as the agent wrote it". Retried with that approval, the
-    action runs as the kind approved and spends it, whether or not its target can be read again.
+    first read never saw. A button of a kind the action has no approval for is not pressed, and the action asks. A
+    click that Playwright has to place (on a wrapper wider than the viewport, one broken over two lines, or one
+    covered at its middle) is pressed by the controller at the point Playwright would have picked, so it is read
+    where it lands too; on a wrapper with no box of its own (`display: contents`) such an action now answers
+    `target_has_no_box` and presses nothing, where it used to click a child.
+  - The approval's reason opens with the controller's sentence, which says what the target (or, asked at the
+    press, what the click would press) reads as and what the agent labelled the action, before the agent's own
+    reason; the dashboard's confirm dialog now labels a reason "what an agent wrote in it is unverified" rather
+    than "as the agent wrote it". Retried with that approval, the action runs as the kind approved and spends it,
+    whether or not its target can be read again.
   - A link, bare `Close` or `Cancel`, and a target that cannot be read (the action then goes on as labelled, and
     an info-level log line says so) are not classified, and an action inside a governed run's approval is not
     read. See the upgrade note. (STORE-42)
@@ -465,11 +472,12 @@ All notable changes to auto-browser are documented here.
   cached for the next call to hang on. The removal now has a setup budget below that bound: a hung setup ends there,
   its session dropped and detached as the read tools' bounds do, and the drag's own error is still what is
   reported. (N7)
-- **`page_not_responding` names the whole setup budget.** A call whose setup messages share one budget named what was
-  left of it, so a retry after the budget was spent read "did not answer within 0 ms". The message now names the
-  budget, and `waited_ms`, beside `code` in the error, says what that message itself waited. The wait for a
+- **`page_not_responding` names the whole setup budget.** A call whose setup messages share one budget named what
+  was left of it, so a retry after the budget was spent read "did not answer within 0 ms". The message now names
+  the budget, and `waited_ms`, beside `code` in the error, says what that message itself waited. The wait for a
   session that another call is opening had no bound at all; it now comes out of the same budget, and past it only
-  the call that waited gives up. (N7)
+  the call that waited gives up, with a message of its own under the same code: another call was still opening the
+  session, and this one sent the page nothing. (N7)
 - **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
   candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the
