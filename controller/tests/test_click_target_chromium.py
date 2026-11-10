@@ -693,7 +693,7 @@ async def test_a_click_that_names_the_wrapper_of_a_button_asks_at_the_press(tmp_
             with pytest.raises(ApprovalRequiredError) as asked:
                 await env.manager.execute_decision(session_id, decision)
             assert asked.value.approval.kind == "destructive", decision
-            assert asked.value.approval.reason.startswith("The controller reads this "), decision
+            assert asked.value.approval.reason.startswith("The controller reads what this "), decision
         assert await _title(env, session_id) == "start"
 
         # Approved, the click runs under that approval: at the press the button reads as the kind approved.
@@ -791,8 +791,8 @@ async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(
         approval = asked.value.approval
         assert (approval.kind, approval.action.risk_category) == ("destructive", "destructive")
         assert approval.reason == (
-            'The controller reads this click\'s target as a button of kind "destructive"; the agent labelled the '
-            "click \"read\". The agent's reason: the model's word"
+            'The controller reads what this click would press as a button of kind "destructive"; the agent '
+            "labelled the click \"read\". The agent's reason: the model's word"
         )
         assert await _title(env, session_id) == "start"
 

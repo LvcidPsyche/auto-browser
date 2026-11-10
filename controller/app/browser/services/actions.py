@@ -551,7 +551,9 @@ class BrowserActionService:
                 session_id,
                 asks,
                 approval_id=None,
-                fallback_reason=classified_reason(stopped.kind, label, decision.reason, decision.action),
+                fallback_reason=classified_reason(
+                    stopped.kind, label, decision.reason, decision.action, at_the_press=True
+                ),
             )
             raise
 

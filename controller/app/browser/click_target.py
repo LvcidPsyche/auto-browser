@@ -641,17 +641,28 @@ def _said_in_full_elsewhere(label: str, labels: list[str]) -> bool:
     return False
 
 
-def classified_reason(kind: RiskCategory, label: RiskCategory | None, agent_reason: str, action: str = "click") -> str:
+def classified_reason(
+    kind: RiskCategory,
+    label: RiskCategory | None,
+    agent_reason: str,
+    action: str = "click",
+    *,
+    at_the_press: bool = False,
+) -> str:
     """The reason of the approval a click (or a type) asks for when its target, not its label, gave it ``kind``.
 
     Asked with the agent's reason alone, the operator read the account of the model that was steered ("opening the
     help panel") beside a kind of ``destructive``, and nothing said who chose the kind. The controller's sentence
     comes first, short enough for what a short account of an approval shows (APPROVAL_SUMMARY_CUT), and the
     agent's reason follows, named as the agent's. Nothing read from the page is in it.
+
+    ``at_the_press``: the kind was read under the pointer, where the press would land, and the action names
+    something else (a wrapper, a point): the sentence says so, beside a summary that names what the action named.
     """
     what = "click" if action == "click" else f"{action} action"
+    read = f"what this {what} would press" if at_the_press else f"this {what}'s target"
     return (
-        f'The controller reads this {what}\'s target as a button of kind "{kind}"; '
+        f'The controller reads {read} as a button of kind "{kind}"; '
         f'the agent labelled the {what} "{label}". The agent\'s reason: {agent_reason}'
     )
 

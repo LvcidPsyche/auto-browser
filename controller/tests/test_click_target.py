@@ -465,15 +465,30 @@ class ClassifiedReasonTests(unittest.TestCase):
             'the type action "write". The agent\'s reason: filling in the form',
         )
 
+    def test_asked_at_the_press_it_names_what_the_action_would_press_not_its_target(self) -> None:
+        # The action named a div, and what was read is the button under the pointer: "this click's target reads
+        # as a button" was said of the div, beside a summary that names the div.
+        self.assertEqual(
+            classified_reason("destructive", "read", "opening the row", at_the_press=True),
+            'The controller reads what this click would press as a button of kind "destructive"; the agent labelled '
+            'the click "read". The agent\'s reason: opening the row',
+        )
+        self.assertEqual(
+            classified_reason("payment", "write", "filling in the form", "type", at_the_press=True),
+            'The controller reads what this type action would press as a button of kind "payment"; the agent '
+            'labelled the type action "write". The agent\'s reason: filling in the form',
+        )
+
     def test_the_controllers_sentence_fits_what_a_short_account_of_an_approval_shows(self) -> None:
         # The dashboard's confirm dialog and the summaries cut a field at APPROVAL_SUMMARY_CUT characters: a
         # long reason of the agent's must not push the controller's sentence out of them.
         for kind in CLICK_LABEL_PHRASES:
             for label, action in (("read", "click"), ("write", "click"), ("upload", "type")):
-                with self.subTest(kind=kind, label=label, action=action):
-                    reason = classified_reason(kind, label, "x" * 1000, action)
-                    self.assertLess(reason.index("x" * 1000), APPROVAL_SUMMARY_CUT)
-                    self.assertTrue(reason.endswith("The agent's reason: " + "x" * 1000))
+                for at_the_press in (False, True):
+                    with self.subTest(kind=kind, label=label, action=action, at_the_press=at_the_press):
+                        reason = classified_reason(kind, label, "x" * 1000, action, at_the_press=at_the_press)
+                        self.assertLess(reason.index("x" * 1000), APPROVAL_SUMMARY_CUT)
+                        self.assertTrue(reason.endswith("The agent's reason: " + "x" * 1000))
 
 
 class _Locator:
