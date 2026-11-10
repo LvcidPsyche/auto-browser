@@ -52,7 +52,10 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
     async def enqueue_agent_step(session_id: str, payload: AgentStepRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "enqueue agent step failed for session %s", session_id):
             await manager.get_session(session_id)
-            return await job_queue.enqueue_step(session_id, payload)
+            try:
+                return await job_queue.enqueue_step(session_id, payload)
+            except RuntimeError:  # the queue is at capacity: answered as a resume at a full queue is
+                raise HTTPException(status_code=503, detail="Service unavailable") from None
 
     @router.post("/sessions/{session_id}/agent/run")
     async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict[str, Any]:
@@ -80,7 +83,10 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
     async def enqueue_agent_run(session_id: str, payload: AgentRunRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "enqueue agent run failed for session %s", session_id):
             await manager.get_session(session_id)
-            return await job_queue.enqueue_run(session_id, payload)
+            try:
+                return await job_queue.enqueue_run(session_id, payload)
+            except RuntimeError:  # the queue is at capacity: answered as a resume at a full queue is
+                raise HTTPException(status_code=503, detail="Service unavailable") from None
 
     @router.post("/agent/jobs/{job_id}/resume", status_code=202)
     async def resume_agent_job(job_id: str, payload: AgentResumeRequest | None = None) -> dict[str, Any]:

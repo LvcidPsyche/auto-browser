@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import os
 import shutil
@@ -30,6 +31,7 @@ for env_name, relative_path in {
 
 import app.main as main_module
 import app.routes.system as system_routes
+from app.agent_jobs import AgentJobStore
 from app.models import AgentStepResult, ProviderInfo
 from app.witness import ReceiptList
 
@@ -242,6 +244,25 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["parent_job_id"], "job-1")
         resume_job.assert_awaited_once_with("job-1", max_steps=4)
+
+    def test_queuing_a_job_at_a_full_queue_answers_503(self) -> None:
+        # The queue's own refusal, through both routes that queue: a queue that holds one job, already holding it.
+        # It reached the client as a 500 "Internal error", where a resume at the same queue answers 503.
+        full: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        full.put_nowait("a-job-waiting")
+        store = AgentJobStore(tempfile.mkdtemp(dir=_TEST_ROOT))
+        with (
+            patch.object(main_module.manager, "get_session", new=AsyncMock()),
+            patch.object(main_module.job_queue, "queue", full),
+            patch.object(main_module.job_queue, "store", store),
+        ):
+            for path in ("/sessions/session-1/agent/jobs/run", "/sessions/session-1/agent/jobs/step"):
+                with self.subTest(path=path):
+                    response = self.client.post(path, json={"provider": "openai", "goal": "g"})
+
+                    self.assertEqual((response.status_code, response.json()), (503, {"detail": "Service unavailable"}))
+        # Neither refused job is left queued for a restart to run.
+        self.assertEqual([record.status for record in store._list_sync(None, None)], ["failed", "failed"])
 
     def test_discard_agent_job_endpoint_marks_job_discarded(self) -> None:
         discard_job = AsyncMock(return_value={"id": "job-1", "status": "discarded", "resumable": False})

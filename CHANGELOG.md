@@ -384,6 +384,11 @@ All notable changes to auto-browser are documented here.
   the worker inside that callback, and a close cut short there left the session open with nothing else to close it.
   The cancel now leaves the callback to finish and settles the record as `interrupted`, as it does for a running
   record no worker holds. (NODE-cancel-job-finish-callback)
+- **Queuing an agent job at a full queue answers `503`, where it answered `500`.** With 100 jobs already waiting,
+  `POST /sessions/{id}/agent/jobs/run` and `POST /sessions/{id}/agent/jobs/step` refused the new job and the refusal
+  reached the client as `500` `Internal error`. Both now answer `503` `Service unavailable`, as
+  `POST /agent/jobs/{id}/resume` does at a full queue: try again later. The refused job is recorded `failed`, as
+  before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
 
 ### Changed
 
