@@ -533,7 +533,9 @@ class BrowserAuthProfileService:
             # Listing another operator's profiles would leak both their existence
             # and the sites they hold logins for. Checked before `get` so that a
             # genuine containment error still raises instead of being skipped.
-            if not self.accessible(directory.name):
+            # A directory whose name is no profile name is no profile (a file manager's .Trash-1000, lost+found): it
+            # is skipped, where the name's ValueError failed the list for every profile beside it.
+            if not self.names_a_profile(directory.name) or not self.accessible(directory.name):
                 continue
             try:
                 profiles.append(await self.get(directory.name))
@@ -1047,6 +1049,14 @@ class BrowserAuthProfileService:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", normalized):
             raise ValueError("auth profile names may contain letters, numbers, dots, underscores, and hyphens")
         return normalized
+
+    @classmethod
+    def names_a_profile(cls, name: str) -> bool:
+        """Whether ``name`` is a profile name as it stands: what a profile's directory is called."""
+        try:
+            return cls.normalize_name(name) == name
+        except ValueError:
+            return False
 
     @staticmethod
     def write_tar(source_dir: Path, dest: Path) -> None:

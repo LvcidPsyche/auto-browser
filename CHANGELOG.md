@@ -409,6 +409,9 @@ All notable changes to auto-browser are documented here.
 - **The session replay page's URL line now shows, and links only an http(s) URL.** The page read a key a session
   summary and a stored record do not have (`url`, not `current_url`), so its URL line never rendered. It now shows
   the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)
+- **The auth profile list no longer fails for a stray directory in the profiles folder.** A directory there whose
+  name is no profile name (a file manager's `.Trash-1000`, `lost+found`) made `GET /auth-profiles` answer `500`,
+  and `browser.list_auth_profiles` an error, for every profile beside it. Such a directory is now skipped.
 - **The REST cron routes answer an auth profile the caller cannot use, where they answered `500`.** `POST /crons`
   naming another operator's auth profile now answers `403` `Not permitted` and creates nothing. With the right key,
   `POST /crons/{id}/trigger` now answers `409` when the job's auth profile does not exist or has become another

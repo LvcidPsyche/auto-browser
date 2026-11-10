@@ -284,6 +284,42 @@ class TheProfileAnswerNamesNoServerPathTests(_ForeignProfile):
         self.assertIn("path", self.service.session_auth_state_info(session))  # type: ignore[arg-type]
 
 
+class TheListSkipsWhatIsNoProfileTests(_ForeignProfile):
+    """A directory under profiles/ whose name is no profile name (a file manager's .Trash-1000) made the whole list
+    raise ValueError: GET /auth-profiles answered 500 and the tool an error, for every profile beside it."""
+
+    def leave_strays(self) -> None:
+        root = self.auth_root / "profiles"
+        for name in (".Trash-1000", "lost+found", "a name with spaces", "x" * 121):
+            (root / name).mkdir(parents=True)
+        (root / ".Trash-1000" / "state.json").write_text("{}", encoding="utf-8")
+        (root / "notes.txt").write_text("not a profile", encoding="utf-8")
+        (root / "stray-file").write_text("a file with a profile's kind of name", encoding="utf-8")
+
+    async def test_the_rest_list_answers_the_profile_beside_a_stray_directory_and_a_stray_file(self) -> None:
+        self.save_foreign_profile(owner=CALLER)
+        self.leave_strays()
+
+        response = await self.client.get("/auth-profiles")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([entry["profile_name"] for entry in response.json()], [PROFILE])
+
+    async def test_the_tool_lists_the_profile_too(self) -> None:
+        self.save_foreign_profile(owner=CALLER)
+        self.leave_strays()
+
+        response = await self.gateway.call_tool(McpToolCallRequest(name="browser.list_auth_profiles", arguments={}))
+
+        self.assertFalse(response.isError, response)
+        self.assertEqual([entry["profile_name"] for entry in response.structuredContent], [PROFILE])
+
+    async def test_only_strays_is_an_empty_list(self) -> None:
+        self.leave_strays()
+
+        self.assertEqual(await self.service.list(), [])
+
+
 class ToolDescriptionTests(unittest.TestCase):
     def test_the_tool_promises_no_directory(self) -> None:
         spec = next(
