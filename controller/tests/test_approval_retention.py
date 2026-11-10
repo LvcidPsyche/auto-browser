@@ -267,6 +267,33 @@ class RetentionTests(RetentionBase):
             self.assertEqual(sum(approval_id in line for line in logged.output), 1, logged.output)
         self.assertEqual(self.audit.events, [])
 
+    async def test_a_decision_time_the_platform_cannot_place_keeps_its_record_and_not_the_pass(self) -> None:
+        # A time with no offset is read as local time, and Windows raises OSError for one before 1970. The error
+        # left the pass, which then removed nothing at every start and sweep while that record existed.
+        unplaceable = await self._decided("executed", days=31)
+        record = await self.store.get(unplaceable)
+        record.decided_at = "1960-01-01T00:00:00"
+        await self.store._persist(record)
+        old = await self._decided("executed", days=31)
+        parse = ApprovalStore._parse_timestamp
+
+        def parse_as_windows(value: str) -> datetime:
+            if value == "1960-01-01T00:00:00":
+                raise OSError(22, "Invalid argument")
+            return parse(value)
+
+        with (
+            patch.object(ApprovalStore, "_parse_timestamp", staticmethod(parse_as_windows)),
+            self.assertLogs("app.approvals", level="WARNING") as logged,
+        ):
+            self.assertEqual(await self.store.prune_decided(), 1)
+            self.assertEqual(await self.store.prune_decided(), 0)
+
+        self.assertEqual(await self._ids(), {unplaceable})
+        self.assertNotIn(old, self._in_sqlite())
+        self.assertEqual(sum(unplaceable in line for line in logged.output), 1, logged.output)
+        self.assertEqual([event["details"]["count"] for event in self.audit.events], [1])
+
     async def test_nothing_is_removed_while_sqlite_is_configured_and_unavailable(self) -> None:
         # SQLite is caught up from the file records at its next start: one removed meanwhile could not show that
         # SQLite's copy of it is stale (pending there, rejected since).

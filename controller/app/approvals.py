@@ -447,7 +447,8 @@ class ApprovalStore:
             if record.decided_at is None:
                 raise ValueError("no decided_at")
             age = now - self._parse_timestamp(record.decided_at)
-        except (ValueError, OverflowError):
+        except (ValueError, OverflowError, OSError):
+            # OSError: a time with no offset is read as local time, which Windows refuses before 1970 or far ahead.
             if record.id not in self._retention_unreadable:
                 self._retention_unreadable.add(record.id)
                 logger.warning(
