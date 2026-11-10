@@ -739,7 +739,7 @@ const approvalConfirmText = (approval) => {
   }
   return `Approve this ${asText(approval.kind, 'unknown')} action in session ${asText(approval.session_id)}?\\n\\n`
     + `${describeAction(approval.action, approval.origin, APPROVAL_DISPLAY.cut)}\\n\\n`
-    + `${toolCall ? 'Arguments (server preview)' : 'Reason, as the agent wrote it'}: `
+    + `${toolCall ? 'Arguments (server preview)' : 'Reason (what an agent wrote in it is unverified)'}: `
     + `${shownText(shown)}\\n\\n${whole}`;
 };
 

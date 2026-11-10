@@ -203,7 +203,12 @@ def test_the_confirm_dialog_is_short_names_the_target_first_and_points_to_the_ro
 
     assert message.startswith('Approve this post action in session sess-1?\n\ntype · selector="#note" · text=')
     assert f'text="{"x" * CUT}"… (100 more characters not shown)' in message
-    assert f"Reason, as the agent wrote it: [U+202E]{'y' * (CUT - 1)}… (51 more characters not shown)" in message
+    # Not "as the agent wrote it": a governed run's reason is the server's sentence, and one the click classifier
+    # asked for opens with the controller's (app/browser/click_target.py, classified_reason).
+    assert (
+        f"Reason (what an agent wrote in it is unverified): [U+202E]{'y' * (CUT - 1)}… (51 more characters not shown)"
+        in message
+    )
     assert "\u202e" not in message
     assert message.endswith("The queue row shows the whole approval.")
 
@@ -224,7 +229,7 @@ def test_a_tool_calls_dialog_labels_the_servers_preview_and_points_to_the_whole_
     message, before = in_node("input.map((given) => approvalConfirmText(given))", [approval, unsized])
 
     assert 'Arguments (server preview): Approve browser.eval_js with {"expression": "pay()"}' in message
-    assert "as the agent wrote it" not in message
+    assert "Reason (" not in message
     # PDT-7: the viewer leaves out what the preview does (a cookie's value, a storage value's text).
     assert message.endswith("View all 935 characters in the queue shows the whole call, credentials left out.")
     assert before.endswith("Nothing more of the call is kept than this preview.")

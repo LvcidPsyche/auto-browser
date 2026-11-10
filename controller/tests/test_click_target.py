@@ -17,6 +17,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
+from app.approval_display import APPROVAL_SUMMARY_CUT
 from app.browser import click_target
 from app.browser.click_target import (
     CLICK_LABEL_PHRASES,
@@ -24,6 +25,7 @@ from app.browser.click_target import (
     DESCRIBE_TARGET_SCRIPT,
     MAX_LABEL_CHARS,
     READ_TIMEOUT_MS,
+    classified_reason,
     classified_risk,
     read_click_target,
 )
@@ -101,6 +103,25 @@ class ClassifiedRiskTests(unittest.TestCase):
         for target in (None, "button", [], {"tag": 1, "labels": "Delete"}, {}):
             with self.subTest(target=target):
                 self.assertIsNone(classified_risk(target, "read"))
+
+
+class ClassifiedReasonTests(unittest.TestCase):
+    def test_it_says_who_chose_the_kind_then_gives_the_agents_reason_as_the_agents(self) -> None:
+        self.assertEqual(
+            classified_reason("payment", "write", "opening the help panel"),
+            'The controller reads this click\'s target as a button of kind "payment"; the agent labelled the click '
+            '"write". The agent\'s reason: opening the help panel',
+        )
+
+    def test_the_controllers_sentence_fits_what_a_short_account_of_an_approval_shows(self) -> None:
+        # The dashboard's confirm dialog and the summaries cut a field at APPROVAL_SUMMARY_CUT characters: a
+        # long reason of the agent's must not push the controller's sentence out of them.
+        for kind in CLICK_LABEL_PHRASES:
+            for label in ("read", "write"):
+                with self.subTest(kind=kind, label=label):
+                    reason = classified_reason(kind, label, "x" * 1000)
+                    self.assertLess(reason.index("x" * 1000), APPROVAL_SUMMARY_CUT)
+                    self.assertTrue(reason.endswith("The agent's reason: " + "x" * 1000))
 
 
 class _Locator:

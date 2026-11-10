@@ -83,13 +83,18 @@ async def test_a_read_labelled_click_on_a_delete_button_asks_for_its_approval(tm
 
         approval = asked.value.approval
         assert (approval.kind, approval.action.risk_category) == ("destructive", "destructive")
+        # The operator is told who chose the kind, before the account of the model that was steered.
+        assert approval.reason == (
+            'The controller reads this click\'s target as a button of kind "destructive"; the agent labelled the '
+            'click "read". The agent\'s reason: the model\'s word'
+        )
         assert await _title(env, session_id) == "start"
 
-        # Approved, the same click spends it: its target reads the same, so it matches.
+        # Approved, the same click spends it: its target reads the same, so it matches, whatever reason the
+        # agent gives this time (an approval does not bind the reason).
         await env.manager.approve(approval.id)
-        await env.manager.execute_decision(
-            session_id, _click("read", element_id=delete["element_id"]), approval_id=approval.id
-        )
+        retried = _click("read", element_id=delete["element_id"]).model_copy(update={"reason": "another account"})
+        await env.manager.execute_decision(session_id, retried, approval_id=approval.id)
         assert await _title(env, session_id) == "DELETED"
         assert (await env.manager.approvals.get(approval.id)).status == "executed"
 
