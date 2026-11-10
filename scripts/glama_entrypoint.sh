@@ -31,9 +31,13 @@ fi
 # UVICORN_HOST or HOST in the environment), so without this it assumed the
 # fail-safe `exposed` scope and refused to start with no API_BEARER_TOKEN —
 # which left the stdio bridge talking to nothing since 1.7.0.
+#
+# --timeout-graceful-shutdown 5, as the controller image's own command gives
+# (controller/Dockerfile says why): a stop must not wait without limit for a
+# response still in flight.
 API_BIND_SCOPE=loopback \
 SESSION_ISOLATION_MODE=glama_inspect \
-    uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+    uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5 &
 
 # Wait up to 60s for the server to become healthy
 i=0

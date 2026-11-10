@@ -104,7 +104,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     # Sessions are closed sequentially on shutdown and an isolated one can take
     # ~10s (tunnel terminate + container stop), so the 10s default SIGKILLed
-    # cleanup mid-flight and orphaned containers and tunnels.
+    # cleanup mid-flight and orphaned containers and tunnels. Before that
+    # cleanup, uvicorn waits up to 5s of this for the requests in flight (the
+    # image's command passes --timeout-graceful-shutdown 5), so the cleanup
+    # has the other 55: change the two together.
     stop_grace_period: 60s
     depends_on:
       browser-node:

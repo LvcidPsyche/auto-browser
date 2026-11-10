@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import OrderedDict
@@ -7,8 +8,9 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.datastructures import Headers
 from starlette.routing import compile_path
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
 from ..audit import reset_current_operator, set_current_operator
@@ -77,6 +79,63 @@ class RefusalLogWindows:
         while len(self._windows) > REFUSAL_LOG_SOURCES_MAX:
             self._windows.popitem(last=False)
         return int(window[1]) if window is not None else 0
+
+
+# The message uvicorn cancels a request's task with once its graceful-shutdown limit has passed (uvicorn/server.py,
+# Server.shutdown); a test fails if the installed uvicorn no longer says it.
+UVICORN_SHUTDOWN_CANCEL = "Task cancelled, timeout graceful shutdown exceeded"
+_CANCEL_CHAIN_MAX = 16
+
+
+def _is_uvicorns_shutdown_cancel(cancelled: BaseException | None) -> bool:
+    """Whether this cancellation is uvicorn's at its shutdown limit, or was raised while that one unwound.
+
+    The layers inside run in anyio task groups, and a group cancelled from outside raises a bare CancelledError of
+    its own on the way out: uvicorn's, with its message, is then the one behind it (``__context__``).
+    """
+    for _ in range(_CANCEL_CHAIN_MAX):
+        if cancelled is None:
+            return False
+        if isinstance(cancelled, asyncio.CancelledError) and UVICORN_SHUTDOWN_CANCEL in cancelled.args:
+            return True
+        cancelled = cancelled.__context__
+    return False
+
+
+class EventStreamShutdownMiddleware:
+    """End an open event stream quietly when uvicorn cancels it at its graceful-shutdown limit.
+
+    An event stream (GET /mcp, GET /sessions/{id}/events) never ends by itself, so at a stop uvicorn waits its limit
+    for it and then cancels its task. The cancellation surfaces at the top of the app, where uvicorn logs it as
+    "Exception in ASGI application" with a traceback: a normal stop then reads as a crash, once for each open stream.
+    Outermost, so everything inside has unwound (the stream's own cleanup has run) and nothing is left for the
+    cancellation to stop: the stream's body is finished with its last, empty chunk, and one line says what happened.
+    Only that cancellation, and only on a started event stream: any other propagates as it did.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        streaming = False
+
+        async def watching(message: Message) -> None:
+            nonlocal streaming
+            if message["type"] == "http.response.start":
+                content_type = Headers(raw=message.get("headers", [])).get("content-type", "")
+                streaming = content_type.startswith("text/event-stream")
+            await send(message)
+
+        try:
+            await self.app(scope, receive, watching)
+        except asyncio.CancelledError as cancelled:
+            if not streaming or not _is_uvicorns_shutdown_cancel(cancelled):
+                raise
+            logger.info("the event stream on %r was still open at the shutdown limit: ended", scope.get("path", ""))
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 class SessionNetworkPeerMiddleware:
@@ -413,9 +472,13 @@ def install_controller_http_middleware(
         )
         return response
 
-    # Installed last, so it is outermost and also covers the 400/401/429
+    # Installed last of the layers that answer, so it also covers the 400/401/429
     # responses the middleware above short-circuits with.
     install_security_headers(application)
+
+    # Outside every layer above, and it answers nothing itself: a cancellation at uvicorn's shutdown limit unwinds
+    # them all before it gets here (see EventStreamShutdownMiddleware).
+    application.add_middleware(EventStreamShutdownMiddleware)
 
 
 _BASELINE_SECURITY_HEADERS = {

@@ -632,6 +632,28 @@ curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq
 `/readiness` answers `503` when a check fails, so `-f` prints nothing; drop `-f` to see which check.
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
 
+## Stopping the controller
+
+`docker compose stop` and `restart` send the controller SIGTERM. uvicorn stops taking connections and waits up to 5
+seconds for the requests in flight (the image starts it with `--timeout-graceful-shutdown 5`), cancels what is still
+running, and then the controller cleans up: the maintenance loop, the cron scheduler and the job queue stop, and
+every session is closed, one after another (an isolated session can take about 10 seconds). Compose gives the
+controller `stop_grace_period: 60s` for all of it, so the cleanup has 55; Docker kills a controller still running
+after that, and a session whose close was cut short can leave its container or tunnel behind.
+
+An event stream a client holds open (`GET /mcp`, `GET /sessions/{id}/events`) never ends by itself, so a stop with
+one open always waits the 5 seconds. The log then shows uvicorn's
+`Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR, and one INFO line from the controller for
+each stream it ended (`the event stream on '/mcp' was still open at the shutdown limit: ended`). That is a normal
+stop, not a crash: the stream's body is finished and its connection closed, and a client can open it again when
+the controller is back. A call still running at the limit is cancelled too, and for that one uvicorn logs
+`Exception in ASGI application` with a traceback that ends in `CancelledError`.
+
+If you start uvicorn yourself (your own image or command, a process manager), give it the limit too, in seconds and
+well under what your supervisor waits before it kills the process:
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5`. Without it uvicorn waits for an
+open stream without limit and the cleanup never runs.
+
 ## What ALLOWED_HOSTS refuses, and what it does not
 
 `ALLOWED_HOSTS` names the hosts the browser's top-level page may visit. Iframes and subresources an

@@ -72,4 +72,9 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod 0755 /entrypoint.sh
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --timeout-graceful-shutdown: at a stop uvicorn waits for the responses in flight before it runs the app's shutdown
+# (sessions closed, containers and tunnels removed), with no limit unless one is given, and an event stream a client
+# holds open (GET /mcp, GET /sessions/{id}/events) never ends by itself: the cleanup never ran, and Docker killed the
+# process when its grace was over. 5 seconds lets an ordinary call in flight finish and leaves the cleanup 55 of the
+# 60 that docker-compose.yml's stop_grace_period gives; keep the two true of each other (a test reads both).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]

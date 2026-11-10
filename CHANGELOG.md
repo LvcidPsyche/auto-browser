@@ -164,6 +164,14 @@ All notable changes to auto-browser are documented here.
   rejection of a tool call that 1.18.0 stored or rewrote stop an agent's own approval of that call there under
   `AUTONOMOUS_APPROVALS`, with the key file kept or not: 1.17.0 compares the stored text as it is. Reject the call
   again there, or leave `AUTONOMOUS_APPROVALS` off across the downgrade.
+- **The image now starts uvicorn with `--timeout-graceful-shutdown 5`: start it your own way, and you must pass it
+  too.** A stop waits at most 5 seconds for the requests in flight and then runs the controller's cleanup; without
+  the option, a stop with an event stream open (`GET /mcp`, `GET /sessions/{id}/events`) never reaches the cleanup
+  (see Fixed). If your own image, command or process manager starts `uvicorn app.main:app`, add the option, in
+  seconds and well under what your supervisor waits before it kills the process (compose waits 60). A call still
+  running 5 seconds after a stop is now cancelled, where it ran on until it ended or Docker killed the controller.
+  At such a stop uvicorn logs `Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR: that line is
+  a normal stop (`docs/deployment.md`, "Stopping the controller").
 
 ### Security
 
@@ -318,6 +326,14 @@ All notable changes to auto-browser are documented here.
   what was sent) now carry U+FFFD in its place, as the controller's records already do: a strict JSON parser refuses a
   lone surrogate's own escape, and a page should not break a client's parser. A URI holding one answers `-32002`, not
   `500`. `GET /sessions/{id}/events` sent a page title holding one as that escape, and now sends U+FFFD too.
+- **A stop with a client listening on an event stream now reaches the cleanup.** On SIGTERM uvicorn waits for the
+  responses in flight before it runs the controller's shutdown, with no limit unless it is given one, and the image
+  gave none. An open `GET /mcp` stream, or `GET /sessions/{id}/events`, never ends by itself, so the maintenance
+  loop, the cron scheduler, the job queue and the sessions were never shut down: `docker compose stop` and `restart`
+  waited out the 60-second grace and Docker killed the controller, with sessions, browser containers and tunnels
+  left as they were. The image's command and the Glama entrypoint now pass `--timeout-graceful-shutdown 5`. At the
+  limit uvicorn cancels an open stream, and the controller finishes the stream's body and logs one INFO line for
+  it, where uvicorn would log `Exception in ASGI application` with a traceback for each. See the upgrade note.
 - **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
   after the change the event records had been made: `browser.set_cookies` with one in a cookie's name set the
   cookies, then failed with no audit event, no receipt and no log line. The audit store now writes U+FFFD in its
