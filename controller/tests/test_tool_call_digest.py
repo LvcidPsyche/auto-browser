@@ -259,7 +259,8 @@ class ToolCallDigestTests(ApprovalBindingBase):
         await self.manager.reject(rejected, comment="no")
         (Path(self.manager.settings.approval_root) / DIGEST_KEY_FILE).unlink()
         restarted = ApprovalStore(self.manager.settings.approval_root, audit=self.manager.audit)
-        await restarted.startup()
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            await restarted.startup()
         self.manager.approvals = restarted
         again = await self._asked()
 
@@ -268,6 +269,10 @@ class ToolCallDigestTests(ApprovalBindingBase):
         self.assertNotEqual(again, rejected)
         self.assertFalse(approved.isError, approved.content[0].text)
         self.assertEqual((await restarted.get(again)).status, "approved")
+        # The start said so, though nothing pending or approved is kept under the lost key.
+        [warning] = logged.output
+        self.assertIn("1 operator rejection(s) of tool calls", warning)
+        self.assertIn("no longer stop an agent's own approval of the same call", warning)
 
     def test_the_dashboard_reads_a_stored_stand_in_as_its_tool(self) -> None:
         js_pattern = re.search(r"&& /(.+?)/\.exec", _DASHBOARD_HTML).group(1)
@@ -494,6 +499,7 @@ class StoredDigestTests(unittest.IsolatedAsyncioTestCase):
 
         warning = "\n".join(logged.output)
         self.assertIn("2 pending or approved", warning)
+        self.assertIn("1 operator rejection(s) of tool calls", warning)
         self.assertIn(DIGEST_KEY_FILE, warning)
         self.assertNotEqual((root / DIGEST_KEY_FILE).read_text(encoding="ascii"), old_key)
         with self.assertRaisesRegex(PermissionError, ANOTHER_KEY) as spend:
@@ -512,6 +518,48 @@ class StoredDigestTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("app.approvals", level="WARNING") as logged:
             await (await self._store(started=False)).startup()
         self.assertIn("1 pending or approved", "\n".join(logged.output))
+        # The one rejected to end that warning is an operator's rejection kept under the lost key too.
+        self.assertIn("2 operator rejection(s) of tool calls", "\n".join(logged.output))
+
+    async def test_a_start_counts_the_operators_rejections_kept_under_a_key_that_is_gone(self) -> None:
+        # Nothing said so: such a rejection no longer stops an agent's own approval of the call it refused.
+        store = await self._store()
+        root, _ = self._paths("file")
+        by_an_operator = await self._asked(store, _plain("operator"))
+        await store.reject(by_an_operator.id, comment="no")
+        by_the_agent = await self._asked(store, _plain("agent"))
+        await store.reject(by_the_agent.id, decided_via="agent")
+        (root / DIGEST_KEY_FILE).unlink()
+
+        restarted = await self._store(started=False)
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            await restarted.startup()
+
+        # One line, and only of the operator's: nothing pending or approved is kept under that key.
+        [warning] = logged.output
+        self.assertIn("1 operator rejection(s) of tool calls", warning)
+        self.assertIn(DIGEST_KEY_FILE, warning)
+        self.assertIn("AUTONOMOUS_APPROVALS", warning)
+        self.assertNotIn("pending or approved", warning)
+        # A rejection kept under the key this start holds is not one of them.
+        under_this_key = await self._asked(restarted, _plain("operator"))
+        await restarted.reject(under_this_key.id, comment="no")
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            await (await self._store(started=False)).startup()
+        self.assertIn("1 operator rejection(s) of tool calls", "\n".join(logged.output))
+
+    async def test_a_start_with_only_pending_or_approved_ones_under_a_key_that_is_gone_names_no_rejection(self) -> None:
+        store = await self._store()
+        root, _ = self._paths("file")
+        await self._asked(store, _plain("pending"))
+        (root / DIGEST_KEY_FILE).unlink()
+
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            await (await self._store(started=False)).startup()
+
+        [warning] = logged.output
+        self.assertIn("1 pending or approved", warning)
+        self.assertNotIn("rejection", warning)
 
     async def test_an_unusable_key_file_is_logged_and_each_process_keys_with_its_own(self) -> None:
         root, _ = self._paths("file")

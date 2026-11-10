@@ -136,11 +136,13 @@ All notable changes to auto-browser are documented here.
   `APPROVAL_ROOT` whole, the dot file included. Restored without the key file, or with another one, pending and
   approved approvals for tool calls are refused with a message that says so and the agent asks again; each start logs
   how many there are, and rejecting them ends that warning. An operator's earlier rejection of a tool call then no
-  longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`. A start that can neither read
-  a key from the file nor write one logs a warning and keys with a key of its own, so its approvals for tool calls
-  do not outlive that process; a file that holds no key is left as it is, to be removed by hand. After a downgrade to
-  1.17.0, an approval for a tool call that 1.18.0 stored matches no call there (the call answers that the approval
-  does not match the requested action), and the agent asks again.
+  longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`, and each start logs how many
+  such rejections are stored, in a warning of its own: reject the call again when it is asked for, turn
+  `AUTONOMOUS_APPROVALS` off, or restore the key file. A start that can neither read a key from the file nor write
+  one logs a warning and keys with a key of its own, so its approvals for tool calls do not outlive that process; a
+  file that holds no key is left as it is, to be removed by hand. After a downgrade to 1.17.0, an approval for a
+  tool call that 1.18.0 stored matches no call there (the call answers that the approval does not match the
+  requested action), and the agent asks again.
 
 ### Security
 

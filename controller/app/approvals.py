@@ -285,18 +285,24 @@ class ApprovalStore:
         that cannot be rewritten stays, still matches, and is taken at the next start; the pass never stops one.
 
         Also says, once a start, how many approvals that could still run are kept under a key this process does not
-        hold (_kept_under_another_key): nothing else tells an operator before one of them is refused.
+        hold (_kept_under_another_key), and how many rejections by an operator: nothing else tells an operator
+        before one of the first is refused, or that the others no longer match the call they refused
+        (_operator_rejected).
         """
         try:
             async with self._lock:
                 rewritten = 0
                 failed: list[str] = []
                 unreadable = 0
+                rejections = 0
                 for record in await self._primary.list():
                     keyed = self._keyed(record.action)
                     if keyed is record.action:
-                        if record.status in {"pending", "approved"} and self._kept_under_another_key(record.action):
-                            unreadable += 1
+                        if self._kept_under_another_key(record.action):
+                            if record.status in {"pending", "approved"}:
+                                unreadable += 1
+                            elif record.status == "rejected" and record.decided_via != "agent":
+                                rejections += 1
                         continue
                     record.action = keyed
                     try:
@@ -320,13 +326,22 @@ class ApprovalStore:
                 len(failed),
                 failed[0],
             )
+        # Two lines, each true alone: a start can find either kind without the other.
         if unreadable:
             logger.warning(
                 "approval store: %d pending or approved approval(s) for tool calls are kept under another key than "
                 "%s now holds (replaced since, or unreadable at an earlier start): none can be approved or run, and "
-                "the agent asks again; reject them to end this warning. An operator's rejection kept under that key "
-                "no longer matches the call it refused",
+                "the agent asks again; reject them to end this warning",
                 unreadable,
+                self.file_store.root / DIGEST_KEY_FILE,
+            )
+        if rejections:
+            logger.warning(
+                "approval store: %d operator rejection(s) of tool calls are kept under another key than %s now holds "
+                "(replaced since, or unreadable at an earlier start): they no longer stop an agent's own approval of "
+                "the same call, which matters only under AUTONOMOUS_APPROVALS. Reject the call again when it is asked "
+                "for, turn AUTONOMOUS_APPROVALS off, or restore the key file",
+                rejections,
                 self.file_store.root / DIGEST_KEY_FILE,
             )
 

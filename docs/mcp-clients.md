@@ -656,8 +656,12 @@ kept under another key than this controller holds ..."), a call that presents on
 refused with the same reason and told to repeat the call without `approval_id`, which asks for a new
 approval, and each start logs how many such approvals are pending or approved; rejecting them ends that
 warning. An operator's rejection kept under that key no longer stops an agent's own approval of the same
-call under `AUTONOMOUS_APPROVALS`. When the file cannot be used at a start (it holds no key, cannot be
-read, or cannot be written where there is none), the start logs it and keys with a key of its own: its
+call under `AUTONOMOUS_APPROVALS`, and each start logs, in a warning of its own, how many such rejections
+are stored (one made to end the first warning is one of them): reject the call again when it is asked
+for, turn `AUTONOMOUS_APPROVALS` off, or restore the key file. That warning repeats while the rejections
+are stored: the retention (`APPROVAL_RETENTION_DAYS`) removes one made in a session that has closed, and
+keeps one in controller scope. When the file cannot be used at a start (it holds no key, cannot be read,
+or cannot be written where there is none), the start logs it and keys with a key of its own: its
 tool call approvals work until that process ends, and are refused the same way after a restart. A file
 that holds no key is left as it is, and has to be removed before a start writes a new one.
 
