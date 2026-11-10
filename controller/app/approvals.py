@@ -414,7 +414,8 @@ class ApprovalStore:
         Run at startup and by each maintenance sweep. Kept whatever their age: a pending approval; one an
         execution holds; an approved one that has not expired, which can still run its action; an operator's
         rejection in controller scope or in a session of ``open_sessions`` (those live in this process), where
-        it still refuses an agent's approval of the same request (_operator_rejected); and a record whose
+        it still refuses an agent's approval of the same request (_operator_rejected), unless it is a tool
+        call's kept under a key this process does not hold, which matches no request; and a record whose
         decision (or, approved, expiry) time cannot be read, named once in the log.
 
         Nothing goes while SQLite is configured and the file store stands in for it: SQLite is caught up from
@@ -479,6 +480,8 @@ class ApprovalStore:
             record.status == "rejected"
             and record.decided_via != "agent"
             and (record.session_id == CONTROLLER_SCOPE or record.session_id in open_sessions)
+            # Under a key that is gone it matches no call, so it refuses nothing: it goes as an agent's does.
+            and not self._kept_under_another_key(record.action)
         ):
             return False
         try:

@@ -679,10 +679,14 @@ approvals are pending or approved; rejecting them ends that warning. An operator
 that key no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`, and each
 start logs, in a warning of its own, how many such rejections are stored (one made to end the first
 warning is one of them): reject the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or
-restore the key file. That warning repeats while the rejections are stored: the retention removes one
-made in a session that has closed once it is older than `APPROVAL_RETENTION_DAYS` (never when that is
-`0`), and keeps one in controller scope. When the file cannot be used at a start (it holds no key,
-cannot be read, or cannot be written
+restore the key file. That warning repeats while the rejections are stored. The retention removes each
+one once it is older than `APPROVAL_RETENTION_DAYS`, in controller scope and in an open session too,
+where it keeps an operator's rejection that still matches its call: one kept under a key that is gone
+refuses nothing. A start counts them before its own retention pass, so the start that removes the last
+of them logs the warning once more. With `APPROVAL_RETENTION_DAYS=0` nothing removes them, and the
+warning repeats until the key file is restored. A key file restored after the retention has removed a
+rejection does not bring it back: reject the call again when it is asked for. When the file cannot be
+used at a start (it holds no key, cannot be read, or cannot be written
 where there is none), the start logs it and keys with a key of its own: its tool call approvals work
 until that process ends, and are refused the same way after a restart. A file that holds no key is left
 as it is, and has to be removed before a start writes a new one. A start that dies between creating the

@@ -184,7 +184,9 @@ All notable changes to auto-browser are documented here.
   agent asks again; each start logs how many there are, and rejecting them ends that warning. An operator's earlier
   rejection of a tool call then no longer stops an agent's own approval of the same call under
   `AUTONOMOUS_APPROVALS`, and each start logs how many such rejections are stored, in a warning of its own: reject
-  the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or restore the key file. A start that can
+  the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or restore the key file. The retention
+  deletes such a rejection once it is older than `APPROVAL_RETENTION_DAYS`, which ends that warning (with `0` it
+  stays, and so does the warning); a key file restored after that does not bring the rejection back. A start that can
   neither read a key from the file nor write one logs a warning and keys with a key of its own, so its approvals for
   tool calls do not outlive that process; a file that holds no key is left as it is, to be removed by hand. After a
   downgrade to 1.17.0, an approval for a tool call that 1.18.0 stored or rewrote matches no call there (the call
@@ -629,7 +631,9 @@ All notable changes to auto-browser are documented here.
   carries the count. The days count from the decision, not from the run of an approval spent since. Kept whatever
   its age: a pending approval, one an action holds, one approved and not expired, an operator's rejection in
   controller scope or in a session still open (it refuses an agent's approval of the same action there), and one
-  whose decision time cannot be read, which is logged once. So the pass removes decided approvals only, and the
+  whose decision time cannot be read, which is logged once. An operator's rejection of a tool call kept under a key
+  file the controller no longer holds refuses nothing, and is deleted as any other decided approval is, there too.
+  So the pass removes decided approvals only, and the
   stores still grow with approvals nobody decides. Nothing is deleted while SQLite is configured and unavailable; an
   approval whose record or arguments cannot be removed is logged and stays in both stores for the next pass, and a
   pass that fails is logged and leaves the rest for the next. See the upgrade note. (AUTH-33)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -30,6 +31,17 @@ SESSION = "abc123abc123"
 
 def _ago(**age: float) -> str:
     return (datetime.now(UTC) - timedelta(**age)).isoformat().replace("+00:00", "Z")
+
+
+def _tool_call(arguments: str) -> BrowserActionDecision:
+    """A governed tool call's stand-in as the gateway asks an approval for it: the tool, and its arguments' digest."""
+    digest = hashlib.sha256(arguments.encode()).hexdigest()
+    return BrowserActionDecision(
+        action="request_human_takeover",
+        reason="r",
+        risk_category="account_change",
+        text=f"browser.set_cookies sha256:{digest}",
+    )
 
 
 def _settings(root: Path, **values: str) -> Settings:
@@ -249,6 +261,61 @@ class RetentionTests(RetentionBase):
         asked_again = await self._pending(session_id=CONTROLLER_SCOPE, selector="#delete")
         with self.assertRaisesRegex(PermissionError, "an operator rejected this action"):
             await self.store.approve(asked_again, decided_via="agent")
+
+    async def _rejected_tool_call(self, arguments: str, *, session_id: str = CONTROLLER_SCOPE) -> str:
+        """An operator's rejection of a tool call's approval, kept under the key the store holds now."""
+        approval = await self.store.create_or_reuse_pending(
+            session_id=session_id, kind="account_change", reason="r", action=_tool_call(arguments), origin="tool_call"
+        )
+        await self.store.reject(approval.id)
+        return approval.id
+
+    async def test_an_operators_rejection_kept_under_a_key_that_is_gone_goes_once_past_the_retention(self) -> None:
+        # It matches no call any more, so it refuses nothing (_operator_rejected). Kept for good where its action
+        # could still be asked for, it was counted in a warning at every start that nothing an operator did ended.
+        standing = await self._rejected_tool_call("a")
+        open_session = await self._rejected_tool_call("b", session_id="open00000001")
+        recent = await self._rejected_tool_call("c")
+        (self.root / DIGEST_KEY_FILE).unlink()
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            self.store = await self._store()
+        self.assertIn("3 operator rejection(s) of tool calls are kept under another key", "\n".join(logged.output))
+        for approval_id, days in ((standing, 31), (open_session, 31), (recent, 29)):
+            await _age(self.store, approval_id, days=days)
+
+        removed = await self.store.prune_decided(open_sessions={"open00000001"})
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(await self._ids(), {recent})
+        self.assertEqual(self._in_sqlite(), {recent})
+        self.assertEqual(self._on_disk(), {recent})
+        # Inside the retention it is still stored, and still said at a start.
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            self.store = await self._store()
+        self.assertIn("1 operator rejection(s) of tool calls are kept under another key", "\n".join(logged.output))
+        await _age(self.store, recent, days=31)
+        self.assertEqual(await self.store.prune_decided(), 1)
+        with self.assertNoLogs("app.approvals", level="WARNING"):
+            await self._store()
+
+    async def test_an_operators_rejection_of_a_tool_call_under_the_key_held_is_kept(self) -> None:
+        # In controller scope, whatever its age: this one still refuses an agent's approval of the same call.
+        other_key = await self._rejected_tool_call("a")
+        (self.root / DIGEST_KEY_FILE).unlink()
+        with self.assertLogs("app.approvals", level="WARNING"):
+            self.store = await self._store()
+        standing = await self._rejected_tool_call("a")
+        for approval_id in (other_key, standing):
+            await _age(self.store, approval_id, days=400)
+
+        self.assertEqual(await self.store.prune_decided(), 1)
+
+        self.assertEqual(await self._ids(), {standing})
+        asked_again = await self.store.create_or_reuse_pending(
+            session_id=CONTROLLER_SCOPE, kind="account_change", reason="r", action=_tool_call("a"), origin="tool_call"
+        )
+        with self.assertRaisesRegex(PermissionError, "an operator rejected this action"):
+            await self.store.approve(asked_again.id, decided_via="agent")
 
     async def test_a_record_whose_decision_time_cannot_be_read_is_kept_and_logged_once(self) -> None:
         undated = await self._decided("rejected", days=31, session_id="closed000001")
