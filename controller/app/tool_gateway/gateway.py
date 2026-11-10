@@ -164,6 +164,8 @@ SESSION_STARTER_TOOLS = (
 IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
 # Tools that queue an agent step or run: its request carries its own workflow_profile (_call_tool).
 QUEUE_TOOLS = frozenset({"browser.queue_agent_run", "browser.queue_agent_step"})
+# The tools whose approval_id is what they act on, not an approval presented for the call itself.
+APPROVAL_DECISION_TOOLS = frozenset({"browser.approve_approval", "browser.reject_approval", "browser.execute_approval"})
 
 
 # Characters of a governed tool call's arguments shown to the approving operator.
@@ -490,6 +492,8 @@ class McpToolGateway:
             # Surface them so the calling agent can self-correct, instead of
             # collapsing them into the opaque catch-all below.
             message = str(exc.args[0]) if exc.args else exc.__class__.__name__
+            if isinstance(exc, KeyError) and message in self._presented_approval_ids(payload):
+                message = self._unknown_approval_message(spec, message)
             return self._refusal_response(message, {"error": message}, exc)
         except FileNotFoundError as exc:
             # Lookups that miss raise FileNotFoundError with a message naming
@@ -713,6 +717,31 @@ class McpToolGateway:
             approval_id = raw_arguments.pop("approval_id", approval_id)
         governed_approval_id = raw_arguments.pop("governed_approval_id", None)
         return str(governed_approval_id or approval_id) if governed_approval_id or approval_id else None
+
+    @staticmethod
+    def _presented_approval_ids(payload: McpToolCallRequest) -> set[str]:
+        """The approval ids a call names, as _pop_policy_approval_id reads them."""
+        arguments = payload.arguments if isinstance(payload.arguments, dict) else {}
+        return {str(value) for name in ("approval_id", "governed_approval_id") if (value := arguments.get(name))}
+
+    def _unknown_approval_message(self, spec: ToolSpec, approval_id: str) -> str:
+        """What a call is told of an approval id no record answers to, where it was told the id and nothing else.
+
+        The store raises a KeyError naming the id for one it does not hold, and the manager the same for one the
+        caller may not use, so the two read alike here as they do on the REST routes (404). The retention deletes a
+        decided approval, so an agent that kept an old id meets this without having mistyped anything.
+        """
+        days = self.manager.settings.approval_retention_days
+        if spec.name in APPROVAL_DECISION_TOOLS:
+            again = "To get a new approval, repeat the call that needed one without approval_id."
+        else:
+            again = "Repeat the call without approval_id to ask for a new approval."
+        if days <= 0:
+            return f"Unknown approval {approval_id!r}: it never existed. {again}"
+        return (
+            f"Unknown approval {approval_id!r}: it never existed, or it was deleted, as a decided approval can be once "
+            f"APPROVAL_RETENTION_DAYS ({days:g}) have passed since its decision. {again}"
+        )
 
     async def _require_governed_tool_approval(
         self,

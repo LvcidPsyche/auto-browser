@@ -555,6 +555,14 @@ All notable changes to auto-browser are documented here.
   where SQLite held the rejection. The rejection now stands, the log names the record, and SQLite stays in use.
   An `updated_at` that cannot be read still fails a decision on that one record, and an `approved_expires_at` that
   cannot, a call that presents it.
+- **A tool call that names an approval id the controller does not know is told so.** A governed tool call with an
+  `approval_id` no record answers to, and `browser.execute_approval`, `browser.approve_approval` (with
+  `AUTONOMOUS_APPROVALS` on) and `browser.reject_approval` for such an id, answered an error whose whole text was
+  the id. The retention now deletes decided approvals (`APPROVAL_RETENTION_DAYS`), so an agent that kept an old id
+  meets this with no mistake of its own. The error now says that the approval is unknown, that it never existed or
+  was deleted by the retention, and to repeat the call without `approval_id` to ask for a new one. It is an error
+  as before (`isError`), nothing runs and nothing is recorded, an approval the caller may not use reads the same
+  as one that does not exist, and the REST routes answer `404` as they did.
 
 ### Changed
 
