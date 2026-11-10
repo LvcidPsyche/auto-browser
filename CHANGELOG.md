@@ -171,8 +171,8 @@ All notable changes to auto-browser are documented here.
   the call reached the page and `approved` before. A failure's record keeps its error's class only, and the error
   goes on unchanged. A call cancelled after it reached the page is recorded with an unknown outcome, as a cancelled
   action is; one cancelled before it reached the page records nothing, as nothing ran. A record that cannot be
-  written fails a change that was made, as an action's does, and is only logged beside a failure's own error, whose
-  text stays out of that log, as out of the record. (MCP-23)
+  written fails a change that was made, as an action's does, and is logged with the tool and the session; beside a
+  failure's own error it is only logged, and that error's text stays out of the log, as out of the record. (MCP-23)
 - **A governed tool no longer reads an unknown `workflow_profile` as `fast`.** The argument is how a caller asks for
   an operator's approval, so a mistyped value (`Governed`, `strict`, a non-string) silently ran the call without one.
   A tool with a governed kind now refuses it, and `policy_profile` likewise, before anything runs, with a message that
@@ -294,7 +294,15 @@ All notable changes to auto-browser are documented here.
   responses and the REST error answers (a `404`, a `BrowserActionError`, an `HTTPException`'s detail, a `422` quoting
   what was sent) now carry U+FFFD in its place, as the controller's records already do: a strict JSON parser refuses a
   lone surrogate's own escape, and a page should not break a client's parser. A URI holding one answers `-32002`, not
-  `500`.
+  `500`. `GET /sessions/{id}/events` sent a page title holding one as that escape, and now sends U+FFFD too.
+- **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
+  after the change the event records had been made: `browser.set_cookies` with one in a cookie's name set the
+  cookies, then failed with no audit event, no receipt and no log line. The audit store now writes U+FFFD in its
+  place, in both backends, as the witness chain and `actions.jsonl` already did. The session store and the agent job
+  store had the same fault and write U+FFFD too: a session whose page title held one could not have its record
+  saved, at its close included, and an agent run that finished with one in its result was recorded `failed` with no
+  result, though its steps had run. A tool write whose record still cannot be written (a full disk) is now logged
+  at ERROR with the tool and the session, whatever the error's class.
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
   and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and

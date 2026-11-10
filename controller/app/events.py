@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from .approval_display import shown_code_points
-from .utils import UTC
+from .utils import UTC, without_lone_surrogates
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,9 @@ def is_session_closed_event(payload: str, session_id: str) -> bool:
 
 
 def _dispatch(session_id: str, event: dict[str, Any]) -> None:
-    payload = json.dumps(event)
+    # A page's title can hold a lone surrogate: sent as U+FFFD, as the responses send it, not as its escape, which a
+    # strict JSON parser refuses.
+    payload = json.dumps(without_lone_surrogates(event))
     # Push to session-scoped subscribers
     for q in list(_SESSION_QUEUES.get(session_id, [])):
         try:

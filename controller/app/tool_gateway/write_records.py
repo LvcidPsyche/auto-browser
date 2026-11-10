@@ -57,7 +57,7 @@ async def recorded_write(
     can hold a page's content or a value), then the error goes on unchanged; a call cancelled before it reached the
     page records nothing, as nothing ran, and one cancelled after records ``error`` with an unknown outcome, as the
     page may have changed. A record that cannot be written is logged, never raised over the error being reported;
-    with nothing to report, as for an action that ran, the record's own failure is raised.
+    with nothing to report, as for an action that ran, the record's own failure is logged and raised.
 
     The witness policy comes first, as the pipeline's _prepare and the top of its _execute do, before anything touches
     the page: a required hosted Witness that does not answer and a policy block are refused here, recorded ``blocked``
@@ -115,7 +115,13 @@ async def recorded_write(
     except Exception as exc:
         await _record_beside(record("failed", error=type(exc).__name__, reached_page=write.reached_page), tool, exc)
         raise
-    await record("ok")
+    try:
+        await record("ok")
+    except Exception as failure:
+        # The change was made, and the gateway answers some errors (a store's ValueError) without logging them: this
+        # line is then all the controller keeps of it. The failure's repr comes from the stores, not from the page.
+        logger.error("%s changed session %s, but its record could not be written: %r", tool, session.id, failure)
+        raise
 
 
 async def _refuse_by_policy(

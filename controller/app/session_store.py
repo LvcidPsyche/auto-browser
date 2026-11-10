@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import SessionRecord
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path, run_to_completion
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_json, record_path, run_to_completion
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class FileSessionStore(_MarkInterruptedMixin):
 
     def _upsert_sync(self, record: SessionRecord) -> None:
         path = record_path(self.root, record.id, ".json")
-        atomic_write_text(path, record.model_dump_json(indent=2), mode=PRIVATE_FILE_MODE)
+        atomic_write_text(path, record_json(record, indent=2), mode=PRIVATE_FILE_MODE)
 
 
 class RedisSessionStore(_MarkInterruptedMixin):
@@ -143,7 +143,7 @@ class RedisSessionStore(_MarkInterruptedMixin):
     async def upsert(self, record: SessionRecord) -> None:
         client = self._require_client()
         async with client.pipeline(transaction=True) as pipe:
-            await pipe.set(self._record_key(record.id), record.model_dump_json())
+            await pipe.set(self._record_key(record.id), record_json(record))
             await pipe.sadd(self._index_key(), record.id)
             await pipe.execute()
 

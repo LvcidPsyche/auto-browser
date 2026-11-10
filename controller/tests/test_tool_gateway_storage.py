@@ -312,6 +312,44 @@ class GatewayWriteRecordTests(SpendBase):
         with self.assertRaisesRegex(OSError, "disk full"):
             await self.gateway._set_cookies(payload)
 
+    async def test_a_cookie_named_with_a_lone_surrogate_still_leaves_its_audit_entry_and_receipt(self) -> None:
+        # FR-B2-1. Past the input model (which refuses one now): the audit store raised on the name after the cookies
+        # were set, so the write left no audit entry, no receipt and no log line.
+        payload = SetCookiesInput.model_construct(
+            session_id=SESSION, cookies=[{"name": "sid\ud800", "value": CANARY, "domain": "example.com"}]
+        )
+
+        await self.gateway._set_cookies(payload)
+
+        self.context.add_cookies.assert_awaited_once()
+        events, receipts = await self.records("browser.set_cookies")
+        self.assertEqual(
+            [(event.status, event.details["digest"]) for event in events],
+            [("ok", {"cookies": [{"name": "sid�", "domain": "example.com"}]})],
+        )
+        self.assertEqual([item["status"] for item in receipts], ["ok"])
+
+    async def test_a_write_whose_record_cannot_be_written_is_logged_by_tool_and_session(self) -> None:
+        # The gateway answers a store's ValueError with its text and logs nothing itself: without this line a cookie
+        # write whose record failed left no evidence on the controller that the cookies were set.
+        self.manager.audit.append = AsyncMock(side_effect=ValueError("the store refused it"))  # type: ignore[method-assign]
+
+        with self.assertLogs(WRITE_RECORDS_LOGGER, level="ERROR") as logs:
+            response = await self.call(
+                "browser.set_cookies",
+                session_id=SESSION,
+                cookies=[{"name": "sid", "value": CANARY, "domain": "example.com"}],
+            )
+
+        self.assertTrue(response.isError)
+        self.context.add_cookies.assert_awaited_once()
+        self.assertEqual(len(logs.records), 1, logs.output)
+        message = logs.records[0].getMessage()
+        self.assertIn("browser.set_cookies", message)
+        self.assertIn(SESSION, message)
+        self.assertIn("the store refused it", message)
+        self.assertNotIn(CANARY, "\n".join(logs.output))
+
     async def test_a_governed_write_records_once(self) -> None:
         arguments = {
             "session_id": SESSION,

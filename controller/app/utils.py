@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+from pydantic_core import PydanticSerializationError
+
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
@@ -64,6 +67,19 @@ def without_lone_surrogates(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [without_lone_surrogates(item) for item in value]
     return value
+
+
+def record_json(record: BaseModel, *, indent: int | None = None) -> str:
+    """``record`` as the JSON a store writes, with each lone surrogate in its strings replaced by U+FFFD.
+
+    ``model_dump_json`` raises on one, and a page's title or a model's reply can hold one: the store then lost the
+    record of a change that had been made. Only a record that fails the normal dump is walked.
+    """
+    try:
+        return record.model_dump_json(indent=indent)
+    except PydanticSerializationError:
+        clean = type(record).model_validate(without_lone_surrogates(record.model_dump()))
+        return clean.model_dump_json(indent=indent)
 
 
 def record_path(root: Path, record_id: str, suffix: str) -> Path:
