@@ -89,6 +89,17 @@ class ClassifiedRiskTests(unittest.TestCase):
             classified_risk(button("", "", "Place order", "", tag="input", type="submit"), "read"), "payment"
         )
 
+    def test_a_fuller_harmless_name_of_the_button_clears_its_short_one(self) -> None:
+        # A resend button drawn as "Send" and named "Send code" for a screen reader, a filter chip drawn as
+        # "Remove": each label was read apart, and the short one asked.
+        for labels in (("Send code", "Send"), ("Send", "Send code"), ("Remove filter: Price", "Remove")):
+            with self.subTest(labels=labels):
+                self.assertIsNone(classified_risk(button(*labels), "write"))
+        # Only a name that goes on from the very words that ask, harmlessly.
+        self.assertEqual(classified_risk(button("Remove filter", "Delete account"), "write"), "destructive")
+        self.assertEqual(classified_risk(button("Send payment link", "Send"), "write"), "post")
+        self.assertEqual(classified_risk(button("Sending code", "Send"), "write"), "post")
+
     def test_role_button_and_input_buttons_count_and_a_link_does_not(self) -> None:
         self.assertEqual(classified_risk(button("Remove", tag="div", type="", role="button"), "read"), "destructive")
         self.assertEqual(classified_risk(button("Send", tag="input", type="image"), "write"), "post")
@@ -162,6 +173,32 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send verification documents"),
         ("post", "Send verification"),
         ("post", "Send email"),
+        # An icon font's name of one word before the label, as the icon's element puts it on the label's line.
+        ("payment", "payment Pay now"),
+        ("payment", "lock Pay securely"),
+        ("destructive", "warning Delete account"),
+        ("destructive", "cancel Cancel subscription"),
+        ("payment", "check Confirm purchase"),
+        ("destructive", "close Close account"),
+        ("destructive", "block Deactivate"),
+        ("destructive", "arrow back Delete account"),
+        # Lower case first is still the label where no capitalised word follows it, and where one does and
+        # says nothing.
+        ("destructive", "delete account"),
+        ("destructive", "delete Account"),
+        # What Send sends is not a way to sign in, or may not be.
+        ("post", "Send SMS"),
+        ("post", "Send text message"),
+        ("post", "Send again"),
+        ("post", "Send password"),
+        ("post", "Send instructions"),
+        # A pin is also what a map or a board sends to somebody.
+        ("post", "Send PIN"),
+        # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
+        # case, "delete Purchase history" is a label too.
+        ("destructive", "delete Purchase history"),
+        ("destructive", "delete Remove filter"),
+        ("post", "send Send code"),
         # A harmless line does not excuse a dangerous one beside it.
         ("destructive", "Remove filter\nDelete account"),
         ("destructive", "Delete account\nRemove filter"),
@@ -234,6 +271,18 @@ class LabelRulesTests(unittest.TestCase):
         "Remove from library",
         "Remove from list",
         "Remove from bag",
+        "Send one-time password",
+        "Send me a one-time PIN",
+        "Send password reset email",
+        "Send login email",
+        "Send reset instructions",
+        "Send password reset instructions",
+        # An icon's name before a harmless label, and a file's name with an underscore in it.
+        "search Remove filters",
+        "history Purchase history",
+        "delete_me.txt",
+        "post_2024.md",
+        "pay_stub.pdf",
         # A harmless continuation is one however the page breaks its lines.
         "Send\ncode",
         "Remove\nfilter",

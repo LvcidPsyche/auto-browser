@@ -126,12 +126,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       `Purchase history`, `Purchase order`, `Purchase orders`, `Pay as you go`, `Post code`
     - Nor is `Send` asked about when it sends a way to sign in ("Send code", "Send me a login link", "Send reset
       link to my email"): the word itself, then nothing or words of the next list, then one of: `code`, `link`,
-      `otp`, `passcode`, `verification email`, `confirmation email`
+      `otp`, `passcode`, `one-time password`, `one-time pin`, `verification email`, `confirmation email`,
+      `activation email`, `recovery email`, `reset email`, `login email`, `sign-in email`,
+      `reset instructions`
     - Between the two only these words may stand: `me`, `us`, `a`, `an`, `the`, `my`, `new`, `another`, `login`,
       `log-in`, `sign-in`, `signin`, `magic`, `reset`, `password`, `verification`, `confirmation`, `activation`,
       `security`, `one-time`, `single-use`, `recovery`, `authentication`, `2fa`, `mfa`, `sms`, `email`, `text`
     - After it the label ends, or goes on with one of: `to`, `via`, `by`, `through`, `using`, `in`, `on`, `again`,
-      `now`, `instead`. So "Send payment link", "Send gift code" and "Send code review request" ask.
+      `now`, `instead`. So "Send payment link", "Send gift code" and "Send code review request" ask, and so
+      do "Send email", "Send SMS", "Send again" and "Send PIN" (a pin is also what a map or a board sends).
   - A label is read as its whole text on one line, and then each of its first three lines by itself, so a name
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
     of over 40 characters is a sentence, not a name, and is not matched. A line the table matches is let go when
@@ -139,8 +142,17 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     "filter"). Case and spacing do not count; characters that show nothing (zero-width ones, soft hyphens, the
     marks that set a text's direction) are removed; up to two leading tokens that are a number, a mark or an icon
     font's ligature name are skipped ("1 Delete", "credit_card Pay now"), and a label that is one ligature name is
-    read with its underscores as spaces ("delete_forever"); a hyphen goes on with its word ("Pay-as-you-go" is not
-    "Pay"; a dash does not, so "Pay – as you go" asks); the comma of `Yes, delete` may be missing.
+    read with its underscores as spaces ("delete_forever"; one with a dot is a file's name, "delete_me.txt"); a
+    hyphen goes on with its word ("Pay-as-you-go" is not "Pay"; a dash does not, so "Pay – as you go" asks); the
+    comma of `Yes, delete` may be missing.
+  - An icon font's name of one word stands on the label's line as a word in lower case ("payment Pay now",
+    "warning Delete account"). So where one or two such words lead up to a capitalised one, the line is read
+    from that one too, and asks when either reading does: "delete Remove filter" and "send Send code" ask,
+    since "delete Purchase history" is a label as well.
+  - A button often has several names (what it shows, its `aria-label`, its title). One the table matches is let
+    go when another goes on from the same words to a harmless continuation: a button that shows "Send" and is
+    named "Send code" for a screen reader, a filter chip that shows "Remove" and is named "Remove filter:
+    Price".
   - Left out on purpose: bare `Close`, `Cancel`, `Dismiss`, `OK`, `Continue`, `Next` and `Accept` (they are
     everywhere and mostly harmless), `Checkout` and `Proceed to checkout` (they open a page), `Subscribe`,
     `Unsubscribe`, `Submit`, `Confirm`, `Save changes` and `Clear`.

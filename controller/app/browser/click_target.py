@@ -131,8 +131,16 @@ HARMLESS_AFTER_SEND: tuple[str, ...] = (
     "link",
     "otp",
     "passcode",
+    "one-time password",
+    "one-time pin",
     "verification email",
     "confirmation email",
+    "activation email",
+    "recovery email",
+    "reset email",
+    "login email",
+    "sign-in email",
+    "reset instructions",
 )
 SEND_FILLER_WORDS: tuple[str, ...] = (
     "me",
@@ -205,6 +213,8 @@ _GRAPHEME_JOINER = "\u034f"
 # A token that is no word of the label: a number or a mark ("1", "\N{MIDDLE DOT}"), or an icon font's ligature
 # name, which has an underscore ("shopping_cart"). Up to this many are skipped before the label's first word.
 _NOT_A_WORD = re.compile(r"[\W\d]+|\S*_\S*")
+# A word all in lower case, as an icon font's name of one word is ("payment", "lock", "warning").
+_LOWER_CASE_WORD = re.compile(r"[a-z][a-z0-9]*")
 _MAX_SKIPPED_TOKENS = 2
 
 # (el, limit) => what a click on el lands on, or null. The element counts as the button, input or link it sits in,
@@ -380,16 +390,22 @@ def _label_kind(label: str) -> ApprovalKind | None:
     a name, and was skipped whole. A line the table matches is let go when the label from that line on is a
     harmless continuation: "Remove" over "filter" is "Remove filter", however the page breaks it.
     """
-    lines = [_shown(line) for line in _without_invisible(label).splitlines()]
-    lines = [line for line in lines if line]
+    lines = _lines(label)
     kind = _line_kind(" ".join(lines)) if len(lines) > 1 else None
     if kind is not None:
         return kind
     for index, line in enumerate(lines[:MAX_LABEL_LINES]):
-        kind = _line_kind(line)
-        if kind is not None and not _HARMLESS_PATTERN.match(_from_its_first_word(" ".join(lines[index:]))):
+        kind = _line_kind(line, " ".join(lines[index + 1 :]).casefold())
+        if kind is not None:
             return kind
     return None
+
+
+def _lines(label: str) -> list[str]:
+    """The lines of a label that show something, each as it is matched but for its case: its spaces collapsed,
+    the marks before its first word gone, what shows nothing taken out."""
+    shown = (_LEADING_SYMBOLS.sub("", " ".join(line.split())) for line in _without_invisible(label).splitlines())
+    return [line for line in shown if line]
 
 
 def _without_invisible(label: str) -> str:
@@ -398,34 +414,53 @@ def _without_invisible(label: str) -> str:
     )
 
 
-def _shown(line: str) -> str:
-    """A line as it is matched: its spaces collapsed, the marks before its first word gone, its case folded."""
-    return _LEADING_SYMBOLS.sub("", " ".join(line.split())).casefold()
+def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
+    """The kind a line asks for; ``rest`` is what the label goes on with after it, case folded.
 
-
-def _line_kind(shown: str) -> ApprovalKind | None:
+    Each reading of the line (_readings) is matched by itself, and one that is a harmless continuation, alone or
+    with the rest of the label, asks nothing.
+    """
     if not shown or len(shown) > MAX_LABEL_CHARS:
         return None
-    shown = _from_its_first_word(shown)
-    if _HARMLESS_PATTERN.match(shown):
-        return None
-    for kind, pattern in _PHRASE_PATTERNS.items():
-        if pattern.match(shown):
-            return kind
+    for reading in _readings(shown):
+        if _HARMLESS_PATTERN.match(reading) or (rest and _HARMLESS_PATTERN.match(f"{reading} {rest}")):
+            continue
+        for kind, pattern in _PHRASE_PATTERNS.items():
+            if pattern.match(reading):
+                return kind
     return None
 
 
-def _from_its_first_word(shown: str) -> str:
-    """``shown`` without the tokens before its first word that are not words; one that is all the label has is
-    read with its underscores as spaces ("delete_forever", an icon font's name for the icon it draws)."""
+def _harmless(shown: str) -> bool:
+    """Whether a text, read from its first word, is a harmless continuation of a phrase of the table."""
+    return _HARMLESS_PATTERN.match(_readings(shown)[-1]) is not None
+
+
+def _readings(shown: str) -> list[str]:
+    """What a line is matched as, case folded. The line asks when any of them does.
+
+    Tokens before the first word that are no words are skipped (a number, a mark, an icon font's name with an
+    underscore). Then, where one or two words all in lower case lead up to a capitalised one, the line is read
+    from that one as well: an icon font's name of one word is such a word, put on the label's line by the icon's
+    element ("payment Pay now"), and hid the label. And from its first word, as before: "delete Account" is a
+    label too, so a harmless label after an icon whose name is a phrase of the table ("delete Remove filter")
+    still asks. A line that is one token with underscores and no dot is read with them as spaces
+    ("delete_forever", the name of the icon it draws; "delete_me.txt" is a file's name).
+    """
     tokens = shown.split(" ")
     skipped = 0
     while skipped < _MAX_SKIPPED_TOKENS and len(tokens) > 1 and _NOT_A_WORD.fullmatch(tokens[0]):
         tokens = tokens[1:]
         skipped += 1
-    if len(tokens) == 1 and "_" in tokens[0]:
-        return " ".join(tokens[0].replace("_", " ").split())
-    return _LEADING_SYMBOLS.sub("", " ".join(tokens))
+    if len(tokens) == 1 and "_" in tokens[0] and "." not in tokens[0]:
+        return [" ".join(tokens[0].replace("_", " ").split()).casefold()]
+    lead = 0
+    while lead < _MAX_SKIPPED_TOKENS - skipped and lead + 1 < len(tokens) and _LOWER_CASE_WORD.fullmatch(tokens[lead]):
+        lead += 1
+    whole = _LEADING_SYMBOLS.sub("", " ".join(tokens)).casefold()
+    if lead and tokens[lead][:1].isupper():
+        return [" ".join(tokens[lead:]).casefold(), whole]
+    return [whole]
 
 
 def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | None:
@@ -436,13 +471,28 @@ def classified_risk(target: Any, label: RiskCategory | None) -> RiskCategory | N
     button_like = tag == "button" or (tag == "input" and kind_of_input in _BUTTON_INPUT_TYPES) or role == "button"
     if button_like:
         labels = target.get("labels")
-        for text in labels if isinstance(labels, list) else ():
-            kind = _label_kind(text) if isinstance(text, str) else None
-            if kind is not None:
+        labels = [text for text in labels if isinstance(text, str)] if isinstance(labels, list) else []
+        for text in labels:
+            kind = _label_kind(text)
+            if kind is not None and not _said_in_full_elsewhere(text, labels):
                 return kind
     if target.get("submits") is True and label == "read":
         return "write"
     return None
+
+
+def _said_in_full_elsewhere(label: str, labels: list[str]) -> bool:
+    """Whether another name of the same button goes on from ``label``'s very words to a harmless continuation.
+
+    A button drawn as "Send" and named "Send code" for a screen reader, a filter chip drawn as "Remove": the
+    fuller name is the button's, and the short one alone asked.
+    """
+    said = " ".join(_lines(label)).casefold()
+    for other in labels:
+        full = " ".join(_lines(other))
+        if full.casefold().startswith(said + " ") and _harmless(full):
+            return True
+    return False
 
 
 def classified_reason(kind: RiskCategory, label: RiskCategory | None, agent_reason: str, action: str = "click") -> str:
