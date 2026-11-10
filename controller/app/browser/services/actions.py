@@ -61,6 +61,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _target_left_the_pointer() -> BrowserActionError:
+    """The target had no box any more once Playwright had put the pointer on it."""
+    return BrowserActionError(
+        "Nothing was pressed: the target left the page as the pointer reached it. Observe the page again and retry.",
+        code="target_moved",
+        status_code=409,
+        retryable=True,
+    )
+
+
 # Times the human-like mouse path's 4-18 ms gaps. perf_counter, not the event
 # loop's clock: that is time.monotonic, which ticks every 15.6 ms on Windows
 # before Python 3.13, coarser than what is being measured.
@@ -86,6 +97,27 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
     if (node === el) return true;
   }
   return false;
+}"""
+
+# (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of the part of
+# el's first box that its frame's viewport shows (an inline element broken over lines has a box a line), counted
+# from the corner of its padding box, with the widths of the border at that corner. Playwright presses a position
+# where it is given, so the controller knows the point; the point Playwright picks itself it cannot ask for.
+_PRESS_PLACE_SCRIPT = """(el) => {
+  const view = el.ownerDocument.defaultView;
+  const style = view.getComputedStyle(el);
+  const border = [parseInt(style.borderLeftWidth, 10) || 0, parseInt(style.borderTopWidth, 10) || 0];
+  const whole = el.getBoundingClientRect();
+  const first = el.getClientRects()[0] || whole;
+  const middle = (low, high, limit) => {
+    const from = Math.max(low, 0), to = Math.min(high, limit);
+    return to - from >= 1 ? (from + to) / 2 : (low + high) / 2;
+  };
+  return {
+    x: middle(first.left, first.right, view.innerWidth) - whole.left - border[0],
+    y: middle(first.top, first.bottom, view.innerHeight) - whole.top - border[1],
+    border,
+  };
 }"""
 
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
@@ -1047,18 +1079,34 @@ class BrowserActionService:
     ) -> None:
         """Playwright's own click on ``locator``, for a target the human-like press could not take.
 
-        It puts the pointer and presses in one step, with no moment between for the read a press takes
-        (press_mouse). For an action whose target is read, Playwright's hover puts the pointer there first,
-        with the checks its click makes, and what is under it is read before the click.
+        Playwright picks the point of its click itself, the middle of the first piece of the element that the
+        viewport shows, and presses in the same step: there is no moment between for the read a press takes
+        (press_mouse), and no way to ask it for the point. Read at the middle of the element's box instead, a
+        wrapper wider than the viewport, or one in two pieces over two lines, was read at a point the click never
+        touched, and the button under Playwright's point was pressed unread.
+
+        So for an action whose target is read the step is taken apart, and only the placing is Playwright's. Its
+        checks run (a trial click), its hover puts the pointer at the point its click would have picked, given to
+        it as a position so that the controller knows where that is, and the press is the controller's own: read
+        where it goes down, as every other press is. Whether the target takes the pointer at that point is
+        Playwright's check, made by its hover: it knows a label slotted into a component's button as that
+        button's, which the check before a human-like press does not (_RECEIVES_POINTER_SCRIPT).
         """
-        if press_is_read():
-            await locator.hover(timeout=timeout_ms)
-            coords = await self.locator_center(locator)
-            if coords is not None:
-                await refuse_press_not_asked_about(
-                    self.manager.element_ids, session.page, *coords, session_id=session.id
-                )
-        await locator.click(timeout=timeout_ms)
+        if not press_is_read():
+            await locator.click(timeout=timeout_ms)
+            return
+        await locator.click(trial=True, timeout=timeout_ms)
+        place = await locator.evaluate(_PRESS_PLACE_SCRIPT)
+        position = {"x": float(place["x"]), "y": float(place["y"])}
+        await locator.hover(position=position, timeout=timeout_ms)
+        box = await locator.bounding_box()
+        if not box:
+            raise _target_left_the_pointer()
+        # Where Playwright puts a position: the corner of the element's box, its border, the offset.
+        x = float(box["x"] + place["border"][0] + position["x"])
+        y = float(box["y"] + place["border"][1] + position["y"])
+        await session.page.mouse.move(x, y)
+        await self.press_mouse(session, x, y)
 
     @staticmethod
     async def _receives_pointer_at(locator: Any, x: float, y: float) -> bool:

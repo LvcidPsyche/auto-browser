@@ -28,7 +28,7 @@ from app.browser.click_target import (
     reading_presses,
     refuse_press_not_asked_about,
 )
-from app.browser.services.actions import BrowserActionService
+from app.browser.services.actions import _PRESS_PLACE_SCRIPT, BrowserActionService
 
 DELETE = {"tag": "button", "type": "submit", "role": "", "submits": False, "labels": ["", "Delete account"]}
 PAY = {"tag": "div", "type": "", "role": "button", "submits": False, "labels": ["Pay now"]}
@@ -136,16 +136,24 @@ def _service(under_the_pointer: Any) -> tuple[BrowserActionService, SimpleNamesp
     return BrowserActionService(manager), session, done
 
 
-def _locator(done: list[str]) -> SimpleNamespace:
-    async def hover(**_: Any) -> None:
-        done.append("hover")
+BOX = {"x": 20, "y": 30, "width": 40, "height": 40}
+# Where the page says Playwright's click lands, from the corner of the padding box, and the border at that corner.
+PLACE = {"x": 12, "y": 7, "border": [3, 2]}
+PLACED_AT = (20 + 3 + 12.0, 30 + 2 + 7.0)
 
-    async def click(**_: Any) -> None:
-        done.append("click")
 
-    return SimpleNamespace(
-        hover=hover, click=click, bounding_box=AsyncMock(return_value={"x": 20, "y": 30, "width": 40, "height": 40})
-    )
+def _locator(done: list[str], *, box: Any = BOX) -> SimpleNamespace:
+    async def hover(**given: Any) -> None:
+        done.append(f"hover at {given['position']}")
+
+    async def click(**given: Any) -> None:
+        done.append("trial click" if given.get("trial") else "click")
+
+    async def evaluate(script: str, *_args: Any) -> Any:
+        assert script == _PRESS_PLACE_SCRIPT
+        return PLACE
+
+    return SimpleNamespace(hover=hover, click=click, evaluate=evaluate, bounding_box=AsyncMock(return_value=box))
 
 
 async def test_the_mouse_does_not_go_down_on_a_button_nobody_was_asked_about() -> None:
@@ -162,25 +170,39 @@ async def test_the_mouse_does_not_go_down_on_a_button_nobody_was_asked_about() -
     assert service.manager.element_ids.evaluate.await_count == 1
 
 
-async def test_a_click_playwright_places_is_read_where_its_hover_put_the_pointer() -> None:
-    # Playwright's click puts the pointer and presses in one step: its hover puts the pointer first, with the
-    # checks the click makes, and what is under it is read before the click.
-    service, session, done = _service(CLOSE)
-    with reading_presses("click", "read", None):
-        await service.click_as_playwright_places_it(session, _locator(done), timeout_ms=1000)
-    assert done == ["hover", "click"]
-    arg = service.manager.element_ids.evaluate.await_args.args[2]
-    assert (arg["x"], arg["y"]) == (40.0, 50.0)
+async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_was_read() -> None:
+    # Playwright's click picks its own point and presses in one step. For a read action only the placing is left
+    # to it: its checks, then its hover at a position the controller gave it. The pointer is put on that very
+    # point, and the press is press_mouse's: read there, then down.
+    placed = "hover at {'x': 12.0, 'y': 7.0}"
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, done = _service(CLOSE)
+        with reading_presses("click", "read", None):
+            await service.click_as_playwright_places_it(session, _locator(done), timeout_ms=1000)
+        assert done == ["trial click", placed, "mouse down", "mouse up"]
+        session.page.mouse.move.assert_awaited_once_with(*PLACED_AT)
+        arg = service.manager.element_ids.evaluate.await_args.args[2]
+        assert (arg["x"], arg["y"]) == PLACED_AT
 
-    service, session, done = _service(DELETE)
-    with reading_presses("click", "read", None), pytest.raises(PressNeedsApproval):
+        service, session, done = _service(DELETE)
+        with reading_presses("click", "read", None), pytest.raises(PressNeedsApproval):
+            await service.click_as_playwright_places_it(session, _locator(done))
+        assert done == ["trial click", placed]
+
+        # Not read: Playwright's click alone, as before.
+        service, session, done = _service(DELETE)
         await service.click_as_playwright_places_it(session, _locator(done))
-    assert done == ["hover"]
+        assert done == ["click"]
+        service.manager.element_ids.evaluate.assert_not_awaited()
 
-    # Not read: the click alone, as before.
-    service, session, done = _service(DELETE)
-    await service.click_as_playwright_places_it(session, _locator(done))
-    assert done == ["click"]
+
+async def test_a_target_with_no_box_once_the_pointer_is_on_it_is_not_pressed() -> None:
+    # Before, an element with no box once the pointer was there was clicked unread.
+    service, session, done = _service(CLOSE)
+    with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as refused:
+        await service.click_as_playwright_places_it(session, _locator(done, box=None))
+    assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+    assert "mouse down" not in done and "click" not in done
     service.manager.element_ids.evaluate.assert_not_awaited()
 
 

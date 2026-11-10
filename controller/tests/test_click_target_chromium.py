@@ -141,6 +141,26 @@ UNDER_THE_POINTER = """<title>start</title>
   onclick="document.title='REMOVED'">Remove member</button></div>
 <div id="row">Report <button onclick="document.title='GONE'">Delete</button></div>
 """
+# Wrappers whose middle is not where a click on them lands: one wider than the viewport, whose middle is off the
+# screen, and one in two pieces over two lines, whose middle is on text outside it. Playwright clicks the middle of
+# the first piece the viewport shows, and a button is there: in the wide one a small button, 20 px to each side of
+# that point, inside a border, so a point counted without the border (50 px left, 20 px up) misses it.
+PAST_THE_MIDDLE = """<title>start</title>
+<style>
+  body { margin: 0; font: 16px/20px monospace }
+  #wide { position: fixed; left: 0; top: 200px; width: 4000px; height: 60px; border: solid #ccc }
+  #wide { border-width: 20px 0 0 50px }
+  #wide button { position: absolute; left: calc(50vw - 70px); top: 10px; width: 40px; height: 40px; padding: 0 }
+  #lines { width: 300px }
+  #lines .lead, #lines .tail { display: inline-block; height: 20px }
+  #lines .lead { width: 200px }
+  #lines .tail { width: 150px }
+  #pieces button { width: 80px; height: 60px; padding: 0; border: 0; vertical-align: top }
+</style>
+<div id="lines"><span class="lead">lead</span><span id="pieces"><button
+  onclick="document.title='REMOVED'">Remove member</button> <span class="tail">tail</span></span></div>
+<div id="wide"><button onclick="document.title='DELETED'">Delete account</button></div>
+"""
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -638,6 +658,42 @@ async def test_a_click_that_names_the_wrapper_of_a_button_asks_at_the_press(tmp_
         await page.evaluate("document.title = 'start'")
         await env.manager.click(session_id, selector="#panel")
         assert await _title(env, session_id) == "DELETED"
+
+
+@pytest.mark.parametrize("wrapper", ["#wide", "#pieces"])
+async def test_a_wrapper_whose_middle_is_not_where_its_click_lands_asks_at_the_press(
+    tmp_path: Path, wrapper: str
+) -> None:
+    # The human-like press aims at the middle of the element's box, and where the element is not what is there the
+    # click went to Playwright's own, which picks its own point: the read was made at the middle (off the screen,
+    # or on text beside the wrapper) and the press landed on the button.
+    async with browser_env(tmp_path, {"/": PAST_THE_MIDDLE}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        box = await page.locator(wrapper).bounding_box()
+        middle = [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2]
+        on_it = "([sel, x, y]) => { const el = document.elementFromPoint(x, y); return !!el && !!el.closest(sel) }"
+        assert not await page.evaluate(on_it, [wrapper, *middle]), "the fixture's middle is on the wrapper"
+
+        for decision in (_click("read", selector=wrapper), _type("write", selector=wrapper)):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, decision)
+            assert asked.value.approval.kind == "destructive", decision
+        assert await _title(env, session_id) == "start"
+
+        # Approved, it presses the button, where Playwright's click would have.
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, _click("read", selector=wrapper))
+        await env.manager.approve(asked.value.approval.id)
+        await env.manager.execute_decision(
+            session_id, _click("read", selector=wrapper), approval_id=asked.value.approval.id
+        )
+        assert await _title(env, session_id) in ("DELETED", "REMOVED")
+
+        # The click route, which reads nothing, still clicks as Playwright places it.
+        await page.evaluate("document.title = 'start'")
+        await env.manager.click(session_id, selector=wrapper)
+        assert await _title(env, session_id) in ("DELETED", "REMOVED")
 
 
 async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(tmp_path: Path) -> None:

@@ -27,6 +27,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError, ApprovalStore, held_for_execution
+from app.browser.services.actions import _PRESS_PLACE_SCRIPT
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, McpToolCallRequest
@@ -63,23 +64,29 @@ class FakeLocator:
     def __init__(self, page: "FakePage") -> None:
         self.page = page
         self.first = self
+        # No box until Playwright's hover has put the pointer on it, so every click is one Playwright places.
+        self.box: dict[str, float] | None = None
 
     async def scroll_into_view_if_needed(self) -> None:
         return None
 
     async def bounding_box(self):
-        return None
+        return self.box
 
     async def get_attribute(self, _name: str) -> None:
         return None
 
-    async def evaluate(self, *_args: Any) -> bool:
-        return True  # focus checks: the field has focus
+    async def evaluate(self, script: str = "", *_args: Any) -> Any:
+        if script == _PRESS_PLACE_SCRIPT:
+            return {"x": 5.0, "y": 5.0, "border": [0, 0]}
+        return True  # focus checks: the field has focus; the pointer check: the target is under it
 
     async def hover(self, **_: object) -> None:
-        return None  # where the click will put the pointer: a read click is read there first
+        self.box = {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}
 
-    async def click(self, **_: object) -> None:
+    async def click(self, *, trial: bool = False, **_: object) -> None:
+        if trial:
+            return None
         self.page.clicks += 1
         await self.page.after_click()
 
@@ -87,6 +94,23 @@ class FakeLocator:
         self.page.uploads.append(path)
         if self.page.upload_error is not None:
             raise self.page.upload_error
+
+
+class FakeMouse:
+    """The press the controller makes itself for a click whose target is read: it lands as a click does."""
+
+    def __init__(self, page: "FakePage") -> None:
+        self.page = page
+
+    async def move(self, _x: float, _y: float, **_: object) -> None:
+        return None
+
+    async def down(self, **_: object) -> None:
+        return None
+
+    async def up(self, **_: object) -> None:
+        self.page.clicks += 1
+        await self.page.after_click()
 
 
 class FakePage:
@@ -97,6 +121,7 @@ class FakePage:
         self.evaluated: list[str] = []
         self.evaluated_args: list[Any] = []
         self.keyboard = FakeKeyboard()
+        self.mouse = FakeMouse(self)
         # What a click does after it lands: navigate away, wait, expire the approval.
         self.click_navigates_to: str | None = None
         self.click_started = asyncio.Event()
