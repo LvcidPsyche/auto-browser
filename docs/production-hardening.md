@@ -101,6 +101,25 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - An approval of a tool that names no session (`browser.delete_memory_profile`,
     `browser.cdp_attach`) is held in a controller-wide scope and belongs to the operator who
     asked, as described in `docs/mcp-clients.md`.
+- In the fast profile a click's `risk_category` is the model's word, and a page can steer it, so a click labelled
+  `read` or `write` (an unlabelled click is `write`) has its target read first, in the controller's isolated world:
+  - A button (`button`, an `input` of a button type, or `role=button`) whose label (its `aria-label`, visible text,
+    or an input's value or alt text) is at most 40 characters and starts, as whole words, with a phrase of the table
+    in `controller/app/browser/click_target.py` asks for that kind's approval, as an honest label does: `payment`
+    (`Pay`, `Place order`, `Buy now`, `Confirm payment`, `Purchase`), `destructive` (`Delete`, `Remove`,
+    `Cancel subscription`, `Close account`), `account_change` (`Change password`, `Change email`) and `post`
+    (`Publish`, `Post`, `Send`). Bare `Close`, `Cancel`, `Dismiss`, `OK`, `Continue`, `Next` and `Accept` are left
+    out: they are everywhere and mostly harmless.
+  - A form's submit button with no such label, labelled `read`, is recorded as `write`, which asks for nothing, so
+    search boxes and login forms keep working unattended. One labelled `write` is untouched.
+  - It does not catch a label the table lacks, a button drawn on a canvas, a link ("How to delete your account" is
+    an article), a label given only by `aria-labelledby` or an image, a selector only Playwright reads (`text=`, one
+    inside a shadow root), or a form sent by Enter in one of its fields. A target that cannot be read (none there, a
+    page that does not answer within 2 seconds to set the read up and 2 to run it) is not classified, and the click
+    runs as labelled. Inside a governed run's approval, which an operator gave for that very click, it is not read
+    again.
+  - A navigation off `ALLOWED_HOSTS` needs no rule of its own: with `PRE_REQUEST_BLOCKING` on (the default) it is
+    refused whatever its label.
 - Request-rate limiting with 429 responses and reset headers
 - Metrics endpoint for scraping and alert wiring
 - Automated retention cleanup for:

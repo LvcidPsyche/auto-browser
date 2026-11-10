@@ -20,12 +20,14 @@ from ...approvals import (
     ApprovalRequiredError,
     held_action_approval,
     held_for_execution,
+    held_tool_call_approval,
     refused_before_effect,
 )
 from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
+from ..click_target import CHECKED_LABELS, classified_risk, read_click_target
 from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from ..element_world import READ
@@ -439,6 +441,7 @@ class BrowserActionService:
             # the gateway checked it), that approval is given back.
             refused_before_effect(exc)
             raise
+        decision = await self._click_risk_from_its_target(session, decision)
         approval = await self.require_decision_approval(
             session_id,
             decision,
@@ -465,6 +468,24 @@ class BrowserActionService:
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
             async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+
+    async def _click_risk_from_its_target(
+        self, session: "BrowserSession", decision: BrowserActionDecision
+    ) -> BrowserActionDecision:
+        """A click labelled read or write, as what it lands on records it (app/browser/click_target.py).
+
+        Before the approval decision, so a button the model called read or write that deletes, pays, posts or
+        changes the account asks for approval as an honest label would, and a form submit called read is recorded
+        as a write. Not inside an outer layer's approval: a governed run's, which an operator gave for this very
+        click, or the one execute_approval runs, whose click was read when it was asked for.
+        """
+        if decision.action != "click" or decision.risk_category not in CHECKED_LABELS:
+            return decision
+        if held_action_approval() is not None or held_tool_call_approval() is not None:
+            return decision
+        target = await read_click_target(self.manager.element_ids, session.page, decision)
+        risk = classified_risk(target, decision.risk_category)
+        return decision if risk is None else decision.model_copy(update={"risk_category": risk})
 
     def _refuse_a_host_off_the_list(self, decision: BrowserActionDecision) -> None:
         """Refuse a navigate whose URL ALLOWED_HOSTS refuses, before an approval for it is asked for or spent.

@@ -121,6 +121,13 @@ All notable changes to auto-browser are documented here.
   arguments. `GET /approvals` stops listing them, and their ids answer as ids that do not exist. The audit log's own
   events about them stay, within `AUDIT_MAX_EVENTS`. To keep every record, set `APPROVAL_RETENTION_DAYS=0` before
   upgrading, or copy `APPROVAL_ROOT` and the database first. A negative value stops the controller at startup.
+- **A fast-profile click on a pay, delete, post or account button now asks for approval, whatever its label.** A
+  click labelled `read` or `write` (an unlabelled click is `write`) on a button whose label starts with a phrase such
+  as `Pay`, `Place order`, `Delete`, `Remove`, `Send` or `Change password` now answers `approval_required` of that
+  kind, as the same click labelled honestly did. An agent loop that ran such clicks unattended in the fast profile
+  now stops there until an operator approves (or the agent itself, under `AUTONOMOUS_APPROVALS`). A form submit with
+  no such label still runs unattended, recorded as `write`. The table, and what it does not catch, are in
+  `docs/production-hardening.md`.
 
 ### Security
 
@@ -199,6 +206,14 @@ All notable changes to auto-browser are documented here.
   listed operator's approve of an approval they asked for with `409` and the reason, the withdraw of a rejection
   waiting on it included; their rejections, and an agent's approval under `AUTONOMOUS_APPROVALS`, are not affected.
   (AUTH-36)
+- **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read` or
+  `write` asked for no approval, and that label is written by a model reading the page, which the page can steer.
+  Before the approval decision the click's target is now read in the controller's isolated world, where no page
+  script runs: a button whose label (its `aria-label`, text, or an input's value) is at most 40 characters and
+  starts, as whole words, with a phrase of a narrow table per kind (`payment`, `destructive`, `account_change`,
+  `post`) asks for that kind's approval, and a form's submit button labelled `read` is recorded as `write`. A link,
+  a longer label, bare `Close` or `Cancel`, and a target that cannot be read (the click then runs as labelled) are
+  not classified, and a click inside a governed run's approval is not read again. See the upgrade note. (STORE-42)
 
 ### Fixed
 
