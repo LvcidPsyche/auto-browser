@@ -155,14 +155,32 @@ DESCRIBE_TARGET_SCRIPT = r"""
   return { tag, type, role, submits: Boolean(submits && target.form), labels };
 }
 """
-# (x, y) => the element a press at that point lands on, or null: the innermost one, through open shadow roots.
+# (x, y) => the element a press at that point lands on, or null: the innermost one, through open shadow roots
+# and into frames whose document the page's origin can reach (the same origin, srcdoc), up to three frames down.
+# The point is carried into a frame by its box, border and padding; a frame that CSS scales or turns is read at a
+# point that is off. A frame of another origin is as far as it goes: the element is the frame.
 _ELEMENT_AT_SCRIPT = r"""
 (x, y) => {
-  let el = document.elementFromPoint(x, y);
-  for (let depth = 0; el && el.shadowRoot && depth < 8; depth += 1) {
-    const inner = el.shadowRoot.elementFromPoint(x, y);
-    if (!inner || inner === el) break;
-    el = inner;
+  let root = document;
+  let el = null;
+  for (let frames = 0; frames <= 3; frames += 1) {
+    let hit = root.elementFromPoint(x, y);
+    for (let depth = 0; hit && hit.shadowRoot && depth < 8; depth += 1) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    if (!hit) break;
+    el = hit;
+    if (el.localName !== 'iframe' && el.localName !== 'frame') break;
+    let inside = null;
+    try { inside = el.contentDocument; } catch (error) { inside = null; }
+    if (!inside || !inside.defaultView) break;
+    const box = el.getBoundingClientRect();
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    x -= box.left + el.clientLeft + (parseFloat(style.paddingLeft) || 0);
+    y -= box.top + el.clientTop + (parseFloat(style.paddingTop) || 0);
+    root = inside;
   }
   return el;
 }

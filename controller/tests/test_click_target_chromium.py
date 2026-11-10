@@ -46,6 +46,25 @@ WORDY = """<title>start</title>
 <button id="icon" onclick="document.title='PAID'"><span class="material-icons">credit_card</span> Pay now</button>
 <button id="code" onclick="document.title='SENT'">Send code</button>
 """
+# A frame of the page's own origin inside another, each with a border and padding to cross, and beside them a
+# frame the page cannot reach into (sandboxed, so of an origin of its own).
+FRAMES = """<title>start</title>
+<style>
+  body { margin: 0 }
+  iframe { position: absolute; left: 60px; width: 380px; border: 6px solid #888; padding: 5px }
+  #outer { top: 30px; height: 220px }
+  #apart { top: 300px; height: 80px }
+</style>
+<iframe id="outer"></iframe>
+<iframe id="apart" sandbox srcdoc="<button id='sealed'>Delete account</button>"></iframe>
+<script>
+document.getElementById('outer').srcdoc = `<body style="margin: 0">
+  <iframe id="inner" style="margin: 12px; border: 3px solid #333; width: 300px; height: 110px"
+    srcdoc="<button id='deep' style='margin: 20px' onclick=&quot;top.document.title = 'DELETED'&quot;>Delete
+      account</button>"></iframe>
+  <button id="shallow" style="display: block" onclick="top.document.title = 'CLOSED'">Close</button>`;
+</script>
+"""
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
 # PAGE with a button before the others that only a selector piercing an open shadow root finds.
@@ -173,6 +192,41 @@ async def test_a_name_over_a_sentence_and_a_name_after_an_icons_ligature_are_rea
         # A login form's "Send code" is not a post: it runs unattended.
         await env.manager.execute_decision(session_id, _click("write", selector="#code"))
         assert await _title(env, session_id) == "SENT"
+
+
+async def _centre(locator) -> dict[str, float]:
+    box = await locator.bounding_box()
+    return {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2}
+
+
+async def test_a_point_inside_frames_of_the_pages_origin_is_read_there(tmp_path: Path) -> None:
+    # The element at a point over a frame is the <iframe>, which is no button: the click was not classified.
+    async with browser_env(tmp_path, {"/": FRAMES}) as env:
+        session_id = await env.create("/")
+        outer = env.page(session_id).frame_locator("#outer")
+        deep = await _centre(outer.frame_locator("#inner").locator("#deep"))
+        shallow = await _centre(outer.locator("#shallow"))
+
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, _click("read", **deep))
+        assert asked.value.approval.kind == "destructive"
+        assert await _title(env, session_id) == "start"
+
+        # One frame down, a harmless button runs as labelled.
+        await env.manager.execute_decision(session_id, _click("write", **shallow))
+        assert await _title(env, session_id) == "CLOSED"
+
+
+async def test_a_point_inside_a_frame_of_another_origin_is_not_read(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/": FRAMES}) as env:
+        session_id = await env.create("/")
+        sealed = await _centre(env.page(session_id).frame_locator("#apart").locator("#sealed"))
+
+        # The page's own origin cannot see into it, so neither can the controller's world there: unread, the
+        # click runs as labelled.
+        await env.manager.execute_decision(session_id, _click("read", **sealed))
+
+        assert await env.manager.approvals.list() == []
 
 
 async def test_a_close_button_and_a_link_run_as_labelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
