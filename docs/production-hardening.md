@@ -149,6 +149,16 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     - After it the label ends, or goes on with one of: `to`, `via`, `by`, `through`, `using`, `in`, `on`, `again`,
       `now`, `instead`. So "Send payment link", "Send gift code" and "Send code review request" ask, and so
       do "Send email", "Send SMS", "Send again" and "Send PIN" (a pin is also what a map or a board sends).
+    - From such a word on the label may say only where the code goes or what it is for: `me`, `my`, `your`,
+      `the`, `this`, `a`, `an`, `and`, `or`, `at`, `with`, `email`, `e-mail`, `mail`, `inbox`, `address`,
+      `phone`, `mobile`, `cell`, `number`, `device`, `sms`, `text`, `message`, `call`, `voice`, `app`,
+      `whatsapp`, `authenticator`, `registered`, `primary`, `backup`, `recovery`, `work`, `personal`, `other`,
+      `another`, `different`, `new`, `ending`, `reset`, `password`, `verify`, `confirm`, `sign`, `log`,
+      `login`, `continue`, `account`, `identity`. A word of the list before may stand there too, and an address
+      as a page shows the user's own: with an at sign inside it, or with a digit, an asterisk or a bullet in it
+      ("j***@example.com", "+1 (***) ***-1234"). So "Send code to my phone" and "Send code to reset your
+      password" run, and "Send code to all users", "Send verification email to John" and "Send code to verify
+      payment" ask. An address written out in full ("Send code to pat@example.com") runs, whoever's it is.
   - A label is read as its whole text on one line, and then each of its first three lines by itself, so a name
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
     of over 40 characters is a sentence, not a name, and is not matched, and the page hands over the first 400

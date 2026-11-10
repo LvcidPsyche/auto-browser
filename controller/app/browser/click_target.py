@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import string
 import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -213,6 +214,63 @@ SEND_LINK_WORDS: tuple[str, ...] = (
     "authentication",
 )
 SEND_TAIL_WORDS: tuple[str, ...] = ("to", "via", "by", "through", "using", "in", "on", "again", "now", "instead")
+# From a tail word on, a label may say only where the code goes or what it is for: the user's own address ("to my
+# phone", "by email"), which a page shows masked, or the sign-in it serves ("to reset your password"). Whatever
+# followed a tail word was let go, so "Send code to all users" and "Send verification email to John", which send to
+# somebody else, ran as a login form's button does. Besides these words a tail word may stand there, and an
+# address as a page shows it (_SEND_ADDRESS).
+SEND_DESTINATION_WORDS: tuple[str, ...] = (
+    "me",
+    "my",
+    "your",
+    "the",
+    "this",
+    "a",
+    "an",
+    "and",
+    "or",
+    "at",
+    "with",
+    "email",
+    "e-mail",
+    "mail",
+    "inbox",
+    "address",
+    "phone",
+    "mobile",
+    "cell",
+    "number",
+    "device",
+    "sms",
+    "text",
+    "message",
+    "call",
+    "voice",
+    "app",
+    "whatsapp",
+    "authenticator",
+    "registered",
+    "primary",
+    "backup",
+    "recovery",
+    "work",
+    "personal",
+    "other",
+    "another",
+    "different",
+    "new",
+    "ending",
+    "reset",
+    "password",
+    "verify",
+    "confirm",
+    "sign",
+    "log",
+    "login",
+    "continue",
+    "account",
+    "identity",
+)
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40
 # The read's bound, for the message that runs it and, apart, for the messages that set it up: past it the click
@@ -256,6 +314,12 @@ _SIGN_IN_SEND = re.compile(
     + f"|{_SEND_FILLERS} {_one_of(SEND_LINK_WORDS)}{_SEND_FILLERS} link)"
     + f"(?:$| {_one_of(SEND_TAIL_WORDS)}{_WORD_END})"
 )
+# An address as a page shows the user's own: with an at sign inside it, or masked, so with a digit, an asterisk
+# or a bullet in it ("j***@example.com", "+1", "***-1234"). "@channel" is neither.
+_SEND_ADDRESS = re.compile(r"[^\s@]+@\S+|[^\s@]*[\d*\u2022\u25cf\u00b7]\S*")
+_SEND_GOES_ON_WITH = frozenset(SEND_TAIL_WORDS) | frozenset(SEND_DESTINATION_WORDS)
+# What may stand around a word without being part of it: "phone.", "(sms)".
+_AROUND_A_WORD = string.punctuation + "\u2026\u201c\u201d\u2018\u2019"
 _LEADING_SYMBOLS = re.compile(r"^[^\w]+")
 # Characters that show nothing and would split a word from the table's: Unicode's format characters (zero-width
 # space, joiner and non-joiner, word joiner, byte order mark, soft hyphen, the marks and isolates that set a text's
@@ -491,14 +555,24 @@ def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
     return None
 
 
+def _says_only_where_it_goes(rest: str) -> bool:
+    """Whether what follows Send's tail word names only the user's own address or the sign-in the code is for."""
+    for token in rest.split():
+        word = token.strip(_AROUND_A_WORD)
+        if word and word not in _SEND_GOES_ON_WITH and not _SEND_ADDRESS.fullmatch(token):
+            return False
+    return True
+
+
 def _asks_nothing(text: str) -> bool:
     """Whether ``text``, case folded, is a harmless continuation of a phrase of the table.
 
     A way to sign in that Send sends, which has a grammar of its own, or a harmless phrase with no phrase of the
     table after it: "Remove from library and delete files" starts as a harmless label does, and was let go for it.
     """
-    if _SIGN_IN_SEND.match(text):
-        return True
+    sent = _SIGN_IN_SEND.match(text)
+    if sent is not None:
+        return _says_only_where_it_goes(text[sent.end() :])
     start = _HARMLESS_START.match(text)
     return start is not None and _PHRASE_LATER.search(text, start.end()) is None
 

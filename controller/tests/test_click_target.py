@@ -30,6 +30,7 @@ from app.browser.click_target import (
     HARMLESS_LABEL_PHRASES,
     MAX_LABEL_CHARS,
     READ_TIMEOUT_MS,
+    SEND_DESTINATION_WORDS,
     SEND_FILLER_WORDS,
     SEND_LINK_WORDS,
     SEND_TAIL_WORDS,
@@ -218,6 +219,19 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send link to John"),
         ("post", "Send link to everyone"),
         ("post", "Send email link"),
+        # After "to", "via" and the like a label may say only where the code goes or what it is for: the user's
+        # own address or the sign-in it serves. Sent to somebody else it is a message, however it starts.
+        ("post", "Send code to all users"),
+        ("post", "Send code to everyone"),
+        ("post", "Send code to John"),
+        ("post", "Send code to the whole team"),
+        ("post", "Send code to @channel"),
+        ("post", "Send code via the group chat"),
+        ("post", "Send verification email to all users"),
+        ("post", "Send login link to all members"),
+        ("post", "Send reset link to customer"),
+        ("post", "Send code to verify payment"),
+        ("post", "Send code to confirm account deletion"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -286,6 +300,26 @@ class LabelRulesTests(unittest.TestCase):
         "Send magic link",
         "Send code to my phone",
         "Send code again",
+        # Where the code goes, as a page shows the user's own address, and what it is for.
+        "Send code to my email",
+        "Send code to my phone.",
+        "Send code to j***@example.com",
+        "Send code to me at j***@example.com",
+        "Send code to +1 (***) ***-1234",
+        "Send code to \u2022\u2022\u2022\u20221234",
+        "Send code to phone ending in 1234",
+        "Send code via SMS",
+        "Send code by text message",
+        "Send me a code via WhatsApp",
+        "Send code to authenticator app",
+        "Send code to a different number",
+        "Send code to another device",
+        "Send code again in 30s",
+        "Send magic link to my inbox",
+        "Send code to reset your password",
+        "Send code to verify my email",
+        "Send code to sign in",
+        "Send code to continue",
         "Send me a link",
         "Send us a new link",
         "Send verification link",
@@ -401,6 +435,10 @@ class LabelRulesTests(unittest.TestCase):
         # exception by itself.
         self.assertTrue(SEND_FILLER_WORDS)
         self.assertTrue(SEND_TAIL_WORDS)
+        # What may follow a tail word names no kind of the table by itself, and no everybody.
+        self.assertTrue(SEND_DESTINATION_WORDS)
+        phrases = {phrase for kind in CLICK_LABEL_PHRASES.values() for phrase in kind}
+        self.assertEqual(set(SEND_DESTINATION_WORDS) & (phrases | {"all", "everyone", "users", "team"}), set())
         self.assertEqual(set(SEND_FILLER_WORDS) & set(HARMLESS_AFTER_SEND), set())
         self.assertEqual(set(SEND_TAIL_WORDS) & (set(SEND_FILLER_WORDS) | set(HARMLESS_AFTER_SEND)), set())
         # A link is no way to sign in by itself, and every word that makes it one may stand before it.
