@@ -34,8 +34,13 @@ import asyncio
 import logging
 import re
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..action_errors import BrowserActionError
 from ..models import ApprovalKind, BrowserActionDecision, RiskCategory
 from .element_ids import target_element_id
 
@@ -362,6 +367,9 @@ SAME_ELEMENT_SCRIPT = (
 # The comparison's bound, for its message and, apart, for the messages that set it up. Past it the press goes to
 # the point itself, which costs nothing but the jitter, so it is short: the pointer is already there, waiting.
 SAME_ELEMENT_TIMEOUT_MS = 500
+# The bound of the read made just before a press, for its message and, apart, for the messages that set it
+# up. Short for the same reason: past it the press goes on.
+PRESS_READ_TIMEOUT_MS = 500
 
 
 def _label_kind(label: str) -> ApprovalKind | None:
@@ -511,6 +519,92 @@ async def same_element_at(
         logger.debug("the elements at a click's point and at its jittered point could not be compared: %r", exc)
         return False
     return same is True
+
+
+@dataclass(frozen=True)
+class _PressRead:
+    """What a press made for the action under way is read against: the action, the label the agent gave it, and
+    the kind the approval it runs under was given for (None when it runs under none)."""
+
+    action: str
+    label: RiskCategory | None
+    approved: ApprovalKind | None
+
+
+# Set around an action whose target was read (BrowserActionService.execute_decision). A press made for anything
+# else is not read: a direct call of the click route, a governed run under its operator's approval.
+_PRESS_READ: ContextVar[_PressRead | None] = ContextVar("press_read", default=None)
+
+
+@contextmanager
+def reading_presses(action: str, label: RiskCategory | None, approved: ApprovalKind | None) -> Iterator[None]:
+    """While the block runs, every press is read first (refuse_press_not_asked_about)."""
+    token = _PRESS_READ.set(_PressRead(action, label, approved))
+    try:
+        yield
+    finally:
+        _PRESS_READ.reset(token)
+
+
+def press_is_read() -> bool:
+    """Whether a press made now is read first: inside reading_presses."""
+    return _PRESS_READ.get() is not None
+
+
+class PressNeedsApproval(BrowserActionError):
+    """A press stopped before the mouse went down: under the pointer is a button of a kind (``kind``) the action
+    has no approval for. BrowserActionService.execute_decision asks for that approval."""
+
+    def __init__(self, kind: ApprovalKind, action: str) -> None:
+        super().__init__(
+            f'Nothing was pressed: the element under the pointer reads as a button of kind "{kind}", which this '
+            f"{action} has no approval for.",
+            code="press_needs_approval",
+            action=action,
+            status_code=409,
+            retryable=False,
+        )
+        self.kind = kind
+
+
+async def refuse_press_not_asked_about(
+    element_ids: ElementIds, page: Page, x: float, y: float, *, session_id: str
+) -> None:
+    """Read what is under the pointer at (x, y), where the mouse is about to go down, and refuse the press
+    (PressNeedsApproval) when it is a button of a kind of the table the action under way has no approval for.
+
+    The read before the approval decision describes the element the action names, as the page stood then. The
+    press lands on what is under the pointer: the button that fills a wrapper the action named, or one the page
+    showed as the pointer arrived (a row's "Delete", shown while the pointer is over the row). Outside
+    reading_presses nothing is read. What cannot be read is pressed, as a target that cannot be read goes on, and
+    is logged the same way.
+    """
+    reading = _PRESS_READ.get()
+    if reading is None:
+        return
+    try:
+        target = await element_ids.evaluate(
+            page,
+            CLICK_TARGET_SCRIPT,
+            {"x": x, "y": y, "limit": _LABEL_CUT},
+            timeout_ms=PRESS_READ_TIMEOUT_MS,
+            setup_timeout_ms=PRESS_READ_TIMEOUT_MS,
+            keep_session=True,
+        )
+    except Exception as exc:
+        logger.info(
+            "session %s: what is under the pointer could not be read before the press of a %s labelled %s (%s); "
+            "the press goes on, unclassified",
+            session_id,
+            reading.action,
+            reading.label,
+            type(exc).__name__,
+        )
+        logger.debug("session %s: reading what is under the pointer failed with: %r", session_id, exc)
+        return
+    kind = classified_risk(target, reading.label)
+    if kind in CLICK_LABEL_PHRASES and kind != reading.approved:
+        raise PressNeedsApproval(kind, reading.action)
 
 
 async def _read_selected(page: Page, selector: str) -> Any:

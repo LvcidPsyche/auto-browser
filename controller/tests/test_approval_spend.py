@@ -76,6 +76,9 @@ class FakeLocator:
     async def evaluate(self, *_args: Any) -> bool:
         return True  # focus checks: the field has focus
 
+    async def hover(self, **_: object) -> None:
+        return None  # where the click will put the pointer: a read click is read there first
+
     async def click(self, **_: object) -> None:
         self.page.clicks += 1
         await self.page.after_click()

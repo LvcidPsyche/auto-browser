@@ -6,6 +6,7 @@ import random
 import re
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -31,9 +32,13 @@ from ..click_target import (
     CHECKED_LABELS,
     CLICK_LABEL_PHRASES,
     TARGET_READ_ACTIONS,
+    PressNeedsApproval,
     classified_reason,
     classified_risk,
+    press_is_read,
     read_click_target,
+    reading_presses,
+    refuse_press_not_asked_about,
     same_element_at,
 )
 from ..element_ids import selector_hint, target_element_id
@@ -238,7 +243,7 @@ class BrowserActionService:
                 await locator.scroll_into_view_if_needed()
                 coords = await self.locator_center(locator)
                 if coords is None:
-                    await locator.click()
+                    await self.click_as_playwright_places_it(session, locator)
                 else:
                     target["x"], target["y"] = coords
                     await self.click_locator_human_like(session, locator, coords)
@@ -449,6 +454,10 @@ class BrowserActionService:
             # the gateway checked it), that approval is given back.
             refused_before_effect(exc)
             raise
+        # Before the target's read gives the decision another kind: the agent's own label, and whether the
+        # action is one whose target is read at all.
+        label = decision.risk_category
+        reads_its_target = self._reads_its_target(decision)
         decision, asked_for_its_target = await self._click_risk_from_its_target(
             session, decision, approval_id=approval_id
         )
@@ -472,13 +481,30 @@ class BrowserActionService:
             "approval_checked": approval is not None or held is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
-        with action_witness_context(witness_context):
-            # Uploads go through manager.upload, which checks and claims the
-            # approval itself.
-            if approval is None or decision.action == "upload":
-                return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
-            async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
-                return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+        # An action whose target was read has each press read once more, at the pointer, against the kind
+        # it runs approved for (click_target.refuse_press_not_asked_about).
+        approved = approval.kind if approval is not None else None
+        presses = reading_presses(decision.action, label, approved) if reads_its_target else nullcontext()
+        try:
+            with action_witness_context(witness_context), presses:
+                # Uploads go through manager.upload, which checks and claims the
+                # approval itself.
+                if approval is None or decision.action == "upload":
+                    return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+                async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
+                    return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+        except PressNeedsApproval as stopped:
+            # Stopped with the pointer over a button of a kind nobody was asked about (the action named its
+            # wrapper, or the page showed it as the pointer arrived): asked for now, as the read before the
+            # decision asks. An approval the action ran under is spent: its action had begun.
+            asks = decision.model_copy(update={"risk_category": stopped.kind})
+            await self.require_decision_approval(
+                session_id,
+                asks,
+                approval_id=None,
+                fallback_reason=classified_reason(stopped.kind, label, decision.reason, decision.action),
+            )
+            raise
 
     async def _click_risk_from_its_target(
         self, session: "BrowserSession", decision: BrowserActionDecision, *, approval_id: str | None = None
@@ -489,13 +515,10 @@ class BrowserActionService:
 
         Before the approval decision, so a button the model gave such a label that deletes, pays, posts or
         changes the account asks for approval as an honest label would, and a form submit called read is recorded
-        as a write. Not inside an outer layer's approval: a governed run's, which an operator gave for this very
-        click, or the one execute_approval runs, whose click was read when it was asked for. Nor when the
-        caller presents the approval this very action asked for: it runs under that one.
+        as a write. Not when the caller presents the approval this very action asked for: it runs under that
+        one.
         """
-        if decision.action not in TARGET_READ_ACTIONS or decision.risk_category not in CHECKED_LABELS:
-            return decision, None
-        if held_action_approval() is not None or held_tool_call_approval() is not None:
+        if not self._reads_its_target(decision):
             return decision, None
         presented = await self._kind_of_the_approval_presented(session, decision, approval_id)
         if presented is not None:
@@ -511,6 +534,21 @@ class BrowserActionService:
             else None
         )
         return decision.model_copy(update={"risk_category": risk}), reason
+
+    @staticmethod
+    def _reads_its_target(decision: BrowserActionDecision) -> bool:
+        """Whether ``decision`` presses a target that is read first, and again at each press: a click or a
+        type whose label asks for nothing in the fast profile.
+
+        Not inside an outer layer's approval: a governed run's, which an operator gave for this very action, or
+        the one execute_approval runs, whose action was read when it was asked for.
+        """
+        return (
+            decision.action in TARGET_READ_ACTIONS
+            and decision.risk_category in CHECKED_LABELS
+            and held_action_approval() is None
+            and held_tool_call_approval() is None
+        )
 
     async def _kind_of_the_approval_presented(
         self, session: "BrowserSession", decision: BrowserActionDecision, approval_id: str | None
@@ -964,6 +1002,11 @@ class BrowserActionService:
         await asyncio.sleep(random.uniform(0.03, 0.12))
 
     async def press_mouse(self, session: "BrowserSession", x: float, y: float) -> None:
+        """Press and release at (x, y), where the pointer is. For an action whose target is read, what is under
+        the pointer is read first, and a button nobody was asked about is not pressed.
+        """
+        if press_is_read():
+            await refuse_press_not_asked_about(self.manager.element_ids, session.page, x, y, session_id=session.id)
         await session.page.mouse.down()
         await asyncio.sleep(random.uniform(0.02, 0.08))
         await session.page.mouse.up()
@@ -997,7 +1040,25 @@ class BrowserActionService:
         if await self._receives_pointer_at(locator, x, y):
             await self.press_mouse(session, x, y)
         else:
-            await locator.click(timeout=timeout_ms)
+            await self.click_as_playwright_places_it(session, locator, timeout_ms=timeout_ms)
+
+    async def click_as_playwright_places_it(
+        self, session: "BrowserSession", locator: Any, *, timeout_ms: float | None = None
+    ) -> None:
+        """Playwright's own click on ``locator``, for a target the human-like press could not take.
+
+        It puts the pointer and presses in one step, with no moment between for the read a press takes
+        (press_mouse). For an action whose target is read, Playwright's hover puts the pointer there first,
+        with the checks its click makes, and what is under it is read before the click.
+        """
+        if press_is_read():
+            await locator.hover(timeout=timeout_ms)
+            coords = await self.locator_center(locator)
+            if coords is not None:
+                await refuse_press_not_asked_about(
+                    self.manager.element_ids, session.page, *coords, session_id=session.id
+                )
+        await locator.click(timeout=timeout_ms)
 
     @staticmethod
     async def _receives_pointer_at(locator: Any, x: float, y: float) -> bool:
@@ -1009,7 +1070,7 @@ class BrowserActionService:
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         coords = await self.locator_center(locator)
         if coords is None:
-            await locator.click()
+            await self.click_as_playwright_places_it(session, locator)
         else:
             await self.click_locator_human_like(session, locator, coords, timeout_ms=FOCUS_CLICK_TIMEOUT_MS)
         await asyncio.sleep(0.05 + random.random() * 0.1)

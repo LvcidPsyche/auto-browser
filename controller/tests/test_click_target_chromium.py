@@ -17,7 +17,13 @@ import pytest
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
-from app.browser.click_target import CLICK_TARGET_SCRIPT, DESCRIBE_TARGET_SCRIPT, READ_TIMEOUT_MS, same_element_at
+from app.browser.click_target import (
+    CLICK_TARGET_SCRIPT,
+    DESCRIBE_TARGET_SCRIPT,
+    PRESS_READ_TIMEOUT_MS,
+    READ_TIMEOUT_MS,
+    same_element_at,
+)
 from app.browser.services import actions as actions_module
 from app.models import BrowserActionDecision
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
@@ -112,6 +118,25 @@ LABELLED = """<title>start</title>
 <label id="for" for="del">Erase my data</label>
 <label id="around">Billing <input id="pay" type="button" value="Pay now" onclick="document.title='PAID'"></label>
 <label id="field">Your name <input id="name"></label>
+"""
+# What a press lands on that the read before it did not describe: the button that fills a wrapper the click names
+# (a div, and a focusable row with an element id of its own), and a button a row shows only while the pointer is
+# over it.
+UNDER_THE_POINTER = """<title>start</title>
+<style>
+  body { margin: 0 }
+  .wrap { position: absolute; left: 40px; width: 220px; height: 50px }
+  .wrap button { display: block; width: 220px; height: 50px }
+  #panel { top: 30px }
+  #member { top: 110px }
+  #row { position: absolute; left: 40px; top: 200px; width: 320px; height: 40px; background: #eee }
+  #row button { display: none; position: absolute; left: 110px; top: 5px; width: 100px; height: 30px }
+  #row:hover button { display: block }
+</style>
+<div id="panel" class="wrap"><button onclick="document.title='DELETED'">Delete account</button></div>
+<div id="member" class="wrap" tabindex="0" aria-label="Member row"><button
+  onclick="document.title='REMOVED'">Remove member</button></div>
+<div id="row">Report <button onclick="document.title='GONE'">Delete</button></div>
 """
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
@@ -468,7 +493,11 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
             env.manager.execute_decision(session_id, _click("read", element_id=delete["element_id"])), 20
         )
 
-        assert bounds == [(READ_TIMEOUT_MS, READ_TIMEOUT_MS, True)]
+        # Asked before the decision, and once more at the press, for less long: the pointer is waiting there.
+        assert bounds == [
+            (READ_TIMEOUT_MS, READ_TIMEOUT_MS, True),
+            (PRESS_READ_TIMEOUT_MS, PRESS_READ_TIMEOUT_MS, True),
+        ]
         assert await _title(env, session_id) == "DELETED"
         assert await env.manager.approvals.list() == []
 
@@ -508,6 +537,71 @@ async def test_an_approval_presented_for_its_click_is_spent_though_the_target_is
         # An approval asked for another action is still only shown on one that needs none.
         await env.manager.execute_decision(session_id, _click("write", selector="#close"), approval_id=approval.id)
         assert await _title(env, session_id) == "CLOSED"
+
+
+async def test_a_click_that_names_the_wrapper_of_a_button_asks_at_the_press(tmp_path: Path) -> None:
+    # The read before the decision describes the element the action names: here a div, which is no button. The
+    # press lands on the button that fills it, and ran as labelled, by a selector, an element id or a type.
+    async with browser_env(tmp_path, {"/": UNDER_THE_POINTER}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        row = await env.element(session_id, "Member row")
+        click = _click("read", selector="#panel")
+
+        for decision in (click, _click("write", element_id=row["element_id"]), _type("write", selector="#panel")):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, decision)
+            assert asked.value.approval.kind == "destructive", decision
+            assert asked.value.approval.reason.startswith("The controller reads this "), decision
+        assert await _title(env, session_id) == "start"
+
+        # Approved, the click runs under that approval: at the press the button reads as the kind approved.
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, click)
+        approval = asked.value.approval
+        assert approval.action.risk_category == "destructive"
+        await env.manager.approve(approval.id)
+        await env.manager.execute_decision(session_id, click, approval_id=approval.id)
+        assert await _title(env, session_id) == "DELETED"
+        assert (await env.manager.approvals.get(approval.id)).status == "executed"
+
+        # Inside an outer approval, which an operator gave for this very click, the press is not read either.
+        await page.evaluate("document.title = 'start'")
+        governed = await env.manager.approvals.create_or_reuse_pending(
+            session_id=session_id, kind="write", reason="governed", action=_click("write", selector="#panel")
+        )
+        await env.manager.approve(governed.id)
+        async with held_for_execution(env.manager.approvals, governed.id, may_give_back=True):
+            await env.manager.execute_decision(session_id, _click("write", selector="#panel"), approval_id=governed.id)
+        assert await _title(env, session_id) == "DELETED"
+
+        # And the click route presses for its caller, as it did.
+        await page.evaluate("document.title = 'start'")
+        await env.manager.click(session_id, selector="#panel")
+        assert await _title(env, session_id) == "DELETED"
+
+
+async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(tmp_path: Path) -> None:
+    # A row shows its "Delete" only while the pointer is over the row. Read before the pointer moved, the point
+    # was the row; the press landed on the button the pointer's arrival had just shown.
+    async with browser_env(tmp_path, {"/": UNDER_THE_POINTER}) as env:
+        session_id = await env.create("/")
+        click = _click("read", x=200.0, y=220.0)
+
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, click)
+
+        approval = asked.value.approval
+        assert (approval.kind, approval.action.risk_category) == ("destructive", "destructive")
+        assert approval.reason == (
+            'The controller reads this click\'s target as a button of kind "destructive"; the agent labelled the '
+            "click \"read\". The agent's reason: the model's word"
+        )
+        assert await _title(env, session_id) == "start"
+
+        await env.manager.approve(approval.id)
+        await env.manager.execute_decision(session_id, click, approval_id=approval.id)
+        assert await _title(env, session_id) == "GONE"
 
 
 async def test_inside_an_outer_approval_the_click_is_not_asked_about_again(tmp_path: Path) -> None:
