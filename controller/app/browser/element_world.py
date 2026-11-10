@@ -317,13 +317,29 @@ class PageWorld:
     ) -> tuple["CDPSession", str]:
         if self._cdp is not None and self._frame_id is not None:
             return self._cdp, self._frame_id
-        async with self._lock:
+        await self._take_the_lock(setup)
+        try:
             if self._cdp is None:
                 self._cdp = await self._attach(page, setup=setup)
             if self._frame_id is None:
                 tree = await self._send(self._cdp, "Page.getFrameTree", None, setup=setup, keep_session=keep_session)
                 self._frame_id = tree["frameTree"]["frame"]["id"]
             return self._cdp, self._frame_id
+        finally:
+            self._lock.release()
+
+    async def _take_the_lock(self, setup: _SetupBudget | None) -> None:
+        """Take the lock the session is opened under, waiting no longer than the call's setup budget.
+
+        While it is held another call is attaching, for as long as its own budget lets it. The wait for it was no
+        setup message and had no bound, so a read with half a second for its setup waited out an attach of many
+        seconds. Past the budget this call alone gives up: the session being opened is the other call's, and is
+        left to it. A call with no setup budget waits as it did.
+        """
+        if setup is None:
+            await self._lock.acquire()
+            return
+        await self._within(self._lock.acquire(), "the session another call is opening", setup=setup, keep_session=True)
 
     async def _attach(self, page: "Page", *, setup: _SetupBudget | None = None) -> "CDPSession":
         attaching = asyncio.ensure_future(page.context.new_cdp_session(page))

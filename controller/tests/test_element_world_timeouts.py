@@ -288,6 +288,36 @@ async def test_a_setup_message_that_would_start_after_the_budget_is_spent_fails_
     assert failed_after_s < 0.5  # a retry with a budget of its own would have waited a whole second
 
 
+async def test_a_call_waits_for_the_session_another_call_is_opening_no_longer_than_its_setup_budget() -> None:
+    # The session is opened under a lock, and the wait for the lock was no setup message: a read with a budget of
+    # 120 ms waited as long as the call beside it took to attach.
+    cdp = SlowCdp({})
+    page, instance = slow_page(cdp, attach_s=3 * SLOW_S), world()
+    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=LONG_MS))
+    await asyncio.sleep(0.05)
+    assert instance._lock.locked()
+
+    elapsed, error = await timed_failure(
+        instance.call(page, "decl", effect=READ, timeout_ms=LONG_MS, setup_timeout_ms=SHORT_MS, keep_session=True)
+    )
+
+    assert error.code == PAGE_NOT_RESPONDING
+    assert f"within {SHORT_MS} ms" in str(error)
+    assert elapsed < 2 * SLOW_S  # the attach takes three
+    # Only the call that waited gave up: the one that was opening the session gets it, and its answer.
+    assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
+    assert (instance._cdp, instance._frame_id) == (cdp, "frame-1")
+    assert cdp.detached == 0
+    # Whatever the waiting call asked for: one that does not keep the session has none of its own to drop yet.
+    page, instance = slow_page(cdp, attach_s=3 * SLOW_S), world()
+    opening = asyncio.ensure_future(instance.call(page, "decl", effect=READ, setup_timeout_ms=LONG_MS))
+    await asyncio.sleep(0.05)
+    _elapsed, error = await timed_failure(instance.call(page, "decl", effect=READ, setup_timeout_ms=SHORT_MS))
+    assert error.code == PAGE_NOT_RESPONDING
+    assert await asyncio.wait_for(opening, timeout=TEST_BOUND_S) == "read"
+    assert (instance._cdp, cdp.detached) == (cdp, 0)
+
+
 # -- a call past its bound, with another call in flight on the same session --------
 
 
