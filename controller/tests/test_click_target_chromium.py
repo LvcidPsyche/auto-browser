@@ -3,7 +3,7 @@
 The fast profile asked for approval only when the decision's own risk_category said post, payment, account_change
 or destructive, and that label is a model's reading of the page it acts on. These run execute_decision, the fast
 path every agent step, browser.execute_action and REST decision goes through, on pages served locally, with the
-target read in the controller's isolated world (app/browser/click_target.py). Same harness as test_element_ids.py.
+target read as the click will find it (app/browser/click_target.py). Same harness as test_element_ids.py.
 """
 
 from __future__ import annotations
@@ -30,6 +30,16 @@ PAGE = """<title>start</title>
 """
 ARTICLE = "<title>ARTICLE</title>"
 RESULTS = "<title>RESULTS</title>"
+# PAGE with a button before the others that only a selector piercing an open shadow root finds.
+SHADOW = PAGE.replace(
+    "</title>",
+    """</title>
+<div id="host"></div>
+<script>
+document.getElementById('host').attachShadow({mode: 'open'}).innerHTML =
+  `<button class="wipe" onclick="document.title='WIPED'">Delete workspace</button>`;
+</script>""",
+)
 
 
 def _click(risk: str, **target: Any) -> BrowserActionDecision:
@@ -88,6 +98,45 @@ async def test_a_write_labelled_click_by_selector_or_point_is_read_too(tmp_path:
         assert await _title(env, session_id) == "start"
 
 
+async def test_a_selector_in_any_dialect_the_click_accepts_is_read(tmp_path: Path) -> None:
+    # The click resolves its selector with Playwright, which reads more than CSS: a steered model has only to name
+    # the button in another dialect.
+    async with browser_env(tmp_path, {"/": SHADOW}) as env:
+        session_id = await env.create("/")
+
+        for selector in (
+            "text=Delete account",
+            'role=button[name="Delete account"]',
+            "xpath=//button[@id='delete']",
+            "button:has-text('Delete account')",
+            "body >> #delete",
+            ".wipe",
+            # Playwright's first match is the shadow root's button, which comes first in the document;
+            # document.querySelector never enters the shadow root, and finds Close.
+            "#close, .wipe",
+        ):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, _click("read", selector=selector))
+            assert asked.value.approval.kind == "destructive", selector
+        assert await _title(env, session_id) == "start"
+
+
+async def test_a_selector_that_matches_nothing_is_not_classified_and_fails_as_the_click_does(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/": PAGE}) as env:
+        session_id = await env.create("/")
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with pytest.raises(BrowserActionError) as failed:
+            await env.manager.execute_decision(session_id, _click("read", selector="text=No such button"))
+
+        # The read gives up after READ_TIMEOUT_MS, and the click then waits its own ACTION_TIMEOUT_MS (3 s here).
+        assert not isinstance(failed.value, ApprovalRequiredError)
+        assert loop.time() - started < (READ_TIMEOUT_MS + 3000) / 1000 + 3
+        assert await env.manager.approvals.list() == []
+        assert await _title(env, session_id) == "start"
+
+
 async def test_a_close_button_and_a_link_run_as_labelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     risks = _record_witness_risk(monkeypatch)
     async with browser_env(tmp_path, {"/": PAGE, "/article": ARTICLE}) as env:
@@ -121,6 +170,7 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
 ) -> None:
     async with browser_env(tmp_path, {"/": PAGE}) as env:
         session_id = await env.create("/")
+        delete = await env.element(session_id, "Delete account")
         evaluate = env.manager.element_ids.evaluate
         bounds: list[tuple[int, int]] = []
 
@@ -135,7 +185,9 @@ async def test_a_read_the_page_does_not_answer_does_not_stop_the_click(
         monkeypatch.setattr(env.manager.element_ids, "evaluate", hung_read)
 
         # Unread, the click runs as labelled, and reports for itself what becomes of it.
-        await asyncio.wait_for(env.manager.execute_decision(session_id, _click("read", selector="#delete")), 20)
+        await asyncio.wait_for(
+            env.manager.execute_decision(session_id, _click("read", element_id=delete["element_id"])), 20
+        )
 
         assert bounds == [(READ_TIMEOUT_MS, READ_TIMEOUT_MS)]
         assert await _title(env, session_id) == "DELETED"

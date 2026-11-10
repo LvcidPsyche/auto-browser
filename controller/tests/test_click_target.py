@@ -1,18 +1,32 @@
 """STORE-42: a fast-profile click labelled read or write is classified by what it lands on, not the model's word.
 
-classified_risk reads CLICK_TARGET_SCRIPT's answer; these pin its table one case at a time. The script itself, and
-the fast path that uses it, run against real Chromium in test_click_target_chromium.py.
+classified_risk reads DESCRIBE_TARGET_SCRIPT's answer; these pin its table one case at a time, and where
+read_click_target sends each way of naming a target. The scripts themselves, and the fast path that uses them, run
+against real Chromium in test_click_target_chromium.py.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import unittest
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
-from app.browser.click_target import CLICK_LABEL_PHRASES, READ_TIMEOUT_MS, classified_risk, read_click_target
+from app.browser import click_target
+from app.browser.click_target import (
+    CLICK_LABEL_PHRASES,
+    CLICK_TARGET_SCRIPT,
+    DESCRIBE_TARGET_SCRIPT,
+    MAX_LABEL_CHARS,
+    READ_TIMEOUT_MS,
+    classified_risk,
+    read_click_target,
+)
 from app.models import BrowserActionDecision
 
 
@@ -89,39 +103,121 @@ class ClassifiedRiskTests(unittest.TestCase):
                 self.assertIsNone(classified_risk(target, "read"))
 
 
+class _Locator:
+    """What page.locator(selector).first is asked, and what it answers (a value, an exception, or never)."""
+
+    def __init__(self, page: "_Page") -> None:
+        self._page = page
+
+    @property
+    def first(self) -> "_Locator":
+        return self
+
+    async def evaluate(self, expression: str, arg: Any = None, *, timeout: float | None = None) -> Any:
+        self._page.evaluated.append((expression, arg, timeout))
+        if self._page.answer is NEVER:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self._page.left += 1
+        if isinstance(self._page.answer, BaseException):
+            raise self._page.answer
+        return self._page.answer
+
+
+NEVER = object()
+
+
 class _Page:
-    pass
+    def __init__(self, answer: Any = None) -> None:
+        self.answer = answer
+        self.located: list[str] = []
+        self.evaluated: list[tuple[str, Any, float | None]] = []
+        self.left = 0
+
+    def locator(self, selector: str) -> _Locator:
+        self.located.append(selector)
+        return _Locator(self)
 
 
 class ReadClickTargetTests(unittest.IsolatedAsyncioTestCase):
-    async def _read(self, element_ids: Any, **fields: Any) -> Any:
+    async def _read(self, element_ids: Any, page: _Page | None = None, **fields: Any) -> Any:
         decision = BrowserActionDecision(action="click", reason="r", risk_category="read", **fields)
-        return await read_click_target(element_ids, _Page(), decision)
+        return await read_click_target(element_ids, page or _Page(), decision)
 
-    async def test_the_read_is_bounded_and_names_the_target_as_the_click_does(self) -> None:
+    async def test_an_element_id_or_a_point_is_read_in_the_world_and_bounded(self) -> None:
         element_ids = AsyncMock()
         element_ids.evaluate.return_value = {"tag": "button"}
         element_id = "op-" + "ab" * 12
+        page = _Page()
 
         for fields, expected in (
             ({"element_id": element_id}, {"elementId": element_id}),
             ({"selector": f'[data-operator-id="{element_id}"]'}, {"elementId": element_id}),
-            ({"selector": "#delete"}, {"selector": "#delete"}),
+            # As the click does: an element id wins over a selector, and a selector over a point.
+            ({"element_id": element_id, "selector": "text=Delete"}, {"elementId": element_id}),
             ({"x": 10.0, "y": 20.0}, {"x": 10.0, "y": 20.0}),
         ):
             with self.subTest(fields=fields):
-                self.assertEqual(await self._read(element_ids, **fields), {"tag": "button"})
+                self.assertEqual(await self._read(element_ids, page, **fields), {"tag": "button"})
+                self.assertEqual(element_ids.evaluate.await_args.args[1], CLICK_TARGET_SCRIPT)
                 arg = element_ids.evaluate.await_args.args[2]
                 self.assertEqual({key: value for key, value in arg.items() if key != "limit"}, expected)
                 kwargs = element_ids.evaluate.await_args.kwargs
                 self.assertEqual((kwargs["timeout_ms"], kwargs["setup_timeout_ms"]), (READ_TIMEOUT_MS, READ_TIMEOUT_MS))
+        self.assertEqual(page.located, [])
+
+    async def test_a_selector_is_read_on_the_element_the_click_would_find(self) -> None:
+        element_ids = AsyncMock()
+        limit = MAX_LABEL_CHARS * 4
+
+        for selector in ("#delete", "text=Delete account", 'role=button[name="Delete"]', "xpath=//button"):
+            with self.subTest(selector=selector):
+                page = _Page({"tag": "button"})
+                self.assertEqual(
+                    await self._read(element_ids, page, selector=selector, x=1.0, y=2.0), {"tag": "button"}
+                )
+                # page.locator(selector).first, as BrowserActionService.click resolves it, and nothing but a read.
+                self.assertEqual(page.located, [selector])
+                self.assertEqual(page.evaluated, [(DESCRIBE_TARGET_SCRIPT, limit, READ_TIMEOUT_MS)])
+        element_ids.evaluate.assert_not_awaited()
+
+    async def test_a_selector_whose_read_never_answers_is_given_up_at_the_bound(self) -> None:
+        page = _Page(NEVER)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with patch.object(click_target, "READ_TIMEOUT_MS", 50), self.assertLogs("app.browser.click_target", "DEBUG"):
+            self.assertIsNone(await self._read(AsyncMock(), page, selector="text=Delete account"))
+
+        self.assertLess(loop.time() - started, 5)
+        # The call is cancelled and left behind: it is not waited for.
+        await asyncio.sleep(0)
+        self.assertEqual(page.left, 1)
+
+    async def test_a_selector_playwright_refuses_or_cannot_find_classifies_nothing(self) -> None:
+        for answer in (PlaywrightError("Unexpected token"), PlaywrightTimeoutError("Timeout 2000ms exceeded.")):
+            with self.subTest(answer=answer), self.assertLogs("app.browser.click_target", "DEBUG"):
+                self.assertIsNone(await self._read(AsyncMock(), _Page(answer), selector="##"))
+
+    async def test_a_cancelled_click_takes_its_read_with_it(self) -> None:
+        page = _Page(NEVER)
+        reading = asyncio.ensure_future(self._read(AsyncMock(), page, selector="text=Delete account"))
+        await asyncio.sleep(0.01)
+
+        reading.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await reading
+
+        await asyncio.sleep(0)
+        self.assertEqual(page.left, 1)
 
     async def test_a_page_that_does_not_answer_classifies_nothing_and_is_logged_at_debug(self) -> None:
         element_ids = AsyncMock()
         element_ids.evaluate.side_effect = BrowserActionError("no answer", code=PAGE_NOT_RESPONDING)
 
         with self.assertLogs("app.browser.click_target", level=logging.DEBUG) as logged:
-            self.assertIsNone(await self._read(element_ids, selector="#delete"))
+            self.assertIsNone(await self._read(element_ids, x=10.0, y=20.0))
 
         self.assertEqual([record.levelno for record in logged.records], [logging.DEBUG])
 
