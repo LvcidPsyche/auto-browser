@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -121,6 +122,13 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
             patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01),
         )
 
+    def as_on_posix(self):
+        """The key's mode check runs, on Windows too; the directory's has its own tests, and needs an owner to read."""
+        stack = ExitStack()
+        stack.enter_context(patch.object(identity_module, "_POSIX", True))
+        stack.enter_context(patch.object(NodeIdentity, "_tighten_a_loose_directory", Mock()))
+        return stack
+
     def test_a_key_that_is_empty_at_first_and_complete_on_a_later_read_is_loaded(self):
         with self.reading_the_key_as(b"", self.pem):
             self.assertEqual(NodeIdentity(self.dir).node_id, self.node_id)
@@ -164,6 +172,31 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
 
         with wait, poll, patch.object(Path, "read_bytes", gone), self.assertRaises(FileNotFoundError):
             NodeIdentity(self.dir)
+
+    def test_the_key_is_tightened_once_however_often_its_read_is_retried(self):
+        # Only the read and the parse are retried. A key that could not be tightened and did not parse wrote its
+        # warning at every try, about forty of them in the bound.
+        tighten = Mock()
+        with self.as_on_posix(), patch.object(identity_module, "_tighten_a_loose_key", tighten):
+            with self.reading_the_key_as(b"", b"", self.pem):
+                self.assertEqual(NodeIdentity(self.dir).node_id, self.node_id)
+
+        self.assertEqual(self.reads, 3)
+        tighten.assert_called_once_with(self.key)
+
+    def test_the_loser_at_the_exclusive_create_tightens_the_key_once_too(self):
+        real_exists = Path.exists
+
+        def not_yet(path, *args, **kwargs):
+            return False if path.name == "node_private.pem" else real_exists(path, *args, **kwargs)
+
+        tighten = Mock()
+        with self.as_on_posix(), patch.object(identity_module, "_tighten_a_loose_key", tighten):
+            with patch.object(Path, "exists", not_yet), self.reading_the_key_as(b"", b"", self.pem):
+                self.assertEqual(NodeIdentity(self.dir).node_id, self.node_id)
+
+        self.assertEqual(self.reads, 3)
+        tighten.assert_called_once_with(self.key)
 
 
 class NodeIdentityPublishedFilesTests(unittest.TestCase):
@@ -391,6 +424,58 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
                     path.rmdir()
                 else:
                     path.unlink()
+
+    def test_a_temp_file_of_a_published_file_is_the_identitys_own(self):
+        # What a publish that is still running, or one a killed start left, puts beside the file it publishes. Counted
+        # as another file, it made a loose directory of ours read as shared, and its mode was left.
+        left = [self.dir / ".node_public.pem.k3j2x9aa.tmp", self.dir / ".node_meta.json.0_qz81xw.tmp"]
+        for path in left:
+            path.write_text("", encoding="utf-8")
+
+        with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            chmod = self._load(0o755, ours=True)
+
+        chmod.assert_called_once_with(self.dir, 0o700)
+        text = "\n".join(logs.output)
+        self.assertNotIn("holds other files", text)
+        self.assertIn("tightened it to 700", text)
+
+    def test_the_temp_name_is_the_one_a_publish_really_uses(self):
+        # The names above are written by hand: this one is the writer's own, seen while its publish runs.
+        real_replace = utils_module.replace_retrying
+        fresh = Path(self._tmp.name) / "fresh"
+        during: dict[str, list[str]] = {}
+
+        def probe(source, destination):
+            names = sorted(entry.name for entry in fresh.iterdir())
+            during[Path(destination).name] = [name for name in names if identity_module._is_a_publish_under_way(name)]
+            self.assertIn(Path(source).name, during[Path(destination).name])
+            real_replace(source, destination)
+
+        with patch.object(utils_module, "replace_retrying", probe):
+            NodeIdentity(fresh)
+
+        self.assertEqual(set(during), {"node_public.pem", "node_meta.json"})
+        self.assertEqual([len(names) for names in during.values()], [1, 1])
+
+    def test_a_name_that_only_looks_like_one_still_counts_as_another_file(self):
+        # The private key is never written through a temp file, and a publish puts random characters in the name.
+        for other in (
+            ".node_private.pem.k3j2x9aa.tmp",
+            ".node_public.pem.tmp",
+            "node_public.pem.k3j2x9aa.tmp",
+            ".node_public.pem.k3j2x9aa",
+            ".peers.json.k3j2x9aa.tmp",
+        ):
+            with self.subTest(other=other):
+                path = self.dir / other
+                path.write_text("", encoding="utf-8")
+                with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+                    chmod = self._load(0o755, ours=True)
+
+                chmod.assert_not_called()
+                self.assertIn("holds other files", "\n".join(logs.output))
+                path.unlink()
 
     def test_a_add_10_the_witness_signer_tightens_only_a_directory_of_identity_files(self):
         from app.witness_signing import WitnessSigner

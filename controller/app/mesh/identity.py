@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 _PRIVKEY_FILE = "node_private.pem"
 _PUBKEY_FILE = "node_public.pem"
 _META_FILE = "node_meta.json"
+# The files published whole (atomic_write_text), and how the temp file such a publish keeps beside one ends.
+_PUBLISHED_FILES = (_PUBKEY_FILE, _META_FILE)
+_TEMP_SUFFIX = ".tmp"
 
 _KEY_FILE_MODE = 0o600
 _IDENTITY_DIR_MODE = 0o700
@@ -110,6 +113,18 @@ def _tighten_a_loose_key(path: Path) -> None:
     )
 
 
+def _is_a_publish_under_way(name: str) -> bool:
+    """Whether ``name`` is the temp file atomic_write_text keeps beside a published file until it is whole.
+
+    ``.<file>.<random>.tmp``, for the two files written that way. The private key is not: it is created in place.
+    """
+    for published in _PUBLISHED_FILES:
+        prefix = f".{published}."
+        if name.startswith(prefix) and name.endswith(_TEMP_SUFFIX) and len(name) > len(prefix) + len(_TEMP_SUFFIX):
+            return True
+    return False
+
+
 def _read_while_another_start_writes(read: Callable[[], _T]) -> _T:
     """``read``, retried for a short bound: another start may be writing the file it reads.
 
@@ -143,7 +158,7 @@ class NodeIdentity:
 
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
-            self._private_key = _read_while_another_start_writes(lambda: self._load_private_key(priv_path))
+            self._private_key = self._load_private_key(priv_path)
         else:
             logger.info("mesh.identity: generating new keypair in %s", self._dir)
             self._private_key = Ed25519PrivateKey.generate()
@@ -154,7 +169,7 @@ class NodeIdentity:
             except FileExistsError:
                 # Another start made the key between the check and the exclusive create: that key is this node's.
                 logger.info("mesh.identity: another start created the keypair in %s; loading it", self._dir)
-                self._private_key = _read_while_another_start_writes(lambda: self._load_private_key(priv_path))
+                self._private_key = self._load_private_key(priv_path)
 
         self._public_key: Ed25519PublicKey = self._private_key.public_key()
         pub_raw = self._public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # 32 bytes
@@ -183,9 +198,13 @@ class NodeIdentity:
         logger.info("mesh.identity: node_id=%s", self._node_id)
 
     def _load_private_key(self, priv_path: Path) -> Ed25519PrivateKey:
+        # The mode is put right once. Only the read and the parse are tried again while another start writes the
+        # file: a key that cannot be tightened would otherwise write its warning at every try.
         if _POSIX:
             _tighten_a_loose_key(priv_path)
-        return Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes()))
+        return _read_while_another_start_writes(
+            lambda: Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes()))
+        )
 
     def _tighten_a_loose_directory(self) -> None:
         """mkdir's mode applies only to a directory it creates: one an older release made at 0755 keeps that mode.
@@ -245,10 +264,14 @@ class NodeIdentity:
         )
 
     def _other_entries(self) -> list[str]:
-        """The names in the identity directory that are not the identity's own files (an unlistable one counts)."""
+        """The names in the identity directory that are not the identity's own files (an unlistable one counts).
+
+        A publish under way is the identity's own too: another start's, or what a killed start left.
+        """
         own = {_PRIVKEY_FILE, _PUBKEY_FILE, _META_FILE}
         try:
-            return [entry.name for entry in self._dir.iterdir() if entry.name not in own]
+            names = [entry.name for entry in self._dir.iterdir()]
+            return [name for name in names if name not in own and not _is_a_publish_under_way(name)]
         except OSError as exc:
             return [f"<unlistable: {type(exc).__name__}>"]
 
