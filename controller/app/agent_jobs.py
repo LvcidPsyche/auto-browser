@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import Context
 from pathlib import Path
 from uuid import uuid4
 
@@ -261,6 +262,18 @@ class AgentJobStore:
         atomic_write_text(path, record_json(record, indent=2), mode=PRIVATE_FILE_MODE)
 
 
+async def _finished_in_the_queue(_job_id: str) -> None:
+    """Stands in AgentJobQueue._on_finish for a callback that was run when its job was ended in the queue.
+
+    The entry stays until a worker takes the id (and runs this, which does nothing) or the enqueue drops it, so that
+    "is its callback still here" goes on meaning "no worker has finished this job" (_enqueue).
+    """
+
+
+# How long a cancel or a discard waits for the finish callback of a job it ended in the queue: as long as a cancel
+# waits for a worker to stop a running job. The callback goes on past it.
+_QUEUE_ENDED_FINISH_WAIT_SECONDS = 5.0
+
 RESUME_CONTEXT_PREFIX = "Resuming background agent job"
 RESUME_CONTEXT_MIN_CHARS = 1000
 QUEUED_OPERATOR_CREDENTIAL_REMOVED = (
@@ -304,17 +317,48 @@ class AgentJobQueue:
         # Deliberately in-memory: if the controller restarts, the browser
         # sessions these callbacks would close are gone with it.
         self._on_finish: dict[str, Callable[[str], Awaitable[None]]] = {}
+        # The finish callbacks under way for jobs that were ended in the queue (_finish_one_ended_in_the_queue): each in
+        # a task of its own, so that shutdown can stop them as it stops a worker's.
+        self._queue_ended_finishes: set[asyncio.Task[None]] = set()
 
     async def _run_finish_callback(self, job_id: str) -> None:
         callback = self._on_finish.pop(job_id, None)
         if callback is None:
             return
+        await self._call_finish_callback(callback, job_id)
+
+    @staticmethod
+    async def _call_finish_callback(callback: Callable[[str], Awaitable[None]], job_id: str) -> None:
         try:
             await callback(job_id)
         except Exception:
             # Never let cleanup failure escape into the worker loop — but never
             # swallow it silently either, or a leaked session looks like success.
             logger.exception("finish callback for agent job %s failed", job_id)
+
+    async def _finish_one_ended_in_the_queue(self, job_id: str) -> None:
+        """Run the finish callback of a job a cancel or a discard has ended, unless a worker holds the job.
+
+        A worker runs the callback of every job it takes off the queue, whatever state it finds it in. One ended while
+        it waited there would otherwise keep what its callback gives back (a cron run's session, and its job's slot)
+        until a worker reached it: behind a long run, for as long as that run takes.
+
+        Once: the callback is replaced by a stand-in in the same step as the checks, so a worker that takes the id
+        from here on, and a second cancel or discard, find it already run. A job a worker holds is left to that
+        worker, which finds the record ended and runs the callback itself. The callback runs in a task of its own,
+        with no operator, as a worker's does: the caller waits for it only so long, and a caller that is cancelled
+        does not stop it part-way (in a cron run's, with the session still open and nothing left to close it).
+        """
+        callback = self._on_finish.get(job_id)
+        if callback is None or callback is _finished_in_the_queue or job_id in self._running_tasks:
+            return
+        self._on_finish[job_id] = _finished_in_the_queue
+        task = asyncio.create_task(
+            self._call_finish_callback(callback, job_id), name=f"agent-job-finish-{job_id}", context=Context()
+        )
+        self._queue_ended_finishes.add(task)
+        task.add_done_callback(self._queue_ended_finishes.discard)
+        await asyncio.wait([task], timeout=_QUEUE_ENDED_FINISH_WAIT_SECONDS)
 
     async def startup(self) -> None:
         await self.store.startup()
@@ -357,6 +401,11 @@ class AgentJobQueue:
             except asyncio.CancelledError:
                 pass
         self._workers = []
+        # A finish under way for a job ended in the queue is stopped as a worker's is, above.
+        for finish in list(self._queue_ended_finishes):
+            finish.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await finish
         self._started = False
 
     async def list_jobs(
@@ -428,6 +477,8 @@ class AgentJobQueue:
     async def discard_job(self, job_id: str) -> dict:
         await self._accessible(job_id)
         record, changed = await self.store.discard(job_id)
+        # Before anything is audited, as a cancel stops a running job: the record already says discarded.
+        await self._finish_one_ended_in_the_queue(job_id)
         if changed:
             await self._audit("agent_job_discarded", "discarded", record)
         return self._public_record(record)
@@ -447,6 +498,9 @@ class AgentJobQueue:
             # disk) used to raise here and leave the job running.
             self._cancellation_reasons[job_id] = "user"
             task.cancel()
+        if record.status == "cancelled":
+            # If that was in the queue, by this call or an earlier one, no worker's task is there to finish it.
+            await self._finish_one_ended_in_the_queue(job_id)
         if changed:
             await self._audit_quietly("agent_job_cancel_requested", record.status, record)
         if record.status == "cancelled":
@@ -537,7 +591,8 @@ class AgentJobQueue:
                 except _AlreadyFinished:
                     # There is nothing to take back. If a worker had it, a caller told of a failure (not a cancellation)
                     # would say it never ran, and invite a second run. One no worker holds whose callback is still here
-                    # never ran (cancelled or discarded in the queue), and nothing is bound to run that callback.
+                    # never ran: it was cancelled or discarded in the queue, and what is here is the stand-in of a
+                    # callback run there, or a callback that was not here yet to run.
                     ran_to_its_end = isinstance(exc, Exception) and (
                         record.id in self._running_tasks or record.id not in self._on_finish
                     )

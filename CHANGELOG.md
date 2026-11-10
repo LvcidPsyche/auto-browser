@@ -511,6 +511,13 @@ All notable changes to auto-browser are documented here.
   the worker inside that callback, and a close cut short there left the session open with nothing else to close it.
   The cancel now leaves the callback to finish and settles the record as `interrupted`, as it does for a running
   record no worker holds. (NODE-cancel-job-finish-callback)
+- **A cron run cancelled or discarded while it waits in the queue gives back its session and its slot at once.**
+  The record ended at the call, but the session the fire opened was closed, the cron job's slot freed and
+  `last_status` written only when a worker took the run off the queue: behind a long run, with one worker
+  (`AGENT_JOB_WORKER_COUNT`), the session stayed open and counted toward `MAX_SESSIONS`, the job's next fires answered
+  `previous_run_active`, and `last_status` read `queued`, for as long as the run ahead took. The cancel or the
+  discard now does that itself, once, when no worker holds the run; it waits up to 5 seconds for the close, which
+  goes on if the caller gives up, and `last_status` then reads `cancelled` or `discarded`.
 - **Queuing an agent job at a full queue answers `503`, where it answered `500`.** With 100 jobs already waiting,
   `POST /sessions/{id}/agent/jobs/run` and `POST /sessions/{id}/agent/jobs/step` refused the new job and the refusal
   reached the client as `500` `Internal error`. Both now answer `503` `Service unavailable`, as
