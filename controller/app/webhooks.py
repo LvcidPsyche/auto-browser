@@ -231,8 +231,10 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
 async def _post_pinned(target: _Target, raw: bytes, headers: dict[str, str]) -> httpx.Response:
     """Post to the checked addresses in turn, moving on only when one cannot be connected to.
 
-    Nothing was sent to an address that did not connect, so the next one is tried, as httpx's own lookup would; once
-    one connects, its answer (an HTTP error included) is final.
+    Nothing was sent to an address that did not connect, so the next one is tried, as httpx's own lookup would. A TLS
+    handshake that fails or times out is that too: httpx 0.28 raises ConnectError or ConnectTimeout for it, as for a
+    refused connection. Once one connects, its answer (an HTTP error included) is final, and so is a failure after the
+    request began to go out (a read timeout, a dropped connection): the event may have arrived.
     """
     client = get_client(direct=True)
     pinned_headers = {**headers, **target.headers}

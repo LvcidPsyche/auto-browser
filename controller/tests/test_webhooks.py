@@ -6,6 +6,7 @@ The old check read an IP literal only: 0x7f.1 and 2130706433 passed it, and a na
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +28,9 @@ _OK = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
 _SERVER_ERROR = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
 _TUNNEL_OPEN = b"HTTP/1.1 200 Connection established\r\n\r\n"
 _CLIENTS = ("_client", "_direct_client")
+# A reply that connects for real, to a listener of the test's own (one that fails the TLS handshake).
+_REAL = object()
+_REAL_CONNECT_TCP = httpcore.AnyIOBackend.connect_tcp
 
 
 def _approval() -> ApprovalRecord:
@@ -320,6 +324,12 @@ class _Wire:
             async def write(self, buffer: bytes, timeout: float | None = None) -> None:
                 wire.sent.append(buffer)
 
+            async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+                # A reply may hold an exception, raised where the answer is read (a read timeout).
+                if self._buffer and isinstance(self._buffer[0], Exception):
+                    raise self._buffer.pop(0)
+                return await super().read(max_bytes, timeout)
+
             async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
                 wire.tls_names.append(server_hostname)
                 return self
@@ -327,6 +337,10 @@ class _Wire:
         async def connect_tcp(_backend, host, port, timeout=None, local_address=None, socket_options=None):
             self.connects.append((host, port))
             reply = replies.get(host, httpcore.ConnectError(f"no route to {host}"))
+            if reply is _REAL:
+                return await _REAL_CONNECT_TCP(
+                    _backend, host, port, timeout=timeout, local_address=local_address, socket_options=socket_options
+                )
             if isinstance(reply, Exception):
                 raise reply
             return Stream(list(reply))
@@ -442,6 +456,48 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(wire.connects, [(_PUBLIC, 8443), (_SECOND, 8443)])
         self.assertEqual(sum(chunk.startswith(b"POST ") for chunk in wire.sent), 1)
+
+    async def test_the_next_checked_address_is_tried_when_one_fails_the_tls_handshake(self) -> None:
+        # R5C-7: a listener on the first address that answers the ClientHello in plaintext. At httpx 0.28.1 and
+        # httpcore 1.0.9 the failed handshake (ssl.SSLError, as for a certificate that does not verify) is raised as
+        # ConnectError: no byte of the request had gone, so the next address is tried.
+        heard: list[bytes] = []
+
+        async def not_tls(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            heard.append(await reader.read(4096))
+            writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+
+        listener = await asyncio.start_server(not_tls, "127.0.0.1", 0)
+        port = listener.sockets[0].getsockname()[1]
+        async with listener:
+            wire = await self._dispatch(
+                {},
+                {"127.0.0.1": _REAL, _SECOND: [_OK]},
+                "127.0.0.1",
+                _SECOND,
+                url=f"https://hooks.example.com:{port}/approval",
+                allow_private_targets=True,
+            )
+
+        self.assertEqual(wire.connects, [("127.0.0.1", port), (_SECOND, port)])
+        self.assertEqual(len(heard), 1)
+        self.assertTrue(heard[0].startswith(b"\x16\x03"), "the first address heard a TLS ClientHello")
+        self.assertNotIn(b"POST", heard[0])
+        self.assertEqual(wire.tls_names, ["hooks.example.com"])
+        self.assertEqual(sum(chunk.startswith(b"POST ") for chunk in wire.sent), 1)
+        self.assertEqual([args for args in self._warned() if args[0] == "webhook %s returned %d"], [])
+
+    async def test_a_read_timeout_on_the_first_address_sends_nothing_to_the_second(self) -> None:
+        # The request had gone when the answer timed out: posting it again could deliver the event twice.
+        timed_out = [httpcore.ReadTimeout("timed out")]
+        wire = await self._dispatch({}, {_PUBLIC: timed_out, _SECOND: [_OK]}, _PUBLIC, _SECOND)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443)])
+        self.assertEqual(sum(chunk.startswith(b"POST ") for chunk in wire.sent), 1)
+        failed = [args for args in self._warned() if args[0] == "webhook dispatch to %s failed: %s"]
+        self.assertEqual(failed, [("webhook dispatch to %s failed: %s", "https://hooks.example.com", "ReadTimeout")])
 
     async def test_an_http_error_answer_is_final(self) -> None:
         wire = await self._dispatch({}, {_PUBLIC: [_SERVER_ERROR], _SECOND: [_OK]}, _PUBLIC, _SECOND)
