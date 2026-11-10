@@ -151,7 +151,7 @@ OTHER_ROUTES = [
         None,
         "resume_job",
         owner="job_queue",
-        runtime=_AGENT_DOWN,
+        # 503 for a full queue alone (test_agent_http.py): any other RuntimeError is a fault like the rest.
         value_error_is_generic=False,
     ),
     Route("post", "/agent/jobs/j-1/discard", None, "discard_job", owner="job_queue", value_error_is_generic=False),

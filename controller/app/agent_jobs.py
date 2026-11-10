@@ -30,6 +30,15 @@ class _AlreadyFinished(ValueError):
     """AgentJobQueue._withdraw found nothing to take back: the job has already finished."""
 
 
+class AgentJobQueueFull(RuntimeError):
+    """The queue holds as many jobs as it takes: the new one is recorded failed and refused. Try again later.
+
+    A RuntimeError, as it was raised before it had a name, so a caller that answers one with its text still does
+    (the MCP gateway). Its own class, so a route can answer it 503 and nothing else: any other RuntimeError on the
+    way to the queue is a fault, not a reason to try again.
+    """
+
+
 class AgentJobStore:
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -579,7 +588,7 @@ class AgentJobQueue:
             record.status = "failed"
             record.error = "Job queue is full (max 100 queued jobs)"
             await self.store.update(record)
-            raise RuntimeError("Job queue is at capacity. Try again later.")
+            raise AgentJobQueueFull("Job queue is at capacity. Try again later.")
         try:
             await self._audit("agent_job_enqueued", "queued", record)
         except BaseException as exc:

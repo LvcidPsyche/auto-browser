@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from ..agent_jobs import AgentJobQueueFull
 from ..models import AgentResumeRequest, AgentRunRequest, AgentStepRequest
 from ._utils import typed_route_errors
 
@@ -54,7 +55,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             await manager.get_session(session_id)
             try:
                 return await job_queue.enqueue_step(session_id, payload)
-            except RuntimeError:  # the queue is at capacity: answered as a resume at a full queue is
+            except AgentJobQueueFull:  # and only that: any other RuntimeError is a fault, answered 500 and logged
                 raise HTTPException(status_code=503, detail="Service unavailable") from None
 
     @router.post("/sessions/{session_id}/agent/run")
@@ -85,7 +86,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             await manager.get_session(session_id)
             try:
                 return await job_queue.enqueue_run(session_id, payload)
-            except RuntimeError:  # the queue is at capacity: answered as a resume at a full queue is
+            except AgentJobQueueFull:
                 raise HTTPException(status_code=503, detail="Service unavailable") from None
 
     @router.post("/agent/jobs/{job_id}/resume", status_code=202)
@@ -98,7 +99,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
                 raise HTTPException(status_code=404, detail="Unknown job") from None
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
-            except RuntimeError:
+            except AgentJobQueueFull:
                 raise HTTPException(status_code=503, detail="Service unavailable") from None
 
     @router.post("/agent/jobs/{job_id}/discard")

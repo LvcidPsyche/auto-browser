@@ -541,6 +541,9 @@ All notable changes to auto-browser are documented here.
   reached the client as `500` `Internal error`. Both now answer `503` `Service unavailable`, as
   `POST /agent/jobs/{id}/resume` does at a full queue: try again later. The refused job is recorded `failed`, as
   before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
+  Only the full queue is answered so. The resume route answered every `RuntimeError` as `503` with nothing logged, so
+  a fault after the job was queued read as "try again later" with the job left queued: on all three routes any other
+  error now answers `500` `Internal error` and is logged.
 - **One approval record with a time that cannot be read no longer stops the others.** A rejected tool call keeps its
   arguments until the rejection is older than the approval TTL, and the pass that removes them runs at every start
   and inside every request for an approval. It read the record's `decided_at` with nothing caught, so one record whose
