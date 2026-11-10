@@ -273,6 +273,9 @@ class Settings(BaseSettings):
     # Days a decided approval (approved, rejected or executed) is kept after its decision; then its record is
     # deleted, at startup and in each maintenance sweep (ApprovalStore.prune_decided). 0 keeps them all.
     approval_retention_days: float = Field(30.0, alias="APPROVAL_RETENTION_DAYS")
+    # Operator ids (named credentials) refused an approve of an approval they asked for; comma-separated, empty
+    # (the default) refuses nobody. An agent's approval under AUTONOMOUS_APPROVALS is not affected.
+    approval_refuse_self_approval_operators: str = Field("", alias="APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS")
     # Lets agents approve their own pending actions: MCP browser.approve_approval
     # and the built-in agent loop. Off, an operator approves every one.
     autonomous_approvals: bool = Field(False, alias="AUTONOMOUS_APPROVALS")
@@ -612,6 +615,12 @@ class Settings(BaseSettings):
     @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def approval_refuse_self_approval_operator_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.strip() for item in self.approval_refuse_self_approval_operators.split(",") if item.strip()
+        )
 
     @property
     def mcp_allowed_origin_list(self) -> list[str]:

@@ -65,9 +65,9 @@ class ExecutionHold:
         self.effect = False
         # What the action pipeline raised before any change, when it refused.
         self.refusal: Exception | None = None
-        # An operator's reject (comment, decided_via) that arrived after the claim and
+        # An operator's reject (comment, decided_via, decided_by) that arrived after the claim and
         # before the effect: effect_started then refuses, and the give-back applies it.
-        self.rejection: tuple[str | None, ApprovalDecider] | None = None
+        self.rejection: tuple[str | None, ApprovalDecider, str | None] | None = None
         # Set when effect_started refused the action on that rejection: an approve that
         # withdraws it afterwards is told the action was already refused, not that it may start.
         self.stopped = False

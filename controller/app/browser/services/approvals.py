@@ -6,7 +6,7 @@ from ...approval_display import approval_provenance
 from ...approvals import CONTROLLER_SCOPE, held_for_execution
 from ...auth_policy import has_named_credentials
 from ...models import ApprovalDecider, ApprovalRecord
-from ...session_ownership import may_use
+from ...session_ownership import may_use, verified_operator
 from ...witness import WitnessApproval
 
 
@@ -110,6 +110,8 @@ class BrowserApprovalService:
                     "kind": approval.kind,
                     "comment": comment,
                     "decided_via": decided_via,
+                    # The record keeps the decision this withdraw restores, and its decider.
+                    "decided_by": verified_operator(),
                     **approval_provenance(approval),
                 },
             )
@@ -158,6 +160,7 @@ class BrowserApprovalService:
                 "kind": approval.kind,
                 "comment": comment,
                 "decided_via": decided_via,
+                "decided_by": approval.decided_by,
                 **approval_provenance(approval),
             },
         )
@@ -185,6 +188,8 @@ class BrowserApprovalService:
                     "kind": approval.kind,
                     "comment": comment,
                     "decided_via": decided_via,
+                    # The claim holds this reject; the record still names the approve it may turn back.
+                    "decided_by": verified_operator(),
                     **approval_provenance(approval),
                 },
             )
@@ -205,6 +210,7 @@ class BrowserApprovalService:
                 "kind": approval.kind,
                 "comment": comment,
                 "decided_via": decided_via,
+                "decided_by": approval.decided_by,
                 **approval_provenance(approval),
             },
         )

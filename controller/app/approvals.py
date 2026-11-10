@@ -127,10 +127,14 @@ class ApprovalStore:
         *,
         approval_ttl_minutes: int = 15,
         retention_days: float = 0,
+        refuse_self_approval: Iterable[str] = (),
         audit: Any = None,
         rejection_receipt: Callable[[ApprovalRecord], Awaitable[None]] | None = None,
     ):
         self._lock = asyncio.Lock()
+        # Operators who may not approve what they asked for (APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS); empty, the
+        # default and a bare store's, refuses nobody.
+        self.refuse_self_approval = frozenset(refuse_self_approval)
         # Where a give-back is recorded (an AuditStore); None in a bare store.
         self.audit = audit
         # Records the witness receipt of an operator's rejection that a give-back
@@ -539,7 +543,7 @@ class ApprovalStore:
             approval.executed_at = None
             if hold.rejection is not None:
                 approval.status = "rejected"
-                approval.decision_comment, approval.decided_via = hold.rejection
+                approval.decision_comment, approval.decided_via, approval.decided_by = hold.rejection
                 approval.decided_at = now
                 approval.approved_expires_at = None
                 self._sensitive_texts.pop(hold.approval_id, None)
@@ -559,7 +563,10 @@ class ApprovalStore:
         rejected = approval.status == "rejected"
         details: dict[str, Any] = {"kind": approval.kind, **approval_provenance(approval)}
         if rejected:
-            details.update(comment=approval.decision_comment, decided_via=approval.decided_via)
+            # Written by the execution's task, as its operator: decided_by names who rejected.
+            details.update(
+                comment=approval.decision_comment, decided_via=approval.decided_via, decided_by=approval.decided_by
+            )
         if self.audit is not None:
             try:
                 await self.audit.append(
@@ -608,7 +615,7 @@ class ApprovalStore:
         """
         if self.audit is None or hold.rejection is None:
             return
-        comment, decided_via = hold.rejection
+        comment, decided_via, decided_by = hold.rejection
         try:
             approval = await self.get(hold.approval_id)
             await self.audit.append(
@@ -621,6 +628,7 @@ class ApprovalStore:
                     "kind": approval.kind,
                     "comment": comment,
                     "decided_via": decided_via,
+                    "decided_by": decided_by,
                     **approval_provenance(approval),
                 },
             )
@@ -707,8 +715,12 @@ class ApprovalStore:
         decided_via: ApprovalDecider,
     ) -> Decision:
         """Approve or reject ``approval_id``, or, while its action holds it, put the decision on the claim."""
+        decided_by = verified_operator()
         async with self._lock:
             approval = await self.get(approval_id)
+            if status == "approved" and decided_via != "agent":
+                # Before the claim: withdrawing a reject that waits on one is an approve of the same request.
+                self._refuse_self_approval(approval, decided_by)
             if approval.status == "executed":
                 claim = self._claims.get(approval_id)
                 # Claimed by an action that has not begun, and that a refusal would give
@@ -719,7 +731,7 @@ class ApprovalStore:
                 # A tool call's claim never gives back, so nothing could apply a reject to it.
                 if decided_via != "agent" and claim is not None and claim.may_give_back and not claim.effect:
                     if status == "rejected":
-                        claim.rejection = (comment, decided_via)
+                        claim.rejection = (comment, decided_via, decided_by)
                         return Decision(approval, "deferred")
                     if claim.rejection is not None:
                         claim.rejection = None
@@ -749,6 +761,7 @@ class ApprovalStore:
             approval.decided_at = now
             approval.decision_comment = comment
             approval.decided_via = decided_via
+            approval.decided_by = decided_by
             if status == "approved":
                 approval.approved_expires_at = self._expiry_timestamp(now)
             else:
@@ -756,6 +769,18 @@ class ApprovalStore:
                 self._sensitive_texts.pop(approval_id, None)
             await self._persist(approval)
         return Decision(approval)
+
+    def _refuse_self_approval(self, approval: ApprovalRecord, decided_by: str | None) -> None:
+        """Refuse an operator of APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS an approve of what they asked for.
+
+        Both named by credentials: an unowned request, or a decider no credential proves, is no one's own.
+        """
+        if decided_by is None or decided_by != approval.owner or decided_by not in self.refuse_self_approval:
+            return
+        raise ServerStateRefusal(
+            f"approval {approval.id}: operator {decided_by} asked for it and may not approve it "
+            "(APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS); another operator decides it"
+        )
 
     async def _refuse_what_is_no_longer_whole(self, approval: ApprovalRecord) -> None:
         """Refuse an approve of an approval missing what it was asked with: the agent asks again.

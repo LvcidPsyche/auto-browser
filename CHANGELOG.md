@@ -189,6 +189,16 @@ All notable changes to auto-browser are documented here.
   queued agent job ran as the operator who queued it the same way. Each fire now reads the credentials as they are at
   that moment, and a job that a token-verified operator queued is refused when a worker takes it if that credential
   has gone, ending as a failed job that never ran. See the upgrade note. (STORE-17)
+- **Approvals now record who decided them, and a deployment can refuse an operator's approval of their own request.**
+  A record said how an approval was decided (`decided_via`), not by whom, and an operator's rejection made while an
+  action held the approval was audited, once its give-back applied it, as the operator running the action. Each
+  decision now stores `decided_by`, the operator a named credential proved (for an agent's decision, the operator
+  it acts for), in both stores, in `GET /approvals` and `GET /approvals/{id}`, and in the decision's audit event,
+  that rejection's included. It is `null` under the shared token or none, and for a record stored before this
+  version. `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS` (operator ids, comma-separated, empty by default) refuses a
+  listed operator's approve of an approval they asked for with `409` and the reason, the withdraw of a rejection
+  waiting on it included; their rejections, and an agent's approval under `AUTONOMOUS_APPROVALS`, are not affected.
+  (AUTH-36)
 
 ### Fixed
 

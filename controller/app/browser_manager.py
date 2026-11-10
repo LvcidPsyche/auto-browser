@@ -256,6 +256,7 @@ class BrowserManager:
             db_path=self.settings.state_db_path,
             approval_ttl_minutes=self.settings.approval_ttl_minutes,
             retention_days=self.settings.approval_retention_days,
+            refuse_self_approval=self.settings.approval_refuse_self_approval_operator_ids,
             audit=self.audit,
             rejection_receipt=self.approval_service.rejection_receipt,
         )

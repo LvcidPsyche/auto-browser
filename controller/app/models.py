@@ -570,6 +570,9 @@ class ApprovalRecord(BaseModel):
     decision_comment: str | None = None
     decided_at: str | None = None
     decided_via: ApprovalDecider | None = None
+    # The token-verified operator who decided (verified_operator()), an agent's too: the one it acts for. None when
+    # no named credential proved one, and for a record stored before the field existed.
+    decided_by: str | None = None
     approved_expires_at: str | None = None
     executed_at: str | None = None
     # The token-verified operator who asked (None when unowned). A session
