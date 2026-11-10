@@ -44,6 +44,12 @@ always present; the per-session resources appear once a browser session exists.
 | `browser://<id>/console` | `application/json` | Recent console messages |
 | `browser://<id>/network` | `application/json` | Recent network requests/responses |
 
+`browser://<id>/dom` returns at most 1,000,000 characters: a longer page is cut
+and ends in an HTML comment that says so, and `browser.get_html` pages through
+the whole text. A read that fails (a timeout, a closed page, a page
+`ALLOWED_HOSTS` refuses) answers `-32603`; `-32002` means only that the URI
+names no resource or the session is not there.
+
 ## Reading a resource
 
 ```jsonc

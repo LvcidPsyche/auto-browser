@@ -10,8 +10,10 @@ All notable changes to auto-browser are documented here.
   any other version the controller does not speak is, and one that cannot follow disconnects itself. A session that
   negotiated `2025-03-26` before the upgrade, restored from the session store, goes on at that version as it did,
   with or without the `MCP-Protocol-Version` header, until it initializes again: a stdio bridge that outlives the
-  upgrade sends that header on every POST and re-initializes only on a `404`. On a session at any other version a
-  `2025-03-26` header is refused with `400` and `-32602`.
+  upgrade sends that header on every POST and re-initializes only on a `404`. It then replays its client's own
+  `initialize` and keeps the answer, so a `2025-03-26` client behind it goes on at `2025-11-25` without being told;
+  the controller answers a session the same at either version. On a session at any other version a `2025-03-26`
+  header is refused with `400` and `-32602`.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
   silent, as it always was, and `resources/unsubscribe` still removes it.
@@ -26,6 +28,9 @@ All notable changes to auto-browser are documented here.
   loses the older one when it opens the newer, and a stream also ends when its session is deleted or evicted. Open one
   stream per session, reconnect only when it has ended, and after reconnecting read again what you watch:
   notifications are not replayed.
+- **`DELETE /mcp` with a wrong `MCP-Protocol-Version` no longer deletes the session.** 1.17.0 ignored the header on
+  `DELETE`. A version the controller does not speak, or one other than the session's, now answers `400` and the
+  session stays. Send the session's version on `DELETE`, or no header, as the stdio bridge does.
 - **On a confidential session, `browser.set_cookies` and `browser.set_local_storage` now follow an action's rules, and
   a required hosted Witness must answer.** Both are `account_change`, so a session with `protection_mode=confidential`
   refuses them for an anonymous operator, on a shared takeover surface and in a shared browser process, as it refuses
@@ -34,6 +39,12 @@ All notable changes to auto-browser are documented here.
   (`WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL`) and it is not configured or does not answer. Send an operator id
   (`X-Operator-Id`), run such sessions with an isolated takeover surface and browser, and keep the hosted Witness
   reachable.
+- **`browser.set_viewport` now waits for the session, and can be refused.** At 1.17.0 it ran at once, on any page,
+  whatever else held the session. It now waits up to 10 seconds for a session another call holds and then answers
+  `The session is busy with another call. Try again.`, is refused while the session's page is one `ALLOWED_HOSTS`
+  refuses, and answers `The page moved while it was read` when the page moved during the call, the viewport already
+  changed. A client that sets the viewport while a long action or an agent step holds the session now gets an error
+  it never got: set the viewport before the action starts, or try again when it has ended.
 - **A governed tool now refuses a `workflow_profile` other than `fast` or `governed`.** Any other value (a typo, the
   wrong case, a non-string) used to read as `fast`, so the call ran without the approval it asked for. It now answers
   an error that names the two values, and nothing runs: send one of them, or leave the argument out (`null` counts as
@@ -364,8 +375,10 @@ All notable changes to auto-browser are documented here.
   cap covers (one operator's, or the whole table), eviction now takes every session without a live stream before any
   session with one, least recently used first within each, so a client that only listens outlasts a flood of
   `initialize` requests and goes only when nothing but listeners remain under that cap; a client initializing into a
-  table full of listeners keeps its new session. An open stream still counts as use, as a request does, in the
-  last-used time a restart goes by. (MCP-11)
+  table full of listeners keeps its new session, but only until the next `initialize` under that cap if it opens no
+  stream of its own, as no stdio bridge does: that session is then the one without a stream, and goes first, however
+  recently it was used (the bridge initializes again at its next call). An open stream still counts as use, as a
+  request does, in the last-used time a restart goes by. (MCP-11)
 - **`DELETE /mcp` checks `MCP-Protocol-Version`, as every other request after `initialize` does.** It ignored the
   header and deleted the session whatever the header said. An unsupported version is now `400` and `-32602`, a
   version other than the session's `400` and `-32600`, and the session stays; a matching or absent header still

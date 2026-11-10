@@ -1010,8 +1010,8 @@ refuses afterwards if either changed, the page closed, or the page is refused no
 one allowed URL to another meanwhile is read. This covers observe, every screenshot (deleted when
 refused, and when the read is cancelled before it is checked), the snapshots around an action, the share
 page's frame and title (the share poll answers 403), `browser.eval_js`, `browser.wait_for_selector`,
-`browser.get_html`, `browser.find_elements`, the storage tools (refused before a write and checked after
-it), `browser.drag_drop`, the DOM resource and the CDP routes. Tab listings, session summaries, approval
+`browser.get_html`, `browser.find_elements`, the storage tools and `browser.set_viewport` (refused before
+a write and checked after it), `browser.drag_drop`, the DOM resource and the CDP routes. Tab listings, session summaries, approval
 requests and saved auth profiles leave the title empty in the same cases, and a bot challenge found on a
 page that moved while it was probed is refused instead of described.
 
@@ -1021,7 +1021,8 @@ summaries, the snapshots an action returns, approval requests and the `navigatio
 
 The page-reading MCP tools (`browser.eval_js`, `browser.get_html`, `browser.find_elements`,
 `browser.get_local_storage` and `browser.set_local_storage`, for local or session storage,
-`browser.drag_drop` and the `browser://<session>/dom` resource) take the session lock: they wait up to
+`browser.drag_drop` and the `browser://<session>/dom` resource) and `browser.set_viewport` take the
+session lock: they wait up to
 10 seconds for a session another call holds and then fail, and give up on a page that does not answer
 within 30 seconds (a `browser.find_elements` text query within 10, `query_timeout`; a drag: 30 seconds,
 plus `ACTION_TIMEOUT_MS` for each end named by a selector or `element_id`, the most that end waits for
