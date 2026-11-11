@@ -1814,6 +1814,11 @@ LAID_OVER = {
         "width: 300px; margin: 40px; padding: 20px'><h3 id='t' style='margin: 0'>Quarterly report</h3>"
         "<div style='position: absolute; inset: 0'></div></div>"
     ),
+    "a scrim in a role=link card": (
+        "<div role='link' tabindex='0' onclick=\"document.title = 'PRESSED'\" style='position: relative; "
+        "width: 300px; margin: 40px; padding: 20px'><h3 id='t' style='margin: 0'>Quarterly report</h3>"
+        "<div style='position: absolute; inset: 0'></div></div>"
+    ),
 }
 LAID_OVER_PAGE = "<!doctype html><title>start</title><body style='margin: 0'>"
 
