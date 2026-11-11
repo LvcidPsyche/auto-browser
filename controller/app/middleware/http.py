@@ -111,6 +111,15 @@ class EventStreamShutdownMiddleware:
     Outermost, so everything inside has unwound (the stream's own cleanup has run) and nothing is left for the
     cancellation to stop: the stream's body is finished with its last, empty chunk, and one line says what happened.
     Only that cancellation, and only on a started event stream: any other propagates as it did.
+
+    What has gone out is noted once its send has returned, not when the message is seen: a cancellation can land in
+    a message's own send (uvicorn's waits there, before it writes, while the transport is paused), and that message
+    is then not out. So a start cancelled in its send is no started stream, and the cancellation propagates, where
+    it was answered with a body for a response that had not begun. A stream whose last chunk has gone out, cancelled
+    while the app is still in its cleanup, is sent nothing more: a second last chunk is one a strict server refuses.
+    A client that has gone when the closing chunk is sent (an OSError from the server's send) has nobody to end the
+    body for: that is said in the one line and raised no further, or the quiet stop is a traceback again. Any other
+    error of that send is the server's refusal of the chunk, and is raised.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -120,22 +129,37 @@ class EventStreamShutdownMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        streaming = False
+        # An event stream's start has gone out; its last chunk has.
+        streaming = ended = False
 
         async def watching(message: Message) -> None:
-            nonlocal streaming
+            nonlocal streaming, ended
+            await send(message)
             if message["type"] == "http.response.start":
                 content_type = Headers(raw=message.get("headers", [])).get("content-type", "")
                 streaming = content_type.startswith("text/event-stream")
-            await send(message)
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                ended = True
 
         try:
             await self.app(scope, receive, watching)
         except asyncio.CancelledError as cancelled:
             if not streaming or not _is_uvicorns_shutdown_cancel(cancelled):
                 raise
-            logger.info("the event stream on %r was still open at the shutdown limit: ended", scope.get("path", ""))
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            path = scope.get("path", "")
+            if ended:
+                logger.info("the event stream on %r had ended and was still closing at the shutdown limit", path)
+                return
+            try:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            except OSError as gone:
+                logger.info(
+                    "the event stream on %r was still open at the shutdown limit, and its client had gone (%s)",
+                    path,
+                    type(gone).__name__,
+                )
+            else:
+                logger.info("the event stream on %r was still open at the shutdown limit: ended", path)
 
 
 class SessionNetworkPeerMiddleware:

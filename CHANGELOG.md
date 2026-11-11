@@ -419,7 +419,9 @@ All notable changes to auto-browser are documented here.
   waited out the 60-second grace and Docker killed the controller, with sessions, browser containers and tunnels
   left as they were. The image's command and the Glama entrypoint now pass `--timeout-graceful-shutdown 5`. At the
   limit uvicorn cancels an open stream, and the controller finishes the stream's body and logs one INFO line for
-  it, where uvicorn would log `Exception in ASGI application` with a traceback for each. See the upgrade note.
+  it, where uvicorn would log `Exception in ASGI application` with a traceback for each. A stream whose body had
+  already ended is sent nothing more, and one whose client had gone by then is no error: the line says which. See
+  the upgrade note.
 - **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
   after the change the event records had been made: `browser.set_cookies` with one in a cookie's name set the
   cookies, then failed with no audit event, no receipt and no log line. The audit store now writes U+FFFD in its

@@ -318,6 +318,111 @@ class OnlyUvicornsShutdownCancelIsEndedQuietlyTests(unittest.IsolatedAsyncioTest
                 content_type=b"text/event-stream", cancel_message=UVICORN_SHUTDOWN_CANCEL, started=False
             )
 
+    START = {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
+    CHUNK = {"type": "http.response.body", "body": b": connected\n\n", "more_body": True}
+    LAST = {"type": "http.response.body", "body": b"", "more_body": False}
+
+    async def run_app(self, downstream: Any, send: Any) -> None:
+        from app.middleware.http import EventStreamShutdownMiddleware
+
+        await EventStreamShutdownMiddleware(downstream)(
+            {"type": "http", "path": "/mcp", "method": "GET"}, AsyncMock(), send
+        )
+
+    async def test_a_cancellation_inside_the_starts_own_send_propagates_and_no_body_is_sent(self) -> None:
+        # The start was taken for sent before its send returned, so a response that never started was given a body.
+        sent: list[dict] = []
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                # Where uvicorn's send waits before it writes anything (a paused transport): the start is not out.
+                raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)
+            sent.append(message)
+
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            await send(self.START)
+
+        with self.assertNoLogs("app.middleware.http", level="INFO"), self.assertRaises(asyncio.CancelledError):
+            await self.run_app(downstream, send)
+
+        self.assertEqual(sent, [])
+
+    async def test_a_stream_that_ended_its_body_and_is_cancelled_in_its_cleanup_is_sent_nothing_more(self) -> None:
+        # A second last chunk is one a strict server refuses with an error of its own.
+        sent: list[dict] = []
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            for message in (self.START, self.CHUNK, self.LAST):
+                await send(message)
+            raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)  # still in its own cleanup at the limit
+
+        with self.assertLogs("app.middleware.http", level="INFO") as logged:
+            await self.run_app(downstream, send)  # quietly: the stop is still no crash
+
+        self.assertEqual(sent, [self.START, self.CHUNK, self.LAST])
+        self.assertEqual([record.levelname for record in logged.records], ["INFO"])
+
+    async def test_a_cancellation_inside_the_last_chunks_own_send_still_ends_the_body(self) -> None:
+        sent: list[dict] = []
+        cancelled_once: list[bool] = []
+
+        async def send(message: dict) -> None:
+            if message == self.LAST and not cancelled_once:
+                cancelled_once.append(True)
+                raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)  # before anything of it was written
+            sent.append(message)
+
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            for message in (self.START, self.CHUNK, self.LAST):
+                await send(message)
+
+        with self.assertLogs("app.middleware.http", level="INFO"):
+            await self.run_app(downstream, send)
+
+        self.assertEqual(sent, [self.START, self.CHUNK, self.LAST])
+
+    async def test_a_client_that_has_gone_when_the_stream_is_ended_leaves_one_line_and_no_error(self) -> None:
+        # The closing chunk has nobody to go to. Raised from here, the server logged the quiet stop with a traceback.
+        for gone in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(104, "Connection reset by peer")):
+            with self.subTest(type(gone).__name__):
+                sent: list[dict] = []
+
+                async def send(message: dict, gone: OSError = gone, sent: list[dict] = sent) -> None:
+                    if message == self.LAST:
+                        raise gone
+                    sent.append(message)
+
+                async def downstream(scope: dict, receive: Any, send: Any) -> None:
+                    await send(self.START)
+                    await send(self.CHUNK)
+                    raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)
+
+                with self.assertLogs("app.middleware.http", level="INFO") as logged:
+                    await self.run_app(downstream, send)
+
+                self.assertEqual(sent, [self.START, self.CHUNK])
+                self.assertEqual([record.levelname for record in logged.records], ["INFO"])
+                self.assertIsNone(logged.records[0].exc_info)
+                self.assertIn(type(gone).__name__, logged.records[0].getMessage())
+
+    async def test_any_other_failure_of_the_closing_chunk_is_raised(self) -> None:
+        # A server that refuses the chunk says this layer misread the response: that is not a client that left.
+        async def send(message: dict) -> None:
+            if message == self.LAST:
+                raise RuntimeError(
+                    "Unexpected ASGI message 'http.response.body' sent, after response already completed."
+                )
+
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            await send(self.START)
+            raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)
+
+        with self.assertRaises(RuntimeError):
+            await self.run_app(downstream, send)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
