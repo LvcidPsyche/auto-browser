@@ -18,8 +18,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
-from app import events
+from app import events, utils
 from app.agent_jobs import AgentJobStore
 from app.audit import AuditStore
 from app.browser.aria_outline import outline_from_aria_snapshot
@@ -370,3 +371,50 @@ class KeysThatMeetTests(_Tmp):
 
         (stored,) = await store.list(limit=10)
         self.assertEqual(stored.details, {f"{REPLACED} (2)": 1, REPLACED: 2, f"{REPLACED} (3)": 3})
+
+
+class CostOfKeysThatMeetTests(unittest.TestCase):
+    """Each key and each item is cleaned once, whatever the keys do: a level more costs what the level before did.
+
+    The dict was cleaned once to find that its keys met and again to rename them, so each level of such dicts doubled
+    the work: 20 levels (441 bytes of JSON) held the event loop for eight seconds. Nothing here is timed.
+    """
+
+    @staticmethod
+    def _nested(depth: int) -> Any:
+        """A dict ``depth`` levels deep, two keys of every level taking one name once cleaned."""
+        value: Any = "x"
+        for _ in range(depth):
+            value = {LONE: value, OTHER_LONE: 1}
+        return value
+
+    @staticmethod
+    def _cleaned_and_visits(value: Any, *, at_most: int) -> tuple[Any, int]:
+        """``value`` cleaned, and how many keys, items and containers the cleaner was handed on the way."""
+        clean = utils.without_lone_surrogates
+        visits = 0
+
+        def counted(part: Any) -> Any:
+            nonlocal visits
+            visits += 1
+            if visits > at_most:
+                raise AssertionError(f"the cleaner was handed more than {at_most} parts")
+            return clean(part)
+
+        with patch.object(utils, "without_lone_surrogates", counted):
+            return counted(value), visits
+
+    def test_a_dict_nested_60_deep_whose_keys_meet_at_every_level_is_cleaned(self) -> None:
+        cleaned, _ = self._cleaned_and_visits(self._nested(60), at_most=1000)
+
+        for _ in range(60):
+            self.assertEqual(list(cleaned), [REPLACED, f"{REPLACED} (2)"])
+            self.assertEqual(cleaned[f"{REPLACED} (2)"], 1)
+            cleaned = cleaned[REPLACED]
+        self.assertEqual(cleaned, "x")
+
+    def test_a_level_more_of_keys_that_meet_costs_the_same_whatever_the_depth(self) -> None:
+        visits = [self._cleaned_and_visits(self._nested(depth), at_most=100_000)[1] for depth in range(1, 9)]
+
+        steps = {more - fewer for fewer, more in zip(visits, visits[1:], strict=False)}
+        self.assertEqual(len(steps), 1, visits)

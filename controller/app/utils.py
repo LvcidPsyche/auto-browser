@@ -120,27 +120,33 @@ def without_lone_surrogates(value: Any) -> Any:
     if isinstance(value, str):
         return _LONE_SURROGATE.sub("\ufffd", value)
     if isinstance(value, dict):
-        cleaned = {without_lone_surrogates(key): without_lone_surrogates(item) for key, item in value.items()}
+        # Each key and each item is cleaned here, once: cleaned again where the keys meet, a dict of such dicts
+        # cost twice the work for every level it went down.
+        entries = [(key, without_lone_surrogates(key), without_lone_surrogates(item)) for key, item in value.items()]
+        cleaned = {name: item for _, name, item in entries}
         # Fewer keys than it had: the replacement gave two of them one name.
-        return cleaned if len(cleaned) == len(value) else _with_no_key_lost(value)
+        return cleaned if len(cleaned) == len(value) else _with_no_key_lost(entries)
     if isinstance(value, list | tuple):
         return [without_lone_surrogates(item) for item in value]
     return value
 
 
-def _with_no_key_lost(value: dict[Any, Any]) -> dict[Any, Any]:
-    """What without_lone_surrogates returns for a dict whose keys meet once the replacement is made (see there)."""
-    names = {key: without_lone_surrogates(key) for key in value}
-    taken = {name for key, name in names.items() if name == key}
+def _with_no_key_lost(entries: list[tuple[Any, Any, Any]]) -> dict[Any, Any]:
+    """What without_lone_surrogates returns for a dict whose keys meet once the replacement is made (see there).
+
+    ``entries`` holds, for each of the dict's items in order, its key as it was, that key cleaned and the item
+    cleaned: this only gives the names out, and cleans nothing.
+    """
+    taken = {name for key, name, _ in entries if name == key}
     cleaned: dict[Any, Any] = {}
-    for key, item in value.items():
-        name = wanted = names[key]
+    for key, wanted, item in entries:
+        name = wanted
         number = 1
         while name != key and name in taken:
             number += 1
             name = f"{wanted} ({number})"
         taken.add(name)
-        cleaned[name] = without_lone_surrogates(item)
+        cleaned[name] = item
     return cleaned
 
 
