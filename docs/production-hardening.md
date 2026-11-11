@@ -167,11 +167,11 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       before) may stand there too, and an address as a page shows the user's own: a name with an at sign after it,
       or a number as a page masks one, made of digits, asterisks, bullets, the letter x and a phone number's marks
       and nothing else ("j***@example.com", "+1 (***) ***-1234"); a count of seconds ("30s") too. A mark that is
-      no letter and no digit (an arrow, a tick) says nothing. A word behind an at sign or a hash names somebody or
-      a channel, whatever the word. So "Send code to my phone" and "Send code to reset your password" run, and
-      "Send code to all users", "Send verification email to John", "Send code to team2", "Send code to #work" and
-      "Send code to verify payment" ask. An address written out in full ("Send code to pat@example.com") runs,
-      whoever's it is.
+      no letter and no digit (an arrow, a tick) says nothing, here and anywhere in a label that Send opens ("Send
+      code →" runs; "Send code → John" asks). A word behind an at sign or a hash names somebody or a channel,
+      whatever the word. So "Send code to my phone" and "Send code to reset your password" run, and "Send code to
+      all users", "Send verification email to John", "Send code to team2", "Send code to #work" and "Send code to
+      verify payment" ask. An address written out in full ("Send code to pat@example.com") runs, whoever's it is.
   - A label is read as its whole text on one line, and then each of its first three lines by itself, so a name
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
     of over 40 characters is a sentence, not a name, and is not matched, and the page hands over the first 400

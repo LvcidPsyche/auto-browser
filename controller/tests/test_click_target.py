@@ -248,6 +248,12 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code to #work"),
         ("post", "Send code to @backup"),
         ("post", "Send code to (@backup)"),
+        # A mark says nothing, so it hides nothing either: the words beside it are read as they stand.
+        ("post", "Send code \u2192 to all users"),
+        ("post", "Send code \u2192 John"),
+        ("post", "Send code \u2013 all users"),
+        ("post", "Send code \u2192\nto all users in the organization"),
+        ("post", "Send code\n\u2192 to all users in the organization"),
         # The everyday words name no one: beside a word that does, the label still asks.
         ("post", "Send code to all trusted users"),
         ("post", "Send code to the same people \u2192"),
@@ -368,6 +374,12 @@ class LabelRulesTests(unittest.TestCase):
         "Send code to the same number",
         "Send code to this browser",
         "Send code again in 30 seconds",
+        # A sign-in button with its arrow or its tick and no word after it.
+        "Send code \u2192",
+        "Send code \u203a",
+        "Send code \u2713",
+        "Send me a login link \u2192",
+        "Send \u2192 code",
         "Send code to log into your account",
         "Send code to access your account",
         "Send code to proceed",

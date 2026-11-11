@@ -646,9 +646,20 @@ def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
 
 def _send_goes_on(reading: str, rest: str) -> bool:
     """Whether ``rest``, the lines after a way to sign in that Send sends, opens with one of Send's tail words."""
-    if not rest or _SIGN_IN_SEND.match(reading) is None:
+    rest = _worded(rest)
+    if not rest or _SIGN_IN_SEND.match(_worded(reading)) is None:
         return False
     return rest.split(maxsplit=1)[0].strip(_AROUND_A_WORD) in SEND_TAIL_WORDS
+
+
+def _worded(text: str) -> str:
+    """``text`` without its tokens that have no letter and no digit, as Send's grammar reads it.
+
+    An arrow, a tick or a dash says nothing wherever it stands: "Send code \u2192" is a sign-in button's label,
+    and asked, since the grammar let a mark go only after a word the label goes on with. No word is dropped,
+    so "Send code \u2192 John" still names John.
+    """
+    return " ".join(token for token in text.split() if any(char.isalnum() for char in token))
 
 
 def _says_only_where_it_goes(rest: str) -> bool:
@@ -673,9 +684,10 @@ def _asks_nothing(text: str) -> bool:
     A way to sign in that Send sends, which has a grammar of its own, or a harmless phrase with no phrase of the
     table after it: "Remove from library and delete files" starts as a harmless label does, and was let go for it.
     """
-    sent = _SIGN_IN_SEND.match(text)
+    worded = _worded(text)
+    sent = _SIGN_IN_SEND.match(worded)
     if sent is not None:
-        return _says_only_where_it_goes(text[sent.end() :])
+        return _says_only_where_it_goes(worded[sent.end() :])
     start = _HARMLESS_START.match(text)
     return start is not None and _PHRASE_LATER.search(text, start.end()) is None
 
