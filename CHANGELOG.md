@@ -181,8 +181,9 @@ All notable changes to auto-browser are documented here.
   under `AUTONOMOUS_APPROVALS`). A form submit with no such label still runs unattended, recorded as `write`, and
   so do `Send code`, `Remove filter`, `Purchase history` and the other harmless continuations (`Send link` by
   itself asks: it is also the button of a share dialog; so does `Send code to all users`, since after `to` a label
-  may name only the user's own address or what the code is for). A menu's command (`role=menuitem`) is read as a
-  button is. A click or a type, so labelled, on a wrapper with no box of its own (`display: contents`) answers
+  may go on only with words for where a sign-in code goes or what it is for, an address, or a masked number). A
+  menu's command (`role=menuitem`) is read as a button is, and a link inside a button or a menu item as that item.
+  A click or a type, so labelled, on a wrapper with no box of its own (`display: contents`) answers
   `target_has_no_box`: name an element inside it. The direct routes (`POST /sessions/{id}/actions/click` and
   `/actions/type`) carry no label and are not read. The whole table, how a label is read, and what the read does
   not catch, are in `docs/production-hardening.md`.
@@ -365,12 +366,14 @@ All notable changes to auto-browser are documented here.
     click that Playwright has to place (on a wrapper wider than the viewport, one broken over two lines, or one
     covered at its middle) is pressed by the controller at the point Playwright would have picked, so it is read
     where it lands too; on a wrapper with no box of its own (`display: contents`) such an action now answers
-    `target_has_no_box` and presses nothing, where it used to click a child.
-  - The approval's reason opens with the controller's sentence, which says what the target (or, asked at the
+    `target_has_no_box` and presses nothing, where it used to click a child, and a target that has left the page
+    or is no longer shown once the pointer is placed answers `target_moved`, which is retryable.
+  - A new approval's reason opens with the controller's sentence, which says what the target (or, asked at the
     press, what the click would press) reads as and what the agent labelled the action, before the agent's own
-    reason; the dashboard's confirm dialog now labels a reason "what an agent wrote in it is unverified" rather
-    than "as the agent wrote it". Retried with that approval, the action runs as the kind approved and spends it,
-    whether or not its target can be read again.
+    reason (one already pending for the same action and kind is reused as it stands); the dashboard's confirm
+    dialog now labels a reason "what an agent wrote in it is unverified" rather than "as the agent wrote it".
+    Retried with that approval, the action runs as the kind approved and spends it, whether or not its target can
+    be read again.
   - A link, bare `Close` or `Cancel`, and a target that cannot be read (the action then goes on as labelled, and
     an info-level log line says so) are not classified, and an action inside a governed run's approval is not
     read. See the upgrade note. (STORE-42)

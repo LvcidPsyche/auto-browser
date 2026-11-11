@@ -1089,8 +1089,10 @@ class BrowserActionService:
         click point, frames included), and the point is checked again once the
         pointer has arrived and the pause before the press is over, so a cover
         put up during the move or the pause is caught as well. When that last
-        check fails the click goes to Playwright's `click()`, which clicks the
-        element if it can and otherwise refuses — it never clicks what covers it.
+        check fails the click is one Playwright places (click_as_playwright_places_it):
+        its own `click()`, or for an action whose target is read its hover and the
+        controller's press where that put the pointer. Either clicks the element if
+        it can and otherwise refuses: neither clicks what covers it.
         """
         await self._checks_of_a_click(locator, timeout_ms=timeout_ms)
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
