@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
-from ..utils import holds_lone_surrogate, run_to_completion, without_lone_surrogates
+from ..utils import holds_lone_surrogate, record_json, run_to_completion, without_lone_surrogates
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -420,7 +420,9 @@ class HarnessRunStore:
         target = self.run_dir(record.id) / "run.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        # record_json, as the other stores write a record: a verifier's result keeps untyped details, and a lone
+        # surrogate in them raised here, after the run's state was set, so run.json went on reading "running".
+        tmp.write_text(record_json(record, indent=2), encoding="utf-8")
         tmp.replace(target)
 
     def get(self, run_id: str) -> HarnessRunRecord:

@@ -7,6 +7,7 @@ from typing import Any
 
 from ...process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
 from ...providers.base import allowlisted_environment
+from ...utils import without_lone_surrogates
 from ..contracts import TaskContract
 from .base import VerificationResult
 
@@ -142,6 +143,10 @@ class UniversalVerifierAdapter:
             return self._unavailable("Universal Verifier output shape is invalid.")
 
         try:
+            # json.loads decodes a "\ud800" escape to a lone surrogate, which nothing that keeps the result can be
+            # written with (run.json, drift.json, a candidate) and no string the result types takes. Replaced here,
+            # where the reply is taken in, in its keys too.
+            result = without_lone_surrogates(result)
             return VerificationResult(
                 passed=result.get("passed"),
                 confidence=float(result.get("confidence") or 0.0),

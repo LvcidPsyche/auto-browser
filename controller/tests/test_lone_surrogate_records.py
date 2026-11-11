@@ -13,6 +13,7 @@ surrogate's too). Its contract and its trace are hashed as UTF-8, so it replaces
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,8 @@ from app.browser.aria_outline import outline_from_aria_snapshot
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessService
 from app.harness.trace import TraceEnvelope
+from app.harness.verifier import UniversalVerifierAdapter
+from app.harness.verifier.base import VerificationResult
 from app.models import AgentJobCheckpoint, OperatorIdentity, SessionRecord
 from app.session_store import FileSessionStore, RedisSessionStore
 from app.utils import utc_now, without_lone_surrogates
@@ -169,6 +172,8 @@ class AgentJobStoreTests(_Tmp):
 
 
 DONE = {"url": "https://example.com/done", "text": "done"}
+# A verifier command: it prints the file it is given, whatever it is sent.
+PRINT_THE_FILE = "import pathlib, sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text(encoding='ascii'))"
 
 
 def _contract(**extra: Any) -> TaskContract:
@@ -247,6 +252,60 @@ class HarnessRunTests(_Tmp):
         (action,) = [event for event in trace.events if event.event_type == "action"]
         self.assertEqual(action.payload["observation"]["accessibility_outline"]["nodes"][0]["name"], f"Pay{REPLACED}")
         self.assertEqual(trace.final_observation["accessibility_outline"]["nodes"][0]["name"], f"Pay{REPLACED}")
+
+    def _verifier_that_replies(self, reply: dict[str, Any]) -> UniversalVerifierAdapter:
+        """The Universal Verifier over a command that prints ``reply`` as JSON, a lone surrogate as its escape."""
+        path = self.root / "reply.json"
+        path.write_text(json.dumps(reply), encoding="ascii")
+        return UniversalVerifierAdapter(command=[sys.executable, "-c", PRINT_THE_FILE, str(path)], timeout_seconds=60)
+
+    async def test_a_verifiers_reply_holding_a_lone_surrogate_keeps_its_verdict_and_the_run_its_record(self) -> None:
+        # json.loads decodes the escape. In a value the result keeps untyped, the run's record could not be written:
+        # the call raised and run.json read "running". In a string the result types, or in a key, the verdict was lost.
+        replies = {
+            "a value the result keeps untyped": {"passed": True, "extra": f"fine{LONE}"},
+            "the notes": {"passed": True, "notes": f"fine{LONE}"},
+            "a postcondition's name": {"passed": False, "failed_postconditions": [f"p{LONE}"]},
+            "a key": {"passed": True, f"k{LONE}": [{f"j{LONE}": 1}]},
+        }
+        for number, (where, reply) in enumerate(replies.items()):
+            with self.subTest(where=where):
+                reply = {**reply, "confidence": 1.0}
+                service = HarnessService(self.root / f"harness-{number}", verifier=self._verifier_that_replies(reply))
+
+                record = await service.start_convergence(_contract(), mock_final_observation=DONE)
+
+                self.assertEqual(record.status, "converged" if reply["passed"] else "unconverged", record.notes)
+                stored = service.store.get(record.id)  # its record reads back, and says the same
+                self.assertEqual(stored.status, record.status)
+                verification = stored.attempts[0].verification
+                self.assertIs(verification.passed, reply["passed"], verification.notes)
+                self.assertEqual(verification.details["raw"], without_lone_surrogates(reply))
+                self.assertIn(REPLACED, json.dumps(verification.details["raw"], ensure_ascii=False))
+
+    async def test_a_run_whose_result_holds_a_lone_surrogate_is_saved_in_the_state_it_ended_in(self) -> None:
+        # The store's own write, for a result that did not come through the adapter above (HarnessService takes any
+        # verifier). The write raised after the run's state was set, and run.json went on reading "running".
+        class OfItsOwn:
+            def __init__(self, passed: bool) -> None:
+                self.passed = passed
+
+            async def verify(self, contract: TaskContract, trace: Any) -> VerificationResult:
+                return VerificationResult(passed=self.passed, confidence=1.0, details={"raw": {"notes": f"n{LONE}"}})
+
+        for passed in (False, True):
+            with self.subTest(passed=passed):
+                service = HarnessService(self.root / f"harness-{passed}", verifier=OfItsOwn(passed))
+
+                record = await service.start_convergence(_contract(), mock_final_observation=DONE)
+
+                stored = service.store.get(record.id)
+                self.assertEqual(stored.status, record.status)
+                self.assertNotEqual(stored.status, "running")
+                if not passed:
+                    # A run that passed stages a candidate from the verifier's own result, a step of its own.
+                    self.assertEqual(stored.status, "unconverged", record.notes)
+                self.assertEqual(stored.attempts[0].verification.details, {"raw": {"notes": f"n{REPLACED}"}})
 
 
 class SessionEventStreamTests(unittest.IsolatedAsyncioTestCase):

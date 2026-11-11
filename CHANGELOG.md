@@ -474,7 +474,12 @@ All notable changes to auto-browser are documented here.
   call to its approval takes a lone surrogate as it is, so the approval is asked and covers that call alone. One in
   a key is refused, whichever the profile: a key of either value was already (the input types it), and a key of a
   dict inside one now is too, with `contract.metadata must not hold a lone surrogate (half of a UTF-16 pair) in a
-  key`. The call with such a key ran under `fast`, and under `governed` was still answered `utf-8`.
+  key`. The call with such a key ran under `fast`, and under `governed` was still answered `utf-8`. A reply of the
+  Universal Verifier (`HARNESS_UV_COMMAND`) can hold one too, written as its JSON escape. In a value the result
+  keeps as it came, the run's record could not be written: the call raised, and `run.json` read `running` until the
+  next start. In the notes or a postcondition's name the verdict was dropped as an invalid reply, and in a key the
+  run failed. The reply now gets U+FFFD in its place, keys included, so the verdict stands, and `run.json` is
+  written as the other stores write a record.
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
   and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and
