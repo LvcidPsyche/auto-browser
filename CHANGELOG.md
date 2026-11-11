@@ -14,6 +14,12 @@ All notable changes to auto-browser are documented here.
   `initialize` and keeps the answer, so a `2025-03-26` client behind it goes on at `2025-11-25` without being told;
   the controller answers a session the same at either version. On a session at any other version a `2025-03-26`
   header is refused with `400` and `-32602`.
+- **An MCP `initialize` whose `clientInfo` or `capabilities` is past a bound is refused.** Each may be nested at most
+  32 levels and take at most 64 KiB as JSON; one past either answers JSON-RPC error `-32602` and makes no session.
+  What MCP defines for the two takes a few levels and well under a kilobyte, so a client is refused only for
+  something large of its own that it sends there (an icon as a data URI, for one). A session that an older version
+  stored past a bound is dropped at this version's start: its client is answered `404` on its next request, as
+  after an eviction, and the `initialize` it then sends is refused as above until it sends less.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
   silent, as it always was, and `resources/unsubscribe` still removes it.
@@ -814,10 +820,18 @@ All notable changes to auto-browser are documented here.
   `500`, the session stayed in memory, and every later write of the file failed the same way. Each `initialize` by
   any client then answered `500`, as did `notifications/initialized` and `DELETE /mcp` for a session made before,
   until a restart. Any client that may call `POST /mcp` could send one, and a client that decodes its own name
-  with `surrogateescape` sends one by accident. Capabilities nested some hundreds of objects deep (600, on the
-  image's Python 3.11) did the same. A lone surrogate is now stored as U+FFFD, and that `initialize` is answered as
-  any other. A session whose first write fails, for such a depth or for a full disk, is dropped before the error is
-  answered: `500`, for that request alone.
+  with `surrogateescape` sends one by accident. Capabilities nested some hundreds of objects deep did the same, and
+  a session nested a few levels less was written by its `initialize` and then failed the write of every client's
+  `DELETE /mcp`, which answered `500` for as long as that session lasted, restarts included. Nothing bounded the
+  size of either, and the file is written whole at every write of it by anybody. A lone surrogate is now stored as
+  U+FFFD, and that `initialize` is answered as any other. An `initialize` whose `clientInfo` or `capabilities` is
+  nested deeper than 32 levels (the object itself is the first, and a list is a level as an object is) or takes
+  more than 64 KiB written compactly as JSON in UTF-8 is refused with JSON-RPC error `-32602`, whose message names
+  the field and the bound and nothing of the value: no session is made and nothing is written. A session an older
+  version stored past either bound is dropped when the file is read, with one WARNING that counts them and quotes
+  none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down answers `400` `-32700`,
+  as a body that is no JSON does, where it was an unhandled `500`. A session whose first write fails (a full disk)
+  is dropped before the error is answered: `500`, for that request alone.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,

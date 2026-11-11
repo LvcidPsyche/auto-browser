@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass, field
+from itertools import chain
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -50,6 +51,14 @@ _STREAM_KEEPALIVE_SECONDS = 15
 # another operator's. Unowned sessions (shared token, no token) are bounded by the table's cap alone.
 MAX_MCP_SESSIONS = 500
 MAX_MCP_SESSIONS_PER_OWNER = 100
+# How deep an initialize's clientInfo or capabilities may be nested (the object itself is the first level, and a list
+# is a level as an object is), and the most bytes either may take written compactly as JSON in UTF-8. Both are kept
+# with the session, and the table of sessions is written whole, on the event loop, at every write of it: one nested
+# some hundreds deep was written by its initialize and stopped the writer (RecursionError) for every client's DELETE,
+# which writes from a shallower stack, and one of 32 MiB was written again at every write by anybody. What MCP
+# defines for the two needs three or four levels and well under a kilobyte.
+MAX_CLIENT_OBJECT_DEPTH = 32
+MAX_CLIENT_OBJECT_JSON_BYTES = 64 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -109,7 +118,8 @@ class McpHttpTransport:
 
         try:
             payload = await request.json()
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: a body nested past what the JSON reader goes down, which is no ValueError.
             return self._json_error_response(None, -32700, "Invalid JSON payload", status_code=400)
 
         if isinstance(payload, list):
@@ -622,13 +632,21 @@ class McpHttpTransport:
                 negotiated_version,
             )
 
+        client_info = self._coerce_dict(params.get("clientInfo"))
+        client_capabilities = self._coerce_dict(params.get("capabilities"))
+        # Before either is cleaned or kept. The answer names the field and the bound, and nothing of the value.
+        for name, value in (("clientInfo", client_info), ("capabilities", client_capabilities)):
+            past_a_bound = _past_a_client_object_bound(value)
+            if past_a_bound is not None:
+                return self._json_error_response(request_id, -32602, f"initialize: {name} {past_a_bound}")
+
         session = McpSession(
             id=uuid4().hex,
             protocol_version=negotiated_version,
             # The client's own, kept in the session table, which is written as UTF-8: a lone surrogate in either
             # (JSON's "\ud800" reads as one) could not be written, so it is stored as U+FFFD, as the stores do.
-            client_info=without_lone_surrogates(self._coerce_dict(params.get("clientInfo"))),
-            client_capabilities=without_lone_surrogates(self._coerce_dict(params.get("capabilities"))),
+            client_info=without_lone_surrogates(client_info),
+            client_capabilities=without_lone_surrogates(client_capabilities),
             owner=verified_operator(),
         )
         self._sessions[session.id] = session
@@ -638,9 +656,9 @@ class McpHttpTransport:
         try:
             self._persist_sessions()
         except Exception:
-            # The table is written whole, so a session that cannot be written (the client's capabilities nested
-            # deeper than the writer goes) would fail every later write too: each initialize by anybody, until a
-            # restart. Its id was never answered, so nobody holds it; it is taken back out before the error goes on.
+            # The table is written whole, so a session that cannot be written would fail every later write too:
+            # each initialize by anybody, until a restart. Its id was never answered, so nobody holds it; it is
+            # taken back out before the error goes on.
             self._forget_session(session.id)
             raise
 
@@ -766,6 +784,7 @@ class McpHttpTransport:
             logger.warning("ignoring malformed MCP session store at %s", self._session_store_path)
             return
         restored: dict[str, McpSession] = {}
+        past_a_bound = 0
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -785,7 +804,23 @@ class McpHttpTransport:
                 )
             except Exception:
                 continue
+            if _past_a_client_object_bound(session.client_info) or _past_a_client_object_bound(
+                session.client_capabilities
+            ):
+                # Written by a version that kept whatever a client sent. Its client is answered 404 "Unknown MCP
+                # session" and initializes again, as for a session that was evicted.
+                past_a_bound += 1
+                continue
             restored[session.id] = session
+        if past_a_bound:
+            logger.warning(
+                "dropped %d MCP sessions read from %s: a clientInfo or capabilities nested deeper than %d levels or "
+                "larger than %d bytes as JSON is no longer kept",
+                past_a_bound,
+                self._session_store_path,
+                MAX_CLIENT_OBJECT_DEPTH,
+                MAX_CLIENT_OBJECT_JSON_BYTES,
+            )
         self._sessions = restored
 
     def _evict_stale_sessions(self, *, keep: str | None = None) -> None:
@@ -885,6 +920,34 @@ class McpHttpTransport:
     @staticmethod
     def _session_headers(session: McpSession) -> dict[str, str]:
         return {MCP_PROTOCOL_HEADER: session.protocol_version}
+
+
+def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
+    """Which bound an initialize's clientInfo or capabilities is past, in the words of its refusal (None: neither).
+
+    The walk is a loop over one iterator a level, where a function that calls itself would run out of frames on the
+    depth it is to refuse. It ends at the first thing past a bound, so a value of a million keys is not gone through
+    to be refused: it counts a byte for each key and each value and one for each character of text, which is no more
+    than the JSON takes. Only a value that is under both by that count is written out to be measured.
+    """
+    too_large = f"is larger than {MAX_CLIENT_OBJECT_JSON_BYTES} bytes as JSON"
+    at_least = 0
+    levels = [iter((value,))]
+    while levels:
+        for part in levels[-1]:
+            at_least += 1 + (len(part) if isinstance(part, str) else 0)
+            if at_least > MAX_CLIENT_OBJECT_JSON_BYTES:
+                return too_large
+            if isinstance(part, dict | list):
+                if len(levels) > MAX_CLIENT_OBJECT_DEPTH:
+                    return f"is nested deeper than {MAX_CLIENT_OBJECT_DEPTH} levels"
+                levels.append(chain.from_iterable(part.items()) if isinstance(part, dict) else iter(part))
+                break
+        else:
+            levels.pop()
+    # A lone surrogate, which UTF-8 does not carry, takes the three bytes that U+FFFD takes in its place.
+    written = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
+    return too_large if len(written) > MAX_CLIENT_OBJECT_JSON_BYTES else None
 
 
 async def _next_stream_event(queue: asyncio.Queue, stop: asyncio.Event) -> str | None:

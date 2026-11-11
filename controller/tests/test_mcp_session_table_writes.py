@@ -8,6 +8,11 @@ back from the file.
 
 Both halves are held here: what a client sends is stored with U+FFFD for each lone surrogate, and a session whose
 first write fails, for whatever reason, is taken back out of the table before the error goes on.
+
+What a client sends is bounded too, by two numbers of the controller's own. The table is written whole at every
+write of it, so a clientInfo nested some hundreds of objects deep, which an initialize's write went down and a
+DELETE's write (made from a shallower place in the stack) did not, made every client's DELETE answer 500, and one of
+32 MiB was written again at every write by anybody.
 """
 
 from __future__ import annotations
@@ -17,24 +22,25 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app import mcp_transport
-from app.mcp_transport import MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER, McpHttpTransport
+from app.mcp_transport import (
+    MAX_CLIENT_OBJECT_DEPTH,
+    MAX_CLIENT_OBJECT_JSON_BYTES,
+    MCP_PROTOCOL_HEADER,
+    MCP_SESSION_HEADER,
+    McpHttpTransport,
+)
 
 PROTOCOL = "2025-11-25"
 LONE = "\ud800"
 # As a client that decoded its own name with surrogateescape sends it: in a value, in a key and below the top level.
 CLIENT_INFO = {"name": "client" + LONE, "version": "1", "build" + LONE: {"tags": ["a" + LONE]}}
 CAPABILITIES = {"roots": {"listChanged": True}, "experimental": {"x" + LONE: "y" + LONE}}
-# Objects inside one another. How many levels the request's parser, the cleaner of what the client sent and the
-# table's writer each go down before the interpreter stops them (RecursionError) is the interpreter's own: on Python
-# 3.11 and 3.12 the writer stops short of 600 and the parser does not, and on 3.14 the 600 are written and 1,000 are
-# what stops short. So more than one depth, and no depth is expected to be refused or to be written.
-DEEP = (600, 1_000)
 REPLACEMENT = chr(0xFFFD)  # U+FFFD, by its number: the character itself in this file would read as a mistake
 
 
@@ -49,12 +55,70 @@ def _with(value: object, old: str, new: str) -> object:
     return value
 
 
-class McpSessionTableWriteTests(unittest.TestCase):
+def _objects(depth: int) -> str:
+    """The JSON of ``depth`` objects inside one another, the outermost counted."""
+    return '{"a":' * (depth - 1) + "{}" + "}" * (depth - 1)
+
+
+def _lists_in_an_object(depth: int) -> str:
+    """The JSON of an object that holds lists inside one another, ``depth`` levels with the object."""
+    return '{"a":' + "[" * (depth - 1) + "]" * (depth - 1) + "}"
+
+
+def _of_bytes(size: int, *, letter: str = "x") -> str:
+    """The JSON of an object that takes ``size`` bytes written compactly as UTF-8, its text made of ``letter``."""
+    room = size - len('{"name":""}')
+    each = len(letter.encode("utf-8"))
+    value = {"name": letter * (room // each) + "x" * (room % each)}
+    assert len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) == size
+    # ASCII on the wire, so more bytes there than are counted: what is counted is what the controller would write.
+    return json.dumps(value)
+
+
+TOO_DEEP = f"is nested deeper than {MAX_CLIENT_OBJECT_DEPTH} levels"
+TOO_LARGE = f"is larger than {MAX_CLIENT_OBJECT_JSON_BYTES} bytes as JSON"
+# What is kept at each bound, what is refused one past it, and the words of the refusal.
+AT_AND_PAST_A_BOUND = {
+    "objects in one another": (_objects(MAX_CLIENT_OBJECT_DEPTH), _objects(MAX_CLIENT_OBJECT_DEPTH + 1), TOO_DEEP),
+    "lists in one another": (
+        _lists_in_an_object(MAX_CLIENT_OBJECT_DEPTH),
+        _lists_in_an_object(MAX_CLIENT_OBJECT_DEPTH + 1),
+        TOO_DEEP,
+    ),
+    "bytes of JSON": (
+        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES),
+        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES + 1),
+        TOO_LARGE,
+    ),
+    "bytes of JSON, of text that takes two bytes a letter": (
+        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES, letter=chr(0xE9)),
+        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES + 1, letter=chr(0xE9)),
+        TOO_LARGE,
+    ),
+}
+
+
+class _Transport(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.store = Path(self.tempdir.name) / "mcp-sessions.json"
-        self.transport = McpHttpTransport(
+        self.transport = self.transport_over_the_store()
+        app = FastAPI()
+
+        @app.post("/mcp")
+        async def post_mcp(request: Request):
+            return await self.transport.handle_post_request(request)
+
+        @app.delete("/mcp")
+        async def delete_mcp(request: Request):
+            return await self.transport.handle_delete_request(request)
+
+        # A failed write is answered 500 by the server, as the shipped app answers it.
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def transport_over_the_store(self) -> McpHttpTransport:
+        return McpHttpTransport(
             tool_gateway=SimpleNamespace(list_tools=lambda: []),
             server_name="auto-browser",
             server_title="Auto Browser MCP",
@@ -63,14 +127,6 @@ class McpSessionTableWriteTests(unittest.TestCase):
             session_store_path=str(self.store),
             manager=SimpleNamespace(sessions={}),
         )
-        app = FastAPI()
-
-        @app.post("/mcp")
-        async def post_mcp(request: Request):
-            return await self.transport.handle_post_request(request)
-
-        # A failed write is answered 500 by the server, as the shipped app answers it.
-        self.client = TestClient(app, raise_server_exceptions=False)
 
     def initialize(self, client_info: dict | None = None, capabilities: dict | None = None):
         params = {
@@ -84,6 +140,15 @@ class McpSessionTableWriteTests(unittest.TestCase):
             "/mcp", content=json.dumps(body).encode("ascii"), headers={"content-type": "application/json"}
         )
 
+    def initialize_as_written(self, *, client_info: str = "{}", capabilities: str = "{}"):
+        """An initialize whose clientInfo and capabilities are the JSON given, byte for byte."""
+        params = f'{{"protocolVersion":"{PROTOCOL}","clientInfo":{client_info},"capabilities":{capabilities}}}'
+        body = f'{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{params}}}'
+        return self.client.post("/mcp", content=body.encode("ascii"), headers={"content-type": "application/json"})
+
+    def delete(self, session_id: str):
+        return self.client.delete("/mcp", headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: PROTOCOL})
+
     def stored(self) -> list[dict]:
         return json.loads(self.store.read_text(encoding="utf-8"))
 
@@ -93,6 +158,8 @@ class McpSessionTableWriteTests(unittest.TestCase):
         self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], PROTOCOL)
         return response.headers[MCP_SESSION_HEADER]
 
+
+class McpSessionTableWriteTests(_Transport):
     def test_an_initialize_holding_a_lone_surrogate_is_answered_and_stops_no_later_one(self) -> None:
         first = self.assert_an_ordinary_answer(self.initialize())
 
@@ -144,32 +211,104 @@ class McpSessionTableWriteTests(unittest.TestCase):
         after = self.assert_an_ordinary_answer(self.initialize())
         self.assertEqual([record["id"] for record in self.stored()], [kept, after])
 
-    def test_capabilities_nested_deep_are_answered_or_cost_their_own_initialize_alone(self) -> None:
-        # No mock: where the table's writer gives up (RecursionError) on a depth the request's parser takes, the
-        # session could not be written either, and it stopped every later initialize as the lone surrogate did.
-        answered = [self.assert_an_ordinary_answer(self.initialize())]
-        body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"%s","capabilities":%s}}'
-        for depth in DEEP:
-            with self.subTest(depth=depth):
-                deep = '{"a":' * depth + "1" + "}" * depth
 
-                response = self.client.post(
-                    "/mcp",
-                    content=(body % (PROTOCOL, deep)).encode("ascii"),
-                    headers={"content-type": "application/json"},
-                )
+class McpClientObjectBoundsTests(_Transport):
+    """clientInfo and capabilities are each kept up to two bounds of the controller's own, and refused past either."""
 
-                if response.status_code == 200:
-                    # Answered: a session like any other, in the table and in the file.
-                    answered.append(self.assert_an_ordinary_answer(response))
-                else:
-                    # Refused: no session, and the table is what it was.
-                    self.assertGreaterEqual(response.status_code, 400, response.text[:200])
-                    self.assertNotIn(MCP_SESSION_HEADER, response.headers)
-                self.assertEqual(sorted(self.transport._sessions), sorted(answered))
-                # Either way no later initialize pays for it, and the file holds the sessions answered and no other.
-                answered.append(self.assert_an_ordinary_answer(self.initialize()))
-                self.assertEqual([record["id"] for record in self.stored()], answered)
+    SENT_AS = {"clientInfo": "client_info", "capabilities": "capabilities"}
+    STORED_AS = {"clientInfo": "client_info", "capabilities": "client_capabilities"}
+
+    def test_each_is_kept_at_a_bound_and_refused_one_past_it(self) -> None:
+        for field, argument in self.SENT_AS.items():
+            for bound, (at, past, words) in AT_AND_PAST_A_BOUND.items():
+                with self.subTest(field=field, bound=bound):
+                    kept = self.assert_an_ordinary_answer(self.initialize_as_written(**{argument: at}))
+                    self.assertEqual(self.stored()[-1]["id"], kept)
+                    self.assertEqual(self.stored()[-1][self.STORED_AS[field]], json.loads(at))
+                    table, sessions = self.store.read_bytes(), sorted(self.transport._sessions)
+
+                    refused = self.initialize_as_written(**{argument: past})
+
+                    # A JSON-RPC error, as the transport answers params it does not take. It names the field and
+                    # the bound, and nothing of what was sent.
+                    self.assertEqual(refused.status_code, 200, refused.text[:300])
+                    error = {"code": -32602, "message": f"initialize: {field} {words}"}
+                    self.assertEqual(refused.json(), {"jsonrpc": "2.0", "id": 1, "error": error})
+                    self.assertNotIn(MCP_SESSION_HEADER, refused.headers)
+                    # No session, and no write: the table is what it was, in memory and in the file.
+                    self.assertEqual(sorted(self.transport._sessions), sessions)
+                    self.assertEqual(self.store.read_bytes(), table)
+
+    def test_a_session_at_both_bounds_stops_no_other_clients_delete(self) -> None:
+        # The 500 was of every DELETE by anybody, while one session nested 486 to 490 deep (Python 3.12) was in the
+        # table: its initialize had written it, and a DELETE writes the same table from fewer frames up.
+        at_the_bounds = self.assert_an_ordinary_answer(
+            self.initialize_as_written(
+                client_info=_of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES), capabilities=_objects(MAX_CLIENT_OBJECT_DEPTH)
+            )
+        )
+        another = self.assert_an_ordinary_answer(self.initialize())
+
+        deleted = self.delete(another)
+
+        self.assertEqual(deleted.status_code, 204, deleted.text[:300])
+        self.assertEqual(list(self.transport._sessions), [at_the_bounds])
+        self.assertEqual([record["id"] for record in self.stored()], [at_the_bounds])
+        self.assertEqual(self.delete(at_the_bounds).status_code, 204)
+        self.assertEqual(self.stored(), [])
+
+    def test_a_table_an_older_build_wrote_is_read_without_the_sessions_past_a_bound(self) -> None:
+        # An older build kept whatever its writer could go down (488 objects on Python 3.11) and any size.
+        marker = "VALUE-OF-THE-CLIENT"
+        deep = json.loads(_objects(200).replace("{}", json.dumps({"k": marker})))
+        large = {"name": marker + "x" * MAX_CLIENT_OBJECT_JSON_BYTES}
+
+        def record(session_id: str, client_info: dict, capabilities: dict) -> dict:
+            return {
+                "id": session_id,
+                "protocol_version": PROTOCOL,
+                "client_info": client_info,
+                "client_capabilities": capabilities,
+                "initialized": True,
+                "created_at": "2026-11-01T00:00:00+00:00",
+                "last_used_at": "2026-11-01T00:00:00+00:00",
+                "resource_subscriptions": [],
+                "owner": None,
+            }
+
+        written = [
+            record("deep-info", deep, {}),
+            record("plain", {"name": "pytest", "version": "1"}, {"roots": {"listChanged": True}}),
+            record("deep-capabilities", {"name": "pytest"}, deep),
+            record("large-info", large, {}),
+            record("large-capabilities", {}, large),
+            record("at-the-bounds", json.loads(_objects(MAX_CLIENT_OBJECT_DEPTH)), {}),
+        ]
+        self.store.write_text(json.dumps(written), encoding="utf-8")
+
+        with self.assertLogs("app.mcp_transport", level="WARNING") as logs:
+            self.transport = self.transport_over_the_store()
+
+        self.assertEqual(list(self.transport._sessions), ["plain", "at-the-bounds"])
+        (line,) = logs.output  # one line for the four, and nothing of what they held
+        self.assertIn("4 MCP sessions", line)
+        self.assertNotIn(marker, line)
+        for name in ("deep-info", "deep-capabilities", "large-info", "large-capabilities"):
+            self.assertNotIn(name, line)
+            self.assertEqual(self.delete(name).status_code, 404)
+        # The sessions that are kept go on, and the next write of the table leaves the others out of the file too.
+        self.assertEqual(self.delete("plain").status_code, 204)
+        self.assertEqual([item["id"] for item in self.stored()], ["at-the-bounds"])
+
+    def test_a_body_the_json_reader_cannot_go_down_is_answered_as_one_that_cannot_be_read(self) -> None:
+        # How deep Python's JSON reader goes before it gives up (RecursionError, which is no ValueError) is the
+        # interpreter's own, so the reader is stood in for: such a body was an unhandled 500.
+        with patch.object(Request, "json", AsyncMock(side_effect=RecursionError("maximum recursion depth exceeded"))):
+            refused = self.initialize()
+
+        self.assertEqual(refused.status_code, 400, refused.text[:300])
+        self.assertEqual(refused.json()["error"], {"code": -32700, "message": "Invalid JSON payload"})
+        self.assertEqual(self.transport._sessions, {})
 
 
 if __name__ == "__main__":

@@ -24,6 +24,13 @@ That means:
 - MCP clients with HTTP transport support can talk to it directly, sending the controller's token
 - stdio-first clients can use the bridge, which reads the file named by `AUTO_BROWSER_TOKEN_FILE` / `--token-file`; the repo wrapper (`make stdio-bridge`, or `scripts/mcp_stdio_bridge.py`) defaults that to its checkout's `data/api-token` for a loopback URL
 
+The controller keeps the `clientInfo` and the `capabilities` of an `initialize`
+with the MCP session it makes. Each may be nested at most 32 levels (the object
+itself is the first, and a list is a level as an object is) and take at most
+64 KiB written compactly as JSON in UTF-8. An `initialize` past either bound is
+answered with JSON-RPC error `-32602`, whose message names the field and the
+bound, and makes no session.
+
 ## Connect directly over HTTP
 
 Clients that speak MCP's HTTP transport need no bridge: point them at
