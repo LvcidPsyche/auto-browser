@@ -180,6 +180,14 @@ class CronStoreUnreadableError(RuntimeError):
         super().__init__(CRON_STORE_UNREADABLE)
 
 
+class StoredWebhookKeyUnreadable(Exception):
+    """A job's stored webhook key that cannot be read (CronService._read_stored_key), which proves no key.
+
+    Its text names the class of what reading the key raised, and nothing of the key: a UnicodeEncodeError's own text
+    names a character of it and its place.
+    """
+
+
 class CronService:
     """Manages cron jobs and webhook triggers for browser automation."""
 
@@ -220,7 +228,8 @@ class CronService:
             return
         self._scheduler = AsyncIOScheduler(timezone=self._timezone, job_defaults=dict(_SCHEDULER_JOB_DEFAULTS))
         for job in jobs.values():
-            if job.get("enabled") and job.get("schedule"):
+            # A record that is no JSON object was warned of above, and is no job (_accessible).
+            if isinstance(job, dict) and job.get("enabled") and job.get("schedule"):
                 self._register_job(job)
         self._scheduler.start()
         logger.info("cron service started with %d jobs", len(jobs))
@@ -230,15 +239,33 @@ class CronService:
 
         Before the scheduler check, as webhook triggers work without APScheduler. A store that cannot be re-saved is
         only logged, and goes on working: a job still holding its key is compared by hashing that key.
+
+        A job whose stored key cannot be read, or whose record is no JSON object (a store edited by hand), is left as
+        it is, with a WARNING that names the job: what reading it raised stopped the controller's start.
         """
         async with self._lock:
             jobs = self._load()
-            legacy = [job for job in jobs.values() if job.get("webhook_key")]
+            legacy = []
+            for job_id, job in jobs.items():
+                if not isinstance(job, dict):
+                    logger.warning("cron job %s: its stored record is no JSON object, so it is left as it is", job_id)
+                    continue
+                try:
+                    key_hash = self._read_stored_key(job)
+                except StoredWebhookKeyUnreadable as exc:
+                    logger.warning(
+                        "cron job %s: %s, so its webhook refuses every key until the key is rotated; the job is left "
+                        "as it is",
+                        job_id,
+                        exc,
+                    )
+                    continue
+                if job.get("webhook_key"):
+                    job["webhook_key_hash"] = key_hash
+                    del job["webhook_key"]
+                    legacy.append(job)
             if not legacy:
                 return
-            for job in legacy:
-                job["webhook_key_hash"] = self._stored_key_hash(job)
-                del job["webhook_key"]
             try:
                 self._save(jobs)
             except OSError as exc:
@@ -334,16 +361,17 @@ class CronService:
             return created
 
     async def list_jobs(self) -> list[dict[str, Any]]:
-        return [self._safe_job(j) for j in self._load().values() if may_use(j.get("owner"))]
+        return [self._safe_job(j) for j in self._load().values() if isinstance(j, dict) and may_use(j.get("owner"))]
 
     async def get_job(self, job_id: str) -> dict[str, Any]:
         return self._safe_job(self._accessible(self._load(), job_id))
 
     @staticmethod
     def _accessible(jobs: dict[str, Any], job_id: str) -> dict[str, Any]:
-        """Another operator's job answers as if it did not exist."""
+        """Another operator's job answers as if it did not exist, and so does a record that is no JSON object (a
+        store edited by hand), which no caller can read."""
         job = jobs.get(job_id)
-        if job is None or not may_use(job.get("owner")):
+        if not isinstance(job, dict) or not may_use(job.get("owner")):
             raise KeyError(job_not_found_text(job_id))
         return job
 
@@ -455,7 +483,7 @@ class CronService:
         """
         job = self._load().get(job_id)
         try:
-            stored_hash = self._stored_key_hash(job) if job is not None else None
+            stored_hash = self._read_stored_key(job) if job is not None else None
             # An unknown id, a job with no key and a wrong key are one refusal, after one comparison: what differs
             # is which hash there was to compare against. Compared as bytes: compare_digest raises TypeError for a
             # str with non-ASCII characters, which surfaced as a 500 instead of a refusal.
@@ -464,9 +492,9 @@ class CronService:
                 (stored_hash or _NO_WEBHOOK_KEY_DIGEST).encode("utf-8"),
             )
         except Exception as exc:
-            # A stored key that cannot be read or hashed (a lone surrogate in the key or in its hash, a record that
-            # is no object: a store edited by hand) proves no key a caller sends. A ValueError among these was
-            # answered as a run refused with the key proved, to a wrong key too. The cause goes with the refusal.
+            # A stored key that cannot be read (StoredWebhookKeyUnreadable) proves no key a caller sends, and nor
+            # does a key that cannot be hashed. A ValueError among these was answered as a run refused with the key
+            # proved, to a wrong key too. The cause goes with the refusal.
             raise WebhookKeyRefusedError(WEBHOOK_KEY_REFUSED) from exc
         if not matched or stored_hash is None:
             raise WebhookKeyRefusedError(WEBHOOK_KEY_REFUSED)
@@ -874,12 +902,30 @@ class CronService:
         atomic_write_text(self._store_path, json.dumps(data, indent=2), mode=PRIVATE_FILE_MODE)
 
     @staticmethod
-    def _stored_key_hash(job: dict[str, Any]) -> str | None:
-        """The hash of the job's webhook key, or None. A key still held as it is (an unmigrated store) is hashed."""
-        if job.get("webhook_key_hash"):
-            return str(job["webhook_key_hash"])
-        legacy_key = job.get("webhook_key")
-        return _hash_webhook_key(str(legacy_key)) if legacy_key else None
+    def _read_stored_key(job: Any) -> str | None:
+        """The hash of the job's webhook key, or None. A key still held as it is (an unmigrated store) is hashed.
+
+        The one reader of a stored key. One that cannot be read (a lone surrogate in the key or in its hash, a record
+        that is no JSON object: a store edited by hand) raises StoredWebhookKeyUnreadable, which the trigger answers
+        as a refused key and every other reader as no key (_stored_key_hash).
+        """
+        try:
+            if job.get("webhook_key_hash"):
+                key_hash = str(job["webhook_key_hash"])
+                key_hash.encode("utf-8")  # as the trigger compares it
+                return key_hash
+            legacy_key = job.get("webhook_key")
+            return _hash_webhook_key(str(legacy_key)) if legacy_key else None
+        except (AttributeError, UnicodeEncodeError) as exc:
+            raise StoredWebhookKeyUnreadable(f"the stored webhook key cannot be read ({type(exc).__name__})") from None
+
+    @classmethod
+    def _stored_key_hash(cls, job: dict[str, Any]) -> str | None:
+        """The stored key's hash, or None for no key and for one that cannot be read, which proves no key."""
+        try:
+            return cls._read_stored_key(job)
+        except StoredWebhookKeyUnreadable:
+            return None
 
     @classmethod
     def _safe_job(cls, job: dict[str, Any]) -> dict[str, Any]:

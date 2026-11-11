@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.browser_manager import BrowserManager
-from app.cron_service import CronService, WebhookKeyRefusedError
+from app.cron_service import CronService, StoredWebhookKeyUnreadable, WebhookKeyRefusedError
 from app.models import McpToolCallRequest, OperatorIdentity
 from app.routes.operations import create_operations_router
 from app.session_ownership import acting_as, as_system
@@ -25,6 +25,8 @@ from tests.test_browser_manager_create_session import _settings
 ALICE = OperatorIdentity(id="alice", source="token")
 BOB = OperatorIdentity(id="bob", source="token")
 LEGACY_KEY = "legacy-plaintext-key-0123456789abcdef"
+# A stored key or hash no reader can encode: a store edited by hand.
+UNREAD = "unreadable-key\ud800"
 
 
 def _digest(key: str) -> str:
@@ -473,16 +475,20 @@ class CronWebhookTriggerRefusalTests(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(response.status_code, 403, response.text)
                     self.assertEqual(response.json(), {"detail": "Not permitted"})
-                # The log has the cause, in the one line a refused key writes.
+                # The log says why, in the one line a refused key writes: the class of what was raised, and that the
+                # stored key cannot be read. The error's own text named a character of the key and its place.
                 with self.assertLogs("app.routes.operations", level="WARNING") as logged:
                     client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": "any-key"})
                 (line,) = [record.getMessage().splitlines()[0] for record in logged.records]
-                self.assertIn(f"cron trigger refused for job '{job['id']}': answered 403 for {error}: ", line)
-                self.assertNotIn("legacy", line)
-                self.assertNotIn(good["webhook_key_hash"], line)
+                self.assertEqual(
+                    line,
+                    f"cron trigger refused for job '{job['id']}': answered 403 for StoredWebhookKeyUnreadable: "
+                    f"'the stored webhook key cannot be read ({error})'",
+                )
                 with self.assertRaises(WebhookKeyRefusedError) as refused:
                     await self.service.trigger_via_webhook(job["id"], job["webhook_key"])
-                self.assertEqual(type(refused.exception.__cause__).__name__, error)
+                self.assertIs(type(refused.exception.__cause__), StoredWebhookKeyUnreadable)
+                self.assertIsNone(refused.exception.__cause__.__cause__)
         self.manager.create_session.assert_not_awaited()
 
     async def test_a_disabled_job_answers_its_error_only_after_the_key_is_proved(self) -> None:
@@ -520,6 +526,97 @@ class CronWebhookTriggerRefusalTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.trigger_via_webhook(job["id"], job["webhook_key"])
 
         self.assertTrue(result["triggered"])
+
+
+class CronStoredKeyUnreadableTests(unittest.IsolatedAsyncioTestCase):
+    """A stored key the trigger takes for none is none to every other reader of the job's record too.
+
+    A store edited by hand: a lone surrogate in the key or its hash, or a record that is no JSON object. The trigger
+    refused every key for it, but every other reader raised what reading it raised: GET /crons answered 500 for
+    every job, GET /crons/{id} and DELETE /crons/{id}/webhook-key 500, and a legacy key stopped the controller's
+    start (CronService.startup, which app/main.py awaits with nothing round it).
+    """
+
+    SHAPES = (
+        (
+            "a plain key holding a lone surrogate",
+            lambda good: {**good, "webhook_key_hash": None, "webhook_key": UNREAD},
+        ),
+        ("a hash holding a lone surrogate", lambda good: {**good, "webhook_key_hash": UNREAD}),
+        ("a record that is no object", lambda good: ["not", "an", "object"]),
+    )
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service, self.manager = _service(Path(self.tmp.name) / "crons.json")
+        app = FastAPI()
+        app.include_router(
+            create_operations_router(manager=self.manager, proxy_store=MagicMock(), cron_service=self.service)
+        )
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    async def _stored_as(self, shape) -> tuple[str, str]:
+        """A job stored in ``shape`` beside a good one: (the job's id, the good one's id)."""
+        store = self.service._store_path
+        store.unlink(missing_ok=True)
+        job = await self.service.create_job(name="edited", goal="g", webhook_enabled=True)
+        other = await self.service.create_job(name="other", goal="g", webhook_enabled=True)
+        jobs = json.loads(store.read_text(encoding="utf-8"))
+        jobs[job["id"]] = shape(jobs[job["id"]])
+        store.write_text(json.dumps(jobs), encoding="utf-8")
+        return job["id"], other["id"]
+
+    async def test_the_routes_read_it_as_no_key(self) -> None:
+        for cause, shape in self.SHAPES:
+            with self.subTest(cause):
+                job_id, other_id = await self._stored_as(shape)
+                an_object = cause != "a record that is no object"
+
+                listed = self.client.get("/crons")
+                fetched = self.client.get(f"/crons/{job_id}")
+                revoked = self.client.delete(f"/crons/{job_id}/webhook-key")
+                rotated = self.client.post(f"/crons/{job_id}/webhook-key/rotate")
+
+                self.assertEqual(listed.status_code, 200, listed.text)
+                by_id = {job["id"]: job for job in listed.json()}
+                self.assertTrue(by_id[other_id]["webhook_enabled"])
+                if an_object:
+                    self.assertEqual(
+                        (by_id[job_id]["webhook_enabled"], "webhook_key_id" in by_id[job_id]), (False, False)
+                    )
+                    self.assertEqual(fetched.status_code, 200, fetched.text)
+                    self.assertFalse(fetched.json()["webhook_enabled"])
+                    self.assertEqual((revoked.status_code, revoked.json()), (200, {"job_id": job_id, "revoked": False}))
+                    self.assertEqual(rotated.status_code, 200, rotated.text)
+                    # The new key is one the trigger takes: the store no longer holds the one it could not read.
+                    proved = await self.service.trigger_via_webhook(job_id, rotated.json()["webhook_key"])
+                    self.assertTrue(proved["triggered"])
+                else:
+                    # As no job: no route can show or change what the record holds.
+                    self.assertNotIn(job_id, by_id)
+                    unknown = self.client.get("/crons/no-such-job").json()["detail"].replace("no-such-job", job_id)
+                    self.assertEqual((fetched.status_code, fetched.json()), (404, {"detail": unknown}))
+                    self.assertEqual((revoked.status_code, revoked.json()), (404, {"detail": "Not found"}))
+                    self.assertEqual((rotated.status_code, rotated.json()), (404, {"detail": "Not found"}))
+
+    async def test_the_start_leaves_such_a_job_as_it_is_with_a_warning_that_names_the_job_and_not_the_key(self) -> None:
+        for cause, shape in self.SHAPES:
+            with self.subTest(cause):
+                job_id, other_id = await self._stored_as(shape)
+                before = self.service._store_path.read_bytes()
+
+                with self.assertLogs("app.cron_service", level="WARNING") as logged:
+                    try:
+                        await self.service.startup()
+                    finally:
+                        await self.service.shutdown()
+
+                self.assertEqual(self.service._store_path.read_bytes(), before)
+                (line,) = [record.getMessage() for record in logged.records]
+                self.assertTrue(line.startswith(f"cron job {job_id}: "), line)
+                for part in ("unreadable-key", "\ud800", "\\ud800", "position"):
+                    self.assertNotIn(part, line)
 
 
 class CronWebhookKeyMcpTests(unittest.IsolatedAsyncioTestCase):

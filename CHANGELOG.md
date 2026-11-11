@@ -802,8 +802,13 @@ All notable changes to auto-browser are documented here.
   `400`: its body, or a job id in the path that is blank or longer than 50 characters. A body nested past what the
   JSON reader goes down is refused so too, with its WARNING, where it was an unhandled `500`. A job whose stored
   key cannot be read (a lone surrogate in the key or its hash, a record that is no JSON object: a store edited by
-  hand) proves no key, and answers that `403` to every key with a WARNING that names what was raised, where it
-  answered `400` or `500`. `browser.trigger_cron_job`, which takes no key, is unchanged.
+  hand) proves no key, and answers that `403` to every key with a WARNING that names the class of what was raised
+  and that the stored key cannot be read, and nothing of the key, where it answered `400` or `500`. Every other
+  reader of such a job takes it as one with no key, where each answered `500`: `GET /crons` (for every job),
+  `GET /crons/{id}`, `DELETE /crons/{id}/webhook-key` (`revoked: false`) and the rotate, which replaces it. A record
+  that is no JSON object is answered as no job, and `GET /crons` leaves it out. A start leaves such a job as it is,
+  with one WARNING that names the job, where a key held as it was sent, by a store of an earlier version, stopped
+  the controller's start. `browser.trigger_cron_job`, which takes no key, is unchanged.
 - **With its key proved, a cron trigger no longer passes on what the run's session answers its own caller, nor
   answers `500` for a stored job a run cannot take.** `POST /crons/{id}/trigger` answered `403`
   `browser_action_blocked`, with the refused host in its text, for a `start_url` whose load the pre-request gate
