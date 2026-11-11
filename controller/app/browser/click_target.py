@@ -553,7 +553,10 @@ DESCRIBE_TARGET_SCRIPT = r"""
 # and into frames whose document the page's origin can reach (the same origin, srcdoc), up to three frames down.
 # A frame is an iframe, a frame, or an object or an embed that holds a document: a page's own document in one
 # of the last two was read as that element, no button, and its button was pressed unread. An embed has no
-# contentDocument, so a holder's document is looked for among the windows its own window holds.
+# contentDocument, so an embed's document is looked for among the first 256 windows its own window holds (an
+# embed that comes later is read as the element). The look is an embed's alone: made for whatever had no document
+# to reach, it ran to its end for every frame of another site, and in this world the first look costs about 2 ms
+# a window, which on a page of 255 frames used up the half second the read before a press has.
 # The point is carried into a frame by its box, border and padding; a frame that CSS scales or turns is read at a
 # point that is off. A frame of another origin is as far as it goes: the element is the frame.
 _ELEMENT_AT_SCRIPT = r"""
@@ -572,7 +575,7 @@ _ELEMENT_AT_SCRIPT = r"""
     if (!['iframe', 'frame', 'object', 'embed'].includes(el.localName)) break;
     let inside = null;
     try { inside = el.contentDocument || null; } catch (error) { inside = null; }
-    const held = el.ownerDocument.defaultView;
+    const held = el.localName === 'embed' ? el.ownerDocument.defaultView : null;
     for (let index = 0; !inside && held && index < held.length && index < 256; index += 1) {
       try {
         if (held[index].frameElement === el) inside = held[index].document;

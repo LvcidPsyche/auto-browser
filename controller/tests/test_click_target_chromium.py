@@ -20,6 +20,7 @@ from playwright.async_api import ElementHandle, Frame, Locator
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
 from app.browser.click_target import (
+    _ELEMENT_AT_SCRIPT,
     CLICK_TARGET_SCRIPT,
     DESCRIBE_TARGET_SCRIPT,
     MAX_LABEL_CHARS,
@@ -305,6 +306,22 @@ HELD_BY = {
     "embed": _HELD_STYLE + '<div id="wrap"><embed id="frame" type="text/html" src="/held"></div>',
 }
 HELD = html.unescape(_FRAMED_BUTTON)
+# What stands at a point with no document the page can reach, after three frames of the page's own.
+NOT_ENTERED = {
+    "a frame of another origin": '<iframe id="frame" sandbox="allow-scripts" srcdoc="<p>Next</p>"></iframe>',
+    "an object that holds no document": '<object id="frame" type="application/x-nothing">none</object>',
+}
+# ([x, y]) => [the tag of what the read at a point answers, how many of the page's windows it asked for their
+# frame element on the way]. Run where the page's script runs, with each window the page can reach marked
+# first; one of another origin cannot be asked at all.
+_READ_AT_AND_COUNT = (
+    "([x, y]) => { let asked = 0; "
+    "for (let index = 0; index < window.length; index += 1) { try { const held = window[index]; "
+    "const frame = held.frameElement; "
+    "Object.defineProperty(held, 'frameElement', { get() { asked += 1; return frame; } }); "
+    "} catch (error) {} } "
+    "const el = (" + _ELEMENT_AT_SCRIPT + ")(x, y); return [el ? el.localName : null, asked]; }"
+)
 # A frame with a link in it wider than the frame shows, and a button of the page itself beside the frame.
 # The selector names the link through the frame, as a locator made from a frame locator does.
 IN_THE_FRAME = "#frame >> internal:control=enter-frame >> "
@@ -1240,6 +1257,37 @@ async def test_a_button_in_a_document_an_object_or_an_embed_holds_is_read_as_one
         await env.manager.approve(asked.value.approval.id)
         await env.manager.execute_decision(session_id, _click("read", **middle), approval_id=asked.value.approval.id)
         assert await _title(env, session_id) == "DELETED x1"
+
+
+@pytest.mark.parametrize("at_the_point", list(NOT_ENTERED))
+async def test_the_look_among_a_pages_windows_is_made_for_an_embed_alone(tmp_path: Path, at_the_point: str) -> None:
+    # An embed has no contentDocument, so its document is looked for among the windows of its page. The look was
+    # made for whatever had no document the page could reach: a frame of another site above all (a payment field,
+    # a challenge), the commonest frame a click lands on. In the controller's own world the first look costs
+    # about 2 ms a window: on a page of 255 frames the half second of the read before a press ran out.
+    markup = _HELD_STYLE + "<iframe hidden></iframe>" * 3 + f'<div id="wrap">{NOT_ENTERED[at_the_point]}</div>'
+    async with browser_env(tmp_path, {"/": markup}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        middle = await _centre(page.locator("#frame"))
+        found, asked = await page.evaluate(_READ_AT_AND_COUNT, [middle["x"], middle["y"]])
+        assert found == ("object" if "object" in at_the_point else "iframe")
+        assert asked == 0
+
+
+@pytest.mark.parametrize(("others", "found"), [(3, "button"), (255, "button"), (256, "embed")])
+async def test_an_embed_is_entered_where_it_is_one_of_the_first_256_windows_of_its_page(
+    tmp_path: Path, others: int, found: str
+) -> None:
+    # The look ends at the embed's own window, and at the 256th window of the page whatever it found: an embed
+    # that comes later is read as the element, no button, which the docs say.
+    markup = _HELD_STYLE + "<iframe hidden></iframe>" * others + HELD_BY["embed"].removeprefix(_HELD_STYLE)
+    async with browser_env(tmp_path, {"/": markup, "/held": HELD}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        assert await page.evaluate("window.length") == others + 1
+        middle = await _centre(page.locator("#frame"))
+        assert await page.evaluate(_READ_AT_AND_COUNT, [middle["x"], middle["y"]]) == [found, min(others + 1, 256)]
 
 
 @pytest.mark.parametrize(
