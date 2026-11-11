@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -15,6 +16,10 @@ from app.mesh.identity import NodeIdentity
 
 _POSIX_ONLY = unittest.skipUnless(os.name == "posix", "POSIX file modes")
 _PRIVATE_DIR = 0o700
+
+
+class _StillCreating(BaseException):
+    """Raised to end a start that goes on creating files in a directory that refuses each one."""
 
 
 class NodeIdentityKeyFileTests(unittest.TestCase):
@@ -159,10 +164,16 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
             now[0] += seconds
 
         clock = patch.object(identity_module, "time", Mock(monotonic=lambda: now[0], sleep=sleep))
-        with clock, self.reading_the_key_as(b""), self.assertRaises(ValueError):
+        with clock, self.reading_the_key_as(b""), self.assertRaises(RuntimeError) as raised:
             NodeIdentity(self.dir)
         self.assertGreater(self.reads, 1)
         self.assertGreaterEqual(now[0], identity_module._FILE_BEING_WRITTEN_WAIT_SECONDS)
+        # The error an operator reads names the file and the wait: cryptography's own sentence names neither.
+        said = str(raised.exception)
+        self.assertTrue(
+            said.startswith("mesh.identity: node_private.pem could not be read after 2 s: ValueError: "), said
+        )
+        self.assertIsInstance(raised.exception.__cause__, ValueError)
 
     def test_a_key_that_is_gone_when_read_is_retried_within_the_bound_too(self):
         wait, poll = self.with_a_short_bound()
@@ -170,8 +181,10 @@ class NodeIdentityKeyBeingWrittenTests(unittest.TestCase):
         def gone(path):
             raise FileNotFoundError(path)
 
-        with wait, poll, patch.object(Path, "read_bytes", gone), self.assertRaises(FileNotFoundError):
+        with wait, poll, patch.object(Path, "read_bytes", gone), self.assertRaises(RuntimeError) as raised:
             NodeIdentity(self.dir)
+        self.assertIn("node_private.pem could not be read after 0.05 s: FileNotFoundError: ", str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, FileNotFoundError)
 
     def test_the_key_is_tightened_once_however_often_its_read_is_retried(self):
         # Only the read and the parse are retried. A key that could not be tightened and did not parse wrote its
@@ -260,9 +273,11 @@ class NodeIdentityPublishedFilesTests(unittest.TestCase):
             patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.05),
             patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01),
             patch.object(Path, "read_text", read_text),
-            self.assertRaises(PermissionError),
+            self.assertRaises(RuntimeError) as raised,
         ):
             NodeIdentity(self.dir)
+        self.assertIn("node_meta.json could not be read after 0.05 s: PermissionError: ", str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, PermissionError)
 
     def test_files_already_there_are_left_as_they_are(self):
         NodeIdentity(self.dir)
@@ -339,13 +354,71 @@ class NodeIdentityPublishedFilesTests(unittest.TestCase):
             patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.3),
             patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01),
             replacing,
-            self.assertRaises(PermissionError),
+            self.assertRaises(RuntimeError) as raised,
         ):
             NodeIdentity(self.dir)
 
+        self.assertIn("node_public.pem could not be published after 0.3 s: PermissionError: ", str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, PermissionError)
         self.assertEqual(landed, {})
         self.assertFalse((self.dir / "node_public.pem").exists())
         self.assertEqual(self._temp_files_left(), [])
+
+    def _taking_no_new_file(self):
+        """os.open, refusing every create in the identity directory and naming each one tried.
+
+        As a directory the process may not write refuses them. A publish's temp file is such a create, a name a
+        try, and Python 3.11 and 3.12 on Windows answer its refusal by trying the next name, 2**31 of them: a
+        start that is still creating after fifty is ended here.
+        """
+        real_open = os.open
+        tried: list[str] = []
+
+        def refused(path, flags, *args, **kwargs):
+            if not flags & os.O_CREAT or Path(path).parent != self.dir:
+                return real_open(path, flags, *args, **kwargs)
+            tried.append(Path(path).name)
+            if len(tried) > 50:
+                raise _StillCreating(f"{len(tried)} creates were tried in a directory that refused each")
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+        return patch.object(os, "open", refused), tried
+
+    def test_a_directory_that_takes_no_new_file_ends_a_start_at_its_first_create(self):
+        # The key alone, as a start killed before it published leaves it, in a directory that has since been made
+        # read-only. The 2 seconds bound the retries of a publish, not one try of it, and on Windows one try did
+        # not end (the docstring above): the start hung. One create of the identity's own is tried first.
+        NodeIdentity(self.dir)
+        for name in ("node_public.pem", "node_meta.json"):
+            (self.dir / name).unlink()
+        refusing, tried = self._taking_no_new_file()
+        now = [0.0]
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        clock = patch.object(identity_module, "time", Mock(monotonic=lambda: now[0], sleep=sleep))
+        with refusing, clock, self.assertRaises(RuntimeError) as raised:
+            NodeIdentity(self.dir)
+
+        self.assertEqual(len(tried), 1, tried)
+        self.assertTrue(identity_module._is_a_publish_under_way(tried[0]), tried)
+        self.assertEqual(now[0], 0.0, "a directory that refuses a new file was waited on")
+        said = str(raised.exception)
+        self.assertTrue(
+            said.startswith("mesh.identity: node_public.pem could not be published: PermissionError: "), said
+        )
+        self.assertEqual(sorted(entry.name for entry in self.dir.iterdir()), ["node_private.pem"])
+
+    def test_a_whole_identity_in_such_a_directory_is_loaded_and_nothing_is_created(self):
+        # A read-only directory that holds the three files is a deployment, not a fault.
+        node_id = NodeIdentity(self.dir).node_id
+        refusing, tried = self._taking_no_new_file()
+
+        with refusing:
+            self.assertEqual(NodeIdentity(self.dir).node_id, node_id)
+
+        self.assertEqual(tried, [])
 
     @_POSIX_ONLY
     def test_the_published_files_keep_the_mode_an_ordinary_write_gave_them(self):

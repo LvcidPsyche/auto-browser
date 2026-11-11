@@ -139,22 +139,49 @@ def _is_a_publishs_temp_file(entry: Path) -> bool:
         return True
 
 
-def _retried_while_another_start_writes(step: Callable[[], _T]) -> _T:
+def _retried_while_another_start_writes(step: Callable[[], _T], failed: str) -> _T:
     """``step``, retried for a short bound: another start may be writing the file it reads or publishes.
 
     A start can find the private key empty or part-written (_write_private_file creates it, then fills it), by either
     way in (the file was already there, or the exclusive create lost), and on Windows a file another start is replacing
-    refuses a reader for an instant. Still failing at the end, it raises as it would have. Blocks: this runs before the
-    controller serves requests, in the lifespan or in the manager's __init__.
+    refuses a reader for an instant. Still failing at the end, it raises a RuntimeError from the step's own error that
+    says what ``failed`` (the file, by its name) and after how long: cryptography's sentence for a key it cannot
+    parse, or a JSON position, names no file. Blocks: this runs before the controller serves requests, in the
+    lifespan or in the manager's __init__.
+
+    The bound is on the retries, not on one try: a step that does not return is not ended by it. A start makes four
+    such steps one after another (the key's read, the two publishes, the meta's read), each with the whole bound.
     """
     deadline = time.monotonic() + _FILE_BEING_WRITTEN_WAIT_SECONDS
     while True:
         try:
             return step()
-        except (ValueError, OSError):
+        except (ValueError, OSError) as exc:
             if time.monotonic() >= deadline:
-                raise
+                waited = f"{_FILE_BEING_WRITTEN_WAIT_SECONDS:g} s"
+                raise RuntimeError(f"mesh.identity: {failed} after {waited}: {type(exc).__name__}: {exc}") from exc
             time.sleep(_FILE_BEING_WRITTEN_POLL_SECONDS)
+
+
+def _refused_at_once_where_the_directory_takes_no_new_file(path: Path) -> None:
+    """Create one file of the identity's own beside ``path`` and remove it: a directory that refuses it refuses here.
+
+    A publish begins with a temp file (atomic_write_text), which mkstemp makes. On Windows, Python 3.11 and 3.12
+    answer a refused create there by trying the next name, 2**31 of them, wherever os.access calls the directory
+    writable, and an ACL that denies the create does not change what os.access says: a start with a file to
+    publish over such a directory did not end, and the retries' bound never came into it. Named as a publish's
+    temp file is (_is_a_publish_under_way), so one that could not be removed is still the identity's own.
+    """
+    probe = path.with_name(f".{path.name}.{os.urandom(4).hex()}{_TEMP_SUFFIX}")
+    try:
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _KEY_FILE_MODE))
+    except OSError as exc:
+        raise RuntimeError(f"mesh.identity: {path.name} could not be published: {type(exc).__name__}: {exc}") from exc
+    try:
+        os.unlink(probe)
+    except OSError as exc:
+        # It was made, so a publish can be: an empty file under a temp name is left, and said.
+        logger.warning("mesh.identity: %s could not be removed (%s); it is empty", probe, type(exc).__name__)
 
 
 def _publish_unless_there(path: Path, text: str) -> None:
@@ -170,7 +197,10 @@ def _publish_unless_there(path: Path, text: str) -> None:
         if not path.exists():
             atomic_write_text(path, text)
 
-    _retried_while_another_start_writes(publish)
+    if path.exists():
+        return
+    _refused_at_once_where_the_directory_takes_no_new_file(path)
+    _retried_while_another_start_writes(publish, f"{path.name} could not be published")
 
 
 class NodeIdentity:
@@ -216,7 +246,9 @@ class NodeIdentity:
 
         # A consistency check, not tamper detection: meta.json sits in the same directory as the key, so whoever
         # can replace the key can replace it too. It catches a corrupt file or keys mixed from two identities.
-        stored = _retried_while_another_start_writes(lambda: json.loads(meta_path.read_text()))
+        stored = _retried_while_another_start_writes(
+            lambda: json.loads(meta_path.read_text()), f"{meta_path.name} could not be read"
+        )
         if stored.get("node_id") != self._node_id:
             raise RuntimeError(
                 "mesh.identity: stored node_id does not match the key (corrupt or mixed identity directory): "
@@ -231,7 +263,8 @@ class NodeIdentity:
         if _POSIX:
             _tighten_a_loose_key(priv_path)
         return _retried_while_another_start_writes(
-            lambda: Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes()))
+            lambda: Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes())),
+            f"{priv_path.name} could not be read",
         )
 
     def _tighten_a_loose_directory(self) -> None:
