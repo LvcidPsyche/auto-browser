@@ -251,6 +251,13 @@ class LabelRulesTests(unittest.TestCase):
         # The everyday words name no one: beside a word that does, the label still asks.
         ("post", "Send code to all trusted users"),
         ("post", "Send code to the same people \u2192"),
+        # Either side of a slash is read: a name beside a word of the list still names somebody.
+        ("post", "Send code to John/me"),
+        ("post", "Send code via SMS/everyone"),
+        ("post", "Send code via SMS/@backup"),
+        ("post", "Send code to phone/#work"),
+        ("post", "Send code via SMS//everyone"),
+        ("post", "Send code to create account for John"),
         # Past 40 characters a label is read line by line, and "Send code" alone is a sign-in button's name:
         # a next line that opens with "to", "via" and the like goes on with where the code is sent.
         ("post", "Send code\nto all users in the organization"),
@@ -363,6 +370,17 @@ class LabelRulesTests(unittest.TestCase):
         "Send code to verify it\u2019s you",
         "Send code to you",
         "Send code to my linked email",
+        # What a sign-up or a sign-in page says the code is for, and two ways joined by a slash.
+        "Send code to sign up",
+        "Send code to complete sign-in",
+        "Send code to create account",
+        "Send code to register",
+        "Send code to get started",
+        "Send code via Telegram",
+        "Send code via Google Authenticator",
+        "Send code via SMS/Email",
+        "Send code to phone/email",
+        "Send code by automated call",
         "Send code to the address above",
         "Send code by push notification",
         # The same over two lines, and a name over a sentence about it.

@@ -160,9 +160,11 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       `different`, `new`, `ending`, `reset`, `password`, `verify`, `confirm`, `sign`, `log`, `login`, `continue`,
       `account`, `identity`, `you`, `it's`, `it’s`, `into`, `proceed`, `access`, `trusted`, `saved`, `same`,
       `file`, `browser`, `computer`, `we`, `have`, `of`, `for`, `associated`, `linked`, `above`, `below`, `last`,
-      `digits`, `landline`, `telephone`, `notification`, `push`, `seconds`, `second`, `minutes`, `minute`. One of
-      the words a label goes on with (the bullet before) may stand there too, and an address as a page shows the
-      user's own: a name with an at sign after it, or a number as a page masks one, made of digits, asterisks,
+      `digits`, `landline`, `telephone`, `notification`, `push`, `seconds`, `second`, `minutes`, `minute`, `up`,
+      `sign-in`, `sign-up`, `log-in`, `signin`, `signup`, `complete`, `create`, `register`, `get`, `started`,
+      `automated`, `telegram`, `google`, `microsoft`. Two such words may be joined by a slash ("SMS/Email"). One
+      of the words a label goes on with (the bullet before) may stand there too, and an address as a page shows
+      the user's own: a name with an at sign after it, or a number as a page masks one, made of digits, asterisks,
       bullets, the letter x and a phone number's marks and nothing else ("j***@example.com", "+1 (***) ***-1234");
       a count of seconds ("30s") too. A mark that is no letter and no digit (an arrow, a tick) says nothing. A
       word behind an at sign or a hash names somebody or a channel, whatever the word. So "Send code to my phone"

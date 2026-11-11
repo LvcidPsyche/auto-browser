@@ -311,6 +311,21 @@ SEND_DESTINATION_WORDS: tuple[str, ...] = (
     "second",
     "minutes",
     "minute",
+    "up",
+    "sign-in",
+    "sign-up",
+    "log-in",
+    "signin",
+    "signup",
+    "complete",
+    "create",
+    "register",
+    "get",
+    "started",
+    "automated",
+    "telegram",
+    "google",
+    "microsoft",
 )
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40
@@ -633,7 +648,9 @@ def _send_goes_on(reading: str, rest: str) -> bool:
 
 def _says_only_where_it_goes(rest: str) -> bool:
     """Whether what follows Send's tail word names only the user's own address or the sign-in the code is for."""
-    for token in rest.split():
+    # Two ways joined by a slash ("SMS/Email", "phone/email") are two tokens, each read by itself: read as one,
+    # the slash and the mark of "sms/@backup" made an address of it.
+    for token in rest.replace("/", " ").split():
         word = token.strip(_AROUND_A_WORD)
         # A token with no letter and no digit says nothing: an arrow, a tick, a dash, a mask alone.
         if not any(char.isalnum() for char in word):
