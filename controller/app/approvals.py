@@ -151,6 +151,7 @@ class ApprovalStore:
         refuse_self_approval: Iterable[str] = (),
         audit: Any = None,
         rejection_receipt: Callable[[ApprovalRecord], Awaitable[None]] | None = None,
+        may_use: Callable[[ApprovalRecord], Awaitable[bool]] | None = None,
     ):
         self._lock = asyncio.Lock()
         # Operators who may not approve what they asked for (APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS); empty, the
@@ -161,6 +162,9 @@ class ApprovalStore:
         # Records the witness receipt of an operator's rejection that a give-back
         # applied (the manager's); None in a bare store, which keeps no receipts.
         self.rejection_receipt = rejection_receipt
+        # Whether the current operator may use an approval, which its session's owner decides (the manager's);
+        # None in a bare store, which knows no session and goes by the operator the record names.
+        self.may_use = may_use
         self.file_store = FileApprovalStore(root)
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
@@ -821,6 +825,12 @@ class ApprovalStore:
     ) -> ApprovalRecord:
         approval = await self.get(approval_id)
         if approval.session_id != session_id:
+            # Presented in a session that is not its own. A caller who may not use it is answered as for an id no
+            # record answers to, as the listing and the decisions answer: "does not belong" told an operator who
+            # held another's id that it is an approval's.
+            usable = may_use(approval.owner) if self.may_use is None else await self.may_use(approval)
+            if not usable:
+                raise KeyError(approval_id)
             raise PermissionError(f"approval {approval_id} does not belong to session {session_id}")
         # A controller-scope approval has no session whose owner could be asked,
         # so it is the asking operator's alone: another operator's identical call

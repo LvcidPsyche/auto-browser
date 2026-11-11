@@ -71,8 +71,8 @@ class BrowserApprovalService:
             "arguments": await self.manager.approvals.arguments(approval.id),
         }
 
-    async def _may_use(self, approval: ApprovalRecord) -> bool:
-        """Whether the current operator may use an approval: see _usable."""
+    async def may_use(self, approval: ApprovalRecord) -> bool:
+        """Whether the current operator may use an approval: see _usable. The approval store asks it too."""
         lookup = None
         if approval.session_id != CONTROLLER_SCOPE:
             lookup = await self.manager.session_owner_lookup(approval.session_id)
@@ -81,7 +81,7 @@ class BrowserApprovalService:
     async def _accessible(self, approval_id: str) -> ApprovalRecord:
         """An approval the current operator may not use (see _usable) answers as if it did not exist."""
         approval = await self.manager.approvals.get(approval_id)
-        if not await self._may_use(approval):
+        if not await self.may_use(approval):
             raise KeyError(approval_id)
         return approval
 

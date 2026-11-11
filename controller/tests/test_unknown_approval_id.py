@@ -12,8 +12,11 @@ two (approval_id, governed_approval_id) and the advice is to leave that argument
 
 from __future__ import annotations
 
+import dataclasses
 from unittest.mock import AsyncMock
 
+from app.models import OperatorIdentity
+from app.session_ownership import acting_as
 from tests.test_approval_spend import SESSION, SpendBase
 
 UNKNOWN = "0123456789ab"
@@ -27,6 +30,10 @@ REPEAT_GOVERNED = "Repeat the call without governed_approval_id to ask for a new
 ASK_AGAIN = "To get a new approval, repeat the call that needed one without this approval id."
 DECISION_TOOLS = ("browser.execute_approval", "browser.reject_approval", "browser.approve_approval")
 GOVERNED_COOKIES = {"session_id": SESSION, "workflow_profile": "governed", "cookies": [COOKIE]}
+ALICE = OperatorIdentity(id="alice", source="token")
+BOB = OperatorIdentity(id="bob", source="token")
+ANOTHER_SESSION = "session-2"
+CLICK = {"action": "click", "reason": "submit payment", "selector": "#pay", "risk_category": "payment"}
 
 
 def unknown(approval_id: str = UNKNOWN, presented_as: str = "approval_id") -> str:
@@ -139,17 +146,59 @@ class UnknownApprovalIdTests(SpendBase):
 
         self.assertEqual(answer.content[0].text, f"{unknown()} {ASK_AGAIN}")
 
+    def _a_second_session(self, owner: str) -> None:
+        second = dataclasses.replace(self.session, id=ANOTHER_SESSION, name=ANOTHER_SESSION, owner=owner)
+        self.manager.sessions[ANOTHER_SESSION] = second
+
     async def test_an_approval_of_another_operator_reads_as_an_unknown_one(self) -> None:
-        # Who may use an approval is the manager's answer, a KeyError for a stranger as for no record: the same text.
-        _decision, approval_id = await self.approved_click()
-        self.manager.approval_service._may_use = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        # Two operators, a session each. Alice asks for two approvals in hers and has one of them approved; bob then
+        # presents each id wherever a tool takes one. He is told, word for word, what an id no record answers to is
+        # told. A governed call in his own session answered "approval <id> does not belong to session session-2":
+        # that the id is an approval's, which the listing and the three decisions keep from him.
+        self.settings.autonomous_approvals = True
+        self.session.owner = "alice"
+        self._a_second_session("bob")
+        with acting_as(ALICE):
+            asked = await self.call("browser.execute_action", session_id=SESSION, action={**CLICK, "selector": "#p2"})
+            pending = asked.structuredContent["approval_id"]
+            _decision, approved = await self.approved_click()
+        in_his_own = {"session_id": ANOTHER_SESSION, "workflow_profile": "governed", "cookies": [COOKIE]}
+        calls = [(name, {}, "approval_id") for name in DECISION_TOOLS]
+        calls += [
+            ("browser.set_cookies", in_his_own, "approval_id"),
+            ("browser.set_cookies", in_his_own, "governed_approval_id"),
+            ("browser.execute_action", {"session_id": ANOTHER_SESSION, "action": CLICK}, "approval_id"),
+        ]
 
-        theirs = await self.call("browser.execute_approval", approval_id=approval_id)
-        unknown_one = await self.call("browser.execute_approval", approval_id=UNKNOWN)
+        with acting_as(BOB):
+            self.assertEqual((await self.call("browser.list_approvals")).structuredContent, [])
+            for name, arguments, presented_as in calls:
+                for state, approval_id in (("pending", pending), ("approved", approved)):
+                    with self.subTest(name, presented_as=presented_as, alices=state):
+                        theirs = await self.call(name, **arguments, **{presented_as: approval_id})
+                        unknown_one = await self.call(name, **arguments, **{presented_as: UNKNOWN})
 
-        self.assertTrue(theirs.isError)
-        self.assertEqual(theirs.content[0].text.replace(approval_id, UNKNOWN), unknown_one.content[0].text)
-        self.assertTrue(unknown_one.content[0].text.startswith(unknown()), unknown_one.content[0].text)
+                        told, told_of_no_record = theirs.content[0].text, unknown_one.content[0].text
+                        self.assertTrue(theirs.isError)
+                        self.assertEqual(told.replace(approval_id, UNKNOWN), told_of_no_record)
+                        self.assertTrue(told_of_no_record.startswith(unknown(presented_as=presented_as)))
+
+        with acting_as(ALICE):
+            self.assertEqual((await self.status(pending), await self.status(approved)), ("pending", "approved"))
+
+    async def test_the_callers_own_approval_presented_in_another_of_their_sessions_is_told_whose_it_is(self) -> None:
+        # Only a caller who may not use the approval is told nothing of it.
+        self.session.owner = "alice"
+        self._a_second_session("alice")
+        with acting_as(ALICE):
+            _decision, approval_id = await self.approved_click()
+
+            answer = await self.call(
+                "browser.execute_action", session_id=ANOTHER_SESSION, action=CLICK, approval_id=approval_id
+            )
+
+        self.assertTrue(answer.isError)
+        self.assertEqual(answer.content[0].text, f"approval {approval_id} does not belong to session {ANOTHER_SESSION}")
 
     async def test_another_missing_thing_keeps_its_own_words(self) -> None:
         # Only a KeyError that names the presented id is the approval's.

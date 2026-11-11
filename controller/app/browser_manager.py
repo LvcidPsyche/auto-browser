@@ -259,6 +259,7 @@ class BrowserManager:
             refuse_self_approval=self.settings.approval_refuse_self_approval_operator_ids,
             audit=self.audit,
             rejection_receipt=self.approval_service.rejection_receipt,
+            may_use=self.approval_service.may_use,
         )
         self.artifacts = SessionArtifactService(self.settings.artifact_root)
         self.download_capture = DownloadCaptureService(

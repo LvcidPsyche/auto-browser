@@ -807,7 +807,10 @@ All notable changes to auto-browser are documented here.
   of the three approval tools with white space round it (a pasted id with a line break after it) is told the same.
   It is an error as before (`isError`), nothing runs and nothing is recorded, an approval the caller may not use
   and a record that no longer validates read the same as one that does not exist, and the REST routes answer `404`
-  as they did.
+  as they did. Another operator's approval reads so where a call presents its id in a session of the caller's own
+  as well: that call was told `approval <id> does not belong to session <session>` (a REST action `403`), which
+  said that the id is an approval's, as the listing and the three approval tools do not. It is told what an unknown
+  id is told (a REST action `404`). A caller who may use the approval is still told that it is another session's.
 - **A network hook whose `url_pattern` is not a string is refused.** `POST /sessions/{id}/network/hooks` stored a
   number or a boolean as the pattern. Matching then raised for every request of the session that finished or
   failed (one DEBUG line each), so no hook registered after it was called again, and
