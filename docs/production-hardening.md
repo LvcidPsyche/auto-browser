@@ -114,7 +114,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - A button (`button`, an `input` of type `button`, `submit`, `image` or `reset`, `role=button`, or
     `role=menuitem`, which is a menu's command) asks for a kind's approval, as an honest label does, when one of
     its names starts, as whole words, with a phrase of that kind in `controller/app/browser/click_target.py`. An
-    element inside a button counts as the button, and so do a `label` for or around one, text a page slots into a
+    element inside a button counts as the button, and so do a `label` for or around one, a link inside a button or
+    a menu item (a menu whose items carry a URL keeps each item's text in a link), text a page slots into a
     component's button, and a component whose shadow tree puts all it is given into one button. A button's names
     are its `aria-label`, its visible text (with what a slot or a shadow root inside it shows), its `title`, an
     input's value or alt text, the text of its `label`, an `aria-label`, `title` or alt text on up to four
@@ -242,13 +243,13 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     button, Enter in a form field) or by a drag, and a `select`, whose option is chosen with no press
     (`select_option`); a clickable element that is not a button (a `div` with a handler and no role), one that
     chooses rather than commands (`role=option`, `tab`, `switch`, `menuitemradio`, `menuitemcheckbox`) and a link
-    ("How to delete your account" is an article); a button inside a closed shadow root, of which the read sees
-    only the component around it; a label given only by `aria-labelledby`, by an image with no alt text, or by
-    text that CSS or a canvas draws; look-alike characters (a Cyrillic "е" in "Delete"); and a page whose own
-    script falsifies the read of a selector's element, or where a script or a style in motion (an animation that
-    shows a button for a few milliseconds) changes what is under the pointer between the read at the press and the
-    press, which are one message to the browser apart. A page built for that can as well name its button
-    "Continue": the read answers text that steers the model, not a site that is itself hostile.
+    in no button or menu item ("How to delete your account" is an article); a button inside a closed shadow root,
+    of which the read sees only the component around it; a label given only by `aria-labelledby`, by an image with
+    no alt text, or by text that CSS or a canvas draws; look-alike characters (a Cyrillic "е" in "Delete"); and a
+    page whose own script falsifies the read of a selector's element, or where a script or a style in motion (an
+    animation that shows a button for a few milliseconds) changes what is under the pointer between the read at
+    the press and the press, which are one message to the browser apart. A page built for that can as well name
+    its button "Continue": the read answers text that steers the model, not a site that is itself hostile.
   - It asks more than it must where a harmless label starts with a phrase and no exception lists it: `Transfer
     files`, "Send feedback", "Pay monthly", "Buy again", "Post a job", a cart's "Remove item", "Deactivate dark
     mode", a `Post` tab that only opens a form, a counter ("1 Post"), a dash where a hyphen would have joined the

@@ -129,7 +129,11 @@ MENU = """<title>start</title>
     id="padded-word">Remove member</span></li>
   <li id="two" role="menuitem button" tabindex="-1" onclick="document.title='TWO'"><span
     id="two-word">Delete workspace</span></li>
+  <li id="linked" role="menuitem" tabindex="-1" onclick="document.title='LINKED'"><span><a id="link"
+    href="#linked">Delete project</a></span></li>
 </ul>
+<div id="tile" role="button" tabindex="0" onclick="document.title='TILE'"><a id="tile-link"
+  href="#tile">Remove member</a></div>
 """
 # A label for a button, and one around a button: a press on either is a press on the button, as HTML has it.
 LABELLED = """<title>start</title>
@@ -535,6 +539,24 @@ async def test_a_menu_item_is_read_as_a_button_is(tmp_path: Path) -> None:
         assert await _title(env, session_id) == "RENAMED"
         await env.manager.execute_decision(session_id, _click("read", selector="#choice"))
         assert await _title(env, session_id) == "CHOSEN"
+
+
+async def test_a_link_inside_a_menu_item_or_a_button_is_read_as_that_item(tmp_path: Path) -> None:
+    # The walk to the button stopped at the first link. A menu whose items carry a URL keeps each item's text in
+    # a link, and a press on that text is one on the item: named by the link, by its text or by a point on it,
+    # the item's "Delete project" was described as a link, which is not classified, and ran as labelled.
+    async with browser_env(tmp_path, {"/": MENU}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+
+        for link in ("#link", "#tile-link"):
+            for target in ({"selector": link}, await _centre(page.locator(link))):
+                with pytest.raises(ApprovalRequiredError) as asked:
+                    await env.manager.execute_decision(session_id, _click("read", **target))
+                assert asked.value.approval.kind == "destructive", (link, target)
+        with pytest.raises(ApprovalRequiredError):
+            await env.manager.execute_decision(session_id, _click("read", selector="text=Delete project"))
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_role_with_spaces_around_it_or_a_second_token_is_read_by_its_first(tmp_path: Path) -> None:

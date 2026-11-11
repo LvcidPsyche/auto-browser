@@ -382,7 +382,8 @@ _LOWER_CASE_WORD = re.compile(r"[a-z][a-z0-9]*")
 _MAX_SKIPPED_TOKENS = 2
 
 # (el, limit) => what a click on el lands on, or null. The element counts as the button, input or link it sits in,
-# as a click on it is one on them. Both reads below describe their element with it, so they cannot drift apart.
+# as a click on it is one on them, and a link as the button or menu item it sits in. Both reads below describe
+# their element with it, so they cannot drift apart.
 DESCRIBE_TARGET_SCRIPT = r"""
 (el, limit) => {
   if (!el || el.nodeType !== 1) return null;
@@ -401,6 +402,18 @@ DESCRIBE_TARGET_SCRIPT = r"""
     if (node.nodeType === 1 && isButton(node)) { target = node; break; }
     if (!label && node.nodeType === 1 && node.localName === 'label') label = node;
     node = node.assignedSlot || node.parentNode || node.host || null;
+  }
+  // A link in a button or in a menu item is that item's text (a menu whose items carry a URL), and a press on it
+  // is one on the item: from a link the walk goes on to the button or the menu item around it, if there is one.
+  if (target && target.localName === 'a' && !ROLES.includes(roleOf(target))) {
+    let node = target.assignedSlot || target.parentNode || target.host || null;
+    for (let steps = 0; node && steps < 256; steps += 1) {
+      if (node.nodeType === 1 && (node.localName === 'button' || ROLES.includes(roleOf(node)))) {
+        target = node;
+        break;
+      }
+      node = node.assignedSlot || node.parentNode || node.host || null;
+    }
   }
   // A press on a label is one on its control: a label for a button, or around one, is that button. The label is
   // looked for along the same walk: one that holds a component's glyph is outside the tree the glyph is in.
