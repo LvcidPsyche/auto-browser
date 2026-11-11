@@ -891,7 +891,15 @@ async def test_a_wrapper_with_no_box_of_its_own_is_refused_by_name_and_not_press
     # apart, it failed as any action does ("Action failed"), which told the agent nothing it could act on.
     async with browser_env(tmp_path, {"/": NO_BOX}) as env:
         session_id = await env.create("/")
-        assert await env.page(session_id).locator("#wrap").bounding_box() is None
+        page = env.page(session_id)
+        assert await page.locator("#wrap").bounding_box() is None
+        # The page tells such a wrapper from an element that is not shown, which has no box either and nothing
+        # inside it to name.
+        await page.evaluate("document.body.insertAdjacentHTML('beforeend', '<p id=gone hidden>x</p>')")
+        place = actions_module._PRESS_PLACE_SCRIPT
+        wrapper, gone = await page.locator("#wrap").evaluate(place), await page.locator("#gone").evaluate(place)
+        assert (wrapper["boxless"], wrapper["contents"]) == (True, True)
+        assert (gone["boxless"], gone["contents"]) == (True, False)
 
         for decision in (_click("read", selector="#wrap"), _type("write", selector="#wrap")):
             with pytest.raises(BrowserActionError) as refused:

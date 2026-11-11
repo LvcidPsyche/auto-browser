@@ -138,7 +138,7 @@ def _service(under_the_pointer: Any) -> tuple[BrowserActionService, SimpleNamesp
 
 BOX = {"x": 20, "y": 30, "width": 40, "height": 40}
 # Where the page says Playwright's click lands, from the corner of the padding box, and the border at that corner.
-PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False}
+PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False, "contents": False}
 PLACED_AT = (20 + 3 + 12.0, 30 + 2 + 7.0)
 
 
@@ -230,10 +230,19 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
 
         # A target with no box of its own has no point to count from: refused before the pointer is put anywhere.
         service, session, done = _service(CLOSE)
-        boxless = _locator(done, box=None, place={**PLACE, "boxless": True})
+        boxless = _locator(done, box=None, place={**PLACE, "boxless": True, "contents": True})
         with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as refused:
             await service.click_as_playwright_places_it(session, boxless)
         assert refused.value.code == "target_has_no_box"
+        assert done == CHECKS
+
+        # One that has no box because it is not shown any more (hidden after the checks passed) has none inside it
+        # to name either: it was told "Name an element inside it", not retryable. It has left, which is retryable.
+        service, session, done = _service(CLOSE)
+        hidden = _locator(done, box=None, place={**PLACE, "boxless": True, "contents": False})
+        with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as refused:
+            await service.click_as_playwright_places_it(session, hidden)
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
         assert done == CHECKS
 
 

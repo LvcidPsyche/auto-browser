@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 
 def _target_left_the_pointer() -> BrowserActionError:
-    """The target had no box any more once Playwright had put the pointer on it."""
+    """The target had no box any more once Playwright's checks had passed, or once it had put the pointer on it."""
     return BrowserActionError(
         "Nothing was pressed: the target left the page as the pointer reached it. Observe the page again and retry.",
         code="target_moved",
@@ -120,7 +120,8 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
 # size was the corner pixel of such a card), counted from the corner of its padding box, with the widths of the
 # border at that corner. Playwright presses a position where it is given, so the controller knows the point; the
 # point Playwright picks itself it cannot ask for.
-# ``boxless``: el has no box at all (display: contents), so there is no corner to count from.
+# ``boxless``: el has no box at all, so there is no corner to count from; ``contents``: because its children are
+# laid out in its place (display: contents), and not because it is not shown.
 _PRESS_PLACE_SCRIPT = """(el) => {
   const view = el.ownerDocument.defaultView;
   const style = view.getComputedStyle(el);
@@ -141,6 +142,7 @@ _PRESS_PLACE_SCRIPT = """(el) => {
     y: middle(first.top, first.bottom, view.innerHeight) - whole.top - border[1],
     border,
     boxless: boxes.length === 0,
+    contents: style.display === 'contents',
   };
 }"""
 
@@ -1146,7 +1148,9 @@ class BrowserActionService:
         await self._checks_of_a_click(locator, timeout_ms=timeout_ms)
         place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=timeout_ms)
         if place["boxless"]:
-            raise _target_has_no_box()
+            # Shown when the checks passed a moment ago, or they had not: one with no box now, and not for its
+            # children's sake, was hidden since. It has nothing inside it to name.
+            raise _target_has_no_box() if place["contents"] else _target_left_the_pointer()
         position = {"x": float(place["x"]), "y": float(place["y"])}
         await locator.hover(position=position, timeout=timeout_ms)
         box = await locator.bounding_box(timeout=timeout_ms)

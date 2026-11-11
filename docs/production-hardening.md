@@ -214,11 +214,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     the middle of its box (a wrapper wider than the viewport, a link broken over two lines, something over its
     middle), the click is one Playwright places, at a point it picks itself. For an action that is read,
     Playwright then only puts the pointer, at that point, which the controller gives it, and the press is the
-    controller's own, read where it lands as any other; a target that has left the page by then is not pressed
-    (`target_moved`, retryable), and neither is one with no box of its own, whose children are laid out in its
-    place (`display: contents`): where a press on it would land cannot be read, so the action answers
-    `target_has_no_box`, and the agent names an element inside it. This read has half a second to set up and half
-    a second to run; when it fails or runs past either, the press goes on, and an info-level log line says so.
+    controller's own, read where it lands as any other; a target that has left the page by then, or is no longer
+    shown, is not pressed (`target_moved`, retryable), and neither is one with no box of its own, whose children
+    are laid out in its place (`display: contents`): where a press on it would land cannot be read, so the action
+    answers `target_has_no_box`, and the agent names an element inside it. This read has half a second to set up
+    and half a second to run; when it fails or runs past either, the press goes on, and an info-level log line
+    says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as
