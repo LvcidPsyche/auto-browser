@@ -172,12 +172,31 @@ def job_not_found_text(job_id: str) -> str:
     return f"Cron job not found: {job_id}"
 
 
+# As CRON_STORE_UNREADABLE is: fixed and path-free.
+CRON_STORE_UNWRITABLE = (
+    "the cron store (CRON_STORE_PATH) holds a value the controller cannot write back, so no change to it is saved "
+    "until it is fixed. The server log has the cause and where the file is."
+)
+
+
 class CronStoreUnreadableError(RuntimeError):
     """The cron store could not be used; the text is the fixed CRON_STORE_UNREADABLE (REST answers it as 503)."""
 
+    _TEXT = CRON_STORE_UNREADABLE
+
     def __init__(self, *_args: object) -> None:
         # *_args: copy and pickle rebuild an exception from its args, which hold the fixed text.
-        super().__init__(CRON_STORE_UNREADABLE)
+        super().__init__(self._TEXT)
+
+
+class CronStoreUnwritableError(CronStoreUnreadableError):
+    """A save of the cron store failed in its JSON writer, on a value the reader took (CronService._save).
+
+    One of the unreadable store's errors, so that every caller of a save already handles it; its own fixed text is
+    CRON_STORE_UNWRITABLE.
+    """
+
+    _TEXT = CRON_STORE_UNWRITABLE
 
 
 class StoredWebhookKeyUnreadable(Exception):
@@ -268,7 +287,7 @@ class CronService:
                 return
             try:
                 self._save(jobs)
-            except OSError as exc:
+            except (CronStoreUnreadableError, OSError) as exc:
                 logger.error(
                     "cron store %s: %d job(s) still hold their webhook key in plaintext, as the store could not be "
                     "re-saved with their hashes: %s",
@@ -667,9 +686,7 @@ class CronService:
                     # be taken for the one before this fire.
                     record.pop(_REFUSAL_AUDITED, None)
                     self._save(jobs)
-        # RecursionError: a store holding a value the JSON reader took nested deeper than its writer goes, as some
-        # Pythons' do.
-        except (CronStoreUnreadableError, OSError, RecursionError) as exc:
+        except (CronStoreUnreadableError, OSError) as exc:
             logger.error("cron job %s: its run is queued, but the run's metadata could not be saved: %s", job_id, exc)
 
         return {
@@ -814,7 +831,7 @@ class CronService:
                     if record is not None:
                         record["last_status"] = status
                         self._save(jobs)
-        except (CronStoreUnreadableError, OSError, RecursionError) as exc:  # RecursionError: as _run_job_now's
+        except (CronStoreUnreadableError, OSError) as exc:
             logger.error("cron job %s: how run %s ended could not be saved: %s", job_id, agent_job_id, exc)
         finally:
             await self._release_run(job_id, session_id)
@@ -898,8 +915,27 @@ class CronService:
             logger.exception("cron store %s is unreadable (%s) and could not be quarantined", self._store_path, cause)
 
     def _save(self, data: dict[str, Any]) -> None:
+        """Write the store whole; one the JSON writer gives up on raises CronStoreUnwritableError, and stays as it was.
+
+        The reader takes what the writer cannot write: a value nested deeper than the writer goes (the reader of
+        Python 3.12 and later goes deeper than the writer, which recurses: RecursionError), and a run_count as long as
+        Python prints an integer, one digit too long once a run adds one (ValueError). Each failed every save of the
+        store until it was fixed, out of callers that did not take it. Raised here as one error, every caller meets
+        an error it handles: the start goes on, a route answers 503, a run already queued is answered as queued.
+        """
+        try:
+            text = json.dumps(data, indent=2)
+        except (RecursionError, ValueError) as exc:
+            logger.error(
+                "cron store %s holds a value its JSON writer cannot write (%s: %s), so it was not saved; it is saved "
+                "again once that value is fixed in the file",
+                self._store_path,
+                type(exc).__name__,
+                exc,
+            )
+            raise CronStoreUnwritableError from exc
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(self._store_path, json.dumps(data, indent=2), mode=PRIVATE_FILE_MODE)
+        atomic_write_text(self._store_path, text, mode=PRIVATE_FILE_MODE)
 
     @staticmethod
     def _read_stored_key(job: Any) -> str | None:

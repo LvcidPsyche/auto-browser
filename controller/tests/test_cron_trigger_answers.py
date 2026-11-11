@@ -40,6 +40,7 @@ from app.routes.operations import (
 )
 from app.tool_gateway.gateway import McpToolGateway
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
+from tests.test_cron_store_unwritable import _writer_gives_up
 from tests.test_cron_webhook_key import _service
 
 START_URL = "https://shop.example/start"
@@ -367,26 +368,25 @@ class CronRunMetadataTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_store_its_writer_cannot_go_down_is_logged_as_a_save_that_failed(self) -> None:
         # A value the JSON reader took nested deeper than its writer goes, which some Pythons have (a store edited by
-        # hand): the save's RecursionError is stood in for here, as the interpreter decides where it comes.
+        # hand): the writer's RecursionError is stood in for here, as the interpreter decides where it comes.
         job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
 
-        with (
-            patch.object(self.service, "_save", side_effect=RecursionError("maximum recursion depth exceeded")),
-            self.assertLogs("app.cron_service", level="ERROR") as logged,
-        ):
+        with _writer_gives_up(), self.assertLogs("app.cron_service", level="ERROR") as logged:
             response = await self._trigger(job)
 
         self.assert_answered_as_for_a_good_record(response, job["id"], 0)
         self.assertEqual(self._stored(job["id"])["run_count"], 0)
-        (line,) = [record.getMessage() for record in logged.records]
+        # The store's own line, with its path and what the writer raised, then the run's.
+        store_line, line = [record.getMessage() for record in logged.records]
+        self.assertIn("holds a value its JSON writer cannot write (RecursionError", store_line)
         self.assertTrue(line.startswith(f"cron job {job['id']}: its run is queued, but the run's metadata"), line)
 
     async def test_the_end_of_a_run_over_such_a_record_is_logged_and_its_session_released(self) -> None:
         # The run's finish callback writes how the run ended into the same record, and raised the same way.
         self.service.job_queue.store.get = AsyncMock(return_value=SimpleNamespace(status="completed"))
-        for cause, record, save_raises, logged_at in (
-            ("a record that is no object", ["not", "an", "object"], None, "WARNING"),
-            ("a store its writer cannot go down", None, RecursionError("maximum recursion depth exceeded"), "ERROR"),
+        for cause, record, writer_gives_up, logged_at in (
+            ("a record that is no object", ["not", "an", "object"], False, "WARNING"),
+            ("a store its writer cannot go down", None, True, "ERROR"),
         ):
             with self.subTest(cause):
                 job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
@@ -398,13 +398,14 @@ class CronRunMetadataTests(unittest.IsolatedAsyncioTestCase):
                 self.manager.close_session.reset_mock()
 
                 with (
-                    patch.object(self.service, "_save", side_effect=save_raises) if save_raises else nullcontext(),
+                    _writer_gives_up() if writer_gives_up else nullcontext(),
                     self.assertLogs("app.cron_service", level=logged_at) as logged,
                 ):
                     await self.service._finish_run(job["id"], "session-1", "agent-job-1")
 
-                self.assertEqual(len(logged.records), 1, [r.getMessage() for r in logged.records])
-                self.assertTrue(logged.records[0].getMessage().startswith(f"cron job {job['id']}: "))
+                # Where the writer gave up, its own line comes first.
+                self.assertEqual(len(logged.records), 1 + writer_gives_up, [r.getMessage() for r in logged.records])
+                self.assertTrue(logged.records[-1].getMessage().startswith(f"cron job {job['id']}: "))
                 self.assertEqual(self.store.read_bytes(), before)
                 self.manager.close_session.assert_awaited_once_with("session-1")
                 self.assertNotIn(job["id"], self.service._active_runs)

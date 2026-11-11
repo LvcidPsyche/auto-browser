@@ -858,6 +858,17 @@ All notable changes to auto-browser are documented here.
   try: such a count, and one that is `true` or a fraction, is now counted from 0 again, with a WARNING that names
   the job. A record that is no JSON object by then, and a store holding a value nested deeper than the JSON writer
   goes, are left as they are and logged, there and where the run's end is saved. (D7-6)
+- **Every save of a cron store its JSON writer cannot write back now fails with an error its caller handles.** The
+  JSON reader takes what the writer cannot write: a value nested deeper than the writer goes (the reader of Python
+  3.12 and later goes deeper than the writer), or a `run_count` of 4,300 digits, which a run makes one digit longer
+  than Python prints. The save raised `RecursionError` or `ValueError`: a store holding a legacy webhook key stopped
+  the controller's start, `POST /crons`, `DELETE /crons/{id}` and the webhook key's rotate and revoke answered an
+  unhandled `500`, a fire refused for its owner's credential raised, and a trigger whose run was queued answered
+  `500` for the long `run_count`. Now the start goes on, and logs that the keys are still in plaintext; a route
+  answers `503` with a fixed text, which says the store holds a value the controller cannot write back, and an MCP
+  tool answers the same text; the refused fire is answered as refused; and the trigger answers `triggered: true`.
+  One ERROR line names the store's path and what the writer raised, and the store stays as it was until that value
+  is fixed in the file.
 - **A cron job's `last_status` now says how its last run ended.** It stayed `queued` after the run was over. The agent
   job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
   when the job's record cannot say, also for a run that finishes while its trigger is still answering. `completed`

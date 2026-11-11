@@ -15,7 +15,7 @@ from ..approvals import CONTROLLER_SCOPE
 from ..auth_policy import is_bearer_exempt_path
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE, UNJUDGED_TAB_MESSAGE
-from ..cron_service import CRON_STORE_UNREADABLE, CronStoreUnreadableError
+from ..cron_service import CronStoreUnreadableError
 from ..proxy_personas import (
     PROXY_PERSONA_DUPLICATE_ENTRIES,
     PROXY_PERSONA_FILE_UNREADABLE,
@@ -104,11 +104,12 @@ def persona_file_errors() -> Iterator[None]:
 
 @contextmanager
 def cron_store_errors() -> Iterator[None]:
-    """Answer an unreadable cron store as 503 with its fixed text (the path stays in the log)."""
+    """Answer an unreadable cron store, or one that cannot be written back, as 503 with its fixed text (the path
+    stays in the log)."""
     try:
         yield
-    except CronStoreUnreadableError:
-        raise HTTPException(status_code=503, detail=CRON_STORE_UNREADABLE) from None
+    except CronStoreUnreadableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
 @contextmanager
