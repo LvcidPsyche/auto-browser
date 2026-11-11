@@ -143,17 +143,26 @@ PLACED_AT = (20 + 3 + 12.0, 30 + 2 + 7.0)
 
 
 def _locator(done: list[str], *, box: Any = BOX, place: dict[str, Any] = PLACE) -> SimpleNamespace:
+    budgets: dict[str, Any] = {}
+
     async def hover(**given: Any) -> None:
+        budgets["hover"] = given.get("timeout")
         done.append(f"hover at {given['position']}")
 
     async def click(**given: Any) -> None:
+        budgets["trial click" if given.get("trial") else "click"] = given.get("timeout")
         done.append("trial click" if given.get("trial") else "click")
 
-    async def evaluate(script: str, *_args: Any) -> Any:
+    async def evaluate(script: str, *_args: Any, **given: Any) -> Any:
         assert script == _PRESS_PLACE_SCRIPT
+        budgets["place"] = given.get("timeout")
         return place
 
-    return SimpleNamespace(hover=hover, click=click, evaluate=evaluate, bounding_box=AsyncMock(return_value=box))
+    async def bounding_box(**given: Any) -> Any:
+        budgets["box"] = given.get("timeout")
+        return box
+
+    return SimpleNamespace(hover=hover, click=click, evaluate=evaluate, bounding_box=bounding_box, budgets=budgets)
 
 
 async def test_the_mouse_does_not_go_down_on_a_button_nobody_was_asked_about() -> None:
@@ -202,6 +211,17 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
             await service.click_as_playwright_places_it(session, boxless)
         assert refused.value.code == "target_has_no_box"
         assert done == ["trial click"]
+
+
+async def test_every_step_of_a_placed_click_takes_the_clicks_own_budget() -> None:
+    # The read of the place and the read of the box had no bound of their own: under a short budget (a focus
+    # click's) a target that went away between two steps waited out Playwright's default instead.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, done = _service(CLOSE)
+        locator = _locator(done)
+        with reading_presses("click", "read", None):
+            await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
+    assert locator.budgets == {"trial click": 250, "place": 250, "hover": 250, "box": 250}
 
 
 async def test_a_target_with_no_box_once_the_pointer_is_on_it_is_not_pressed() -> None:

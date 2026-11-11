@@ -70,13 +70,13 @@ class FakeLocator:
     async def scroll_into_view_if_needed(self) -> None:
         return None
 
-    async def bounding_box(self):
+    async def bounding_box(self, **_given: Any):
         return self.box
 
     async def get_attribute(self, _name: str) -> None:
         return None
 
-    async def evaluate(self, script: str = "", *_args: Any) -> Any:
+    async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:
         if script == _PRESS_PLACE_SCRIPT:
             return {"x": 5.0, "y": 5.0, "border": [0, 0], "boxless": False}
         return True  # focus checks: the field has focus; the pointer check: the target is under it

@@ -1115,12 +1115,12 @@ class BrowserActionService:
             await locator.click(timeout=timeout_ms)
             return
         await locator.click(trial=True, timeout=timeout_ms)
-        place = await locator.evaluate(_PRESS_PLACE_SCRIPT)
+        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=timeout_ms)
         if place["boxless"]:
             raise _target_has_no_box()
         position = {"x": float(place["x"]), "y": float(place["y"])}
         await locator.hover(position=position, timeout=timeout_ms)
-        box = await locator.bounding_box()
+        box = await locator.bounding_box(timeout=timeout_ms)
         if not box:
             raise _target_left_the_pointer()
         # Where Playwright puts a position: the corner of the element's box, its border, the offset.
