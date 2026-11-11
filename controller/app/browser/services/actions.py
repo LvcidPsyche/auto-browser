@@ -181,10 +181,10 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
 # frame the place is counted from Playwright's box where that box is not the script's size. Of one size they
 # are one box (Playwright's holds the script's), and the script's own is the one to count from: it is read in
 # the run that picks the point, and Playwright's a round trip earlier, so a target the page moved between the
-# two was aimed at off by its move, and the hover waited the click's time out. (A link of several boxes in
-# something turned, moved in that round trip, still is, and so is a target whose corner a resize in it moves:
-# one shrunk about its middle.) In a frame the two boxes are in different
-# coordinates, and the place is counted from the script's own: such a link in a frame is a limit the docs name.
+# two was aimed at off by its move, and the hover waited the click's time out. ``counted``: the place is counted
+# from Playwright's box, which is then read again once the script has run (_place_of). In a frame the two boxes
+# are in different coordinates, and the place is counted from the script's own: such a link in a frame is a limit
+# the docs name.
 # In a frame the script sees what the frame shows of el, which is not what Playwright goes by: it cuts a box
 # by the screen alone, whatever a frame on the way cuts off, and the click's checks have just passed at that
 # point. So there it answers ``framed``, and is asked again with the size of the main frame's viewport as
@@ -210,9 +210,10 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
   let [wider, taller] = [1, 1];
   let corner = [whole.left, whole.top];
   const sized = (box) => Math.abs(box.width - whole.width) < 0.5 && Math.abs(box.height - whole.height) < 0.5;
-  if (seen && !framed) {
-    if (!sized(seen)) corner = [seen.x, seen.y];
-  } else if (seen && size && whole.width > 0 && whole.height > 0 && seen.width > 0 && seen.height > 0) {
+  const counted = Boolean(seen && !framed && !sized(seen));
+  if (counted) {
+    corner = [seen.x, seen.y];
+  } else if (seen && framed && size && whole.width > 0 && whole.height > 0 && seen.width > 0 && seen.height > 0) {
     [wider, taller] = [seen.width / whole.width, seen.height / whole.height];
     const across = (x) => whole.left + (x - seen.x) / wider, down = (y) => whole.top + (y - seen.y) / taller;
     [left, top, right, bottom] = [across(0), down(0), across(size[0]), down(size[1])];
@@ -231,12 +232,16 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
     boxless: boxes.length === 0,
     contents: style.display === 'contents',
     framed,
+    counted,
   };
 }"""
 
 # How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
 # 20 to 500 ms between its looks.
 ENABLED_POLL_SECONDS = 0.1
+# How many times a placed click counts its place again from a box the page changed while the place was read
+# (_place_of).
+PLACE_RECOUNTS = 2
 # What Playwright says of an element the page took out of the document while a step was waiting on it.
 _NOT_ATTACHED = "Element is not attached to the DOM"
 # The check that the pointer finds a target inside frames (_receives_pointer_at): how many documents it asks, the
@@ -1346,9 +1351,7 @@ class BrowserActionService:
             await locator.click(timeout=budget.left_ms())
             return
         await self._checks_of_a_click(locator, budget)
-        # The place is counted from the box Playwright finds for the target, as Playwright counts a position.
-        seen = await locator.bounding_box(timeout=budget.left_ms())
-        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, None], timeout=budget.left_ms())
+        seen, place = await self._place_of(locator, budget)
         if place["framed"] and seen and not place["boxless"]:
             # What the frame shows of the target is not what the screen shows of it: asked again with its size.
             size = await session.page.locator(":root").evaluate(
@@ -1379,6 +1382,30 @@ class BrowserActionService:
                 )
             raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)
+
+    @staticmethod
+    async def _place_of(locator: Any, budget: _Budget) -> tuple[Any, dict[str, Any]]:
+        """The box Playwright finds for the target, and the place to hover at, counted as Playwright counts one.
+
+        The box is read a round trip before the script that picks the place. A place counted from it
+        (``counted``: an element of several boxes in something turned, whose box is not the script's size) is
+        right only where that box still stood when the script ran. A target the page moved and resized in that
+        round trip has boxes of two sizes as well, and was aimed at off itself: Playwright's hover kept the offset
+        through every retry and waited the click's time out, where its own click pressed it. So the box is read
+        again, and the place counted again where it changed, PLACE_RECOUNTS times at most: a target that changes
+        at every read is hovered at the last place counted.
+        """
+        seen = await locator.bounding_box(timeout=budget.left_ms())
+        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, None], timeout=budget.left_ms())
+        for _ in range(PLACE_RECOUNTS):
+            if not place["counted"]:
+                break
+            again = await locator.bounding_box(timeout=budget.left_ms())
+            if again == seen:
+                break
+            seen = again
+            place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, None], timeout=budget.left_ms())
+        return seen, place
 
     @staticmethod
     async def _receives_pointer_at(

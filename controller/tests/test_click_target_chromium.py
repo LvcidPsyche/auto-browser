@@ -1712,6 +1712,66 @@ async def test_a_link_the_page_moves_while_its_place_is_read_is_pressed_where_it
         assert boxes == 2
 
 
+# What the page does to the target right after the placed click first reads its box, and what the target is.
+MOVED_AND_RESIZED = {
+    "a link moved with its first piece shrunk": (
+        TURNED_LINES.replace("TURN", "none"),
+        "#link",
+        "const block = document.querySelector('#block'); block.style.left = '440px'; "
+        "document.querySelector('#link span').style.width = '20px'",
+        "OPENED",
+    ),
+    "a button shrunk about its middle": (
+        "<!doctype html><title>start</title><body style='margin: 0'><button id='go' style='position: absolute; "
+        "left: 400px; top: 300px; width: 120px; height: 30px' onclick=\"document.title = 'PRESSED'\">Go</button>",
+        "#go",
+        "const go = document.querySelector('#go'); go.style.left = '440px'; go.style.width = '40px'",
+        "PRESSED",
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(MOVED_AND_RESIZED))
+async def test_a_target_the_page_moves_and_resizes_while_its_place_is_read_is_pressed_where_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    # Where Playwright's box is not the script's size, the place is counted from Playwright's box, read a round
+    # trip before the script. A target the page moved and resized in that round trip has boxes of two sizes as
+    # well, and was aimed at off itself: Playwright's hover kept that offset through every retry and waited the
+    # click's time out, where Playwright's own click pressed it. The box is read again after the script, and the
+    # place counted again where it changed. The placed path is taken for each shape, the button's too.
+    page, selector, change, pressed = MOVED_AND_RESIZED[shape]
+    placing = False
+    boxes = 0
+    real_place = actions_module.BrowserActionService.click_as_playwright_places_it
+    real_box = Locator.bounding_box
+
+    async def placed_at_once(self: Any, session: Any, locator: Any, coords: Any, **named: Any) -> None:
+        nonlocal placing
+        placing = True
+        try:
+            await real_place(self, session, locator, **named)
+        finally:
+            placing = False
+
+    async def a_box_and_then_a_change(self: Any, *given: Any, **named: Any) -> Any:
+        nonlocal boxes
+        box = await real_box(self, *given, **named)
+        if placing:
+            boxes += 1
+            if boxes == 1:
+                await self.page.evaluate(f"() => {{ {change}; }}")
+        return box
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "click_locator_human_like", placed_at_once)
+    monkeypatch.setattr(Locator, "bounding_box", a_box_and_then_a_change)
+    async with browser_env(tmp_path, {"/": page}) as env:
+        session_id = await env.create("/")
+        await env.manager.execute_decision(session_id, _click("read", selector=selector))
+        assert await _title(env, session_id) == pressed
+        assert boxes >= 3  # the box the move was made after, the box read again, the box the pointer is moved by
+
+
 async def test_the_place_is_counted_from_playwrights_box_only_where_its_size_is_not_the_scripts(
     tmp_path: Path,
 ) -> None:

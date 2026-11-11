@@ -34,8 +34,10 @@ from app.browser.services.actions import (
     _PRESS_PLACE_SCRIPT,
     _RECEIVES_POINTER_SCRIPT,
     ENABLED_POLL_SECONDS,
+    PLACE_RECOUNTS,
     POINTER_CHECK_TIMEOUT_MS,
     BrowserActionService,
+    _Budget,
 )
 
 DELETE = {"tag": "button", "type": "submit", "role": "", "submits": False, "labels": ["", "Delete account"]}
@@ -146,7 +148,7 @@ def _service(under_the_pointer: Any) -> tuple[BrowserActionService, SimpleNamesp
 
 BOX = {"x": 20, "y": 30, "width": 40, "height": 40}
 # Where the page says Playwright's click lands, from the corner of the padding box, and the border at that corner.
-PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False, "contents": False, "framed": False}
+PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False, "contents": False, "framed": False, "counted": False}
 PLACED_AT = (20 + 3 + 12.0, 30 + 2 + 7.0)
 
 
@@ -506,3 +508,41 @@ async def test_only_the_target_of_a_placed_click_is_asked_as_the_button_or_link_
         ("the inner frame", False),
         ("the outer frame", False),
     ]
+
+
+async def test_a_place_counted_from_a_box_that_changes_at_every_read_is_counted_again_a_bounded_number_of_times() -> (
+    None
+):
+    # Counted from Playwright's box, the place is counted again where that box changed while the script ran. A
+    # target the page changes at every read (an animation) is not waited on: the last place counted is hovered at.
+    boxes = iter({"x": float(n), "y": 0.0, "width": 10.0, "height": 10.0} for n in range(100))
+    counts: list[Any] = []
+
+    async def bounding_box(**_given: Any) -> Any:
+        return next(boxes)
+
+    async def evaluate(script: str, given: list[Any], **_named: Any) -> dict[str, Any]:
+        assert script == _PRESS_PLACE_SCRIPT
+        counts.append(given[0]["x"])
+        return {**PLACE, "counted": True}
+
+    locator = SimpleNamespace(bounding_box=bounding_box, evaluate=evaluate)
+    seen, place = await BrowserActionService._place_of(locator, _Budget(5000))
+
+    assert counts == [float(n) for n in range(PLACE_RECOUNTS + 1)]
+    assert seen["x"] == PLACE_RECOUNTS and place["counted"] is True
+
+
+async def test_a_place_counted_from_a_box_that_stood_is_counted_once() -> None:
+    reads: list[str] = []
+
+    async def bounding_box(**_given: Any) -> Any:
+        reads.append("box")
+        return {"x": 1.0, "y": 2.0, "width": 10.0, "height": 10.0}
+
+    async def evaluate(script: str, given: list[Any], **_named: Any) -> dict[str, Any]:
+        reads.append("place")
+        return {**PLACE, "counted": True}
+
+    await BrowserActionService._place_of(SimpleNamespace(bounding_box=bounding_box, evaluate=evaluate), _Budget(5000))
+    assert reads == ["box", "place", "box"]
