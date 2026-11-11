@@ -120,6 +120,9 @@ class ClassifiedRiskTests(unittest.TestCase):
         self.assertEqual(classified_risk(button("Send", tag="div", type="", role="menuitem"), "write"), "post")
         self.assertIsNone(classified_risk(button("Rename", tag="li", type="", role="menuitem"), "read"))
         # What chooses or switches is not a command: a billing period, a list's option, a tab.
+        # The page's walk to the button knows the same roles: it is given them as a list of its own.
+        listed = ", ".join(f"'{role}'" for role in sorted(click_target._BUTTON_ROLES))
+        self.assertIn(f"const ROLES = [{listed}];", click_target.DESCRIBE_TARGET_SCRIPT)
         for role in ("menuitemradio", "menuitemcheckbox", "option", "tab", "switch"):
             with self.subTest(role=role):
                 self.assertIsNone(classified_risk(button("Pay monthly", tag="li", type="", role=role), "read"))

@@ -125,6 +125,10 @@ MENU = """<title>start</title>
   <li id="item" role="menuitem" tabindex="-1" onclick="document.title='DELETED'"><span id="word">Delete
     account</span></li>
   <li id="choice" role="menuitemradio" tabindex="-1" onclick="document.title='CHOSEN'">Pay monthly</li>
+  <li id="padded" role=" MenuItem " tabindex="-1" onclick="document.title='PADDED'"><span
+    id="padded-word">Remove member</span></li>
+  <li id="two" role="menuitem button" tabindex="-1" onclick="document.title='TWO'"><span
+    id="two-word">Delete workspace</span></li>
 </ul>
 """
 # A label for a button, and one around a button: a press on either is a press on the button, as HTML has it.
@@ -496,6 +500,22 @@ async def test_a_menu_item_is_read_as_a_button_is(tmp_path: Path) -> None:
         assert await _title(env, session_id) == "RENAMED"
         await env.manager.execute_decision(session_id, _click("read", selector="#choice"))
         assert await _title(env, session_id) == "CHOSEN"
+
+
+async def test_a_role_with_spaces_around_it_or_a_second_token_is_read_by_its_first(tmp_path: Path) -> None:
+    # The walk to the button matched the role attribute's whole text, and the answer takes its first token: the
+    # text inside role="menuitem button", or inside a role with spaces around it, was described itself, no
+    # button, and its press ran as labelled. Named by the item, the same click asked.
+    async with browser_env(tmp_path, {"/": MENU}) as env:
+        session_id = await env.create("/")
+
+        for item, word in (("#padded", "#padded-word"), ("#two", "#two-word")):
+            point = await _centre(env.page(session_id).locator(word))
+            for target in ({"selector": item}, {"selector": word}, point):
+                with pytest.raises(ApprovalRequiredError) as asked:
+                    await env.manager.execute_decision(session_id, _click("read", **target))
+                assert asked.value.approval.kind == "destructive", target
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that_name(tmp_path: Path) -> None:

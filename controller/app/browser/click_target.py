@@ -389,11 +389,15 @@ DESCRIBE_TARGET_SCRIPT = r"""
   // (the glyph of an icon component sits in the button its host sits in), and from what a page slots into a
   // component to the slot's place in that component's tree (a design system's button is a shadow button around
   // a slot). closest() sees neither.
-  const BUTTONS = 'button, input, [role="button" i], [role="menuitem" i], a[href]';
+  // A role is its first token, whatever its case and the spaces around it, here as in the answer below: matched
+  // as the attribute's whole text, the text inside role="menuitem button" was described itself, no button.
+  const ROLES = ['button', 'menuitem'];
+  const roleOf = (node) => (node.getAttribute('role') || '').trim().split(/\s+/)[0].toLowerCase();
+  const isButton = (node) => node.matches('button, input, a[href]') || ROLES.includes(roleOf(node));
   let target = null;
   let label = null;
   for (let node = el, steps = 0; node && steps < 256; steps += 1) {
-    if (node.nodeType === 1 && node.matches(BUTTONS)) { target = node; break; }
+    if (node.nodeType === 1 && isButton(node)) { target = node; break; }
     if (!label && node.nodeType === 1 && node.localName === 'label') label = node;
     node = node.assignedSlot || node.parentNode || node.host || null;
   }
@@ -410,7 +414,7 @@ DESCRIBE_TARGET_SCRIPT = r"""
     for (const child of given.length <= 64 ? given : []) {
       let found = null;
       for (let node = child.assignedSlot, steps = 0; node && node.nodeType === 1 && steps < 256; steps += 1) {
-        if (node.matches(BUTTONS)) { found = node; break; }
+        if (isButton(node)) { found = node; break; }
         node = node.assignedSlot || node.parentNode;
       }
       if (!found || (inner && inner !== found)) { inner = null; break; }
@@ -421,7 +425,7 @@ DESCRIBE_TARGET_SCRIPT = r"""
   target = target || el;
   const tag = target.localName;
   const type = tag === 'button' || tag === 'input' ? String(target.type || '').toLowerCase() : '';
-  const role = (target.getAttribute('role') || '').trim().split(/\s+/)[0].toLowerCase();
+  const role = roleOf(target);
   const submits = (tag === 'button' && type === 'submit')
     || (tag === 'input' && (type === 'submit' || type === 'image'));
   const cut = (value) => (typeof value === 'string' ? value.slice(0, limit) : '');
