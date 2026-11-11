@@ -444,7 +444,10 @@ All notable changes to auto-browser are documented here.
   at ERROR with the tool and the session, whatever the error's class. `browser.set_cookies` also refuses a cookie
   with a lone surrogate in any of its strings before anything reaches the browser, as `browser.set_local_storage`
   refuses one in its key or value: Chromium stored such a cookie with U+FFFD in the surrogate's place, and a good
-  cookie sent in the same call with it.
+  cookie sent in the same call with it. Two keys of one object that differ only in a lone surrogate take one name
+  once it is replaced, and one of their values was dropped from the audit event, the witness receipt or the answer
+  that held them. Both are now kept: the key whose name is taken gets ` (2)` appended (` (3)` and so on), and a key
+  that needed no replacement keeps its name.
 - **A harness run no longer fails on a lone surrogate.** `harness.start_convergence` takes two values its input does
   not type, the contract's `metadata` and `mock_final_observation`. A lone surrogate in a metadata value failed the
   call with the serializer's error and left the run's empty directory behind. One in the mock observation, or in an

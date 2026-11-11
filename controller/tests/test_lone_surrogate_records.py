@@ -27,11 +27,13 @@ from app.harness.iterate import HarnessService
 from app.harness.trace import TraceEnvelope
 from app.models import AgentJobCheckpoint, OperatorIdentity, SessionRecord
 from app.session_store import FileSessionStore
-from app.utils import utc_now
+from app.utils import utc_now, without_lone_surrogates
 
 # A lone surrogate, as a JSON "\ud800" escape decodes to: UTF-8 cannot encode it.
 LONE = "\ud800"
 REPLACED = "�"
+# Another lone surrogate (a low one): a key holding it differs from one holding LONE only until both are replaced.
+OTHER_LONE = chr(0xDC00)
 
 
 class _Tmp(unittest.IsolatedAsyncioTestCase):
@@ -246,3 +248,49 @@ class SessionEventStreamTests(unittest.IsolatedAsyncioTestCase):
             payload.encode("utf-8")
             self.assertNotIn("\\ud800", payload)
             self.assertEqual(json.loads(payload)["title"], f"Sale{REPLACED}today")
+
+
+class KeysThatMeetTests(_Tmp):
+    """Two keys that differ only in a lone surrogate take one name once it is replaced: neither value is dropped."""
+
+    def test_a_changed_key_whose_name_is_taken_is_kept_under_a_numbered_name(self) -> None:
+        # The key that needed no change keeps its name, wherever among them it stands.
+        cleaned = without_lone_surrogates({LONE: 1, REPLACED: 2, OTHER_LONE: 3})
+
+        self.assertEqual(list(cleaned.items()), [(f"{REPLACED} (2)", 1), (REPLACED, 2), (f"{REPLACED} (3)", 3)])
+
+    def test_two_changed_keys_that_meet_keep_the_first_ones_name_plain(self) -> None:
+        cleaned = without_lone_surrogates({f"a{LONE}": 1, f"a{OTHER_LONE}": 2, "b": 3})
+
+        self.assertEqual(list(cleaned.items()), [(f"a{REPLACED}", 1), (f"a{REPLACED} (2)", 2), ("b", 3)])
+
+    def test_a_numbered_name_that_is_taken_too_is_passed_over(self) -> None:
+        cleaned = without_lone_surrogates({f"k{LONE}": 1, f"k{REPLACED}": 2, f"k{REPLACED} (2)": 3})
+
+        self.assertEqual(cleaned, {f"k{REPLACED} (3)": 1, f"k{REPLACED}": 2, f"k{REPLACED} (2)": 3})
+
+    def test_keys_that_meet_deeper_down_are_kept_and_what_they_hold_is_cleaned(self) -> None:
+        cleaned = without_lone_surrogates({"outer": [{f"a{LONE}": LONE, f"a{OTHER_LONE}": {"deep": [LONE]}}]})
+
+        self.assertEqual(cleaned, {"outer": [{f"a{REPLACED}": REPLACED, f"a{REPLACED} (2)": {"deep": [REPLACED]}}]})
+
+    def test_keys_that_do_not_meet_come_back_under_the_names_they_had(self) -> None:
+        value = {f"b{LONE}": 1, "a": 2, f"c{LONE}": [LONE], 3: "x", None: "y", "a (2)": 4}
+
+        cleaned = without_lone_surrogates(value)
+
+        self.assertEqual(
+            list(cleaned.items()),
+            [(f"b{REPLACED}", 1), ("a", 2), (f"c{REPLACED}", [REPLACED]), (3, "x"), (None, "y"), ("a (2)", 4)],
+        )
+
+    async def test_an_audit_event_whose_details_hold_such_keys_keeps_every_value(self) -> None:
+        store = AuditStore(self.root / "audit")
+        await store.startup()
+
+        await store.append(
+            event_type="browser_action", status="ok", session_id="s1", details={LONE: 1, REPLACED: 2, OTHER_LONE: 3}
+        )
+
+        (stored,) = await store.list(limit=10)
+        self.assertEqual(stored.details, {f"{REPLACED} (2)": 1, REPLACED: 2, f"{REPLACED} (3)": 3})

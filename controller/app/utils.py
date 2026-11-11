@@ -111,14 +111,37 @@ def without_lone_surrogates(value: Any) -> Any:
 
     For a record about to be written as UTF-8 (a JSONL line, a witness receipt): a string holding one
     could not be encoded, so the write failed after the action it records had run.
+
+    Two keys of one dict that differ only in a lone surrogate take the same name once it is replaced, and one
+    value would go with the other's key. Neither is dropped: a key that needed no change keeps its name, and a
+    changed key whose name is taken (by such a key, or by a changed key before it) gets " (2)" appended, or
+    " (3)" and so on, the first that is free. A dict whose keys do not meet comes back under the names it had.
     """
     if isinstance(value, str):
         return _LONE_SURROGATE.sub("\ufffd", value)
     if isinstance(value, dict):
-        return {without_lone_surrogates(key): without_lone_surrogates(item) for key, item in value.items()}
+        cleaned = {without_lone_surrogates(key): without_lone_surrogates(item) for key, item in value.items()}
+        # Fewer keys than it had: the replacement gave two of them one name.
+        return cleaned if len(cleaned) == len(value) else _with_no_key_lost(value)
     if isinstance(value, list | tuple):
         return [without_lone_surrogates(item) for item in value]
     return value
+
+
+def _with_no_key_lost(value: dict[Any, Any]) -> dict[Any, Any]:
+    """What without_lone_surrogates returns for a dict whose keys meet once the replacement is made (see there)."""
+    names = {key: without_lone_surrogates(key) for key in value}
+    taken = {name for key, name in names.items() if name == key}
+    cleaned: dict[Any, Any] = {}
+    for key, item in value.items():
+        name = wanted = names[key]
+        number = 1
+        while name != key and name in taken:
+            number += 1
+            name = f"{wanted} ({number})"
+        taken.add(name)
+        cleaned[name] = without_lone_surrogates(item)
+    return cleaned
 
 
 def holds_lone_surrogate(value: Any) -> bool:
