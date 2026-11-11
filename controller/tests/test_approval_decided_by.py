@@ -343,6 +343,88 @@ class ListedOperatorTests(unittest.TestCase):
         for secret in (named, shared, "f" * 20, "g" * 20):
             self.assertNotIn(secret, warnings[0])
 
+    # Tokens with no run of characters in common, in mixed case, so that one in upper case is another string.
+    A, B = "k3Jx9mQ2vT7pL5wR8nZ4cF6hB1dG0sYuAeIoXtNq", "P8rW2yH5jK9bV3mC7xD1fS4gL6zQ0nTaEiOuMpRk"
+    WITH_COLON = "f4Gh7Jk2Lm9Np3Qr5St8:g5Vw1Xy6Zb4Cd0Ef2Hj7"
+    WITH_COMMA = "s3Kd8Fj2Lq7Wp5Zx1Cv9,t7Bn4Mh6Gy0Ru3Te8Ia2"
+    WITH_BOTH = "s3Kd8Fj2Lq:x5Zc1Vb9Nm,t7Bn4Mh6Gy0Ru3Te8Ia2"
+    NAMED = f"alice:{A},bob:{B}"
+    NAMED_WITH_COLON = f"alice:{A},bob:{WITH_COLON}"
+    PRINTS_NOTHING = "of this deployment's bearer tokens, whole or in part (not printed)"
+    # A row: what is listed, API_BEARER_TOKENS, API_BEARER_TOKEN, and a text each warning holds, in their order.
+    # Where an entry is not exactly a token, each of these wrote a token, or a part of one, to the log.
+    SHAPES = {
+        "a token alone": (A, NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token after Bearer": (f"Bearer {A}", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "two tokens and a space": (f"{A} {B}", NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
+        "two tokens and a semicolon": (f"{A};{B}", NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
+        "pairs written with =": (f"alice={A},bob={B}", NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
+        "the list in double quotes": (f'"{A},{B}"', NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
+        "a token in single quotes": (f"'{A}'", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token and one character more": (f"{A}x", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token cut short by one": (A[:-1], NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token cut short, after a stray quote": ('"' + A[:-1], NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token in upper case": (A.upper(), NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        # The list is split at commas and the shared token is not: its halves are two entries, and one token.
+        "a shared token that holds a comma": (WITH_COMMA, NAMED, WITH_COMMA, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a shared token that holds a comma and a colon": (WITH_BOTH, NAMED, WITH_BOTH, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token that holds a colon": (WITH_COLON, NAMED_WITH_COLON, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "Bearer and a token that holds a colon": (
+            f"Bearer {WITH_COLON}",
+            NAMED_WITH_COLON,
+            None,
+            [f"lists 1 {PRINTS_NOTHING}"],
+        ),
+        "a token that holds a colon, and more after another": (
+            f"{WITH_COLON}:x",
+            NAMED_WITH_COLON,
+            None,
+            [f"lists 1 {PRINTS_NOTHING}"],
+        ),
+        "the first half of such a token before another colon": (
+            f"{WITH_COLON[:20]}:zzz",
+            NAMED_WITH_COLON,
+            None,
+            [f"lists 1 {PRINTS_NOTHING}"],
+        ),
+        "a pair the wrong way round": (f"{A}:alice", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "one token twice, alone and before a colon": (f"{A},{A}:x", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        # What a start still names: an id, and the id of a pasted pair.
+        "the list pasted whole": (NAMED, NAMED, None, ["begins 'alice:'", "begins 'bob:'"]),
+        "an id nobody proves": ("carol", NAMED, None, ["lists 'carol', which no credential"]),
+        "an id that differs by case": ("Alice", NAMED, None, ["It differs from 'alice' only by case"]),
+        "a short id that stands inside a token": (A[5:10], NAMED, None, [f"lists '{A[5:10]}', which no credential"]),
+    }
+
+    def test_no_warning_holds_eight_characters_in_a_row_of_a_token(self) -> None:
+        for shape, (listed, named, shared, expected) in self.SHAPES.items():
+            with self.subTest(shape=shape):
+                warnings = self._warnings(listed, tokens=named, shared=shared)
+
+                self.assertEqual(len(warnings), len(expected), warnings)
+                for warning, text in zip(warnings, expected, strict=True):
+                    self.assertIn(text, warning)
+                tokens = [pair.partition(":")[2] for pair in named.split(",")] + ([shared] if shared else [])
+                for token in tokens:
+                    for start in range(len(token) - 7):
+                        self.assertNotIn(token[start : start + 8], "\n".join(warnings), (token, warnings))
+                    self.assertNotIn(token.upper()[:8], "\n".join(warnings).upper(), (token, warnings))
+
+    def test_an_id_its_own_token_begins_with_is_still_named(self) -> None:
+        # An operator id of API_BEARER_TOKENS is no secret, though ten characters of a token are that id: a slip of
+        # case in it is still hinted, and the list pasted whole is still named by its ids.
+        tokens = f"alice-prod:alice-prod-{self.A}"
+
+        [slip] = self._warnings("Alice-Prod", tokens=tokens)
+        [pasted] = self._warnings(tokens, tokens=tokens)
+
+        self.assertIn("lists 'Alice-Prod'", slip)
+        self.assertIn("It differs from 'alice-prod' only by case", slip)
+        self.assertIn("begins 'alice-prod:'", pasted)
+        for warning in (slip, pasted):
+            for start in range(len(self.A) - 7):
+                self.assertNotIn(self.A[start : start + 8], warning)
+
 
 class FakePage:
     url = "https://example.com"

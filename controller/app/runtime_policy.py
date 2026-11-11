@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
-from typing import Sequence
+from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
 from .auth_policy import (
@@ -37,6 +37,13 @@ MIN_PRODUCTION_BEARER_TOKEN_LENGTH = 32
 # An invalid *_AUTH_MODE is quoted in the error up to this length. The longest mode is "host_bridge": a longer value
 # is no mistyped mode, and may be the provider's API key set on the wrong line, which a refused start would log.
 MAX_AUTH_MODE_QUOTED = 16
+
+# An entry of APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS with this many characters in a row of a bearer token of the
+# deployment is taken for the token, or a part of it, and is not printed. Eight: a quarter of the shortest token
+# production accepts, and long enough that an operator's id does not stand in a token by chance. At two or three
+# characters it does (an id of two hexadecimal digits stands in one 40-digit token in seven), and the warning
+# would then hide the very id it is there to name.
+MIN_TOKEN_RUN_NOT_PRINTED = 8
 
 CLI_PROVIDER_CHECKS = (
     {
@@ -229,25 +236,55 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
         report.errors.append(str(exc))
 
 
+def _tokens_shown_by(text: str, tokens: Iterable[str], *, in_part: bool) -> set[str]:
+    """The tokens that printing ``text`` would show: each that occurs in it and, with ``in_part``, each that has
+    MIN_TOKEN_RUN_NOT_PRINTED characters in a row in common with it. Compared without regard to case: a token of
+    hexadecimal digits in upper case is the same secret.
+    """
+    folded = text.casefold()
+    runs = {
+        folded[start : start + MIN_TOKEN_RUN_NOT_PRINTED]
+        for start in range(len(folded) - MIN_TOKEN_RUN_NOT_PRINTED + 1)
+    }
+    shown: set[str] = set()
+    for token in tokens:
+        token_folded = token.casefold()
+        token_runs = range(len(token_folded) - MIN_TOKEN_RUN_NOT_PRINTED + 1)
+        if token_folded in folded:
+            shown.add(token)
+        elif in_part and any(token_folded[start : start + MIN_TOKEN_RUN_NOT_PRINTED] in runs for start in token_runs):
+            shown.add(token)
+    return shown
+
+
 def _warn_listed_operators_no_credential_proves(settings: Settings, report: RuntimePolicyReport) -> None:
     """APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS is compared to the proven operator id exactly (ApprovalStore), so a
     listed id that no named credential proves refuses nobody, and nothing else would say so.
 
     The warnings go to the log, and an entry can be a secret in the wrong place: API_BEARER_TOKENS pasted whole
-    (id:token pairs), or a token alone. Nothing after an entry's colon is printed, and no token of this deployment.
+    (id:token pairs), a token alone, or a token with something round it (Bearer, a quote, alice=) or cut short.
+    Nothing after an entry's colon is printed. What would be printed, the entry or the text before its colon, is
+    printed only when it shows no token of this deployment, whole or in part (_tokens_shown_by): decided by what
+    it contains, since an entry that is a token and one character more is no token by equality.
     """
     credentials = credentials_for(settings)
     named = {credential.operator_id for credential in credentials if credential.operator_id}
+    named_whatever_the_case = {name.casefold() for name in named}
     tokens = {credential.token for credential in credentials}
     pairs: set[str] = set()
-    listed_tokens = 0
+    # The tokens, not the entries: one listed twice (alone, and before a colon) is one token.
+    listed_tokens: set[str] = set()
     for listed in sorted(settings.approval_refuse_self_approval_operator_ids):
         if credential_names_operator(settings, listed):
             continue
         # An operator id holds no colon: parse_operator_tokens splits an entry at its first one.
         before_colon = listed.partition(":")[0].strip()
-        if listed in tokens or before_colon in tokens:
-            listed_tokens += 1
+        printed = before_colon if ":" in listed else listed
+        # An operator id of API_BEARER_TOKENS, in whatever case, is no secret, though a token may begin with it
+        # (alice-prod:alice-prod-9f8a...): only a whole token in it keeps it out of the log.
+        shown = _tokens_shown_by(printed, tokens, in_part=printed.casefold() not in named_whatever_the_case)
+        if shown:
+            listed_tokens |= shown
             continue
         if ":" in listed:
             pairs.add(before_colon)
@@ -272,8 +309,8 @@ def _warn_listed_operators_no_credential_proves(settings: Settings, report: Runt
         )
     if listed_tokens:
         report.warnings.append(
-            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {listed_tokens} of this deployment's bearer tokens (not "
-            "printed) where it takes operator ids: a token there refuses nobody"
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {len(listed_tokens)} of this deployment's bearer tokens, "
+            "whole or in part (not printed), where it takes operator ids: an entry that holds one refuses nobody"
         )
 
 

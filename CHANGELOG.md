@@ -332,9 +332,11 @@ All notable changes to auto-browser are documented here.
   Another operator can approve it only where one can reach it, in a session nobody owns: in a session the asker
   owns, and in controller scope, it stays pending, so list only operators whose calls run in unowned sessions.
   A listed id is compared to the operator's id exactly, case included: one that no credential in
-  `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id (an entry with a
-  colon only up to it, and a bearer token of the deployment not at all: the list takes ids alone) and says when it
-  differs from a credential's only by case. (AUTH-36)
+  `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id and says when it
+  differs from a credential's only by case. The list takes ids alone, and a secret set there by mistake is not
+  written to the log: an entry with a colon is named only up to it, and an entry is counted and not printed when
+  what would be printed holds a bearer token of the deployment, or eight characters in a row of one, in whatever
+  case (a token after `Bearer` or `alice=`, in quotes, with a character too many or cut short). (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read`,
   `write` or `upload` asked for no approval, and that label is written by a model reading the page, which text on
   the page can steer. Before the approval decision the target of such a click is now read, found as the click will
