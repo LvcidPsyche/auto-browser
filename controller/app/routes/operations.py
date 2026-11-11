@@ -12,7 +12,7 @@ from ..approvals import ServerStateRefusal
 from ..auth_state import AuthStateDecryptError
 from ..browser.services.auth_profiles import UncheckedAuthProfileError
 from ..browser.services.session_creation import SessionLimitError
-from ..cron_service import CronJobDisabledError
+from ..cron_service import CronJobDisabledError, WebhookKeyRefusedError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
 from ._utils import (
@@ -42,6 +42,13 @@ CRON_TRIGGER_SESSION_LIMIT_DETAIL = (
 CRON_TRIGGER_AUTH_PROFILE_DETAIL = (
     "The job's run could not start: its auth profile does not exist, or the job's owner may not open it. Save the "
     "profile as the job's owner, or delete the job and create it again with another profile."
+)
+# With the key proved, anything else the run's start refuses: its session (an auth state too old or not encrypted,
+# a start_url ALLOWED_HOSTS no longer lists) or the job as it is stored. The caller holds a webhook key, not the
+# operator's token, so the text names nothing of the cause: no host, no age, no setting. The log has it.
+CRON_TRIGGER_RUN_REFUSED_DETAIL = (
+    "The job's run could not start: the controller refused its session, or the job as it is stored. The webhook "
+    "key was accepted; the server log names the cause."
 )
 
 
@@ -243,22 +250,33 @@ def create_operations_router(
             # The path names the job; a job_id in the body must not redirect the
             # trigger to a different one.
             payload = TriggerCronJobInput.model_validate({**body, "job_id": job_id})
+        except (ValidationError, ValueError) as exc:
+            # The body's webhook key is never in the line: a model's refusal is logged by field and kind.
+            log_hidden_cause(logger, 400, exc, "cron trigger failed for job %s", job_id)
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+        # The body is the caller's, and is judged above. From here on the service reads the cron store and refuses the
+        # key before it does anything else: whatever else is raised comes with the key proved, and no mistake of the
+        # caller's put it there.
+        try:
             # The run's session reads the job's proxy persona.
             with cron_store_errors(), persona_file_errors():
                 return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Not found") from None
-        except UncheckedAuthProfileError:
-            # Raised where the run's session opens the job's profile, so the key is proved: not the 403 below.
-            raise HTTPException(status_code=409, detail=CRON_TRIGGER_AUTH_PROFILE_DETAIL) from None
-        except PermissionError as exc:
-            # The refusal of a key (an unknown id, no key, a wrong one), or of the run's session. One the OS raises
-            # carries an errno (a state file the process may not read): the server's fault, which "Not permitted",
-            # the answer for a wrong key, would hide. As the create's, and the FileNotFoundError below.
-            if exc.errno is not None:
-                raise
+        except WebhookKeyRefusedError as exc:
+            # An unknown id, no key, a wrong one: the only 403 of this route, so that a caller can read it as the key.
             log_hidden_cause(logger, 403, exc, "cron trigger refused for job %s", job_id)
             raise HTTPException(status_code=403, detail="Not permitted") from None
+        except UncheckedAuthProfileError:
+            # Raised where the run's session opens the job's profile.
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_AUTH_PROFILE_DETAIL) from None
+        except PermissionError as exc:
+            # A refusal of the run's session: an auth state too old or not encrypted, a start_url ALLOWED_HOSTS no
+            # longer lists. Each answered "Not permitted", the answer for a wrong key. One the OS raises carries an
+            # errno (a state file the process may not read): the server's fault, a 500. As the create's, and the
+            # FileNotFoundError below.
+            if exc.errno is not None:
+                raise
+            log_hidden_cause(logger, 409, exc, "cron trigger refused for job %s", job_id)
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_RUN_REFUSED_DETAIL) from None
         except AgentJobQueueFull:  # and only that: any other RuntimeError is a fault. The run's session is released.
             raise queue_full(logger, "a run of cron job", payload.job_id) from None
         except FileNotFoundError as exc:
@@ -276,9 +294,10 @@ def create_operations_router(
         except AuthStateDecryptError as exc:
             # A fixed text that says what to check; it names no path.
             raise HTTPException(status_code=422, detail=str(exc)) from None
-        except (ValidationError, ValueError) as exc:
-            # The body's webhook key is never in the line: a model's refusal is logged by field and kind.
-            log_hidden_cause(logger, 400, exc, "cron trigger failed for job %s", job_id)
-            raise HTTPException(status_code=400, detail="Invalid request") from None
+        except (KeyError, ValueError) as exc:
+            # The job as it is stored: a record with no goal (it answered 404 "Not found"), one the run's request
+            # model refuses (400 "Invalid request"). Neither is in the caller's hands.
+            log_hidden_cause(logger, 409, exc, "cron trigger failed for job %s", job_id)
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_RUN_REFUSED_DETAIL) from None
 
     return router

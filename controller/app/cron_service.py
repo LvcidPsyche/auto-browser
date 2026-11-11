@@ -107,6 +107,14 @@ class CronJobDisabledError(RuntimeError):
     """A disabled job was asked to run."""
 
 
+class WebhookKeyRefusedError(PermissionError):
+    """A webhook trigger's key was refused (WEBHOOK_KEY_REFUSED): an unknown id, a job with no key, a wrong key.
+
+    A class of its own, so that the route can answer this refusal, and no other, as a refused key: the run's start
+    raises PermissionError too once the key is proved (an auth state too old, a start_url ALLOWED_HOSTS refuses).
+    """
+
+
 # Fixed and path-free, because callers (MCP above all) show it as it is; the path and the cause are logged.
 CRON_STORE_UNREADABLE = (
     "the cron store (CRON_STORE_PATH) is unreadable; cron jobs are not loaded until it is fixed. The server log has "
@@ -397,7 +405,7 @@ class CronService:
             _hash_webhook_key(webhook_key).encode("utf-8"), (stored_hash or _NO_WEBHOOK_KEY_DIGEST).encode("utf-8")
         )
         if not matched or stored_hash is None:
-            raise PermissionError(WEBHOOK_KEY_REFUSED)
+            raise WebhookKeyRefusedError(WEBHOOK_KEY_REFUSED)
         return await self._run_job_now(job)
 
     async def trigger_job(self, job_id: str) -> dict[str, Any]:

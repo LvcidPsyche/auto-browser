@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.browser_manager import BrowserManager
-from app.cron_service import CronService
+from app.cron_service import CronService, WebhookKeyRefusedError
 from app.models import McpToolCallRequest, OperatorIdentity
 from app.routes.operations import create_operations_router
 from app.session_ownership import acting_as, as_system
@@ -414,7 +414,8 @@ class CronWebhookTriggerRefusalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     compare.call_count, 1, "a refusal that skips the comparison is told apart by its speed"
                 )
-                self.assertEqual(type(caught.exception), PermissionError)
+                # The key's own class, a PermissionError: the route answers this one, and no other, as a refused key.
+                self.assertIs(type(caught.exception), WebhookKeyRefusedError)
                 errors[name] = str(caught.exception)
         self.assertEqual(len(set(errors.values())), 1, errors)
         self.assertNotIn("not enabled", next(iter(errors.values())))

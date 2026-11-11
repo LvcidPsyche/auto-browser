@@ -10,24 +10,35 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 
 from app.agent_jobs import AgentJobQueueFull
+from app.auth_state import AuthStateManager
 from app.browser.services.auth_profiles import BrowserAuthProfileService
+from app.browser_manager import BrowserManager
 from app.cron_service import CronService
 from app.models import OperatorIdentity
-from app.routes.operations import CRON_TRIGGER_AUTH_PROFILE_DETAIL, create_operations_router
+from app.routes.operations import (
+    CRON_TRIGGER_AUTH_PROFILE_DETAIL,
+    CRON_TRIGGER_RUN_REFUSED_DETAIL,
+    create_operations_router,
+)
 from app.session_ownership import acting_as
 
 ALICE = OperatorIdentity(id="alice", source="token")
 TOKENS = "alice:" + "a" * 40 + ",bob:" + "b" * 40
+# What the refusals of a run's session hold (a host, an age, a file, a setting), none of it for a webhook's caller.
+OF_A_SESSIONS_REFUSAL = ("other.example", "shop.example", "73", "72", "state.json", "login", "AUTH", "HOSTS", "file")
 
 
 class CronAuthProfileRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -183,6 +194,94 @@ class CronAuthProfileRouteTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": "not-the-key"})
 
         self.assertEqual((response.status_code, response.json()), (403, {"detail": "Not permitted"}))
+
+    def _what_a_runs_session_refuses(self) -> dict[str, tuple[PermissionError, str]]:
+        """What a session's start refuses once the key is proved: each raised by the code that refuses it there, with
+        a word of its text."""
+        state = self.root / "state.json"
+        state.write_text("{}", encoding="utf-8")
+        long_ago = time.time() - 73 * 3600
+        os.utime(state, (long_ago, long_ago))
+        by_age = AuthStateManager(encryption_key=None, require_encryption=False, max_age_hours=72.0)
+        encrypted_only = AuthStateManager(
+            encryption_key=Fernet.generate_key().decode(), require_encryption=True, max_age_hours=0
+        )
+        hosts: Any = SimpleNamespace(settings=SimpleNamespace(allowed_host_patterns=["shop.example"]))
+        raising = {
+            "an auth state older than AUTH_STATE_MAX_AGE_HOURS": (
+                lambda: by_age.prepare_for_context(state),
+                "Auth state is stale",
+            ),
+            "an unencrypted auth state under REQUIRE_AUTH_STATE_ENCRYPTION": (
+                lambda: encrypted_only.prepare_for_context(state),
+                "this auth state is not encrypted",
+            ),
+            "a start_url whose host ALLOWED_HOSTS no longer lists": (
+                lambda: BrowserManager._assert_url_allowed(hosts, "https://other.example/account"),
+                "is not allowlisted",
+            ),
+            "a start_url whose scheme is refused": (
+                lambda: BrowserManager._assert_url_allowed(hosts, "file:///etc/passwd"),
+                "is not allowed",
+            ),
+        }
+        refusals = {}
+        for cause, (refuse, word) in raising.items():
+            with self.assertRaisesRegex(PermissionError, word) as refused:
+                refuse()
+            self.assertIsNone(refused.exception.errno, cause)
+            refusals[cause] = (refused.exception, word)
+        return refusals
+
+    async def test_a_run_its_session_refuses_answers_409_with_the_key_proved_and_never_a_refused_key(self) -> None:
+        # Each answered 403 "Not permitted", which a caller is told to read as a wrong key. A job whose saved login was
+        # not saved again answered it to every webhook from the fourth day on (AUTH_STATE_MAX_AGE_HOURS: 72 by default).
+        for cause, (refusal, word) in self._what_a_runs_session_refuses().items():
+            with self.subTest(cause):
+                job_id, key = await self._job_with_profile("login")
+                self.create_session_error = refusal
+
+                with self.assertLogs("app.routes.operations", level="WARNING") as logged, acting_as(ALICE):
+                    response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": key})
+
+                self.assertEqual(
+                    (response.status_code, response.json()), (409, {"detail": CRON_TRIGGER_RUN_REFUSED_DETAIL})
+                )
+                # The caller holds a webhook key, not the operator's token: the cause is the log's alone.
+                self.assert_names_nothing(response, *OF_A_SESSIONS_REFUSAL)
+                (record,) = logged.records
+                line = record.getMessage()
+                self.assertIn(f"cron trigger refused for job '{job_id}': answered 409 for PermissionError", line)
+                self.assertIn(word, line)
+                self.assertNotIn(key, line)
+
+    async def test_a_stored_job_the_run_cannot_use_answers_that_409_with_the_key_proved(self) -> None:
+        # A record cut short (no goal) answered 404 "Not found", and one the run's request model refuses (a provider
+        # no longer known) 400 "Invalid request": the caller's key was right, and its body held nothing else.
+        for cause, field, value, error in (
+            ("no goal", "goal", None, "KeyError"),
+            ("a provider the run's request model refuses", "provider", "no-such-provider", "ValidationError"),
+        ):
+            with self.subTest(cause):
+                job_id, key = await self._job_with_profile("login")
+                jobs = self.stored_jobs()
+                if value is None:
+                    del jobs[job_id][field]
+                else:
+                    jobs[job_id][field] = value
+                self.store_path.write_text(json.dumps(jobs), encoding="utf-8")
+
+                with self.assertLogs("app.routes.operations", level="WARNING") as logged, acting_as(ALICE):
+                    response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": key})
+                    wrong_key = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": "not-it"})
+
+                self.assertEqual(
+                    (response.status_code, response.json()), (409, {"detail": CRON_TRIGGER_RUN_REFUSED_DETAIL})
+                )
+                self.assert_names_nothing(response, field, "no-such-provider")
+                self.assertIn(f"answered 409 for {error}", logged.records[0].getMessage())
+                # Only once the key is proved: a stranger learns nothing of the job's state.
+                self.assertEqual((wrong_key.status_code, wrong_key.json()), (403, {"detail": "Not permitted"}))
 
     async def _trigger_at_a_queue_that_raises(self, error: Exception) -> tuple[httpx.Response, str, list[str]]:
         """A trigger with the right key, of a job whose run gets its session and is then refused by the queue."""

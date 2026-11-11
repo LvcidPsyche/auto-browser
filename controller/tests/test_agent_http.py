@@ -32,6 +32,7 @@ for env_name, relative_path in {
 import app.main as main_module
 import app.routes.system as system_routes
 from app.agent_jobs import AgentJobStore
+from app.cron_service import WebhookKeyRefusedError
 from app.models import AgentStepResult, ProviderInfo
 from app.witness import ReceiptList
 
@@ -539,7 +540,9 @@ class AgentHttpTests(unittest.TestCase):
             patch.object(main_module.share_manager, "token_info", return_value={"valid": False}),
             patch.object(main_module.proxy_store, "delete_persona", return_value=False),
             patch.object(main_module.cron_service, "delete_job", new=AsyncMock(return_value=False)),
-            patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=PermissionError())),
+            patch.object(
+                main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=WebhookKeyRefusedError())
+            ),
         ):
             replay = self.client.get("/sessions/session-1/replay")
             exported = self.client.get("/auth-profiles/ops/export")

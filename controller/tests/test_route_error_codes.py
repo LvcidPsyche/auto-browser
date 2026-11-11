@@ -34,7 +34,7 @@ from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
 from app.routes._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
-from app.routes.operations import create_operations_router
+from app.routes.operations import CRON_TRIGGER_RUN_REFUSED_DETAIL, create_operations_router
 
 SID = "s-missing"
 
@@ -796,7 +796,8 @@ def test_a_cron_trigger_refused_for_its_key_leaves_a_line_that_names_the_job(
 
     assert (response.status_code, response.json()) == (403, {"detail": "Not permitted"})
     first, _where = _the_routes_line(caplog)
-    assert first.startswith("cron trigger refused for job 'no-such-job': answered 403 for PermissionError: "), first
+    refused = "cron trigger refused for job 'no-such-job': answered 403 for WebhookKeyRefusedError: "
+    assert first.startswith(refused), first
     assert "sentinel-key" not in first
 
 
@@ -816,6 +817,7 @@ def test_a_cron_trigger_with_a_body_the_route_refuses_logs_no_part_of_the_key(
 def test_a_cron_trigger_whose_run_raises_a_value_error_leaves_the_cause_in_the_log(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # Raised with the key proved, so it is no "Invalid request" of the caller's: the 409 of a run that cannot start.
     error = ValueError("start_url must use http or https")
     with (
         caplog.at_level(logging.WARNING),
@@ -823,9 +825,9 @@ def test_a_cron_trigger_whose_run_raises_a_value_error_leaves_the_cause_in_the_l
     ):
         response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
 
-    assert (response.status_code, response.json()) == (400, {"detail": "Invalid request"})
+    assert (response.status_code, response.json()) == (409, {"detail": CRON_TRIGGER_RUN_REFUSED_DETAIL})
     first, _where = _the_routes_line(caplog)
-    assert first == f"cron trigger failed for job 'job-1': answered 400 for ValueError: {str(error)!r}"
+    assert first == f"cron trigger failed for job 'job-1': answered 409 for ValueError: {str(error)!r}"
 
 
 def test_a_share_refused_for_its_lifetime_leaves_the_cause_in_the_log(

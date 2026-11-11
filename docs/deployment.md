@@ -1276,6 +1276,14 @@ non-secret id derived from the hash that tells keys apart:
 - **Revoke** with `DELETE /crons/{job_id}/webhook-key` or `browser.revoke_cron_webhook_key`: the key is removed, and
   a trigger is refused as for a job that never had one. A rotation brings the webhook back.
 
+A trigger answers `403` for the key and for nothing else: an unknown job, a job with no key and a wrong key, with
+nothing to say which. With the key proved, what stops the run is answered as itself and never as `403`: among them
+`409` for a disabled job, for the session cap, for an auth profile that is gone or has become another operator's and,
+in one fixed text that names no cause, for anything else the controller refuses of the run's session or of the job
+as it is stored (an auth state older than `AUTH_STATE_MAX_AGE_HOURS`, a `start_url` that `ALLOWED_HOSTS` no longer
+lists); `422` for an auth state that cannot be decrypted; `503` for a full job queue or a browser that cannot be
+reached. The server log has the cause of that fixed `409`. A `400` is the request's own body.
+
 Each change writes one audit event (`cron_webhook_key_rotated`, `cron_webhook_key_revoked`) without the key or its hash, and
 another operator's job answers as one that does not exist. A key made before 1.18.0 is replaced by its hash on the
 first start after the upgrade and goes on working; if the store cannot be re-saved then, the job keeps working from

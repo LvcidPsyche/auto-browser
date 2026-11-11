@@ -138,7 +138,11 @@ All notable changes to auto-browser are documented here.
   name (`America/Chicago`, `Europe/Berlin`). A name the zone database does not know stops the controller at startup.
 - **`POST /crons/{id}/trigger` no longer answers `404` for an unknown job.** A caller without the key could tell
   which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`):
-  treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved.
+  treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved. So does a
+  run the controller refuses to start with the key proved where 1.17.0 answered `403` (an auth state too old or not
+  encrypted, a `start_url` that `ALLOWED_HOSTS` refuses), `404` (a stored job with no `goal`) or `400` (a stored
+  job the run's request model refuses): the route's `403` now means the key and nothing else, and its `400` the
+  request's own body (see Fixed).
 - **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
   fire now checks `API_BEARER_TOKENS` as it is then, where a token listed twice proves only the first operator
@@ -611,12 +615,13 @@ All notable changes to auto-browser are documented here.
   message, the error's class and text, and the last three frames it was raised through. So is a route's own fixed
   answer for one of the three: the `409` `Conflict` of an approval's approve, reject or execute and of
   `POST /proxy-personas`, the `403` of a page or a tab `ALLOWED_HOSTS` refuses (observe, screenshot, screenshot
-  compare, the network log, tab activation), and the `400` and `403` of the cron routes and of
-  `POST /sessions/{id}/share`. Not logged: a refusal a route answers in that refusal's own words (a tab another tab
-  refused, a busy session), and a refused page at `GET /share/{token}/observe`, which the shared page asks for
-  every five seconds. A caller's own mistake is logged the same way: an ordinary bad request, a refused navigation
-  or a webhook trigger with a wrong key writes one WARNING of at most ten lines, as often as the request rate
-  limit lets it be sent, which is worth knowing before alerting on WARNING. The error's text and the route's
+  compare, the network log, tab activation), the `400` and `403` of the cron routes and of
+  `POST /sessions/{id}/share`, and the `409` of a cron trigger whose run is refused. Not logged: a refusal a route
+  answers in that refusal's own words (a tab another tab refused, a busy session), and a refused page at
+  `GET /share/{token}/observe`, which the shared page asks for every five seconds. A caller's own mistake is logged
+  the same way: an ordinary bad request, a refused navigation or a webhook trigger with a wrong key writes one
+  WARNING of at most ten lines, as often as the request rate limit lets it be sent, which is worth knowing before
+  alerting on WARNING. The error's text and the route's
   arguments can be the caller's, so each is written escaped and cut at 200 characters (the line says when the text
   was cut); a request model's refusal is written as its fields and the kind of each refusal, never the values
   (the trigger's body holds the webhook key); and the frames are part of the message. One refusal's text held the
@@ -674,6 +679,16 @@ All notable changes to auto-browser are documented here.
   `profile.json` no longer parses answers that `409` too: it answered `403`, which the upgrade note reads as a
   refused key. A file the operating system will not let the controller read answered that `403` as well, and is now
   a `500`, the server's fault, as it is at `POST /crons`.
+- **With its key proved, a cron trigger whose run cannot start no longer answers as a refused key.**
+  `POST /crons/{id}/trigger` answered `403` `Not permitted`, which the upgrade note reads as a refused key, when the
+  run's session was refused: for an auth state older than `AUTH_STATE_MAX_AGE_HOURS` (72 by default, so a job whose
+  saved login was not saved again answered every webhook `403` from the fourth day), for one not encrypted under
+  `REQUIRE_AUTH_STATE_ENCRYPTION`, and for a `start_url` whose host `ALLOWED_HOSTS` no longer lists or whose scheme
+  is refused. A stored job with no `goal` answered `404` `Not found`, and one the run's request model refuses `400`
+  `Invalid request`. Each now answers `409` in one fixed text that names nothing of the cause, since the caller
+  holds a webhook key and not the operator's token: the cause is in the server log, one WARNING for each such
+  trigger. Only an unknown job, a job with no key and a wrong key answer `403`, and only a body the route refuses
+  `400`. `browser.trigger_cron_job`, which takes no key, is unchanged.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
