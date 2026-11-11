@@ -290,7 +290,7 @@ class AnOpenStreamDoesNotHoldTheShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.config.timeout_graceful_shutdown = self.LIMIT_SECONDS
 
         with (
-            patch("app.middleware.http.STREAM_CLOSING_SEND_SECONDS", 0.2, create=True),
+            patch("app.middleware.http.STREAM_CLOSING_SEND_SECONDS", 0.2),
             self.assertLogs("uvicorn.error", level="INFO") as server_log,
             self.assertLogs("app.middleware.http", level="INFO") as ended,
         ):
@@ -376,6 +376,15 @@ class OnlyUvicornsShutdownCancelIsEndedQuietlyTests(unittest.IsolatedAsyncioTest
         for content_type in (b"application/json", b"text/plain; charset=utf-8", b"text/html", b""):
             with self.subTest(content_type=content_type), self.assertRaises(asyncio.CancelledError):
                 await self.run_stream(content_type=content_type, cancel_message=UVICORN_SHUTDOWN_CANCEL)
+
+    async def test_an_event_stream_is_one_in_whatever_case_its_media_type_is_written(self) -> None:
+        # A media type is the same in any case. Matched as written, a stream that answered Text/Event-Stream was
+        # taken for a plain response, and its cancel at the limit was the traceback again.
+        for content_type in (b"Text/Event-Stream", b"TEXT/EVENT-STREAM; charset=utf-8"):
+            with self.subTest(content_type=content_type), self.assertLogs("app.middleware.http", level="INFO"):
+                sent = await self.run_stream(content_type=content_type, cancel_message=UVICORN_SHUTDOWN_CANCEL)
+
+                self.assertEqual(sent[-1], {"type": "http.response.body", "body": b"", "more_body": False})
 
     async def test_a_bare_cancellation_raised_while_uvicorns_unwinds_is_still_uvicorns(self) -> None:
         # What a task group cancelled from outside raises on its way out: a CancelledError of its own, with the one
@@ -533,7 +542,7 @@ class OnlyUvicornsShutdownCancelIsEndedQuietlyTests(unittest.IsolatedAsyncioTest
         downstream, send = self.stalled(sent, asyncio.Event(), outcome)
 
         with (
-            patch("app.middleware.http.STREAM_CLOSING_SEND_SECONDS", 0.05, create=True),
+            patch("app.middleware.http.STREAM_CLOSING_SEND_SECONDS", 0.05),
             self.assertLogs("app.middleware.http", level="INFO") as logged,
         ):
             await asyncio.wait_for(self.run_app(downstream, send), 5)

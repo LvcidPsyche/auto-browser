@@ -102,6 +102,9 @@ class EventStreamShutdownMiddleware:
     is then not out. So a start cancelled in its send is no started stream, and the cancellation propagates, where
     it was answered with a body for a response that had not begun. A stream whose last chunk has gone out, cancelled
     while the app is still in its cleanup, is sent nothing more: a second last chunk is one a strict server refuses.
+    That order rests on a send that waits before it writes, as uvicorn's does: a server whose send wrote the last
+    chunk and then waited, cancelled in that wait, would be sent a second.
+
     A client that has gone when the closing chunk is sent (an OSError from the server's send) has nobody to end the
     body for: that is said in the one line and raised no further, or the quiet stop is a traceback again. Any other
     error of that send is the server's refusal of the chunk, and is raised. A client that is there and does not read
@@ -123,7 +126,8 @@ class EventStreamShutdownMiddleware:
             await send(message)
             if message["type"] == "http.response.start":
                 content_type = Headers(raw=message.get("headers", [])).get("content-type", "")
-                streaming = content_type.startswith("text/event-stream")
+                # Lower-cased: a media type is the same in any case, and a stream may write it Text/Event-Stream.
+                streaming = content_type.lower().startswith("text/event-stream")
             elif message["type"] == "http.response.body" and not message.get("more_body", False):
                 ended = True
 
