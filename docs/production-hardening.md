@@ -243,6 +243,13 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     in its place (`display: contents`): where a press on it would land cannot be read, so the action answers
     `target_has_no_box`, and the agent names an element inside it. A target inside a frame is placed on what the
     screen shows of it, also where its frame runs off the screen or CSS draws the frame at another size.
+    An element that CSS turns is placed at the middle of what the screen shows of the box around it, where
+    Playwright takes the mean of the element's corners, each held to the screen. The two are one point until a
+    part of the element is off the screen; where a corner of the screen cuts it and its middle is off the
+    screen, the controller's point can be beside the element (a square turned 45 degrees is so), and the click
+    ends when its time does, where Playwright's own click presses. A link over two lines inside something CSS
+    turns or skews is placed where Playwright presses it; inside a frame as well, it can be placed beside the
+    link, and ends the same way.
     Playwright does not look through a frame that CSS transforms, or that stands inside anything
     CSS transforms (a dialog the page centres with a transform is one), so there the question above is the only
     one asked: where the page has put something of its own over such a frame, or the frame holds another frame

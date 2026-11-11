@@ -237,6 +237,11 @@ class _Budget:
 
     Given the whole budget each, the waits of one click could hold its session for several budgets, on a target
     that kept every one of them waiting to the end: Playwright's own click has one deadline for all its checks.
+
+    It bounds the click's waits for its target, and nothing else. A page that stops answering holds a click
+    still: the pointer's moves and the questions asked of a handle wait for the page, with no bound to give
+    them. A page busy for 6 seconds once the checks had passed held a click for 7.4 under a budget of 3, and
+    the click then pressed.
     """
 
     def __init__(self, timeout_ms: float) -> None:

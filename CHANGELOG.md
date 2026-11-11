@@ -395,7 +395,9 @@ All notable changes to auto-browser are documented here.
     of its layout when it is to be pressed (`hidden`, `display: none`), or that the pointer does not find where
     the click was placed (made invisible since, or under something), answers `target_moved`, which is retryable
     (one that has left the page, or was made invisible before the pointer was placed, is waited for, as a click
-    waits, and ends the click when its time does).
+    waits, and ends the click when its time does). In two places the point is not Playwright's, and such a click
+    can be placed beside its target and end when its time does, where it used to press: an element CSS turns
+    that a corner of the screen cuts, and, in a frame, a link over two lines inside something CSS turns.
   - A new approval's reason opens with the controller's sentence, which says what the target (or, asked at the
     press, what the click would press) reads as and what the agent labelled the action, before the agent's own
     reason (one already pending for the same action and kind is reused as it stands); the dashboard's confirm
@@ -476,7 +478,10 @@ All notable changes to auto-browser are documented here.
   `ACTION_TIMEOUT_MS` of their own. A target that left the page once the checks had passed held its session for
   7 seconds under a limit of 3, and one that kept every step waiting could hold it for several limits. The
   waits now share the one limit, counted from where the click begins, as the steps of Playwright's own click
-  share its timeout: the same target ends the click after 3.3 seconds. Older than this release.
+  share its timeout: the same target ends the click after 3.3 seconds. Older than this release. The limit is
+  on the click's waits for its target. A page that stops answering holds a click still: the pointer's moves and
+  the questions asked of the page wait for it, and a page busy for 6 seconds once the checks had passed held a
+  click for 7.4 seconds under a limit of 3, which then pressed.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
