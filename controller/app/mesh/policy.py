@@ -148,9 +148,28 @@ def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> 
     for url in _url_arguments(request.arguments):
         if not any(_url_matches(url, pattern) for pattern in grant.url_allowlist):
             raise PolicyDenied(
-                f"URL {url!r} not in allowlist for capability {grant.capability!r}. "
+                f"{_refused_url_shown(url)} is not in the allowlist for capability {grant.capability!r}. "
                 f"Allowed patterns: {grant.url_allowlist}"
             )
+
+
+def _refused_url_shown(url: str) -> str:
+    """What a refusal says of the URL it refuses: its host name, and that it carries userinfo. Never the URL.
+
+    The reason is logged (mesh.policy.denied), and the URL is the peer's text as it sent it: the userinfo, the path
+    and the query in it are not for a log. A URL with userinfo is refused for having it (_url_matches), so the
+    reason says so: its host alone may be one a pattern allows. The host is the peer's text too, so it is quoted.
+    """
+    try:
+        parts = urlsplit(browser_equivalent_url(url))
+    except ValueError:
+        return "A URL that cannot be read"
+    if not parts.hostname:
+        return "A URL with no host name"
+    shown = f"A URL of host {parts.hostname!r}"
+    if parts.username is not None or parts.password is not None:
+        return f"{shown} that carries userinfo, which no pattern allows,"
+    return shown
 
 
 def _check_expires_at(grant: CapabilityGrant) -> None:

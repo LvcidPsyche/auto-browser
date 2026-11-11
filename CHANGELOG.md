@@ -276,7 +276,10 @@ All notable changes to auto-browser are documented here.
   where `capability=tool:browser.observe` now reads `capability='tool:browser.observe'`. An envelope that fails
   verification needs no key, only the id of a registered peer, and its `mesh.delegation.envelope_invalid` warning
   quoted the envelope's own fields whole: that line is now written once in 60 seconds for the peer named, the next
-  one with the count of those between, and its error text is cut at 200 characters.
+  one with the count of those between, and its error text is cut at 200 characters. The `mesh.policy.denied` line
+  also quoted a URL a grant's `url_allowlist` refused, as the peer sent it: a URL with userinfo is refused for
+  having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
+  quoted, and says when the URL carried userinfo; what the peer is answered is the fixed text it was.
 - **A refused start no longer quotes a long `*_AUTH_MODE` value.** With `APP_ENV=production`, an `OPENAI_AUTH_MODE`,
   `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the start with an error that quoted the value,
   and `.env.example` has each a few lines under its provider's API key: a key set on the wrong line was written to
@@ -568,7 +571,9 @@ All notable changes to auto-browser are documented here.
   limit lets it be sent, which is worth knowing before alerting on WARNING. The error's text and the route's
   arguments can be the caller's, so each is written escaped and cut at 200 characters (the line says when the text
   was cut); a request model's refusal is written as its fields and the kind of each refusal, never the values
-  (the trigger's body holds the webhook key); and the frames are part of the message.
+  (the trigger's body holds the webhook key); and the frames are part of the message. One refusal's text held the
+  caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
+  name. It now says `The https URL has no host name`, to a tool's caller too.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host

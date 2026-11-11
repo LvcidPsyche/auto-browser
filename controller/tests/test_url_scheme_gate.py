@@ -30,6 +30,13 @@ REFUSED = (
     "view-source:http://example.com/",
     "ftp://example.com/file",
 )
+# http(s) URLs the gate finds no host name in, and what of them a caller would not want in a log.
+NO_HOST_NAME = (
+    "https://:hunter2@/path?token=SECRET-TOKEN-123",
+    "http://alice:hunter2@:8080/path?token=SECRET-TOKEN-123",
+    "HTTPS://:@/path?token=SECRET-TOKEN-123#hunter2",
+)
+PARTS_OF_A_URL_WITH_NO_HOST_NAME = ("hunter2", "SECRET-TOKEN-123", "alice", "path", "8080")
 
 
 class SchemeGateTests(unittest.TestCase):
@@ -65,6 +72,20 @@ class SchemeGateTests(unittest.TestCase):
         # An opaque origin names no host; the page that made it is judged instead.
         manager._assert_runtime_url_allowed("blob:null/9b1d")
 
+    def test_a_url_with_no_host_name_is_refused_in_words_that_repeat_none_of_it(self) -> None:
+        # A refusal's text is logged by the routes and kept in records. Every other one names a host: this one held
+        # the URL as it was sent, with its userinfo and its query.
+        manager = BrowserManager(Settings(_env_file=None))
+        for url in NO_HOST_NAME:
+            with self.subTest(url=url):
+                with self.assertRaises(PermissionError) as refused:
+                    manager._assert_url_allowed(url)
+
+                text = str(refused.exception)
+                self.assertIn("no host name", text)
+                for part in PARTS_OF_A_URL_WITH_NO_HOST_NAME:
+                    self.assertNotIn(part, text)
+
 
 class ForkRouteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -92,6 +113,25 @@ class ForkRouteTests(unittest.TestCase):
         with patch.object(main_module.manager, "fork_session", fork):
             response = self.client.post("/sessions/abc/fork", params={"start_url": "https://evil.example/"})
         self.assertEqual(response.status_code, 403)
+
+    def test_a_navigation_to_a_url_with_no_host_name_leaves_none_of_the_url_in_the_log(self) -> None:
+        # The route logs the cause of its fixed 403: the gate's own text, which was the whole URL.
+        async def navigate(_session_id: str, url: str) -> None:
+            main_module.manager._assert_url_allowed(url)
+
+        for url in NO_HOST_NAME:
+            with self.subTest(url=url):
+                with (
+                    patch.object(main_module.manager, "navigate", navigate),
+                    self.assertLogs("app.routes.sessions", level="WARNING") as logs,
+                ):
+                    response = self.client.post("/sessions/abc/actions/navigate", json={"url": url})
+
+                self.assertEqual((response.status_code, response.json()), (403, {"detail": "Not permitted"}))
+                logged = "\n".join(logs.output)
+                self.assertIn("answered 403 for PermissionError", logged)
+                for part in PARTS_OF_A_URL_WITH_NO_HOST_NAME:
+                    self.assertNotIn(part, logged)
 
 
 if __name__ == "__main__":

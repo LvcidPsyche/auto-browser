@@ -819,7 +819,9 @@ class BrowserManager:
             raise PermissionError(f"URL scheme {parsed.scheme!r} is not allowed; only http and https are")
         host = parsed.hostname
         if not host:
-            raise PermissionError(f"Could not determine hostname for URL: {url}")
+            # No more of the URL than its scheme: a refusal's text is logged and kept in records, and this URL
+            # can hold userinfo and a query, as the caller sent them.
+            raise PermissionError(f"The {parsed.scheme.lower()} URL has no host name")
         patterns = self.settings.allowed_host_patterns
         if not patterns or "*" in patterns:
             return

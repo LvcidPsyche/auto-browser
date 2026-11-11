@@ -28,8 +28,8 @@ mesh = _registration.mesh  # the route fixture: a server, a legit identity, the 
 FORGED = "\nWARNING:app.auth:forged by a peer" + "\r\x0b\x0c\x1c\x1d\x1e\x85  " + "end"
 
 
-def _post(mesh, capability: str, session_id: str = ""):
-    payload = {"capability": capability, "arguments": {}, "session_id": session_id}
+def _post(mesh, capability: str, session_id: str = "", arguments: dict | None = None):
+    payload = {"capability": capability, "arguments": arguments or {}, "session_id": session_id}
     envelope = make_envelope(mesh.legit, payload, recipient_node_id=mesh.server.node_id)
     return mesh.client.post("/mesh/receive", json=envelope.model_dump())
 
@@ -80,6 +80,61 @@ def test_a_session_id_is_logged_on_one_line(mesh, caplog: pytest.LogCaptureFixtu
     _post(mesh, "session:close", session_id="s1" + FORGED)
 
     _the_line(caplog, "app.mesh.delegation", "mesh.delegation.session_verb")
+
+
+# What of a refused URL is not for a log: its userinfo, its path, its query and its fragment.
+NOT_FOR_THE_LOG = ("alice", "hunter2", "private-path", "SECRET-TOKEN-123")
+REFUSED_URLS = {
+    "userinfo": (
+        "https://alice:hunter2@example.com/private-path?token=SECRET-TOKEN-123",
+        "host 'example.com' that carries userinfo",
+    ),
+    "another host": (
+        "https://evil.example/private-path?token=SECRET-TOKEN-123#hunter2",
+        "A URL of host 'evil.example' is",
+    ),
+    "a port that is none": (
+        "https://evil.example:99999999/private-path?token=SECRET-TOKEN-123",
+        "A URL of host 'evil.example' is",
+    ),
+    "no host name": ("https://:hunter2@/private-path?token=SECRET-TOKEN-123", "A URL with no host name is"),
+    "not a URL": ("https://[::1/private-path?token=SECRET-TOKEN-123", "A URL that cannot be read is"),
+}
+
+
+@pytest.mark.parametrize(("url", "named_as"), REFUSED_URLS.values(), ids=REFUSED_URLS.keys())
+def test_a_url_the_allowlist_refuses_is_logged_by_its_host_alone(
+    mesh, caplog: pytest.LogCaptureFixture, url: str, named_as: str
+) -> None:
+    # The reason of a refusal is logged, and it quoted the URL as the peer sent it. A URL with userinfo is refused
+    # for having it, so that refusal was what wrote a password to the log.
+    grant = CapabilityGrant(capability="tool:*", url_allowlist=["https://example.com/*"])
+    mesh.peers.add(PeerRecord(node_id=mesh.legit.node_id, pubkey_b64=mesh.legit.pubkey_b64, grants=[grant]))
+    caplog.set_level(logging.INFO)
+
+    response = _post(mesh, "tool:browser.navigate", arguments={"action": {"url": url}})
+
+    assert reply_status(response) == "rejected"
+    assert response.json()["payload"]["error"] == "Delegation policy rejected the request"
+    messages = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
+    (line,) = [message for message in messages if message.startswith("mesh.policy.denied")]
+    assert named_as in line and "capability 'tool:*'" in line, line
+    assert [part for part in NOT_FOR_THE_LOG if part in line] == [], line
+    assert [part for part in NOT_FOR_THE_LOG if part in caplog.text] == [], caplog.text
+
+
+def test_a_refused_urls_host_is_logged_on_one_line(mesh, caplog: pytest.LogCaptureFixture) -> None:
+    # A host name is the peer's text too: only a tab, a line feed and a carriage return are taken out of a URL.
+    grant = CapabilityGrant(capability="tool:*", url_allowlist=["https://example.com/*"])
+    mesh.peers.add(PeerRecord(node_id=mesh.legit.node_id, pubkey_b64=mesh.legit.pubkey_b64, grants=[grant]))
+    caplog.set_level(logging.INFO)
+
+    response = _post(
+        mesh, "tool:browser.navigate", arguments={"url": "https://evil.example\x0bforged by a peer\x1c\x85/"}
+    )
+
+    assert reply_status(response) == "rejected"
+    _the_line(caplog, "app.mesh.delegation", "mesh.policy.denied")
 
 
 def _post_unsigned(mesh, recipient: str):
