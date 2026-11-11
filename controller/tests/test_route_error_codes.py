@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 import app.main as main_module
@@ -815,6 +815,22 @@ def test_a_cron_trigger_with_a_body_the_route_refuses_logs_no_part_of_the_key(
     first, where = _the_routes_line(caplog)
     assert ": answered 400 for ValidationError: " in first and "webhook_key: string_type" in first, first
     assert "sentinel-webhook-key" not in "\n".join([first, *where])
+
+
+def test_a_cron_trigger_whose_body_the_json_reader_cannot_go_down_is_an_invalid_request(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A body nested past what Python's JSON reader goes down raises RecursionError, a RuntimeError and no ValueError:
+    # an unhandled 500, for a caller who needs no key of the job. How deep that is is the interpreter's own, so the
+    # reader is stood in for.
+    gave_up = RecursionError("maximum recursion depth exceeded while decoding a JSON object from a unicode string")
+    with caplog.at_level(logging.WARNING), patch.object(Request, "json", new=AsyncMock(side_effect=gave_up)):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+
+    assert response.status_code == 400, response.text
+    assert response.json() == {"detail": "Invalid request"}
+    first, _where = _the_routes_line(caplog)
+    assert first.startswith("cron trigger failed for job 'job-1': answered 400 for RecursionError: "), first
 
 
 def test_a_cron_trigger_whose_run_raises_a_value_error_leaves_the_cause_in_the_log(

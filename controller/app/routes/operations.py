@@ -276,8 +276,10 @@ def create_operations_router(
             # The path names the job; a job_id in the body must not redirect the
             # trigger to a different one.
             payload = TriggerCronJobInput.model_validate({**body, "job_id": job_id})
-        except (ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError, RecursionError) as exc:
             # The body's webhook key is never in the line: a model's refusal is logged by field and kind.
+            # RecursionError: a body nested past what the JSON reader goes down. It is a RuntimeError, so it went
+            # on as a fault of the server's, for a caller who had proved no key.
             log_hidden_cause(logger, 400, exc, "cron trigger failed for job %s", job_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
         # The body is the caller's, and is judged above. From here on the service reads the cron store and refuses the

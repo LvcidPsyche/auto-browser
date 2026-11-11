@@ -736,7 +736,8 @@ All notable changes to auto-browser are documented here.
   `Invalid request`. Each now answers `409` in one fixed text that names nothing of the cause, since the caller
   holds a webhook key and not the operator's token: the cause is in the server log, one WARNING for each such
   trigger. Only an unknown job, a job with no key and a wrong key answer `403`, and only a body the route refuses
-  `400`. `browser.trigger_cron_job`, which takes no key, is unchanged.
+  `400`: one nested past what the JSON reader goes down is refused so too, with its WARNING, where it was an
+  unhandled `500`. `browser.trigger_cron_job`, which takes no key, is unchanged.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
