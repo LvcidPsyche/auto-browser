@@ -702,6 +702,15 @@ All notable changes to auto-browser are documented here.
   `DELETE /sessions/{id}/network/hooks/{pattern}`, whose pattern is text, could not remove it. A list or an object
   answered `500`. Each now answers `422` and nothing is stored; a missing or an empty pattern answers
   `422` `url_pattern required` as before.
+- **One MCP `initialize` can no longer stop every later one.** The transport keeps the `clientInfo` and the
+  `capabilities` of each MCP session, and writes all its sessions to one file at every `initialize`. A lone
+  surrogate in either (JSON's `"\ud800"` reads as one) could not be written as UTF-8: the caller was answered
+  `500`, the session stayed in memory, and every later write of the file failed the same way. Each `initialize` by
+  any client then answered `500`, as did `notifications/initialized` and `DELETE /mcp` for a session made before,
+  until a restart. Any client that may call `POST /mcp` could send one, and a client that decodes its own name
+  with `surrogateescape` sends one by accident. Capabilities nested 600 objects deep did the same. A lone surrogate
+  is now stored as U+FFFD, and that `initialize` is answered as any other. A session whose first write fails, for
+  such a depth or for a full disk, is dropped before the error is answered: `500`, for that request alone.
 
 ### Changed
 

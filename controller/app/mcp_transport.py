@@ -22,7 +22,7 @@ from .models import McpToolCallRequest, OperatorIdentity
 from .safe_json_response import SafeJSONResponse
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .tool_inputs import MAX_TOOL_RESULT_CHARS
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, json_safe, utc_now
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, json_safe, utc_now, without_lone_surrogates
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -625,15 +625,24 @@ class McpHttpTransport:
         session = McpSession(
             id=uuid4().hex,
             protocol_version=negotiated_version,
-            client_info=self._coerce_dict(params.get("clientInfo")),
-            client_capabilities=self._coerce_dict(params.get("capabilities")),
+            # The client's own, kept in the session table, which is written as UTF-8: a lone surrogate in either
+            # (JSON's "\ud800" reads as one) could not be written, so it is stored as U+FFFD, as the stores do.
+            client_info=without_lone_surrogates(self._coerce_dict(params.get("clientInfo"))),
+            client_capabilities=without_lone_surrogates(self._coerce_dict(params.get("capabilities"))),
             owner=verified_operator(),
         )
         self._sessions[session.id] = session
         # Here as well as in _persist_sessions: with no store path configured
         # nothing else bounds the session table.
         self._evict_stale_sessions(keep=session.id)
-        self._persist_sessions()
+        try:
+            self._persist_sessions()
+        except Exception:
+            # The table is written whole, so a session that cannot be written (the client's capabilities nested
+            # deeper than the writer goes) would fail every later write too: each initialize by anybody, until a
+            # restart. Its id was never answered, so nobody holds it; it is taken back out before the error goes on.
+            self._forget_session(session.id)
+            raise
 
         result = {
             "protocolVersion": session.protocol_version,
