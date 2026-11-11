@@ -15,12 +15,15 @@ import asyncio
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -30,9 +33,14 @@ from app.browser.request_gate import GateBlock
 from app.browser_manager import BrowserManager
 from app.cron_service import CronService
 from app.models import McpToolCallRequest
-from app.routes.operations import CRON_TRIGGER_RUN_REFUSED_DETAIL, CRON_TRIGGER_TRY_AGAIN_DETAIL
+from app.routes.operations import (
+    CRON_TRIGGER_RUN_REFUSED_DETAIL,
+    CRON_TRIGGER_TRY_AGAIN_DETAIL,
+    create_operations_router,
+)
 from app.tool_gateway.gateway import McpToolGateway
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
+from tests.test_cron_webhook_key import _service
 
 START_URL = "https://shop.example/start"
 REFUSED_KEY = (403, {"detail": "Not permitted"})
@@ -276,3 +284,127 @@ class CronRunRefusalAtTheOtherDoorsTests(unittest.IsolatedAsyncioTestCase):
             [f"cron job {self.job_id} failed: the stored job's max_steps is not a number"],
         )
         self.manager.create_session.assert_not_awaited()
+
+
+class CronRunMetadataTests(unittest.IsolatedAsyncioTestCase):
+    """Once a trigger has queued its run, nothing the stored record holds turns its answer into an error.
+
+    The save of the run's metadata raised what a store edited by hand made it raise (a TypeError adding one to a
+    run_count that is no number), after the run was queued: an unhandled 500, and a webhook's sender, which tries a
+    5xx again, queued one more run at each try.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service, self.manager = _service(Path(self.tmp.name) / "crons.json")
+        self.store = self.service._store_path
+        app = FastAPI()
+        app.include_router(
+            create_operations_router(manager=self.manager, proxy_store=MagicMock(), cron_service=self.service)
+        )
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def _stored(self, job_id: str) -> Any:
+        return json.loads(self.store.read_text(encoding="utf-8"))[job_id]
+
+    def _store_as(self, job_id: str, record: Any) -> None:
+        jobs = json.loads(self.store.read_text(encoding="utf-8"))
+        jobs[job_id] = record
+        self.store.write_text(json.dumps(jobs), encoding="utf-8")
+
+    async def _trigger(self, job: dict[str, Any]) -> httpx.Response:
+        return self.client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": job["webhook_key"]})
+
+    def assert_answered_as_for_a_good_record(self, response: Any, job_id: str, queued_before: int) -> None:
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            {"triggered": True, "job_id": job_id, "session_id": "session-1", "queued_job": {"id": "agent-job-1"}},
+        )
+        self.assertEqual(self.service.job_queue.enqueue_run.await_count, queued_before + 1)
+
+    async def test_a_stored_run_count_that_is_no_whole_number_is_counted_from_0_again(self) -> None:
+        good = await self.service.create_job(name="good", goal="g", webhook_enabled=True)
+        self.assert_answered_as_for_a_good_record(await self._trigger(good), good["id"], 0)
+        self.assertEqual(self._stored(good["id"])["run_count"], 1)
+        for value in (None, "3", [1], {"a": 1}, True, False, 2.5):
+            with self.subTest(value=value):
+                job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
+                self._store_as(job["id"], {**self._stored(job["id"]), "run_count": value})
+                queued_before = self.service.job_queue.enqueue_run.await_count
+
+                with self.assertLogs("app.cron_service", level="WARNING") as logged:
+                    response = await self._trigger(job)
+
+                self.assert_answered_as_for_a_good_record(response, job["id"], queued_before)
+                stored = self._stored(job["id"])
+                self.assertEqual((stored["run_count"], stored["last_status"]), (1, "queued"))
+                self.assertIsNotNone(stored["last_run_at"])
+                self.assertEqual(
+                    [record.getMessage() for record in logged.records],
+                    [f"cron job {job['id']}: its stored run_count is no whole number, so its runs are counted from 0"],
+                )
+
+    async def test_a_record_that_is_no_object_by_the_save_leaves_the_store_as_it_is(self) -> None:
+        # Edited by hand while the run's session started: the record is read again for the save.
+        job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
+
+        async def edited_meanwhile(**_kwargs: Any) -> dict[str, str]:
+            self._store_as(job["id"], ["not", "an", "object"])
+            return {"id": "session-1"}
+
+        self.manager.create_session.side_effect = edited_meanwhile
+        with self.assertLogs("app.cron_service", level="WARNING") as logged:
+            response = await self._trigger(job)
+
+        self.assert_answered_as_for_a_good_record(response, job["id"], 0)
+        self.assertEqual(self._stored(job["id"]), ["not", "an", "object"])
+        self.assertEqual(
+            [record.getMessage() for record in logged.records],
+            [f"cron job {job['id']}: its stored record is no JSON object, so its run's metadata is not saved"],
+        )
+
+    async def test_a_store_its_writer_cannot_go_down_is_logged_as_a_save_that_failed(self) -> None:
+        # A value the JSON reader took nested deeper than its writer goes, which some Pythons have (a store edited by
+        # hand): the save's RecursionError is stood in for here, as the interpreter decides where it comes.
+        job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
+
+        with (
+            patch.object(self.service, "_save", side_effect=RecursionError("maximum recursion depth exceeded")),
+            self.assertLogs("app.cron_service", level="ERROR") as logged,
+        ):
+            response = await self._trigger(job)
+
+        self.assert_answered_as_for_a_good_record(response, job["id"], 0)
+        self.assertEqual(self._stored(job["id"])["run_count"], 0)
+        (line,) = [record.getMessage() for record in logged.records]
+        self.assertTrue(line.startswith(f"cron job {job['id']}: its run is queued, but the run's metadata"), line)
+
+    async def test_the_end_of_a_run_over_such_a_record_is_logged_and_its_session_released(self) -> None:
+        # The run's finish callback writes how the run ended into the same record, and raised the same way.
+        self.service.job_queue.store.get = AsyncMock(return_value=SimpleNamespace(status="completed"))
+        for cause, record, save_raises, logged_at in (
+            ("a record that is no object", ["not", "an", "object"], None, "WARNING"),
+            ("a store its writer cannot go down", None, RecursionError("maximum recursion depth exceeded"), "ERROR"),
+        ):
+            with self.subTest(cause):
+                job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
+                queued_before = self.service.job_queue.enqueue_run.await_count
+                self.assert_answered_as_for_a_good_record(await self._trigger(job), job["id"], queued_before)
+                if record is not None:
+                    self._store_as(job["id"], record)
+                before = self.store.read_bytes()
+                self.manager.close_session.reset_mock()
+
+                with (
+                    patch.object(self.service, "_save", side_effect=save_raises) if save_raises else nullcontext(),
+                    self.assertLogs("app.cron_service", level=logged_at) as logged,
+                ):
+                    await self.service._finish_run(job["id"], "session-1", "agent-job-1")
+
+                self.assertEqual(len(logged.records), 1, [r.getMessage() for r in logged.records])
+                self.assertTrue(logged.records[0].getMessage().startswith(f"cron job {job['id']}: "))
+                self.assertEqual(self.store.read_bytes(), before)
+                self.manager.close_session.assert_awaited_once_with("session-1")
+                self.assertNotIn(job["id"], self.service._active_runs)

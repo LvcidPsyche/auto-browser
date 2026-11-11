@@ -802,7 +802,12 @@ All notable changes to auto-browser are documented here.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
-  write that fails when the run has already ended is logged too, and the answer stays `triggered: true`. (D7-6)
+  write that fails when the run has already ended is logged too, and the answer stays `triggered: true`. A stored
+  `run_count` that is `null`, a string, a list or an object (a store edited by hand) answered an unhandled `500`
+  there with the run queued, so that a webhook's sender, which tries a `5xx` again, queued one more run at each
+  try: such a count, and one that is `true` or a fraction, is now counted from 0 again, with a WARNING that names
+  the job. A record that is no JSON object by then, and a store holding a value nested deeper than the JSON writer
+  goes, are left as they are and logged, there and where the run's end is saved. (D7-6)
 - **A cron job's `last_status` now says how its last run ended.** It stayed `queued` after the run was over. The agent
   job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
   when the job's record cannot say, also for a run that finishes while its trigger is still answering. `completed`

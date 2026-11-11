@@ -125,6 +125,29 @@ def _refuse_what_a_run_cannot_take(job: dict[str, Any]) -> None:
         raise ValueError("the stored job's max_steps is not a number")
 
 
+def _record_to_write(jobs: dict[str, Any], job_id: str, what: str) -> dict[str, Any] | None:
+    """The job's record in ``jobs``, to write ``what`` into after its run is queued; None if the job is gone.
+
+    None too, with a WARNING, for a record that is no JSON object (a store edited by hand while the run started):
+    the run is queued or over whatever the record holds, and writing into it raised a TypeError.
+    """
+    if job_id not in jobs:
+        return None
+    if not isinstance(jobs[job_id], dict):
+        logger.warning("cron job %s: its stored record is no JSON object, so %s is not saved", job_id, what)
+        return None
+    return jobs[job_id]
+
+
+def _runs_counted(job_id: str, record: dict[str, Any]) -> int:
+    """The record's run_count, or 0, with a WARNING, for one that is no whole number (a store edited by hand)."""
+    count = record.get("run_count", 0)
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    logger.warning("cron job %s: its stored run_count is no whole number, so its runs are counted from 0", job_id)
+    return 0
+
+
 class CronJobDisabledError(RuntimeError):
     """A disabled job was asked to run."""
 
@@ -598,23 +621,27 @@ class CronService:
             await self._release_run(job_id, session_id)
             raise
 
-        # Update run metadata. The run is queued whatever happens here: a store that fails now does not make it untrue.
+        # Update run metadata. The run is queued whatever happens here: a store that fails now does not make it untrue,
+        # nor does what a store edited by hand holds (an answer of 500 here is one a webhook's sender tries again).
         try:
             async with self._lock:
                 jobs = self._load()
-                if job_id in jobs:
-                    jobs[job_id]["last_run_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                record = _record_to_write(jobs, job_id, "its run's metadata")
+                if record is not None:
+                    record["last_run_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
                     # A run no longer in the slot has finished and said how (_finish_run), or a newer run has
                     # taken it and says what the status is: "queued" must not land over either.
                     if self._active_runs.get(job_id) == session_id:
-                        jobs[job_id]["last_status"] = RUN_QUEUED_STATUS
-                    jobs[job_id]["run_count"] = jobs[job_id].get("run_count", 0) + 1
+                        record["last_status"] = RUN_QUEUED_STATUS
+                    record["run_count"] = _runs_counted(job_id, record) + 1
                     # The clear of a refusal's mark is a save of its own (_end_refusal), which can fail: the run's
                     # record takes the mark with it, or it would outlive this run's status and the next refusal would
                     # be taken for the one before this fire.
-                    jobs[job_id].pop(_REFUSAL_AUDITED, None)
+                    record.pop(_REFUSAL_AUDITED, None)
                     self._save(jobs)
-        except (CronStoreUnreadableError, OSError) as exc:
+        # RecursionError: a store holding a value the JSON reader took nested deeper than its writer goes, as some
+        # Pythons' do.
+        except (CronStoreUnreadableError, OSError, RecursionError) as exc:
             logger.error("cron job %s: its run is queued, but the run's metadata could not be saved: %s", job_id, exc)
 
         return {
@@ -755,10 +782,11 @@ class CronService:
             async with self._lock:
                 if self._active_runs.get(job_id) == session_id:
                     jobs = self._load()
-                    if job_id in jobs:
-                        jobs[job_id]["last_status"] = status
+                    record = _record_to_write(jobs, job_id, f"how run {agent_job_id} ended")
+                    if record is not None:
+                        record["last_status"] = status
                         self._save(jobs)
-        except (CronStoreUnreadableError, OSError) as exc:
+        except (CronStoreUnreadableError, OSError, RecursionError) as exc:  # RecursionError: as _run_job_now's
             logger.error("cron job %s: how run %s ended could not be saved: %s", job_id, agent_job_id, exc)
         finally:
             await self._release_run(job_id, session_id)
