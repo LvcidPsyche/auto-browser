@@ -198,6 +198,19 @@ COVERED = """<title>start</title>
 <div id="zone"><button onclick="document.title='DELETED'">Delete account</button></div>
 <div id="bar">Cookies and such</div>
 """
+# A card that is a link. An inline element around a block has three boxes, and the first is empty, at the corner
+# of the block, where this card keeps a star of its own. The card is wider than the viewport, so its middle is
+# off the screen and its click is one Playwright places.
+CARD = """<title>start</title>
+<style>
+  body { margin: 0 }
+  #place { position: fixed; left: 0; top: 100px }
+  #card div { position: relative; width: 4000px; height: 60px }
+  #star { position: absolute; left: 0; top: 0; width: 24px; height: 24px }
+</style>
+<div id="place"><a id="card" href="#opened" onclick="document.title = 'OPENED'"><div><span id="star"
+  onclick="event.preventDefault(); event.stopPropagation(); document.title = 'STARRED'">*</span>Card</div></a></div>
+"""
 # A wrapper with no box of its own: its children are laid out in its place.
 NO_BOX = """<title>start</title>
 <div id="wrap" style="display: contents"><button onclick="document.title='DELETED'">Delete account</button></div>
@@ -810,6 +823,27 @@ async def test_a_wrapper_whose_middle_is_not_where_its_click_lands_asks_at_the_p
         await page.evaluate("document.title = 'start'")
         await env.manager.click(session_id, selector=wrapper)
         assert await _title(env, session_id) in ("DELETED", "REMOVED")
+
+
+async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_own_does(tmp_path: Path) -> None:
+    # The page took the element's first box whatever its size, and an inline link around a block has an empty
+    # one first, at the block's corner: the labelled click pressed that corner pixel, here the card's star,
+    # where Playwright's click (the click route) presses the middle of what the viewport shows of the card.
+    async with browser_env(tmp_path, {"/": CARD}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        areas = await page.locator("#card").evaluate(
+            "(el) => Array.from(el.getClientRects()).map((box) => box.width * box.height)"
+        )
+        # The shape the fixture stands for: an empty box, the block's, an empty box.
+        assert len(areas) == 3 and areas[0] == 0 and areas[1] > 0, areas
+
+        await env.manager.execute_decision(session_id, _click("read", selector="#card"))
+        assert await _title(env, session_id) == "OPENED"
+
+        await page.evaluate("document.title = 'start'")
+        await env.manager.click(session_id, selector="#card")
+        assert await _title(env, session_id) == "OPENED"
 
 
 async def test_a_wrapper_covered_at_its_middle_asks_at_the_press(tmp_path: Path) -> None:

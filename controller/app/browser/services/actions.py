@@ -114,17 +114,24 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
   return false;
 }"""
 
-# (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of the part of
-# el's first box that its frame's viewport shows (an inline element broken over lines has a box a line), counted
-# from the corner of its padding box, with the widths of the border at that corner. Playwright presses a position
-# where it is given, so the controller knows the point; the point Playwright picks itself it cannot ask for.
+# (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of what its
+# frame's viewport shows of the first of el's boxes that it shows a part of (an inline element broken over lines
+# has a box a line, and one around a block an empty box before and after the block: the first box whatever its
+# size was the corner pixel of such a card), counted from the corner of its padding box, with the widths of the
+# border at that corner. Playwright presses a position where it is given, so the controller knows the point; the
+# point Playwright picks itself it cannot ask for.
 # ``boxless``: el has no box at all (display: contents), so there is no corner to count from.
 _PRESS_PLACE_SCRIPT = """(el) => {
   const view = el.ownerDocument.defaultView;
   const style = view.getComputedStyle(el);
   const border = [parseInt(style.borderLeftWidth, 10) || 0, parseInt(style.borderTopWidth, 10) || 0];
   const whole = el.getBoundingClientRect();
-  const first = el.getClientRects()[0] || whole;
+  const boxes = Array.from(el.getClientRects());
+  // As Playwright takes the first quad with an area over 0.99 inside the viewport.
+  const shown = (box) =>
+    Math.max(0, Math.min(box.right, view.innerWidth) - Math.max(box.left, 0)) *
+    Math.max(0, Math.min(box.bottom, view.innerHeight) - Math.max(box.top, 0));
+  const first = boxes.find((box) => shown(box) > 0.99) || boxes[0] || whole;
   const middle = (low, high, limit) => {
     const from = Math.max(low, 0), to = Math.min(high, limit);
     return to - from >= 1 ? (from + to) / 2 : (low + high) / 2;
@@ -133,7 +140,7 @@ _PRESS_PLACE_SCRIPT = """(el) => {
     x: middle(first.left, first.right, view.innerWidth) - whole.left - border[0],
     y: middle(first.top, first.bottom, view.innerHeight) - whole.top - border[1],
     border,
-    boxless: el.getClientRects().length === 0,
+    boxless: boxes.length === 0,
   };
 }"""
 
