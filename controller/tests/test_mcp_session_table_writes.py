@@ -33,6 +33,18 @@ CAPABILITIES = {"roots": {"listChanged": True}, "experimental": {"x" + LONE: "y"
 # Objects inside one another: more than the table's writer goes down (it takes two frames a level, of the 1,000 the
 # interpreter allows by default), fewer than the request's parser refuses.
 TOO_DEEP_TO_WRITE = 600
+REPLACEMENT = chr(0xFFFD)  # U+FFFD, by its number: the character itself in this file would read as a mistake
+
+
+def _with(value: object, old: str, new: str) -> object:
+    """``value`` with ``old`` replaced by ``new`` in every string of it, keys included."""
+    if isinstance(value, str):
+        return value.replace(old, new)
+    if isinstance(value, dict):
+        return {_with(key, old, new): _with(item, old, new) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_with(item, old, new) for item in value]
+    return value
 
 
 class McpSessionTableWriteTests(unittest.TestCase):
@@ -94,13 +106,10 @@ class McpSessionTableWriteTests(unittest.TestCase):
 
         (record,) = self.stored()
         self.assertEqual(record["id"], session_id)
-        self.assertEqual(
-            record["client_info"], {"name": "client�", "version": "1", "build�": {"tags": ["a�"]}}
-        )
-        self.assertEqual(
-            record["client_capabilities"], {"roots": {"listChanged": True}, "experimental": {"x�": "y�"}}
-        )
-        self.assertNotIn(LONE, self.store.read_text(encoding="utf-8"))
+        self.assertEqual(record["client_info"], _with(CLIENT_INFO, LONE, REPLACEMENT))
+        self.assertEqual(record["client_capabilities"], _with(CAPABILITIES, LONE, REPLACEMENT))
+        self.assertEqual(record["client_info"]["name"], "client" + REPLACEMENT)
+        self.assertEqual(self.store.read_text(encoding="utf-8").count(REPLACEMENT), 5)
 
     def test_the_session_of_such_an_initialize_is_one_like_any_other(self) -> None:
         session_id = self.assert_an_ordinary_answer(self.initialize(CLIENT_INFO, CAPABILITIES))
