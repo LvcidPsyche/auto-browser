@@ -440,6 +440,51 @@ class CronWebhookTriggerRefusalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 403, response.text)
                 self.assertEqual(response.json(), {"detail": "Not permitted"})
 
+    async def test_a_stored_key_that_cannot_be_read_proves_no_key_and_refuses_every_key_alike(self) -> None:
+        # A store edited by hand. The stored key is read and hashed before the caller's is compared, and what that
+        # raised was answered as a run refused with the key proved: "The webhook key was accepted", to any key at
+        # all (a record that is no object was an unhandled 500). Nothing was proved, so each is a refused key.
+        job = await self.service.create_job(name="keyed", goal="g", webhook_enabled=True)
+        app = FastAPI()
+        app.include_router(
+            create_operations_router(manager=self.manager, proxy_store=MagicMock(), cron_service=self.service)
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        store = self.service._store_path
+        good = json.loads(store.read_text(encoding="utf-8"))[job["id"]]
+        for cause, record, error in (
+            (
+                "a plain key holding a lone surrogate",
+                {**good, "webhook_key_hash": None, "webhook_key": "legacy\ud800"},
+                "UnicodeEncodeError",
+            ),
+            (
+                "a hash holding a lone surrogate",
+                {**good, "webhook_key_hash": good["webhook_key_hash"] + "\ud800"},
+                "UnicodeEncodeError",
+            ),
+            ("a record that is no object", ["not", "an", "object"], "AttributeError"),
+        ):
+            with self.subTest(cause):
+                store.write_text(json.dumps({job["id"]: record}), encoding="utf-8")
+
+                for key in (job["webhook_key"], "any-key"):
+                    response = client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": key})
+
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(response.json(), {"detail": "Not permitted"})
+                # The log has the cause, in the one line a refused key writes.
+                with self.assertLogs("app.routes.operations", level="WARNING") as logged:
+                    client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": "any-key"})
+                (line,) = [record.getMessage().splitlines()[0] for record in logged.records]
+                self.assertIn(f"cron trigger refused for job '{job['id']}': answered 403 for {error}: ", line)
+                self.assertNotIn("legacy", line)
+                self.assertNotIn(good["webhook_key_hash"], line)
+                with self.assertRaises(WebhookKeyRefusedError) as refused:
+                    await self.service.trigger_via_webhook(job["id"], job["webhook_key"])
+                self.assertEqual(type(refused.exception.__cause__).__name__, error)
+        self.manager.create_session.assert_not_awaited()
+
     async def test_a_disabled_job_answers_its_error_only_after_the_key_is_proved(self) -> None:
         job = await self.service.create_job(name="n", goal="g", schedule="0 9 * * *", webhook_enabled=True)
         await self.service.update_job(job["id"], {"enabled": False})

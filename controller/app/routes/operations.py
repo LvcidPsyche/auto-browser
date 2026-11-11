@@ -279,7 +279,9 @@ def create_operations_router(
                 return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
         except WebhookKeyRefusedError as exc:
             # An unknown id, no key, a wrong one: the only 403 of this route, so that a caller can read it as the key.
-            log_hidden_cause(logger, 403, exc, "cron trigger refused for job %s", job_id)
+            # And a stored key that could not be read, which proves none: the line then names what was raised there.
+            cause = exc.__cause__ if isinstance(exc.__cause__, Exception) else exc
+            log_hidden_cause(logger, 403, cause, "cron trigger refused for job %s", job_id)
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except UncheckedAuthProfileError:
             # Raised where the run's session opens the job's profile.

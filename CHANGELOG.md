@@ -769,8 +769,10 @@ All notable changes to auto-browser are documented here.
   holds a webhook key and not the operator's token: the cause is in the server log, one WARNING for each such
   trigger. Only an unknown job, a job with no key and a wrong key answer `403`, and only a request the route refuses
   `400`: its body, or a job id in the path that is blank or longer than 50 characters. A body nested past what the
-  JSON reader goes down is refused so too, with its WARNING, where it was an unhandled `500`.
-  `browser.trigger_cron_job`, which takes no key, is unchanged.
+  JSON reader goes down is refused so too, with its WARNING, where it was an unhandled `500`. A job whose stored
+  key cannot be read (a lone surrogate in the key or its hash, a record that is no JSON object: a store edited by
+  hand) proves no key, and answers that `403` to every key with a WARNING that names what was raised, where it
+  answered `400` or `500`. `browser.trigger_cron_job`, which takes no key, is unchanged.
 - **With its key proved, a cron trigger no longer passes on what the run's session answers its own caller, nor
   answers `500` for a stored job a run cannot take.** `POST /crons/{id}/trigger` answered `403`
   `browser_action_blocked`, with the refused host in its text, for a `start_url` whose load the pre-request gate

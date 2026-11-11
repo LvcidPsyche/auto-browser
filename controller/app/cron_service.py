@@ -424,15 +424,27 @@ class CronService:
     # ── Webhook trigger ─────────────────────────────────────────────────────
 
     async def trigger_via_webhook(self, job_id: str, webhook_key: str) -> dict[str, Any]:
-        """Verify webhook key and enqueue the job for immediate execution."""
+        """Verify webhook key and enqueue the job for immediate execution.
+
+        Until the key is proved this raises WebhookKeyRefusedError and nothing else of its own (a store that cannot
+        be read is the store's error): whatever else it raises, it raises with the key proved, which is what the
+        route tells its caller.
+        """
         job = self._load().get(job_id)
-        stored_hash = self._stored_key_hash(job) if job is not None else None
-        # An unknown id, a job with no key and a wrong key are one refusal, after one comparison: what differs is
-        # which hash there was to compare against. Compared as bytes: compare_digest raises TypeError for a str with
-        # non-ASCII characters, which surfaced as a 500 instead of a refusal.
-        matched = hmac.compare_digest(
-            _hash_webhook_key(webhook_key).encode("utf-8"), (stored_hash or _NO_WEBHOOK_KEY_DIGEST).encode("utf-8")
-        )
+        try:
+            stored_hash = self._stored_key_hash(job) if job is not None else None
+            # An unknown id, a job with no key and a wrong key are one refusal, after one comparison: what differs
+            # is which hash there was to compare against. Compared as bytes: compare_digest raises TypeError for a
+            # str with non-ASCII characters, which surfaced as a 500 instead of a refusal.
+            matched = hmac.compare_digest(
+                _hash_webhook_key(webhook_key).encode("utf-8"),
+                (stored_hash or _NO_WEBHOOK_KEY_DIGEST).encode("utf-8"),
+            )
+        except Exception as exc:
+            # A stored key that cannot be read or hashed (a lone surrogate in the key or in its hash, a record that
+            # is no object: a store edited by hand) proves no key a caller sends. A ValueError among these was
+            # answered as a run refused with the key proved, to a wrong key too. The cause goes with the refusal.
+            raise WebhookKeyRefusedError(WEBHOOK_KEY_REFUSED) from exc
         if not matched or stored_hash is None:
             raise WebhookKeyRefusedError(WEBHOOK_KEY_REFUSED)
         return await self._run_job_now(job)
