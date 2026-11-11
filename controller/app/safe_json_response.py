@@ -56,10 +56,16 @@ async def safe_http_exception_handler(request: Request, exc: HTTPException) -> R
 
 
 async def safe_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
-    """FastAPI's own 422, unless what was refused holds a lone surrogate or a non-finite number: its errors quote
-    the input."""
+    """FastAPI's own 422, unless what was refused holds a lone surrogate or a non-finite number, or is nested deeper
+    than the encoder goes: its errors quote the input."""
     try:
         return await request_validation_exception_handler(request, exc)
+    except RecursionError:
+        # The encoder goes down an input a call a level, and the JSON reader of Python 3.12 or 3.14 takes a value
+        # deeper than that (a list 1,500 deep): the answer failed, an unhandled 500. Each error's kind, place and
+        # message, without the input it repeats.
+        errors = [{"type": error["type"], "loc": list(error["loc"]), "msg": error["msg"]} for error in exc.errors()]
+        return SafeJSONResponse(status_code=422, content={"detail": errors})
     except UnicodeEncodeError:
         clean = RequestValidationError(without_lone_surrogates(list(exc.errors())), body=exc.body)
         return await request_validation_exception_handler(request, clean)

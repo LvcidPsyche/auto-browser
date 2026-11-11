@@ -930,6 +930,13 @@ All notable changes to auto-browser are documented here.
   write fails (a full disk) is dropped before the error is answered: `500`, for that request alone. With the table
   at its cap, the session it would have put out stays, and its event stream with it: sessions past a cap now go
   once the table is written without them, where they went before the write.
+- **A body field refused for a value nested about a thousand levels deep or more is answered `422`, not `500`.** A
+  REST route whose body is read into a request model (`POST /sessions`, `POST /crons` and the others) answers a
+  field it refuses with `422` and each error's `input`, the value as it was sent, and the answer's encoder goes
+  down that value a call a level: on Python 3.12 and 3.14, whose JSON reader takes such a body, it raised
+  `RecursionError` and the request was an unhandled `500`. That `422` now holds each error's `type`, `loc` and
+  `msg`, without its `input`; every other `422` is as it was. The image runs Python 3.11, whose JSON reader refuses
+  such a body first, with the `400` it answered before.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
