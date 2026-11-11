@@ -309,7 +309,8 @@ All notable changes to auto-browser are documented here.
   having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
   quoted and cut at 200 characters, and says when the URL carried userinfo or a port that cannot be read, for which
   it is refused whatever its host, and, of a host a pattern allows, which of the URL's scheme, port (as written) and
-  path no pattern allows with that host; what the peer is answered is the fixed text it was. Under
+  path no pattern allows with that host, or that the URL writes no port where each pattern of that host names one;
+  what the peer is answered is the fixed text it was. Under
   `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent too (`no readable record
   for session`), the id of a peer's request or of an MCP call; and with `REDIS_URL` set, while Redis failed, so was
   the id of every session a route or a tool looked up, at WARNING (`redis session read failed for`). Both are quoted

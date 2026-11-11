@@ -180,10 +180,22 @@ REFUSED_PARTS = {
         "https://a.example.com/private-path",
         "with a scheme, port and path no one pattern allows together,",
     ),
+    # A URL that writes no port, of a host whose patterns each name one: "a port no pattern allows" named a port the
+    # URL does not write, and with :443 the very port the pattern allows.
     "a pattern with a port of its own": (
         ["https://*.example.com:8443/*"],
         "https://a.example.com/private-path",
-        "and a port no pattern allows with that host,",
+        "and no port written, where each pattern of that host names one,",
+    ),
+    "a pattern with the scheme's own port written out": (
+        ["https://*.example.com:443/*"],
+        "https://a.example.com/x",
+        "and no port written, where each pattern of that host names one,",
+    ),
+    "a scheme, and a pattern with a port of its own": (
+        ["https://*.example.com:443/*"],
+        "http://a.example.com/x",
+        "and a scheme no pattern allows with that host, and no port written, where each pattern of that host names one,",
     ),
 }
 

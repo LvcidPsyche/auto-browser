@@ -223,10 +223,18 @@ def _refused_url_shown(url: str, patterns: list[str]) -> str:
     named = [name for name, _ in _PARTS_NAMED if all(name in refused for refused in refused_by_each)]
     if not named:
         return f"{shown} with a scheme, port and path no one pattern allows together,"
+    # The port of a URL that writes none is refused only by patterns that each name one ("a port no pattern allows"
+    # named a port the URL does not write, and with :443 the one such a pattern allows).
+    no_port = ""
+    if "port" in named and parts.port is None:
+        named.remove("port")
+        no_port = "and no port written, where each pattern of that host names one,"
+        if not named:
+            return f"{shown} {no_port}"
     if "path" in named and ("?" in read[3] or "#" in read[3]):
         named[-1] = "path (with its query or fragment)"
     listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
-    return f"{shown} and a {listed} no pattern allows with that host,"
+    return f"{shown} and a {listed} no pattern allows with that host,{' ' + no_port if no_port else ''}"
 
 
 def _check_expires_at(grant: CapabilityGrant) -> None:
