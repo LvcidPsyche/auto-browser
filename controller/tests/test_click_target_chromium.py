@@ -280,6 +280,47 @@ HELD_BY = {
     "embed": _HELD_STYLE + '<div id="wrap"><embed id="frame" type="text/html" src="/held"></div>',
 }
 HELD = html.unescape(_FRAMED_BUTTON)
+# A frame with a link in it wider than the frame shows, and a button of the page itself beside the frame.
+# The selector names the link through the frame, as a locator made from a frame locator does.
+IN_THE_FRAME = "#frame >> internal:control=enter-frame >> "
+CUT_BY_ITS_FRAME = (
+    "<title>start</title><style>body { margin: 0 } "
+    "#frame { position: fixed; left: FRAME_LEFTpx; top: 100px; width: FRAME_WIDTHpx; height: 120px; border: 0 } "
+    "#side { position: fixed; left: SIDE_LEFTpx; top: 110px; width: 160px; height: 80px }</style>"
+    '<iframe id="frame" src="/inner"></iframe>'
+    '<button id="side" onclick="document.title = \'SIDE PRESSED\'">SIDE_LABEL</button>'
+)
+CUT_LINK = (
+    "<body style='margin: 0'><div style='position: fixed; left: 0; top: 20px'>"
+    "<a id='link' href='#opened' style='display: block; width: LINK_WIDTHpx; height: 60px' "
+    "onclick=\"event.preventDefault(); top.document.title = 'OPENED'\">Card</a></div>"
+)
+
+
+def _cut_by_its_frame(frame_left: int, frame_width: int, link_width: int, side: str) -> dict[str, str]:
+    page = (
+        CUT_BY_ITS_FRAME.replace("FRAME_LEFT", str(frame_left))
+        .replace("FRAME_WIDTH", str(frame_width))
+        .replace("SIDE_LEFT", str(frame_left + link_width // 2 - 60))
+        .replace("SIDE_LABEL", side)
+    )
+    return {"/": page, "/inner": CUT_LINK.replace("LINK_WIDTH", str(link_width))}
+
+
+# A frame drawn at half its size and still wider than the screen, with a link as wide in it and something of
+# the frame's own over the middle of the link.
+SCALED_FRAME = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: fixed; left: 0; top: 100px; width: 3000px; "
+    "height: 240px; border: 0; transform: scale(0.5); transform-origin: 0 0 }</style>"
+    '<iframe id="frame" src="/inner"></iframe>'
+)
+SCALED_LINK = (
+    "<body style='margin: 0'><div style='position: fixed; left: 0; top: 40px'>"
+    "<a id='link' href='#opened' style='display: block; width: 3000px; height: 120px' "
+    "onclick=\"event.preventDefault(); top.document.title = 'OPENED'\">Card</a></div>"
+    "<div style='position: fixed; left: 1400px; top: 40px; width: 200px; height: 120px' "
+    "onclick=\"top.document.title = 'COVER PRESSED'\"></div>"
+)
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -1101,6 +1142,175 @@ async def test_a_button_in_a_document_an_object_or_an_embed_holds_is_read_as_one
         await env.manager.approve(asked.value.approval.id)
         await env.manager.execute_decision(session_id, _click("read", **middle), approval_id=asked.value.approval.id)
         assert await _title(env, session_id) == "DELETED x1"
+
+
+@pytest.mark.parametrize(
+    ("route", "frame_width", "side"),
+    [
+        ("direct", 700, "Next"),
+        ("read", 700, "Next"),
+        ("read", 700, "Delete account"),
+        ("direct", 1000, "Next"),
+        ("read", 1000, "Next"),
+    ],
+)
+async def test_a_click_on_a_link_its_frame_cuts_presses_the_link_and_not_the_page_beside_the_frame(
+    tmp_path: Path, route: str, frame_width: int, side: str
+) -> None:
+    # Whether the pointer finds the target at the middle of its box was asked in the target's own document, and
+    # for one in a frame the answer was always yes: "checked by Playwright", which checks at its own point, the
+    # middle of what the viewport shows. A link wider than the screen has the middle of its box elsewhere:
+    # outside its frame (700 px wide), or in it under something of the page's own (1000 px, where the link's
+    # document finds the link at that point and the page does not find the frame). The click that named the
+    # link pressed the page's button there, and ended as done.
+    async with browser_env(tmp_path, _cut_by_its_frame(0, frame_width, 1600, side)) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        link = await _centre(page.frame_locator("#frame").locator("#link"))
+        button = await page.locator("#side").bounding_box()
+        # The shape the fixture stands for: the middle of the link's box is on the page's button.
+        assert button["x"] < link["x"] < button["x"] + button["width"], (link, button)
+        assert button["y"] < link["y"] < button["y"] + button["height"], (link, button)
+
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#link")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
+        assert await _title(env, session_id) == "OPENED"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_click_on_a_link_in_a_frame_whose_middle_is_off_the_screen_presses_the_link(
+    tmp_path: Path, route: str
+) -> None:
+    # The same with the middle of the link's box past the edge of the viewport: the press went down there, on
+    # nothing, and the action ended as done with nothing clicked.
+    async with browser_env(tmp_path, _cut_by_its_frame(100, 1000, 3000, "Next")) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        link = await _centre(page.frame_locator("#frame").locator("#link"))
+        assert link["x"] > page.viewport_size["width"], link
+
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#link")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
+        assert await _title(env, session_id) == "OPENED"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_click_on_a_link_in_a_frame_that_runs_off_the_screen_presses_what_the_screen_shows(
+    tmp_path: Path, route: str
+) -> None:
+    # The point Playwright picks is the middle of what the screen shows of the element. In a frame the page
+    # can tell only what the frame shows: with the frame's right half off the screen that middle was off it
+    # too, and a click that is read, which is placed by the controller, failed when its time was up where a
+    # plain click pressed the link. The element's box on the screen and the screen's size now go with the
+    # question.
+    async with browser_env(tmp_path, _cut_by_its_frame(1000, 1000, 3000, "Next")) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        await page.evaluate("document.getElementById('side').remove()")
+        frame = await page.locator("#frame").bounding_box()
+        assert frame["x"] + frame["width"] / 2 > page.viewport_size["width"], frame
+
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#link")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
+        assert await _title(env, session_id) == "OPENED"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_click_on_a_link_in_a_frame_that_css_scales_is_pressed_where_the_link_is(
+    tmp_path: Path, route: str
+) -> None:
+    # A point of the screen is carried into a frame by the element's two boxes, the one its own document
+    # gives and the one on the screen, in proportion. Carried by their corners alone, in a frame drawn at
+    # half its size the pointer is looked for a quarter of the way along this link, beside what lies over
+    # its middle, and found on the link; and the point a click that is read is placed at, counted in the
+    # frame's own pixels, is twice as far along as the screen has it: off the screen here, where the press
+    # went down on nothing and the action ended as done. (Unchecked, the press at the middle of the box
+    # went to what lies there.)
+    async with browser_env(tmp_path, {"/": SCALED_FRAME, "/inner": SCALED_LINK}) as env:
+        session_id = await env.create("/")
+        link = await _centre(env.page(session_id).frame_locator("#frame").locator("#link"))
+        assert 700 < link["x"] < 800, link
+
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#link")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
+        assert await _title(env, session_id) == "OPENED"
+
+
+async def test_a_read_click_in_a_scaled_frame_does_not_press_what_the_page_puts_over_the_frame(
+    tmp_path: Path,
+) -> None:
+    # Playwright does not look through a frame that CSS transforms: its hover puts the pointer where it is
+    # told, and with no event reaching the frame it calls that done. Something of the page's own over that
+    # point took the controller's press. The frames on the way up are asked once more, where the press goes.
+    cover = (
+        '<div style="position: fixed; left: 600px; top: 120px; width: 80px; height: 60px" '
+        "onclick=\"document.title = 'PAGE COVER PRESSED'\"></div>"
+    )
+    async with browser_env(tmp_path, {"/": SCALED_FRAME + cover, "/inner": SCALED_LINK}) as env:
+        session_id = await env.create("/")
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
+        assert refused.value.code == "browser_action_failed"
+        assert await _title(env, session_id) == "start"
+
+
+async def test_a_shadow_button_under_its_slotted_label_in_a_frame_is_still_pressed(tmp_path: Path) -> None:
+    # Where a placed click is pressed the frames are asked, and not the target once more: Playwright's hover has
+    # checked the target there, and it knows a label slotted into a component's button as that button's, which
+    # the controller's own question does not. Asked of the target too, this click was refused.
+    inner = SLOTTED.replace("document.title = 'PRESSED '", "top.document.title = 'PRESSED '")
+    assert inner != SLOTTED
+    page = (
+        '<title>start</title><body style="margin: 0">'
+        '<iframe id="frame" src="/inner" style="width: 600px; height: 400px; border: 0"></iframe>'
+    )
+    async with browser_env(tmp_path, {"/": page, "/inner": inner}) as env:
+        session_id = await env.create("/")
+        await env.manager.execute_decision(session_id, _click("write", selector=IN_THE_FRAME + "#filter .inner"))
+        assert await _title(env, session_id) == "PRESSED filter"
+
+
+async def test_a_click_on_a_button_in_a_frame_that_the_pointer_finds_is_still_the_controllers_own_press(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The check through the frames must not send every click in a frame to Playwright's own placing: where
+    # the pointer finds the target, in a frame of the page's own or two frames down, the press is the
+    # human-like one, as it was.
+    placed: list[Any] = []
+    real = actions_module.BrowserActionService.click_as_playwright_places_it
+
+    async def counted(self: Any, *given: Any, **named: Any) -> None:
+        placed.append(given)
+        await real(self, *given, **named)
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "click_as_playwright_places_it", counted)
+    async with browser_env(tmp_path, {"/": FRAMED}) as env:
+        session_id = await env.create("/")
+        await env.manager.click(session_id, selector=IN_THE_FRAME + "button")
+        assert await _title(env, session_id) == "DELETED x1"
+        assert placed == []
+    async with browser_env(tmp_path, {"/": FRAMES}) as env:
+        session_id = await env.create("/")
+        deep = "#outer >> internal:control=enter-frame >> #inner >> internal:control=enter-frame >> #deep"
+        await env.manager.click(session_id, selector=deep)
+        assert await _title(env, session_id) == "DELETED"
+        assert placed == []
+    # And in a frame drawn at half its size.
+    scaled = FRAMED.replace("border: 0 }", "border: 0; transform: scale(0.5); transform-origin: 0 0 }")
+    assert scaled != FRAMED
+    async with browser_env(tmp_path, {"/": scaled}) as env:
+        session_id = await env.create("/")
+        await env.manager.click(session_id, selector=IN_THE_FRAME + "button")
+        assert await _title(env, session_id) == "DELETED x1"
+        assert placed == []
 
 
 async def test_a_click_playwright_places_over_a_frame_presses_nothing_before_it_is_read(tmp_path: Path) -> None:

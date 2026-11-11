@@ -140,7 +140,7 @@ def _service(under_the_pointer: Any) -> tuple[BrowserActionService, SimpleNamesp
 
 BOX = {"x": 20, "y": 30, "width": 40, "height": 40}
 # Where the page says Playwright's click lands, from the corner of the padding box, and the border at that corner.
-PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False, "contents": False}
+PLACE = {"x": 12, "y": 7, "border": [3, 2], "boxless": False, "contents": False, "framed": False}
 PLACED_AT = (20 + 3 + 12.0, 30 + 2 + 7.0)
 
 

@@ -412,6 +412,21 @@ All notable changes to auto-browser are documented here.
   more click too. The checks are now made with no click: a wait for the element to be enabled, then a trial
   hover, which sends the pointer's move and nothing else. The approval read of a fast-profile click depends on
   it: nothing is pressed before the target has been read.
+- **A click on an element inside a frame is pressed only where the pointer finds that element.** A selector that
+  goes into a frame names an element there, and its click is pressed at the middle of the element's box once the
+  pointer is found to be on it. For an element in a frame that was never asked: the check ran in the frame's own
+  document, which cannot tell where it lies on the screen, and answered yes. Where the element is wider or taller
+  than its frame shows (a wide card link, a long form), the middle of its box is outside the frame, and the click,
+  or the click that puts the caret for a `type`, pressed whatever the page had there, or nothing past the edge of
+  the viewport, and ended as done under the name of the element it never touched. A fast-profile action whose
+  target is read still asked at such a press for a button of the table's kinds;
+  `POST /sessions/{id}/actions/click` read nothing. The pointer is now looked for in the element's document and
+  in each document on the way up, where the frame must be what the pointer finds; when it is not, the click is one
+  Playwright places, on what the viewport shows of the element. For an action that is read, whose placed click the
+  controller presses itself, the point is taken on what the screen shows of the element (also through a frame that
+  runs off the screen, or one CSS draws at another size), and the frames are asked again where the press goes
+  down. One limit is Playwright's: it does not look through a frame that CSS transforms, so its own click, which a
+  click that is not read still is, presses what the page has put over such a frame. Older than this release.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)

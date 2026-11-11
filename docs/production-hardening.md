@@ -230,10 +230,16 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     controller's own, read where it lands as any other; a target the page has taken out of its layout by then
     (`hidden`, `display: none`) is not pressed (`target_moved`, retryable; one that has left the page, or that the
     page has made invisible where it stands, is waited for, as a click waits, and ends the click when its time
-    does), and neither is one with no box of its own, whose children are laid out in its place (`display:
-    contents`): where a press on it would land cannot be read, so the action answers `target_has_no_box`, and the
-    agent names an element inside it. This read has half a second to set up and half a second to run; when it
-    fails or runs past either, the press goes on, and an info-level log line says so.
+    does), and neither is one with no box of its own, whose children are laid out in its place
+    (`display: contents`): where a press on it would land cannot be read, so the action answers
+    `target_has_no_box`, and the agent names an element inside it. A target inside a frame is placed on what the
+    screen shows of it, also where its frame runs off the screen or CSS draws the frame at another size, and the
+    frames it is in are asked once more that the pointer finds them where the press goes: Playwright does not look
+    through a frame that CSS transforms, so where the page has put something of its own over such a frame the
+    action ends as `browser_action_failed` with nothing pressed. A click that is not read is Playwright's own
+    click there, which presses what covers the frame and calls it done. This read has half a second to set up and
+    half a second to run; when it fails or runs past either, the press goes on, and an info-level log line says
+    so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as

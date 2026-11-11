@@ -78,7 +78,7 @@ class FakeLocator:
 
     async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:
         if script == _PRESS_PLACE_SCRIPT:
-            return {"x": 5.0, "y": 5.0, "border": [0, 0], "boxless": False}
+            return {"x": 5.0, "y": 5.0, "border": [0, 0], "boxless": False, "framed": False}
         return True  # focus checks: the field has focus; the pointer check: the target is under it
 
     async def is_enabled(self, **_: object) -> bool:

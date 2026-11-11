@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import re
@@ -93,13 +94,24 @@ def _target_has_no_box() -> BrowserActionError:
 # before Python 3.13, coarser than what is being measured.
 _step_clock = time.perf_counter
 
-# Whether the element (or a label for it) is what the pointer at (x, y) hits.
-# Runs in the element's own frame; a target inside a child frame was already
-# checked, across frame boundaries, by Playwright's own checks. For selector
-# targets only: an element named by element_id takes a stricter check in the
-# isolated world (element_target.py), where a label for it does not count.
-_RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
-  if (window !== window.top) return true;
+# Whether the element (or a label for it) is what the pointer at (x, y) hits, in the element's own document.
+# For selector targets only: an element named by element_id takes a stricter check in the isolated world
+# (element_target.py), where a label for it does not count.
+# (x, y) is a point of the main frame's viewport. In a child frame the script cannot tell where its document
+# lies in that viewport, and answered yes for every point: "checked by Playwright", whose checks are made at
+# Playwright's own point, the middle of what the viewport shows of the element, and not at the middle of its
+# box, where the press goes. So there it answers 'framed' until it is given ``box``, the element's box in the
+# main frame's viewport (Playwright's bounding_box): the point is carried into the document by the two boxes,
+# in proportion, which is exact where the frames on the way are moved or scaled, and at the middle of the box
+# where one is turned. _receives_pointer_at asks it of the element, then of each frame element on the way up.
+_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box]) => {
+  if (window !== window.top) {
+    if (!box) return 'framed';
+    const own = el.getBoundingClientRect();
+    if (!(own.width > 0 && own.height > 0 && box.width > 0 && box.height > 0)) return false;
+    x = own.left + ((x - box.x) * own.width) / box.width;
+    y = own.top + ((y - box.y) * own.height) / box.height;
+  }
   let hit = document.elementFromPoint(x, y);
   while (hit && hit.shadowRoot) {
     const inner = hit.shadowRoot.elementFromPoint(x, y);
@@ -124,27 +136,43 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
 # thin: taken so only where an axis showed a whole pixel, a wide card with 0.9 px of its height on the screen
 # (area enough for Playwright to pick it) was aimed at above the screen. Of a box the viewport shows nothing
 # of, it is the middle of the box, which Playwright's hover scrolls to.
+# In a frame the script sees what the frame shows of el, and the screen may show less (a frame that runs off
+# it): it answers ``framed``, and is asked again with ``screen``, el's box in the main frame's viewport and
+# that viewport's size, which narrow what is shown to what the screen shows. The two boxes of el differ in
+# size where a frame on the way is scaled: the place is then in the screen's pixels, as Playwright counts a
+# position from the box it finds on the screen (in the frame's own pixels the point was twice as far along
+# in a frame drawn at half its size).
 # ``boxless``: el has no box at all, so there is no corner to count from; ``contents``: because its children are
 # laid out in its place (display: contents), and not because it is not shown.
-_PRESS_PLACE_SCRIPT = """(el) => {
+_PRESS_PLACE_SCRIPT = """(el, screen) => {
   const view = el.ownerDocument.defaultView;
   const style = view.getComputedStyle(el);
   const border = [parseInt(style.borderLeftWidth, 10) || 0, parseInt(style.borderTopWidth, 10) || 0];
   const whole = el.getBoundingClientRect();
   const boxes = Array.from(el.getClientRects());
+  let [left, top, right, bottom] = [0, 0, view.innerWidth, view.innerHeight];
+  let [wider, taller] = [1, 1];
+  if (screen && whole.width > 0 && whole.height > 0 && screen[0].width > 0 && screen[0].height > 0) {
+    const [box, [width, height]] = screen;
+    [wider, taller] = [box.width / whole.width, box.height / whole.height];
+    const across = (x) => whole.left + (x - box.x) / wider, down = (y) => whole.top + (y - box.y) / taller;
+    [left, top] = [Math.max(left, across(0)), Math.max(top, down(0))];
+    [right, bottom] = [Math.min(right, across(width)), Math.min(bottom, down(height))];
+  }
   // As Playwright takes the first quad with an area over 0.99 inside the viewport.
   const shown = (box) =>
-    Math.max(0, Math.min(box.right, view.innerWidth) - Math.max(box.left, 0)) *
-    Math.max(0, Math.min(box.bottom, view.innerHeight) - Math.max(box.top, 0));
+    Math.max(0, Math.min(box.right, right) - Math.max(box.left, left)) *
+    Math.max(0, Math.min(box.bottom, bottom) - Math.max(box.top, top));
   const picked = boxes.find((box) => shown(box) > 0.99);
   const first = picked || boxes[0] || whole;
-  const middle = (low, high, limit) => (picked ? (Math.max(low, 0) + Math.min(high, limit)) / 2 : (low + high) / 2);
+  const middle = (low, high, from, to) => (picked ? (Math.max(low, from) + Math.min(high, to)) / 2 : (low + high) / 2);
   return {
-    x: middle(first.left, first.right, view.innerWidth) - whole.left - border[0],
-    y: middle(first.top, first.bottom, view.innerHeight) - whole.top - border[1],
+    x: (middle(first.left, first.right, left, right) - whole.left) * wider - border[0],
+    y: (middle(first.top, first.bottom, top, bottom) - whole.top) * taller - border[1],
     border,
     boxless: boxes.length === 0,
     contents: style.display === 'contents',
+    framed: view !== view.top,
   };
 }"""
 
@@ -154,6 +182,10 @@ _PRESS_PLACE_SCRIPT = """(el) => {
 # How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
 # 20 to 500 ms between its looks.
 ENABLED_POLL_SECONDS = 0.1
+# The check that the pointer finds a target inside frames (_receives_pointer_at): how many frames up it goes
+# before it gives the click to Playwright's own placing, and how long it waits for the element it asks about.
+POINTER_CHECK_FRAMES = 8
+POINTER_CHECK_TIMEOUT_MS = 1000
 
 
 class _Budget:
@@ -1187,6 +1219,14 @@ class BrowserActionService:
         budget = self._budget(timeout_ms)
         await self._checks_of_a_click(locator, budget)
         place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=budget.left_ms())
+        if place["framed"] and not place["boxless"]:
+            # What the frame shows of the target is not what the screen shows of it: asked again with both.
+            seen = await locator.bounding_box(timeout=budget.left_ms())
+            size = await session.page.locator(":root").evaluate(
+                "() => [innerWidth, innerHeight]", timeout=budget.left_ms()
+            )
+            if seen:
+                place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, size], timeout=budget.left_ms())
         if place["boxless"]:
             # Shown when the checks passed a moment ago, or they had not: one with no box now, and not for its
             # children's sake, was hidden since. It has nothing inside it to name.
@@ -1199,15 +1239,54 @@ class BrowserActionService:
         # Where Playwright puts a position: the corner of the element's box, its border, the offset.
         x = float(box["x"] + place["border"][0] + position["x"])
         y = float(box["y"] + place["border"][1] + position["y"])
+        if place["framed"] and not await self._receives_pointer_at(locator, x, y, frames_only=True):
+            # Playwright's hover does not look through a frame that CSS transforms: it puts the pointer where
+            # it is told and, with no event reaching the frame, calls that done.
+            raise PlaywrightError(
+                "The click's target is in a frame, and where the pointer was placed the page does not show that frame."
+            )
         await session.page.mouse.move(x, y)
         await self.press_mouse(session, x, y)
 
     @staticmethod
-    async def _receives_pointer_at(locator: Any, x: float, y: float) -> bool:
+    async def _receives_pointer_at(locator: Any, x: float, y: float, *, frames_only: bool = False) -> bool:
+        """Whether the pointer at (x, y) finds the element ``locator`` names, through the frames it is in.
+
+        A target in the main frame is asked in one message, as before. One inside a frame is asked in its own
+        document, and then each frame element on the way up is asked in the document that holds it: the frame
+        must be what the pointer finds there. A press at the middle of a link's box, where the link was wider
+        than its frame, landed on the page beside the frame, and the click ended as done. Anything that cannot
+        be told is a no, and the click is then one Playwright places.
+
+        ``frames_only`` leaves the element itself out and asks the frames alone: for a point Playwright's
+        hover has checked on the element, which does not look through a frame that CSS transforms.
+        """
+        handles: list[Any] = []
         try:
-            return bool(await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y]))
+            if not frames_only:
+                found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None])
+                if found != "framed":
+                    return found is True
+            node = await locator.element_handle(timeout=POINTER_CHECK_TIMEOUT_MS)
+            asked = not frames_only
+            for _ in range(POINTER_CHECK_FRAMES):
+                handles.append(node)
+                if asked:
+                    box = await node.bounding_box()
+                    if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box]) is not True:
+                        return False
+                asked = True
+                frame = await node.owner_frame()
+                if frame is None or frame.parent_frame is None:
+                    return True
+                node = await frame.frame_element()
+            return False
         except Exception:
             return False
+        finally:
+            for handle in handles:
+                with contextlib.suppress(Exception):
+                    await handle.dispose()
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         coords = await self.locator_center(locator)
