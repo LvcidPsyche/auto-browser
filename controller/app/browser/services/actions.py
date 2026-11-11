@@ -205,6 +205,8 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
 # How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
 # 20 to 500 ms between its looks.
 ENABLED_POLL_SECONDS = 0.1
+# What Playwright says of an element the page took out of the document while a step was waiting on it.
+_NOT_ATTACHED = "Element is not attached to the DOM"
 # The check that the pointer finds a target inside frames (_receives_pointer_at): how many frames up it goes
 # before it gives the click to Playwright's own placing, and how long it waits for the element it asks about.
 POINTER_CHECK_FRAMES = 8
@@ -388,7 +390,7 @@ class BrowserActionService:
                 # One budget for every wait of the click, as Playwright's own click has one timeout. The scroll
                 # and the read of the box each waited by Playwright's default, a whole budget more apiece.
                 budget = self._budget(None)
-                await locator.scroll_into_view_if_needed(timeout=budget.left_ms())
+                await self._scroll_into_view(locator, budget)
                 coords = await self.locator_center(locator, timeout_ms=budget.left_ms())
                 if coords is None:
                     await self.click_as_playwright_places_it(session, locator, budget=budget)
@@ -1219,6 +1221,27 @@ class BrowserActionService:
     def _budget(self, timeout_ms: float | None) -> _Budget:
         """A click's budget: the caller's, or the one Playwright gives an action of this session (ACTION_TIMEOUT_MS)."""
         return _Budget(self.manager.settings.action_timeout_ms if timeout_ms is None else timeout_ms)
+
+    @staticmethod
+    async def _scroll_into_view(locator: Any, budget: _Budget) -> None:
+        """Scroll a click's target into view, within the click's budget.
+
+        Playwright's scroll finds one element and waits for it to stand still. When the page replaces that
+        element meanwhile it ends at once ("Element is not attached to the DOM"), where Playwright's click
+        looks the element up again. A disabled button that a form draws again many times a second ended the
+        click there, one step before the checks that wait for such a button (_checks_of_a_click). The scroll
+        is made again while the budget lasts. Any other failure is the click's.
+        """
+        while True:
+            try:
+                await locator.scroll_into_view_if_needed(timeout=budget.left_ms())
+                return
+            except PlaywrightTimeoutError:
+                raise
+            except PlaywrightError as error:
+                if budget.spent or _NOT_ATTACHED not in str(error):
+                    raise
+            await asyncio.sleep(ENABLED_POLL_SECONDS)
 
     @staticmethod
     async def _checks_of_a_click(locator: Any, budget: _Budget) -> None:

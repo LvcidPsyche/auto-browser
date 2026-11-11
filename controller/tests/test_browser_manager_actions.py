@@ -6,10 +6,13 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.services import BrowserRemoteAccessService
+from app.browser.services.actions import _Budget
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
 from app.config import Settings
 from app.utils import UTC
@@ -232,6 +235,43 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(0 < given["trial hover"] <= given["enabled"] <= given["box"] <= whole - 50, given)
         # The question has a bound of its own within that (POINTER_CHECK_TIMEOUT_MS).
         self.assertEqual(locator.evaluate.await_args_list[0].kwargs.get("timeout"), 1000)
+
+    async def test_a_scroll_into_view_that_met_a_replaced_element_is_made_again(self) -> None:
+        # Playwright's scroll finds one element and ends at once when the page replaces it meanwhile ("Element is
+        # not attached to the DOM"), where its click looks the element up again. A disabled button that a form
+        # draws again many times a second ended the click there, one step before the checks that wait for it.
+        gone = PlaywrightError("Locator.scroll_into_view_if_needed: Element is not attached to the DOM")
+        locator = FakeLocator("#submit")
+        self.session.page.locators["#submit"] = locator
+        locator.scroll_into_view_if_needed = AsyncMock(side_effect=[gone, gone, None])
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.click("session-1", selector="#submit")
+        self.assertEqual(locator.scroll_into_view_if_needed.await_count, 3)
+        self.session.page.mouse.down.assert_awaited_once()
+
+        # While the click's budget lasts, and no longer.
+        locator.scroll_into_view_if_needed = AsyncMock(side_effect=gone)
+        with (
+            patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+            patch.object(_Budget, "spent", new_callable=PropertyMock, return_value=True),
+            self.assertRaises(PlaywrightError),
+        ):
+            await self.manager.click("session-1", selector="#submit")
+        self.assertEqual(locator.scroll_into_view_if_needed.await_count, 1)
+
+        # Any other failure is the click's at once: the page closed, or a wait that ran out.
+        for failure in (
+            PlaywrightError("Locator.scroll_into_view_if_needed: Target page, context or browser has been closed"),
+            PlaywrightTimeoutError("Timeout 15000ms exceeded.\n  - Element is not attached to the DOM"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                locator.scroll_into_view_if_needed = AsyncMock(side_effect=failure)
+                with (
+                    patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+                    self.assertRaises(PlaywrightError),
+                ):
+                    await self.manager.click("session-1", selector="#submit")
+                self.assertEqual(locator.scroll_into_view_if_needed.await_count, 1)
 
     async def test_a_long_text_typed_into_a_password_field_leaves_no_trace_of_its_preview(self) -> None:
         # The preview of a field found secret only when typing starts goes, and so does the mark that it was cut.

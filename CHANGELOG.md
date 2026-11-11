@@ -429,7 +429,10 @@ All notable changes to auto-browser are documented here.
   it: nothing is pressed before the target has been read. Enabled is asked once more as the pointer arrives,
   about half a second later: a button the page had turned off by then got a mouse down that the browser gives to
   nobody, under an action that ended as done. Such a click now waits for the button, as Playwright's own does,
-  and fails when it stays off. That gap is older than this release.
+  and fails when it stays off. That gap is older than this release, and so is this one: a disabled button that
+  a page draws again many times a second (a form that renders again while it validates) ended a click at once,
+  at its scroll into view ("Element is not attached to the DOM"), where Playwright's own click waits for the
+  button to come on. The scroll is now made again while the click's time lasts.
 - **A click on an element inside a frame is pressed only where the pointer finds that element.** A selector that
   goes into a frame names an element there, and its click is pressed at the middle of the element's box once the
   pointer is found to be on it. For an element in a frame that was never asked: the check ran in the frame's own
