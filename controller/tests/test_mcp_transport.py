@@ -482,7 +482,7 @@ class McpTransportTests(unittest.TestCase):
         transport._sessions["new"] = McpSession(
             id="new", protocol_version="2025-11-25", client_info={}, client_capabilities={}
         )
-        transport._evict_stale_sessions()
+        transport._persist_sessions()
 
         self.assertEqual(len(transport._sessions), 500)
         self.assertIn("session-0", transport._sessions)
@@ -881,7 +881,7 @@ class McpSessionCapTests(unittest.TestCase):
     def test_one_operators_flood_does_not_evict_another_operators_session(self) -> None:
         self.transport._sessions = {**_owned_sessions("alice", 1, minute=0), **_owned_sessions("bob", 600, minute=1)}
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertIn("alice-0", self.transport._sessions)
 
@@ -891,7 +891,7 @@ class McpSessionCapTests(unittest.TestCase):
             **_owned_sessions("bob", MAX_MCP_SESSIONS_PER_OWNER + 2, minute=1),
         }
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         bob = sorted((key for key in self.transport._sessions if key.startswith("bob-")), key=lambda k: int(k[4:]))
         self.assertEqual(len(bob), MAX_MCP_SESSIONS_PER_OWNER)
@@ -904,7 +904,7 @@ class McpSessionCapTests(unittest.TestCase):
             self.transport._sessions.update(_owned_sessions(owner, MAX_MCP_SESSIONS_PER_OWNER, minute=minute))
         self.transport._sessions.update(_owned_sessions(None, 10, minute=59))
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertEqual(len(self.transport._sessions), MAX_MCP_SESSIONS)
         self.assertNotIn("operator-0-0", self.transport._sessions)

@@ -272,7 +272,7 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         evicted.last_used_at = OLD
         queues = self.queues()
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertNotIn("evicted", self.transport._sessions)
         self.assertIn("newer-0", self.transport._sessions, "the next least recently used is kept")
@@ -289,7 +289,7 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         evicted.last_used_at = OLD
         queues = self.queues()
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertNotIn("evicted", self.transport._sessions)
         self.assertIn("newer-0", self.transport._sessions, "the next least recently used is kept")
@@ -306,7 +306,7 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         for index in range(MAX_MCP_SESSIONS_PER_OWNER):
             self.new_session(f"other-{index}", owner="alice", last_used_at=self.minute_of(index))
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertIn("listening", self.transport._sessions)
         self.assertNotIn("other-0", self.transport._sessions)
@@ -322,7 +322,7 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         for index in range(MAX_MCP_SESSIONS):
             self.new_session(f"other-{index}", last_used_at=self.minute_of(index))
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertIn("listening", self.transport._sessions)
         self.assertNotIn("other-0", self.transport._sessions)
@@ -365,7 +365,7 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         # A turn of the stream's loop that reaches neither the keepalive nor a notification.
         events.emit_session("no-such-browser-session", "closed")
         await self.until(lambda: listening.last_used_at > OLD)
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertGreater(listening.last_used_at, OLD)
         self.assertIn("listening", self.transport._sessions)

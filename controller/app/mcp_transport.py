@@ -829,10 +829,6 @@ class McpHttpTransport:
             )
         self._sessions = restored
 
-    def _evict_stale_sessions(self, *, keep: str | None = None) -> None:
-        for session in self._sessions_past_the_caps(keep):
-            self._forget_session(session.id)
-
     def _sessions_past_the_caps(self, keep: str | None) -> list[McpSession]:
         # Sessions without a live stream go first, so a client that only listens outlasts a flood of initializations,
         # and within each group the least recently used goes first. Ordering by creation evicted a client that had been
