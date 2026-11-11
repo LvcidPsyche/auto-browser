@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
-from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserUnreachableError
+from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserActionError, BrowserUnreachableError
 from ..agent_jobs import AgentJobQueueFull
 from ..approvals import ServerStateRefusal
 from ..auth_state import AuthStateDecryptError
@@ -50,6 +50,13 @@ CRON_TRIGGER_AUTH_PROFILE_DETAIL = (
 CRON_TRIGGER_RUN_REFUSED_DETAIL = (
     "The job's run could not start: the controller refused its session, or the job as it is stored. The webhook "
     "key was accepted; the server log names the cause."
+)
+# With the key proved, a start that may work at the next try: the job's start_url did not load (a name that did not
+# resolve, a timeout), or the browser's pre-request gate or window watcher was not attached. A 503, since a webhook's
+# sender tries a 5xx again and not a 4xx. It names as little as the text above.
+CRON_TRIGGER_TRY_AGAIN_DETAIL = (
+    "The job's run could not start this time: its session's start page did not load, or the browser was not ready "
+    "for a session. The webhook key was accepted; try again. The server log names the cause."
 )
 
 
@@ -262,9 +269,10 @@ def create_operations_router(
             # on as a fault of the server's, for a caller who had proved no key.
             log_hidden_cause(logger, 400, exc, "cron trigger failed for job %s", job_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
-        # The body is the caller's, and is judged above. From here on the service reads the cron store and refuses the
-        # key before it does anything else: whatever else is raised comes with the key proved, and no mistake of the
-        # caller's put it there.
+        # The body and the path's job id are the caller's, and are judged above: the route's only 400, as the key's
+        # refusal below is its only 403. From here on the service reads the cron store and refuses the key before it
+        # does anything else: whatever else is raised comes with the key proved, and no mistake of the caller's put
+        # it there.
         try:
             # The run's session reads the job's proxy persona.
             with cron_store_errors(), persona_file_errors():
@@ -297,6 +305,17 @@ def create_operations_router(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
             raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
+        except BrowserActionError as exc:
+            # What the run's session answers its own caller, which the app's handler passed on as it was: 403 with
+            # the refused host for a start_url the pre-request gate stopped, 400 for one that did not load, 503 in
+            # words that name a setting for a browser whose gate or window watcher is not attached. Here a 403 is the
+            # key's and a 400 the request's, and the caller is told no host: one that may work at the next try
+            # answers 503, which a webhook's sender tries again, and any other the fixed 409.
+            if exc.retryable:
+                log_hidden_cause(logger, 503, exc, "cron trigger failed for job %s", job_id)
+                raise HTTPException(status_code=503, detail=CRON_TRIGGER_TRY_AGAIN_DETAIL) from None
+            log_hidden_cause(logger, 409, exc, "cron trigger refused for job %s", job_id)
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_RUN_REFUSED_DETAIL) from None
         except SessionLimitError:  # the run's session (CB1-8), with a detail that names none (W2-14)
             raise HTTPException(status_code=409, detail=CRON_TRIGGER_SESSION_LIMIT_DETAIL) from None
         except AuthStateDecryptError as exc:
@@ -304,7 +323,8 @@ def create_operations_router(
             raise HTTPException(status_code=422, detail=str(exc)) from None
         except (KeyError, ValueError) as exc:
             # The job as it is stored: a record with no goal (it answered 404 "Not found"), one the run's request
-            # model refuses (400 "Invalid request"). Neither is in the caller's hands.
+            # model refuses (400 "Invalid request"), one that holds a list where a run reads text (an unhandled 500:
+            # the service refuses it as a ValueError). None is in the caller's hands.
             log_hidden_cause(logger, 409, exc, "cron trigger failed for job %s", job_id)
             raise HTTPException(status_code=409, detail=CRON_TRIGGER_RUN_REFUSED_DETAIL) from None
 

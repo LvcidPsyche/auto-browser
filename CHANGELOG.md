@@ -149,9 +149,11 @@ All notable changes to auto-browser are documented here.
   which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`):
   treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved. So does a
   run the controller refuses to start with the key proved where 1.17.0 answered `403` (an auth state too old or not
-  encrypted, a `start_url` that `ALLOWED_HOSTS` refuses), `404` (a stored job with no `goal`) or `400` (a stored
-  job the run's request model refuses): the route's `403` now means the key and nothing else, and its `400` the
-  request's own body (see Fixed).
+  encrypted, a `start_url` that `ALLOWED_HOSTS` refuses or whose load the pre-request gate stops), `404` (a stored
+  job with no `goal`) or `400` (a stored job the run's request model refuses). A `start_url` that does not load
+  answered `400` and now answers `503`: send that trigger again. The route's `403` now means the key and nothing
+  else, and its `400` the request itself: its body, or a job id in the path that is blank or longer than 50
+  characters (see Fixed).
 - **A cron job whose owner has no named credential any more is refused, and so is a job a named operator queued.**
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
   fire now checks `API_BEARER_TOKENS` as it is then, where a token listed twice proves only the first operator
@@ -765,9 +767,25 @@ All notable changes to auto-browser are documented here.
   is refused. A stored job with no `goal` answered `404` `Not found`, and one the run's request model refuses `400`
   `Invalid request`. Each now answers `409` in one fixed text that names nothing of the cause, since the caller
   holds a webhook key and not the operator's token: the cause is in the server log, one WARNING for each such
-  trigger. Only an unknown job, a job with no key and a wrong key answer `403`, and only a body the route refuses
-  `400`: one nested past what the JSON reader goes down is refused so too, with its WARNING, where it was an
-  unhandled `500`. `browser.trigger_cron_job`, which takes no key, is unchanged.
+  trigger. Only an unknown job, a job with no key and a wrong key answer `403`, and only a request the route refuses
+  `400`: its body, or a job id in the path that is blank or longer than 50 characters. A body nested past what the
+  JSON reader goes down is refused so too, with its WARNING, where it was an unhandled `500`.
+  `browser.trigger_cron_job`, which takes no key, is unchanged.
+- **With its key proved, a cron trigger no longer passes on what the run's session answers its own caller, nor
+  answers `500` for a stored job a run cannot take.** `POST /crons/{id}/trigger` answered `403`
+  `browser_action_blocked`, with the refused host in its text, for a `start_url` whose load the pre-request gate
+  stopped (one that redirects to a host `ALLOWED_HOSTS` does not list); `400` `browser_action_failed` for one that
+  did not load (a name that does not resolve, a timeout); and `503` in words that name `PRE_REQUEST_BLOCKING` or
+  `ALLOWED_HOSTS` for a browser whose pre-request gate or window watcher was not attached. The first now answers
+  the fixed `409` of a run the controller refuses. The others answer `503` in one fixed text of their own, which
+  names no host and no setting and says that the key was accepted and to try again: a webhook's sender tries a
+  `5xx` again and not a `4xx`, and the page may answer next time. A stored job that holds, where a run reads text
+  or a number, a value that is neither (`max_steps` a string or a list, `start_url` or `auth_profile` a number or
+  a list, `proxy_persona` a list: a store edited by hand), or whose `id` is a list or an object, was an unhandled
+  `500` and now answers that `409`; an empty value in one of the first four (`null`, `false`, `0`, an empty list)
+  is no value, as it was. Each writes its WARNING with the cause. For such a job `browser.trigger_cron_job` now
+  answers an error that names the field, where it answered `Tool execution failed`, and a scheduled fire logs the
+  same.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit

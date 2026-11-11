@@ -92,6 +92,8 @@ OWNER_CREDENTIAL_REMOVED_STATUS = "refused: owner credential removed"
 _REFUSAL_AUDITED = "refusal_audited"
 # What a job's record holds that no answer hands out (_safe_job).
 _KEPT_TO_THE_CONTROLLER = frozenset({"webhook_key", "webhook_key_hash", _REFUSAL_AUDITED})
+# What a run's session takes from the stored job as text, where the job holds anything there.
+_TEXT_OF_A_RUN = ("start_url", "auth_profile", "proxy_persona")
 
 
 def _hash_webhook_key(key: str) -> str:
@@ -106,6 +108,21 @@ def _webhook_key_id(key_hash: str) -> str:
 
 # Compared against when there is no key to compare with, so a refusal costs the same whatever it was for.
 _NO_WEBHOOK_KEY_DIGEST = _hash_webhook_key("no webhook key is stored for this job")
+
+
+def _refuse_what_a_run_cannot_take(job: dict[str, Any]) -> None:
+    """Refuse a stored job that holds, where a run reads text or a number, a value that is neither.
+
+    The store is JSON a hand can edit. Such a value raised whatever the first code to use it raised (a TypeError
+    from min(), an AttributeError in the URL check), which no caller of a run maps: the webhook's route answered an
+    unhandled 500, with the key proved. A ValueError, as a job the run's request model refuses is, that names the
+    field and nothing of what it holds. An empty value (null, false, 0, an empty list) is no value, as it was.
+    """
+    for field in _TEXT_OF_A_RUN:
+        if job.get(field) and not isinstance(job[field], str):
+            raise ValueError(f"the stored job's {field} is not a string")
+    if job.get("max_steps") and not isinstance(job["max_steps"], (int, float)):
+        raise ValueError("the stored job's max_steps is not a number")
 
 
 class CronJobDisabledError(RuntimeError):
@@ -488,6 +505,10 @@ class CronService:
         # The scheduler already drops a disabled job; a webhook or trigger_job must not run it either.
         if not job.get("enabled", True):
             raise CronJobDisabledError("job is disabled; enable it to run it")
+        if isinstance(job_id, (list, dict)):
+            # A store edited by hand: neither can be a key of the tables below, where it raised TypeError. Any
+            # other id runs as it always has (one that is not the record's own key with its metadata unsaved).
+            raise ValueError("the stored job's id is not a string")
 
         # From the settings as they are now, whoever fired it: a job does not outlive its owner's credential. A
         # deployment moved to the shared token or to none has no named credential left, so it refuses named owners too.
@@ -515,6 +536,7 @@ class CronService:
         # create_session, so a job the request model rejects (older stores
         # accepted max_steps up to 100) left the session open and the job
         # marked in flight, and every later fire was skipped until restart.
+        _refuse_what_a_run_cannot_take(job)
         run_request = AgentRunRequest(
             provider=job.get("provider") or "openai",
             goal=job["goal"],
