@@ -77,13 +77,17 @@ WEBHOOK_KEY_REFUSED = "Invalid webhook key"
 _SCHEDULER_JOB_DEFAULTS = {"misfire_grace_time": 300, "coalesce": True, "max_instances": 1}
 # How a run's agent job can end, as AgentJobRecord.status says it. Anything else means its end was never written.
 _FINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "discarded"})
+# last_status from the fire that queued a run until that run is over. Only a fire the credential allowed writes it.
+RUN_QUEUED_STATUS = "queued"
 # The run ended (its finish callback came), and its agent job's record cannot say how.
 RUN_OUTCOME_UNKNOWN = "unknown"
 # A fire refused because no named credential proves the job's owner any more: the answer's reason, and last_status.
 OWNER_CREDENTIAL_REMOVED = "owner_credential_removed"
 OWNER_CREDENTIAL_REMOVED_STATUS = "refused: owner credential removed"
 # The job's own record of the refusal it is in: there once that refusal's audit event has been written, gone at the
-# first fire the credential allows (_refuse_run, _end_refusal). Nothing else writes it, and no answer shows it.
+# first fire the credential allows (_refuse_run, _end_refusal; and with the record of that fire's run, should the
+# clear not have been saved). One found beside RUN_QUEUED_STATUS is not counted: an allowed fire came after it, under
+# a controller that does not know the field. Nothing else writes it, and no answer shows it.
 _REFUSAL_AUDITED = "refusal_audited"
 # What a job's record holds that no answer hands out (_safe_job).
 _KEPT_TO_THE_CONTROLLER = frozenset({"webhook_key", "webhook_key_hash", _REFUSAL_AUDITED})
@@ -561,8 +565,12 @@ class CronService:
                     # A run no longer in the slot has finished and said how (_finish_run), or a newer run has
                     # taken it and says what the status is: "queued" must not land over either.
                     if self._active_runs.get(job_id) == session_id:
-                        jobs[job_id]["last_status"] = "queued"
+                        jobs[job_id]["last_status"] = RUN_QUEUED_STATUS
                     jobs[job_id]["run_count"] = jobs[job_id].get("run_count", 0) + 1
+                    # The clear of a refusal's mark is a save of its own (_end_refusal), which can fail: the run's
+                    # record takes the mark with it, or it would outlive this run's status and the next refusal would
+                    # be taken for the one before this fire.
+                    jobs[job_id].pop(_REFUSAL_AUDITED, None)
                     self._save(jobs)
         except (CronStoreUnreadableError, OSError) as exc:
             logger.error("cron job %s: its run is queued, but the run's metadata could not be saved: %s", job_id, exc)
@@ -584,6 +592,12 @@ class CronService:
         all, where the record cannot say that it was: the append failed, the mark could not be saved, the caller was
         cancelled between the two, or the record is one stored before the field existed.
 
+        The mark is not read alone. Beside "queued" it is the mark of an earlier refusal: an allowed fire has queued a
+        run since, and that fire's controller did not know the field (1.17.0 keeps it through its writes), so this
+        refusal is a new one and writes its event. A fire of this controller takes the mark away with its run's record
+        (_run_job_now) when its clear could not be saved. A final status beside the mark says nothing either way, and
+        the mark stands: a run that began before the refusal ends during it.
+
         last_status is not what remembers it, as it was: the status was saved before the append and read as the
         event's having been written, and an older run that finished afterwards wrote its own status over it
         (_finish_run), so the same refusal was audited twice. It is still written at every refused fire that does
@@ -597,6 +611,11 @@ class CronService:
                     jobs = self._load()
                     job = jobs.get(job_id)
                     if job is not None:
+                        if job.get("last_status") == RUN_QUEUED_STATUS:
+                            # A mark beside "queued" is that of a refusal an allowed fire has ended: only such a fire
+                            # writes that status. Removed here, in the save below that writes this refusal's status:
+                            # left, it would stand beside that status as the mark of this refusal's event.
+                            job.pop(_REFUSAL_AUDITED, None)
                         audited = job.get(_REFUSAL_AUDITED) is True
                         if job.get("last_status") != OWNER_CREDENTIAL_REMOVED_STATUS:
                             job["last_status"] = OWNER_CREDENTIAL_REMOVED_STATUS
@@ -631,8 +650,10 @@ class CronService:
     async def _set_refusal_audited(self, job_id: str, audited: bool) -> None:
         """Set or clear the job's mark that its refusal's event is written; a store that cannot take it is logged.
 
-        Not set, the next refused fire writes the event once more. Not cleared, the next refusal is taken for the one
-        before it and writes none, until an allowed fire's clear is saved: every allowed fire tries.
+        Not set, the next refused fire writes the event once more. Not cleared, the mark still goes with the record
+        of the run that fire queues (_run_job_now). Where it queues none, or that record cannot be saved either, the
+        next refusal is taken for the one before it and writes no event, until an allowed fire's clear or run is
+        saved: every allowed fire tries.
         """
         try:
             async with self._lock:
@@ -655,8 +676,8 @@ class CronService:
                 )
             else:
                 logger.error(
-                    "cron job %s: its record could not be read or saved to end a refusal: if the job was in one, its "
-                    "next refusal may write no audit event: %s",
+                    "cron job %s: its record could not be read or saved to end a refusal: if the job was in one and "
+                    "this fire's run is not recorded either, its next refusal may write no audit event: %s",
                     job_id,
                     exc,
                 )

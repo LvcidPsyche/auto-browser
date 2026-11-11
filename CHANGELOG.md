@@ -119,9 +119,11 @@ All notable changes to auto-browser are documented here.
 - **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
   replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
-  no usable key. A backup or quarantined copy of the store from before the upgrade still holds the keys, and so does a
-  `.crons.json.*.tmp` file beside the store, which a 1.17.0 save that was killed part-way leaves there and nothing
-  removes: delete any such file, and rotate the keys if a copy may have been read. `GET /crons`,
+  no usable key. A 1.17.0 controller started over a 1.18.0 cron store hands out each stored record whole, so its
+  cron answers show `webhook_key_hash` (a hash of the key, not the key) and, for a job that was refused (below),
+  `refusal_audited`. A backup or quarantined copy of the store from before the upgrade still holds the keys, and so
+  does a `.crons.json.*.tmp` file beside the store, which a 1.17.0 save that was killed part-way leaves there and
+  nothing removes: delete any such file, and rotate the keys if a copy may have been read. `GET /crons`,
   `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and `browser.create_cron_job` answered the key's first
   8 characters in `webhook_key_preview`: they now answer
   `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key
@@ -153,10 +155,13 @@ All notable changes to auto-browser are documented here.
   fires of a job still refused write no event and are logged at debug. The job's entry in the cron store records
   that the event is written, so a restart writes no second one. An event the audit store could not take is written
   at the job's next refused fire, and so is one whose writing the cron store could not record, which the audit log
-  then holds twice. A fire the credential allows ends the refusal, and the next refusal writes its own event. A job
-  a named operator queued fails when a worker takes it, with an error that says so, if that credential has gone
-  meanwhile. Moving to the shared `API_BEARER_TOKEN` or to no token counts: every job a named operator created is then
-  refused. Give the owner a named credential again, or delete the job and create it again under a credential that
+  then holds twice. A fire the credential allows ends the refusal, and the next refusal writes its own event. Where
+  the cron store could not record that end, the record of the run that fire queued ends it; so does a run that a
+  1.17.0 controller queued over the same store, which keeps the record's mark without knowing it. Where neither the
+  end nor a run was recorded, the next refusal may write no event: this version logs an error when that can be so,
+  and 1.17.0 logs nothing. A job a named operator queued fails when a worker takes it, with an error that says so,
+  if that credential has gone meanwhile. Moving to the shared `API_BEARER_TOKEN` or to no token counts: every job a
+  named operator created is then refused. Give the owner a named credential again, or delete the job and create it again under a credential that
   stays. Deleting it needs the owner's credential as well, as listing it does: give the credential back for the
   delete, or stop the controller and remove the job's entry from the cron store (`CRON_STORE_PATH`,
   `/data/crons/crons.json` by default). A job created on the shared token or with no token is unowned and runs as

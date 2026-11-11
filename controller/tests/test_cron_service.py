@@ -929,6 +929,81 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
         self.manager.audit.append.assert_awaited_once()
         self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)  # the latest fire was refused
 
+    def _store_the_mark_beside_queued(self) -> None:
+        """The record as a controller that does not know the mark leaves it (1.17.0, which keeps the keys it does not
+        know through its writes): the fire it allowed wrote "queued", and the mark of the refusal before is still there.
+        """
+        jobs = self.service._load()
+        jobs[self.job["id"]].update({"last_status": "queued", REFUSAL_AUDITED: True})
+        self.service._save(jobs)
+
+    async def test_a_mark_left_beside_queued_is_not_the_next_refusals(self) -> None:
+        # The next refusal read as one whose event was written, and wrote none: a job refused with no event at all.
+        self._store_the_mark_beside_queued()
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self._assert_refused(None)  # one event
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+    async def test_a_mark_left_beside_queued_does_not_stand_for_a_refusal_whose_event_failed(self) -> None:
+        # The stale mark goes in the save that writes the refusal's status. Left in the record, it would stand beside
+        # that status at the next fire, as the mark of an event that was never written.
+        self._store_the_mark_beside_queued()
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        self.manager.audit.append.side_effect = [OSError("audit store full"), None, None]
+
+        with self.assertLogs("app.cron_service", level="ERROR"):
+            await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)  # the one that failed, and the one that wrote
+
+    def _saving_after_one_failure(self):
+        """The store's save, failing once: the first save an allowed fire makes after a refusal is the mark's clear."""
+        save, failures = self.service._save, [OSError("disk full")]
+
+        def save_after_one_failure(jobs: dict) -> None:
+            if failures:
+                raise failures.pop()
+            save(jobs)
+
+        return patch.object(self.service, "_save", side_effect=save_after_one_failure)
+
+    async def test_an_allowed_fire_whose_clear_was_not_saved_ends_the_refusal_where_its_run_is_recorded(self) -> None:
+        # The clear is one save and the run's record another. With the first lost, the mark outlived the refusal it
+        # was for and the next refusal wrote no event: while the run was queued, and after it had finished.
+        self.queue.store.get = AsyncMock(return_value=SimpleNamespace(status="completed"))
+        for name, finished in (("while that run is queued", False), ("after that run has finished", True)):
+            with self.subTest(name):
+                self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
+                self.service._active_runs.clear()
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+                await self.service._scheduled_run(self.job["id"])
+                self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+                self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+
+                with self._saving_after_one_failure(), self.assertLogs("app.cron_service", level="ERROR") as logged:
+                    await self.service._scheduled_run(self.job["id"])
+                (line,) = logged.output
+                self.assertIn("to end a refusal", line)
+                self.assertEqual(self._stored()["last_status"], "queued")
+                if finished:
+                    await self.service._finish_run(self.job["id"], "session-1", "agent-job-1")
+                    self.assertEqual(self._stored()["last_status"], "completed")
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+                await self.service._scheduled_run(self.job["id"])
+                await self.service._scheduled_run(self.job["id"])
+
+                self.assertEqual(self.manager.audit.append.await_count, 2)  # one for each refusal
+
     async def test_a_refusal_stored_before_the_mark_existed_is_audited_once_more_and_never_not_at_all(self) -> None:
         # A record whose last_status reads refused with no mark: whether its event was written cannot be told.
         jobs = self.service._load()
