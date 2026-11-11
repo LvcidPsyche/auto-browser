@@ -30,7 +30,12 @@ from app.browser.click_target import (
     reading_presses,
     refuse_press_not_asked_about,
 )
-from app.browser.services.actions import _PRESS_PLACE_SCRIPT, ENABLED_POLL_SECONDS, BrowserActionService
+from app.browser.services.actions import (
+    _PRESS_PLACE_SCRIPT,
+    _RECEIVES_POINTER_SCRIPT,
+    ENABLED_POLL_SECONDS,
+    BrowserActionService,
+)
 
 DELETE = {"tag": "button", "type": "submit", "role": "", "submits": False, "labels": ["", "Delete account"]}
 PAY = {"tag": "div", "type": "", "role": "button", "submits": False, "labels": ["Pay now"]}
@@ -151,9 +156,11 @@ def _locator(
     place: dict[str, Any] = PLACE,
     enabled: tuple[bool, ...] = (True,),
     each_step_takes: float = 0.0,
+    under_the_pointer: Any = True,
 ) -> SimpleNamespace:
     """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds, the last
-    one for good; ``each_step_takes`` is the time a step holds the click for (the clock is the real one)."""
+    one for good; ``each_step_takes`` is the time a step holds the click for (the clock is the real one);
+    ``under_the_pointer`` is what the page answers when asked whether the pointer finds the target."""
     budgets: dict[str, Any] = {}
     looks = list(enabled)
 
@@ -179,6 +186,9 @@ def _locator(
         done.append("trial click" if given.get("trial") else "click")
 
     async def evaluate(script: str, *_args: Any, **given: Any) -> Any:
+        if script == _RECEIVES_POINTER_SCRIPT:
+            done.append(ASKED)
+            return under_the_pointer
         assert script == _PRESS_PLACE_SCRIPT
         given_budget("place", given)
         return place
@@ -200,6 +210,8 @@ def _locator(
 # Playwright's checks of a click with nothing pressed. Never a trial click: that one presses (the mouse goes down
 # and up for real, cancelled in the target's own frame only), which the real-browser tests show over a frame.
 CHECKS = ["is it enabled", "trial hover"]
+# The question a placed click asks once the pointer is where Playwright's hover put it.
+ASKED = "does the pointer find it"
 
 
 async def test_the_mouse_does_not_go_down_on_a_button_nobody_was_asked_about() -> None:
@@ -225,7 +237,7 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
         service, session, done = _service(CLOSE)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, _locator(done), timeout_ms=1000)
-        assert done == [*CHECKS, placed, "mouse down", "mouse up"]
+        assert done == [*CHECKS, placed, ASKED, "mouse down", "mouse up"]
         session.page.mouse.move.assert_awaited_once_with(*PLACED_AT)
         arg = service.manager.element_ids.evaluate.await_args.args[2]
         assert (arg["x"], arg["y"]) == PLACED_AT
@@ -233,7 +245,17 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
         service, session, done = _service(DELETE)
         with reading_presses("click", "read", None), pytest.raises(PressNeedsApproval):
             await service.click_as_playwright_places_it(session, _locator(done))
-        assert done == [*CHECKS, placed]
+        assert done == [*CHECKS, placed, ASKED]
+
+        # Where the pointer was placed it does not find the target (taken away since the hover, or under something
+        # the hover could not see): nothing is read and nothing pressed. Whatever is no plain yes is a no.
+        for answer in (False, "framed", None):
+            service, session, done = _service(CLOSE)
+            with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as refused:
+                await service.click_as_playwright_places_it(session, _locator(done, under_the_pointer=answer))
+            assert (refused.value.code, refused.value.retryable) == ("target_moved", True), answer
+            assert done == [*CHECKS, placed, ASKED], answer
+            service.manager.element_ids.evaluate.assert_not_awaited()
 
         # Not read: Playwright's click alone, as before.
         service, session, done = _service(DELETE)

@@ -381,9 +381,10 @@ All notable changes to auto-browser are documented here.
     covered at its middle) is pressed by the controller at the point Playwright would have picked, so it is read
     where it lands too; on a wrapper with no box of its own (`display: contents`) such an action now answers
     `target_has_no_box` and presses nothing, where it used to click a child, and a target the page has taken out
-    of its layout when it is to be pressed (`hidden`, `display: none`) answers `target_moved`, which is retryable
-    (one that has left the page, or is made invisible where it stands, is waited for, as a click waits, and ends
-    the click when its time does).
+    of its layout when it is to be pressed (`hidden`, `display: none`), or that the pointer does not find where
+    the click was placed (made invisible since, or under something), answers `target_moved`, which is retryable
+    (one that has left the page, or was made invisible before the pointer was placed, is waited for, as a click
+    waits, and ends the click when its time does).
   - A new approval's reason opens with the controller's sentence, which says what the target (or, asked at the
     press, what the click would press) reads as and what the agent labelled the action, before the agent's own
     reason (one already pending for the same action and kind is reused as it stands); the dashboard's confirm
@@ -438,10 +439,10 @@ All notable changes to auto-browser are documented here.
   in each document on the way up, where the frame must be what the pointer finds; when it is not, the click is one
   Playwright places, on what the viewport shows of the element. For an action that is read, whose placed click the
   controller presses itself, the point is taken on what the screen shows of the element (also through a frame that
-  runs off the screen, or one CSS draws at another size), and the frames are asked again where the press goes
-  down. One limit is Playwright's: it does not look through a frame that CSS transforms, so its own click, which a
-  click that is not read still is, presses what the page has put over such a frame, or has beside it where the
-  element is larger than the frame shows, and ends as done. Older than this release.
+  runs off the screen, or one CSS draws at another size), and the element and its frames are asked again where the
+  press goes down. One limit is Playwright's: it does not look through a frame that CSS transforms, so its own
+  click, which a click that is not read still is, presses what the page has put over such a frame, or has beside
+  it where the element is larger than the frame shows, and ends as done. Older than this release.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)

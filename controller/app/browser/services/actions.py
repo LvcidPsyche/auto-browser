@@ -74,6 +74,18 @@ def _target_left_the_pointer() -> BrowserActionError:
     )
 
 
+def _target_not_under_the_pointer() -> BrowserActionError:
+    """Where Playwright's hover had put the pointer, the pointer did not find the target: the page took it away
+    since, something lies over it there, or it is in a frame the page has something over."""
+    return BrowserActionError(
+        "Nothing was pressed: where the click was placed, the pointer does not find the target. Observe the page "
+        "again and retry.",
+        code="target_moved",
+        status_code=409,
+        retryable=True,
+    )
+
+
 def _target_has_no_box() -> BrowserActionError:
     """The target has no box of its own (display: contents): Playwright places a click on it on one of its children.
 
@@ -104,6 +116,9 @@ _step_clock = time.perf_counter
 # main frame's viewport (Playwright's bounding_box): the point is carried into the document by the two boxes,
 # in proportion, which is exact where the frames on the way are moved or scaled, and at the middle of the box
 # where one is turned. _receives_pointer_at asks it of the element, then of each frame element on the way up.
+# The way up from what the pointer hits goes by the slot a node is given to, as a click's event does: a label
+# slotted into a component's button is that button's. By its parents alone it was not, which only sent the
+# click to Playwright's placing while nothing asked the target after that; the same question is asked there now.
 _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box]) => {
   if (window !== window.top) {
     if (!box) return 'framed';
@@ -121,7 +136,7 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box]) => {
   if (!hit) return false;
   const label = hit.closest ? hit.closest('label') : null;
   if (label && label.control === el) return true;
-  for (let node = hit; node; node = node.parentNode || node.host) {
+  for (let node = hit; node; node = node.assignedSlot || node.parentNode || node.host) {
     if (node === el) return true;
   }
   return false;
@@ -1209,9 +1224,14 @@ class BrowserActionService:
         checks run (_checks_of_a_click), its hover puts the pointer at the point its click would have picked, given to
         it as a position so that the controller knows where that is, and the press is the controller's own: read
         where it goes down, as every other press is. Whether the target takes the pointer at that point is
-        Playwright's check, made by its hover: it knows a label slotted into a component's button as that
-        button's, which the check before a human-like press does not (_RECEIVES_POINTER_SCRIPT). The steps share
-        the click's budget (_Budget), as the steps of Playwright's own click share its timeout.
+        Playwright's check, made by its hover, and then the controller's own (_receives_pointer_at), asked with
+        the pointer there. Playwright's is not enough: it does not look through a frame that stands in
+        anything CSS transforms (it puts the pointer where it is told and watches for the event in the target's
+        own document, so one that goes to the page over the frame, or into a frame that lies over the target,
+        never comes, and it calls that done), and between its hover and the press a page can take the target
+        away. An element made invisible keeps its box, which was all that was asked for then, and the press
+        went to what was behind it. The steps share the click's budget (_Budget), as the steps of Playwright's
+        own click share its timeout.
         """
         if not press_is_read():
             await locator.click(timeout=timeout_ms)
@@ -1239,17 +1259,13 @@ class BrowserActionService:
         # Where Playwright puts a position: the corner of the element's box, its border, the offset.
         x = float(box["x"] + place["border"][0] + position["x"])
         y = float(box["y"] + place["border"][1] + position["y"])
-        if place["framed"] and not await self._receives_pointer_at(locator, x, y, frames_only=True):
-            # Playwright's hover does not look through a frame that CSS transforms: it puts the pointer where
-            # it is told and, with no event reaching the frame, calls that done.
-            raise PlaywrightError(
-                "The click's target is in a frame, and where the pointer was placed the page does not show that frame."
-            )
         await session.page.mouse.move(x, y)
+        if not await self._receives_pointer_at(locator, x, y, placed=True):
+            raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)
 
     @staticmethod
-    async def _receives_pointer_at(locator: Any, x: float, y: float, *, frames_only: bool = False) -> bool:
+    async def _receives_pointer_at(locator: Any, x: float, y: float, *, placed: bool = False) -> bool:
         """Whether the pointer at (x, y) finds the element ``locator`` names, through the frames it is in.
 
         A target in the main frame is asked in one message, as before. One inside a frame is asked in its own
@@ -1258,31 +1274,26 @@ class BrowserActionService:
         than its frame, landed on the page beside the frame, and the click ended as done. Anything that cannot
         be told is a no, and the click is then one Playwright places.
 
-        ``frames_only`` leaves the element itself out and asks the frames alone: for a point Playwright's
-        hover has checked on the element, which does not look through a frame that CSS transforms. There a
+        ``placed``: (x, y) is where Playwright's hover has put the pointer, and a no ends the click. There a
         target more than POINTER_CHECK_FRAMES frames down is a yes: the frames asked said so, the ones above
         them are Playwright's hover's to check, and a no would end a click that Playwright's own makes.
         """
         handles: list[Any] = []
         try:
-            if not frames_only:
-                found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None])
-                if found != "framed":
-                    return found is True
+            found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None])
+            if found != "framed":
+                return found is True
             node = await locator.element_handle(timeout=POINTER_CHECK_TIMEOUT_MS)
-            asked = not frames_only
             for _ in range(POINTER_CHECK_FRAMES):
                 handles.append(node)
-                if asked:
-                    box = await node.bounding_box()
-                    if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box]) is not True:
-                        return False
-                asked = True
+                box = await node.bounding_box()
+                if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box]) is not True:
+                    return False
                 frame = await node.owner_frame()
                 if frame is None or frame.parent_frame is None:
                     return True
                 node = await frame.frame_element()
-            return frames_only
+            return placed
         except Exception:
             return False
         finally:

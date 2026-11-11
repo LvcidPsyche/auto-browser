@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from playwright.async_api import Locator
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
@@ -344,6 +345,26 @@ SCALED_LINK = (
     "onclick=\"event.preventDefault(); top.document.title = 'OPENED'\">Card</a></div>"
     "<div style='position: fixed; left: 1400px; top: 40px; width: 200px; height: 120px' "
     "onclick=\"top.document.title = 'COVER PRESSED'\"></div>"
+)
+# A frame in a dialog the page centres with a transform, so the frame stands inside something CSS transforms; a
+# button in the frame; and over the button a frame of the frame's own, whose button fills it.
+DIALOG_FRAME = (
+    "<title>start</title><style>body { margin: 0 } #dialog { position: fixed; left: 50%; top: 50%; "
+    "transform: translate(-50%, -50%); width: 400px; height: 200px } "
+    "#frame { display: block; width: 400px; height: 200px; border: 0 }</style>"
+    '<div id="dialog"><iframe id="frame" src="/inner"></iframe></div>'
+)
+IN_THE_DIALOG = (
+    "<body style='margin: 0'><button id='go' style='position: absolute; left: 100px; top: 80px; width: 60px; "
+    "height: 24px' onclick=\"top.document.title = 'PRESSED'\">Go</button>"
+)
+A_FRAME_OVER_IT = (
+    "<iframe src='/over' style='position: absolute; left: 90px; top: 70px; width: 80px; height: 44px; "
+    "border: 0'></iframe>"
+)
+OVER_IT = (
+    "<body style='margin: 0'><button style='width: 80px; height: 44px' "
+    "onclick=\"top.document.title = 'THE FRAME OVER IT PRESSED'\">Next</button>"
 )
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
@@ -1314,7 +1335,60 @@ async def test_a_read_click_in_a_scaled_frame_does_not_press_what_the_page_puts_
         session_id = await env.create("/")
         with pytest.raises(BrowserActionError) as refused:
             await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
-        assert refused.value.code == "browser_action_failed"
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        assert await _title(env, session_id) == "start"
+
+
+async def test_a_read_click_does_not_press_into_a_frame_that_lies_over_its_target_in_a_transformed_frame(
+    tmp_path: Path,
+) -> None:
+    # In a frame that stands inside anything CSS transforms, Playwright's hover puts the pointer where it is told
+    # and watches for the event in the target's own document: one that goes into a frame lying over the target
+    # there never comes, and it calls that done. The controller then asked the frames on the way up and not the
+    # target, so the press went to the button of the frame over it, and the action ended as done.
+    pages = {"/": DIALOG_FRAME, "/inner": IN_THE_DIALOG + A_FRAME_OVER_IT, "/over": OVER_IT}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/")
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#go"))
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        assert await _title(env, session_id) == "start"
+    # With nothing over it, a button in such a frame is pressed.
+    async with browser_env(tmp_path, {"/": DIALOG_FRAME, "/inner": IN_THE_DIALOG}) as env:
+        session_id = await env.create("/")
+        await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#go"))
+        assert await _title(env, session_id) == "PRESSED"
+
+
+async def test_a_target_the_page_makes_invisible_once_the_pointer_is_placed_is_not_pressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Once Playwright's hover had put the pointer on the target, only the target's box was asked for, and an
+    # element made invisible keeps its box: the press went to what was behind it, and the action ended as done.
+    # A page does it where hovering a placeholder swaps it for the control. It cannot be timed to do it between
+    # two of the controller's steps, so the hover that places the pointer does it here.
+    real = Locator.hover
+    hidden = 0
+
+    async def hover_then_the_page_hides_it(self: Any, **named: Any) -> None:
+        nonlocal hidden
+        await real(self, **named)
+        if "position" in named:  # the hover that places the pointer: the checks' own is a trial
+            hidden += 1
+            await self.evaluate("(el) => { el.style.visibility = 'hidden' }")
+
+    monkeypatch.setattr(Locator, "hover", hover_then_the_page_hides_it)
+    async with browser_env(tmp_path, {"/": PAST_THE_MIDDLE}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        await page.evaluate(
+            "() => { window.downs = 0; addEventListener('mousedown', () => { window.downs += 1 }, true) }"
+        )
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector="#wide"))
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        assert hidden == 1
+        assert await page.evaluate("() => window.downs") == 0
         assert await _title(env, session_id) == "start"
 
 
