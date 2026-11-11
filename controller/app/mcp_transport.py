@@ -21,9 +21,8 @@ from .mcp_instructions import server_instructions
 from .models import McpToolCallRequest, OperatorIdentity
 from .safe_json_response import SafeJSONResponse
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
-from .tool_gateway.gateway import _json_safe
 from .tool_inputs import MAX_TOOL_RESULT_CHARS
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, utc_now
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, json_safe, utc_now
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -901,7 +900,7 @@ def _json_resource(uri: str, payload: Any) -> dict[str, Any]:
     """A JSON resource, encoded as strictly as a tool result: a NaN or an infinity (a console or network entry can
     carry one) is null, not the bare NaN strict parsers reject, and an object is refused rather than sent as its
     repr. A payload that cannot be encoded raises, and is answered as a failed read (-32603)."""
-    text = json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False)
+    text = json.dumps(json_safe(payload), ensure_ascii=False, allow_nan=False)
     return {"uri": uri, "mimeType": "application/json", "text": text}
 
 

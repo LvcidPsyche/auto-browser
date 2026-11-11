@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import decimal
+import enum
+import json
 import logging
+import math
 import os
 import re
 import stat
 import tempfile
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Coroutine
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import date, datetime, timezone
+from datetime import time as time_of_day
+from pathlib import Path, PurePath
 from typing import Any
 
 from pydantic import BaseModel
@@ -124,6 +130,43 @@ def holds_lone_surrogate(value: Any) -> bool:
     if isinstance(value, list | tuple):
         return any(holds_lone_surrogate(item) for item in value)
     return False
+
+
+# Types strict JSON has no form for that a result may still carry, sent as their text.
+_SENT_AS_TEXT = (date, time_of_day, PurePath, uuid.UUID, decimal.Decimal)
+
+
+def json_safe(value: Any) -> Any:
+    """``value`` with only what strict JSON can hold: NaN and the infinities become null, a tuple or set a list,
+    an Enum its value, and a known type (_SENT_AS_TEXT) its text.
+
+    Any other object raises TypeError rather than going out as its ``str()``: a repr is not a result anyone shaped,
+    and can hold what model_dump would have left out (a BrowserSession's holds its totp_secret).
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {json_key(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, enum.Enum):
+        return json_safe(value.value)
+    if isinstance(value, _SENT_AS_TEXT):
+        return str(value)
+    raise TypeError(f"a {type(value).__name__} is not sent in a tool result")
+
+
+def json_key(key: Any) -> str:
+    """A dict key as json.dumps spells it (``1``, ``true``, ``null``), or a known type's text; any other refused."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, (bool, int, float)):
+        return json.dumps(key)
+    if isinstance(key, _SENT_AS_TEXT):
+        return str(key)
+    raise TypeError(f"a {type(key).__name__} key is not sent in a tool result")
 
 
 def record_json(record: BaseModel, *, indent: int | None = None) -> str:

@@ -9,8 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 
-from .tool_gateway.gateway import _json_safe
-from .utils import without_lone_surrogates
+from .utils import json_safe, without_lone_surrogates
 
 
 class SafeJSONResponse(JSONResponse):
@@ -22,7 +21,7 @@ class SafeJSONResponse(JSONResponse):
     parser refuses a lone surrogate's escape, and a page should not be able to break a client's parser.
 
     A NaN or an infinity is no JSON either, and json.dumps(allow_nan=False) raises ValueError on one, again after
-    the handler has run. It is answered as null, by the walk a tool result goes through (_json_safe): what FastAPI's
+    the handler has run. It is answered as null, by the walk a tool result goes through (json_safe): what FastAPI's
     own JSON path, which the app's default response class takes typed routes off, wrote for a model's float field.
     """
 
@@ -34,7 +33,7 @@ class SafeJSONResponse(JSONResponse):
         except ValueError:
             # json.dumps comes before the encoding, so the body can still hold a lone surrogate after this. Its
             # other ValueError (an int too long to print) is raised again below, as it was.
-            content = _json_safe(content)
+            content = json_safe(content)
         try:
             return super().render(content)
         except UnicodeEncodeError:

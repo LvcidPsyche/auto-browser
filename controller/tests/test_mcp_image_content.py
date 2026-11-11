@@ -71,7 +71,7 @@ class InlineScreenshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent["screenshot_url"], "/artifacts/sess-1/20260101T000000Z-manual.png")
 
     async def test_a_screenshot_path_given_as_a_path_object_still_gets_the_image(self) -> None:
-        # _json_safe turns it into its text, and the image is decided from that text (as at 1.17.0).
+        # json_safe turns it into its text, and the image is decided from that text (as at 1.17.0).
         self.manager.capture_screenshot = AsyncMock(
             return_value={**self._shot_result(), "screenshot_path": PurePath(self.shot)}
         )

@@ -2,18 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import datetime
-import decimal
 import difflib
-import enum
 import hashlib
 import json
 import logging
-import math
 import re
 import time
-import uuid
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Any, Literal, get_args
 
 from playwright.async_api import Error as PlaywrightError
@@ -116,6 +111,7 @@ from ..tool_inputs import (
     VisionFindInput,
     WaitForSelectorInput,
 )
+from ..utils import json_key, json_safe
 from .drag import drag_drop
 from .packs import register_all
 from .previews import preview_arguments
@@ -220,50 +216,13 @@ _ACTION_NAMES = frozenset(get_args(ActionName))
 _WORKFLOW_PROFILES = get_args(WorkflowProfile)
 
 
-# Types strict JSON has no form for that a result may still carry, sent as their text.
-_SENT_AS_TEXT = (datetime.date, datetime.time, PurePath, uuid.UUID, decimal.Decimal)
-
-
-def _json_safe(value: Any) -> Any:
-    """``value`` with only what strict JSON can hold: NaN and the infinities become null, a tuple or set a list,
-    an Enum its value, and a known type (_SENT_AS_TEXT) its text.
-
-    Any other object raises TypeError rather than going out as its ``str()``: a repr is not a result anyone shaped,
-    and can hold what model_dump would have left out (a BrowserSession's holds its totp_secret).
-    """
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {_json_key(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, enum.Enum):
-        return _json_safe(value.value)
-    if isinstance(value, _SENT_AS_TEXT):
-        return str(value)
-    raise TypeError(f"a {type(value).__name__} is not sent in a tool result")
-
-
-def _json_key(key: Any) -> str:
-    """A dict key as json.dumps spells it (``1``, ``true``, ``null``), or a known type's text; any other refused."""
-    if isinstance(key, str):
-        return key
-    if key is None or isinstance(key, (bool, int, float)):
-        return json.dumps(key)
-    if isinstance(key, _SENT_AS_TEXT):
-        return str(key)
-    raise TypeError(f"a {type(key).__name__} key is not sent in a tool result")
-
-
 def _json_safe_detail(detail: dict[str, Any]) -> dict[str, Any]:
-    """An error's detail as strictly as a result (_json_safe), less any entry that cannot be: an error answer
+    """An error's detail as strictly as a result (json_safe), less any entry that cannot be: an error answer
     still goes out, with what it can say."""
     safe: dict[str, Any] = {}
     for key, value in detail.items():
         try:
-            safe[_json_key(key)] = _json_safe(value)
+            safe[json_key(key)] = json_safe(value)
         except (TypeError, ValueError, RecursionError) as exc:
             logger.warning("left %r out of an error's detail: %s", key, exc)
     return safe
@@ -430,8 +389,8 @@ class McpToolGateway:
                     result = await spec.handler(arguments)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
             try:
-                result = _json_safe(result)
-                # From the result as _json_safe left it (a Path is its text), and before it is encoded, so the text
+                result = json_safe(result)
+                # From the result as json_safe left it (a Path is its text), and before it is encoded, so the text
                 # and the structured result say the same.
                 image, image_omitted = await self._inline_image(spec.name, result)
                 if image_omitted is not None:
