@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 def _target_left_the_pointer() -> BrowserActionError:
     """The target had no box any more once Playwright's checks had passed, or once it had put the pointer on it."""
     return BrowserActionError(
-        "Nothing was pressed: the target left the page as the pointer reached it. Observe the page again and retry.",
+        "Nothing was pressed: the target is no longer shown. Observe the page again and retry.",
         code="target_moved",
         status_code=409,
         retryable=True,

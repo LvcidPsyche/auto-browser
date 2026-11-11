@@ -217,12 +217,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     the middle of its box (a wrapper wider than the viewport, a link broken over two lines, something over its
     middle), the click is one Playwright places, at a point it picks itself. For an action that is read,
     Playwright then only puts the pointer, at that point, which the controller gives it, and the press is the
-    controller's own, read where it lands as any other; a target that has left the page by then, or is no longer
-    shown, is not pressed (`target_moved`, retryable), and neither is one with no box of its own, whose children
-    are laid out in its place (`display: contents`): where a press on it would land cannot be read, so the action
-    answers `target_has_no_box`, and the agent names an element inside it. This read has half a second to set up
-    and half a second to run; when it fails or runs past either, the press goes on, and an info-level log line
-    says so.
+    controller's own, read where it lands as any other; a target that is no longer shown by then is not pressed
+    (`target_moved`, retryable; one that has left the page is waited for, as a click waits, and ends the click
+    when its time does), and neither is one with no box of its own, whose children are laid out in its place
+    (`display: contents`): where a press on it would land cannot be read, so the action answers
+    `target_has_no_box`, and the agent names an element inside it. This read has half a second to set up and half
+    a second to run; when it fails or runs past either, the press goes on, and an info-level log line says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as
@@ -242,11 +242,13 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     account"), or after an icon's name goes on in lower case ("lock delete account"); a harmless continuation that
     goes on to something the table has no phrase for ("Remove from list of admins"), and a short name ("Pay") that
     a fuller harmless name of the same button clears; a `Send` label that names another account in the list's own
-    words or by a bare number ("Send code to another account", "Send code to 500"), and `Resend`, which is no
-    phrase of the table ("Resend code to all users"); a name that stands after the first 400 characters of a label
-    or below its third line, and a phrase in a sentence under a harmless name ("Remove from library" above "and
-    permanently delete all the downloaded files from the disk": a line of over 40 characters is not matched); a
-    frame of another origin (a point inside one is read as the frame), and a frame that CSS scales or rotates
+    words or by a bare number ("Send code to another account", "Send code to 500"), or that says who else gets the
+    code on its next line, where the two lines together are past 40 characters and that line opens with no word a
+    label goes on with ("Send code" over "Everyone in the engineering group gets a copy"), and `Resend`, which is
+    no phrase of the table ("Resend code to all users"); a name that stands after the first 400 characters of a
+    label or below its third line, and a phrase in a sentence under a harmless name ("Remove from library" above
+    "and permanently delete all the downloaded files from the disk": a line of over 40 characters is not matched);
+    a frame of another origin (a point inside one is read as the frame), and a frame that CSS scales or rotates
     (read at a point that is off); a control pressed by a key (Enter or Space on a focused button, Enter in a form
     field) or by a drag, and a `select`, whose option is chosen with no press (`select_option`); a clickable
     element that is not a button (a `div` with a handler and no role), one that chooses rather than commands
@@ -263,7 +265,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     mode", a `Post` tab that only opens a form, a counter ("1 Post"), a dash where a hyphen would have joined the
     words ("Pay – as you go"), a tile whose name and description together start with one, a harmless label that
     goes on to a word of the table ("Remove filter: Pay later"). A sign-in button's `Send code` above a sentence
-    that opens with `To`, `Via`, `By`, `In` or `Now` ("Send code" over "To protect your account we text you a
+    that opens with any of the ten words a label goes on with (`To`, `Via`, `By`, `In`, `On`, `Now` and the rest)
+    and then says anything but where the code goes ("Send code" over "To protect your account we text you a
     code"). A navigation link that is a menu item ("Donate", "Pay a bill" or "Send money" on an `a` with
     `role=menuitem`), and a menu item that holds its open submenu, whose commands are in its text. A picker button
     named by its field's `label` ("Transfer to", "Delete after", "Publish date"), and a button inside a `label`

@@ -366,8 +366,9 @@ All notable changes to auto-browser are documented here.
     click that Playwright has to place (on a wrapper wider than the viewport, one broken over two lines, or one
     covered at its middle) is pressed by the controller at the point Playwright would have picked, so it is read
     where it lands too; on a wrapper with no box of its own (`display: contents`) such an action now answers
-    `target_has_no_box` and presses nothing, where it used to click a child, and a target that has left the page
-    or is no longer shown once the pointer is placed answers `target_moved`, which is retryable.
+    `target_has_no_box` and presses nothing, where it used to click a child, and a target that is no longer shown
+    when it is to be pressed answers `target_moved`, which is retryable (one that has left the page is waited for,
+    as a click waits, and ends the click when its time does).
   - A new approval's reason opens with the controller's sentence, which says what the target (or, asked at the
     press, what the click would press) reads as and what the agent labelled the action, before the agent's own
     reason (one already pending for the same action and kind is reused as it stands); the dashboard's confirm

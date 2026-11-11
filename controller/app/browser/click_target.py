@@ -34,12 +34,12 @@ that fails on the retry cannot run the click unasked and leave the approval unsp
 
 Not caught: a label the table lacks (it is English); a frame of another origin; a control pressed by a key or a
 drag, and a select's option; a clickable element that is not a button (_BUTTON_ROLES: a menu item is one, an
-option, a tab and a switch are not), and a link; a button in a closed shadow root; a label given only by
-aria-labelledby, an image with no alt text, or text that CSS or a canvas draws; a name past the cut of a label
-(_LABEL_CUT) or below its third line; look-alike characters; a page where a script, or a style in motion, changes
-what is under the pointer between the read at the press and the press. An action the agent itself labels with a
-kind of the table is approved as labelled and never read. docs/production-hardening.md lists the table and these,
-and a test keeps its list the table's (tests/test_click_target_doc.py).
+option, a tab and a switch are not), and a link in no button or menu item; a button in a closed shadow root; a
+label given only by aria-labelledby, an image with no alt text, or text that CSS or a canvas draws; a name past
+the cut of a label (_LABEL_CUT) or below its third line; look-alike characters; a page where a script, or a style
+in motion, changes what is under the pointer between the read at the press and the press. An action the agent
+itself labels with a kind of the table is approved as labelled and never read. docs/production-hardening.md lists
+the table and these, and a test keeps its list the table's (tests/test_click_target_doc.py).
 """
 
 from __future__ import annotations

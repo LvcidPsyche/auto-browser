@@ -266,6 +266,8 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code\nto all users in the organization"),
         ("post", "Send verification code\nvia the group chat for everyone"),
         ("post", "Send me a login link\nTo: the whole engineering team"),
+        # Short enough to be read as one line, a name under "Send code" asks with no such word.
+        ("post", "Send code\nJohn Smith"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -484,6 +486,9 @@ class LabelRulesTests(unittest.TestCase):
         # Past the first three lines, or a line that is a sentence.
         "Settings\nProfile\nSecurity\nDelete account",
         "Account\nDelete everything you have ever stored with us, for good",
+        # Not caught, and listed so in the docs: who else gets the code, on a second line that opens with no
+        # word a label goes on with, where the two lines together are a sentence's length.
+        "Send code\nEveryone in the engineering group gets a copy",
     )
 
     def test_labels_that_must_ask(self) -> None:
@@ -495,6 +500,13 @@ class LabelRulesTests(unittest.TestCase):
         for label in self.MUST_NOT_ASK:
             with self.subTest(label=label):
                 self.assertIsNone(classified_risk(button(label), "write"))
+
+    def test_send_code_over_a_sentence_that_opens_with_any_word_a_label_goes_on_with_asks(self) -> None:
+        # More than it must for a sign-in page's own sentence, and listed so in the docs, for all ten words.
+        for word in SEND_TAIL_WORDS:
+            with self.subTest(word=word):
+                label = f"Send code\n{word.capitalize()} the gateway we set up for the whole team"
+                self.assertEqual(classified_risk(button(label), "write"), "post")
 
     def test_no_phrase_is_covered_by_a_shorter_one_of_its_kind(self) -> None:
         # "buy now" beside "buy" matches nothing "buy" does not: the table stays what is needed.
