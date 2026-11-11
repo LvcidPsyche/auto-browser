@@ -449,8 +449,8 @@ class McpToolGateway:
             # Surface them so the calling agent can self-correct, instead of
             # collapsing them into the opaque catch-all below.
             message = str(exc.args[0]) if exc.args else exc.__class__.__name__
-            if isinstance(exc, KeyError) and message in self._presented_approval_ids(payload):
-                message = self._unknown_approval_message(spec, message)
+            if isinstance(exc, KeyError) and (presented_as := self._presented_as(payload, message)):
+                message = self._unknown_approval_message(spec, message, presented_as)
             return self._refusal_response(message, {"error": message}, exc)
         except FileNotFoundError as exc:
             # Lookups that miss raise FileNotFoundError with a message naming
@@ -676,27 +676,49 @@ class McpToolGateway:
         return str(governed_approval_id or approval_id) if governed_approval_id or approval_id else None
 
     @staticmethod
-    def _presented_approval_ids(payload: McpToolCallRequest) -> set[str]:
-        """The approval ids a call names, as _pop_policy_approval_id reads them."""
-        arguments = payload.arguments if isinstance(payload.arguments, dict) else {}
-        return {str(value) for name in ("approval_id", "governed_approval_id") if (value := arguments.get(name))}
+    def _presented_as(payload: McpToolCallRequest, approval_id: str) -> list[str]:
+        """The arguments in which a call presented ``approval_id``, as _pop_policy_approval_id reads them; often none.
 
-    def _unknown_approval_message(self, spec: ToolSpec, approval_id: str) -> str:
+        Compared stripped. A tool whose model strips its strings (the three that decide an approval) asks the store
+        for the stripped id, and the store's KeyError names that one: compared with the id as it was sent, a pasted
+        id with a line break after it was no id the call had presented.
+        """
+        arguments = payload.arguments if isinstance(payload.arguments, dict) else {}
+        wanted = approval_id.strip()
+        return [
+            name
+            for name in ("approval_id", "governed_approval_id")
+            if (value := arguments.get(name)) and str(value).strip() == wanted
+        ]
+
+    def _unknown_approval_message(self, spec: ToolSpec, approval_id: str, presented_as: list[str]) -> str:
         """What a call is told of an approval id no record answers to, where it was told the id and nothing else.
 
-        The store raises a KeyError naming the id for one it does not hold, and the manager the same for one the
-        caller may not use, so the two read alike here as they do on the REST routes (404). The retention deletes a
-        decided approval, so an agent that kept an old id meets this without having mistyped anything.
+        The store raises a KeyError naming the id for one it does not hold and for a record that no longer
+        validates, and the manager the same for one the caller may not use, so they read alike here as they do on
+        the REST routes (404). The first sentence is what the controller knows, and is true of each of them; it does
+        not say the approval never existed, which it cannot know (the retention may have deleted it before it was
+        turned off, or a backup was restored). The retention deletes a decided approval, so an agent that kept an old
+        id meets this without having mistyped anything.
+
+        The advice names the argument that held the id: a call can present one as governed_approval_id, and told to
+        leave approval_id out it would send the unknown id again. A decision's own call has no other to repeat, and
+        cannot know which argument the call that needed the approval used.
         """
         days = self.manager.settings.approval_retention_days
+        named = " and ".join(presented_as)
         if spec.name in APPROVAL_DECISION_TOOLS:
-            again = "To get a new approval, repeat the call that needed one without approval_id."
+            again = "To get a new approval, repeat the call that needed one without this approval id."
         else:
-            again = "Repeat the call without approval_id to ask for a new approval."
+            again = f"Repeat the call without {named} to ask for a new approval."
+        known = (
+            f"Unknown approval {approval_id!r} (presented as {named}): this controller holds no approval of that id "
+            "that this call can use."
+        )
         if days <= 0:
-            return f"Unknown approval {approval_id!r}: it never existed. {again}"
+            return f"{known} {again}"
         return (
-            f"Unknown approval {approval_id!r}: it never existed, or it was deleted, as a decided approval can be once "
+            f"{known} It may never have existed, or may have been deleted, as a decided approval can be once "
             f"APPROVAL_RETENTION_DAYS ({days:g}) have passed since its decision. {again}"
         )
 

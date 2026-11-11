@@ -668,10 +668,14 @@ All notable changes to auto-browser are documented here.
   `approval_id` no record answers to, and `browser.execute_approval`, `browser.approve_approval` (with
   `AUTONOMOUS_APPROVALS` on) and `browser.reject_approval` for such an id, answered an error whose whole text was
   the id. The retention now deletes decided approvals (`APPROVAL_RETENTION_DAYS`), so an agent that kept an old id
-  meets this with no mistake of its own. The error now says that the approval is unknown, that it never existed or
-  was deleted by the retention, and to repeat the call without `approval_id` to ask for a new one. It is an error
-  as before (`isError`), nothing runs and nothing is recorded, an approval the caller may not use reads the same
-  as one that does not exist, and the REST routes answer `404` as they did.
+  meets this with no mistake of its own. The error now says that the controller holds no approval of that id the
+  call can use, which argument held the id (`approval_id` or `governed_approval_id`), that the retention may have
+  deleted it (where the retention is on), and to repeat the call that needed the approval without that id to ask
+  for a new one. It does not say the approval never existed, which the controller cannot know. An id sent to one
+  of the three approval tools with white space round it (a pasted id with a line break after it) is told the same.
+  It is an error as before (`isError`), nothing runs and nothing is recorded, an approval the caller may not use
+  and a record that no longer validates read the same as one that does not exist, and the REST routes answer `404`
+  as they did.
 
 ### Changed
 
