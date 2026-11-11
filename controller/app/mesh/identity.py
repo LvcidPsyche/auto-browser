@@ -125,6 +125,20 @@ def _is_a_publish_under_way(name: str) -> bool:
     return False
 
 
+def _is_a_publishs_temp_file(entry: Path) -> bool:
+    """Whether ``entry`` is a publish's temp file: named like one, and a regular file, as an atomic write's is.
+
+    A directory or a link under such a name is somebody else's entry, whatever the link points at. An entry that is
+    gone when it is looked at was a publish that has finished since the directory was listed: it is nothing now.
+    """
+    if not _is_a_publish_under_way(entry.name):
+        return False
+    try:
+        return stat.S_ISREG(entry.lstat().st_mode)
+    except FileNotFoundError:
+        return True
+
+
 def _read_while_another_start_writes(read: Callable[[], _T]) -> _T:
     """``read``, retried for a short bound: another start may be writing the file it reads.
 
@@ -270,8 +284,8 @@ class NodeIdentity:
         """
         own = {_PRIVKEY_FILE, _PUBKEY_FILE, _META_FILE}
         try:
-            names = [entry.name for entry in self._dir.iterdir()]
-            return [name for name in names if name not in own and not _is_a_publish_under_way(name)]
+            entries = list(self._dir.iterdir())
+            return [entry.name for entry in entries if entry.name not in own and not _is_a_publishs_temp_file(entry)]
         except OSError as exc:
             return [f"<unlistable: {type(exc).__name__}>"]
 

@@ -592,7 +592,8 @@ All notable changes to auto-browser are documented here.
   the read is retried: a loose key's mode is put right, or its warning written, once. The temp file a publish
   keeps beside a file until it is whole (`.node_public.pem.<random>.tmp`), another start's or one a killed start
   left, is one of the identity's own files: it no longer makes a group- or world-accessible identity directory
-  read as holding other files, which left its mode as it was. (R5C-8)
+  read as holding other files, which left its mode as it was. Only a regular file is such a temp file: a directory
+  or a link under that name is still another's entry. (R5C-8)
 - **The session replay page's URL line now shows, and links only an http(s) URL.** The page read a key a session
   summary and a stored record do not have (`url`, not `current_url`), so its URL line never rendered. It now shows
   the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)

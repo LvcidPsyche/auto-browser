@@ -477,6 +477,49 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
                 self.assertIn("holds other files", "\n".join(logs.output))
                 path.unlink()
 
+    def test_a_directory_or_a_link_named_like_a_temp_file_still_counts_as_another_entry(self):
+        # An atomic write's temp file is a regular file. Told by the name alone, a directory somebody made under such
+        # a name was the identity's own, and the folder was tightened to 0700 under whoever else uses it.
+        name = ".node_public.pem.k3j2x9aa.tmp"
+        makers = {
+            "a directory": lambda path: path.mkdir(),
+            "a link to a file": lambda path: path.symlink_to(self.dir / "node_public.pem"),
+            "a link to nothing": lambda path: path.symlink_to(self.dir / "gone"),
+        }
+        for kind, make in makers.items():
+            with self.subTest(kind):
+                path = self.dir / name
+                try:
+                    make(path)
+                except OSError as exc:
+                    # Windows makes a link only for a privileged user or in developer mode.
+                    self.skipTest(f"cannot make {kind} here: {type(exc).__name__}")
+                try:
+                    with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+                        chmod = self._load(0o755, ours=True)
+                finally:
+                    path.rmdir() if kind == "a directory" else path.unlink()
+
+                chmod.assert_not_called()
+                text = "\n".join(logs.output)
+                self.assertIn("holds other files", text)
+                self.assertIn(name, text)
+
+    def test_a_temp_file_that_is_gone_when_it_is_looked_at_is_no_entry(self):
+        # Another start's publish can finish between the listing and the look at each entry: its temp file was the
+        # identity's own a moment ago and is nothing now, not a reason to call the directory unlistable.
+        gone = self.dir / ".node_meta.json.0_qz81xw.tmp"
+        real_iterdir = Path.iterdir
+
+        def iterdir(path):
+            return [*real_iterdir(path), gone] if path == self.dir else real_iterdir(path)
+
+        with patch.object(Path, "iterdir", iterdir), self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            chmod = self._load(0o755, ours=True)
+
+        chmod.assert_called_once_with(self.dir, 0o700)
+        self.assertNotIn("holds other files", "\n".join(logs.output))
+
     def test_a_add_10_the_witness_signer_tightens_only_a_directory_of_identity_files(self):
         from app.witness_signing import WitnessSigner
 
