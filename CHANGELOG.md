@@ -488,9 +488,9 @@ All notable changes to auto-browser are documented here.
   7 seconds under a limit of 3, and one that kept every step waiting could hold it for several limits. The
   waits now share the one limit, counted from where the click begins, as the steps of Playwright's own click
   share its timeout: the same target ends the click after 3.3 seconds. Older than this release. The limit is
-  on the click's waits for its target. A page that stops answering holds a click still: the pointer's moves and
-  the questions asked of the page wait for it, and a page busy for 6 seconds once the checks had passed held a
-  click for 7.4 seconds under a limit of 3, which then pressed.
+  on the click's waits for its target. A page that stops answering holds a click still: the pointer's moves,
+  and the questions asked of the target once it is found, wait for the page, and a page busy for 6 seconds
+  once the checks had passed held a click for 7.4 seconds under a limit of 3, which then pressed.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)

@@ -1365,7 +1365,7 @@ class BrowserActionService:
                 # unanswered reads as a no. The click ends as any step before this one ends it then.
                 raise PlaywrightTimeoutError(
                     f"Timeout {budget.timeout_ms:g}ms exceeded: the pointer was placed, and the click's time was "
-                    "up before the target could be asked whether the pointer finds it."
+                    "up before the target answered whether the pointer finds it."
                 )
             raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)

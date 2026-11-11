@@ -243,10 +243,13 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     in its place (`display: contents`): where a press on it would land cannot be read, so the action answers
     `target_has_no_box`, and the agent names an element inside it. A target inside a frame is placed on what the
     screen shows of it, also where its frame runs off the screen or CSS draws the frame at another size.
-    An element that CSS turns is placed at the middle of what the screen shows of the box around it, where
-    Playwright takes the mean of the element's corners, each held to the screen. The two are one point until a
-    part of the element is off the screen; where a corner of the screen cuts it and its middle is off the
-    screen, the controller's point can be beside the element (a square turned 45 degrees is so), and the click
+    An element that CSS turns is placed at the middle of what the screen shows of the box around it (around the
+    first of its boxes, where it has several), where Playwright takes the mean of that box's corners, each held
+    to the screen. The two are one point while the turn is flat and none of the box is off the screen. Turned in
+    three dimensions with perspective they are apart (about 17 px on a button turned 50 degrees about two axes),
+    and wherever Playwright's own click pressed such a button, in the turns measured, the controller's did.
+    Where a corner of the screen cuts an element and its middle is off the screen, the controller's point can
+    be beside the element (a square turned 45 degrees is so), and the click
     ends when its time does, where Playwright's own click presses. A link over two lines inside something CSS
     turns or skews is placed where Playwright presses it; inside a frame as well, it can be placed beside the
     link, and ends the same way.
