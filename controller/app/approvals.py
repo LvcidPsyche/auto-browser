@@ -298,7 +298,9 @@ class ApprovalStore:
         _handed_out), so this pass reads the backend itself to find it; left alone, the stores would hold it until
         each record's next write. Nothing but the text changes, so the stores agree as before (_catch_sqlite_up), and
         the same call still matches (_keyed). A record that cannot be rewritten stays, still matches, and is taken at
-        the next start; the pass never stops one.
+        the next start; the pass never stops one. A process that keys alone (_digest_key) rewrites none, and says how
+        many it left: under its own key no later start could match them, so one start that could not use the key
+        file ended every operator's rejection stored before 1.18.0 (the next good start's retention then removed it).
 
         Also says, once a start, how many approvals that could still run are kept under a key this process does not
         hold (_kept_under_another_key), and how many rejections by an operator: nothing else tells an operator
@@ -319,6 +321,10 @@ class ApprovalStore:
                                 unreadable += 1
                             elif record.status == "rejected" and record.decided_via != "agent":
                                 rejections += 1
+                        continue
+                    if self._keyed_by_this_process_alone:
+                        # Read after _keyed, which reads the key: that is where a process learns that it keys alone.
+                        failed.append(f"{record.id} (this start keys with a key of its own)")
                         continue
                     record.action = keyed
                     try:

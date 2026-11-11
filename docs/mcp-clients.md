@@ -693,9 +693,12 @@ rejection does not bring it back: reject the call again when it is asked for. Wh
 used at a start (it holds no key, cannot be read, or cannot be written
 where there is none), the start logs it and keys with a key of its own: its tool call approvals work
 until that process ends, and are refused the same way after a restart. To that process every tool call
-approval stored before reads as kept under another key, the file's own among them, so its retention
-removes no operator's rejection on that ground: one in controller scope or in an open session stays
-whatever its age, and the next start that can use the file matches it again. A file that holds no key
+approval stored under a key before reads as kept under another key, the file's own among them, so its
+retention removes no operator's rejection on that ground: one in controller scope or in an open session
+stays whatever its age, and the next start that can use the file matches it again. A record that still
+holds the plain SHA-256 is not rewritten by such a start, which logs how many it left: under that
+process's key it would match no call at any later start. It matches its call in that process as before,
+and the next start that can use the file rewrites it under the file's key. A file that holds no key
 is left as it is, and has to be removed before a start writes a new one. A start that dies between creating the
 file and writing the key leaves one, empty or cut short of its 64 hex characters: no approval was ever
 kept under it, so it is safe to remove. One that held a key and was changed since (edited, or saved in

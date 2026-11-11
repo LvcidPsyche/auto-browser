@@ -204,7 +204,9 @@ All notable changes to auto-browser are documented here.
   neither read a key from the file nor write one logs a warning and keys with a key of its own, so its approvals for
   tool calls do not outlive that process. Its retention deletes no such rejection, in controller scope or in an open
   session: it cannot tell the file's key from one that is gone, and the next start that reads the file matches
-  again the rejections kept under it. A file that holds no key is left as it is, to be removed by hand. After a
+  again the rejections kept under it. Nor does such a start rewrite the stand-ins 1.17.0 stored: it logs how many
+  it left, they match their calls there as before, and the next start that reads the file rewrites them. A file
+  that holds no key is left as it is, to be removed by hand. After a
   downgrade to 1.17.0, an approval for a tool call that 1.18.0 stored or rewrote matches no call there (the call
   answers that the approval does not match the requested action), and the agent asks again. Nor does an operator's
   rejection of a tool call that 1.18.0 stored or rewrote stop an agent's own approval of that call there under

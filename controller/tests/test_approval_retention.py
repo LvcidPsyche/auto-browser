@@ -376,6 +376,70 @@ class RetentionTests(RetentionBase):
         with self.assertNoLogs("app.approvals", level="WARNING"):
             await self._store()
 
+    async def _stored_texts(self, approval_id: str) -> set[str | None]:
+        """The record's text as each store configured holds it, not as the store hands it out."""
+        backends = [self.store.file_store, *([self.store.sqlite_store] if self.store.sqlite_store else [])]
+        return {(await backend.get(approval_id)).action.text for backend in backends}
+
+    async def _asked_again_and_refused_the_agents_approval(self, arguments: str) -> None:
+        asked_again = await self.store.create_or_reuse_pending(
+            session_id=CONTROLLER_SCOPE,
+            kind="account_change",
+            reason="r",
+            action=_tool_call(arguments),
+            origin="tool_call",
+        )
+        with self.assertRaisesRegex(PermissionError, "an operator rejected this action"):
+            await self.store.approve(asked_again.id, decided_via="agent")
+
+    async def test_a_start_that_keys_alone_leaves_a_rejection_stored_before_1_18_0_for_a_start_that_holds_the_key(
+        self,
+    ) -> None:
+        # 1.17.0 stored a tool call's digest plain, and a start rewrites it keyed. A start that could not use the key
+        # file rewrote it under its own key, which no later start holds: at the next good start the operator's
+        # rejection no longer refused the agent's own approval of the call, and the retention removed it.
+        for sqlite in (True, False):
+            with self.subTest(sqlite=sqlite):
+                self.root = Path(self.tmp.name) / f"approvals-{sqlite}"
+                self.db_path = Path(self.tmp.name) / f"state-{sqlite}.db"
+                self.store = await self._store(sqlite=sqlite)
+                rejected = await self._rejected_tool_call("a")
+                await _age(self.store, rejected, days=31)
+                record = await self.store.get(rejected)
+                record.action = _tool_call("a")  # as 1.17.0 stored it
+                for backend in (self.store.file_store, self.store.sqlite_store):
+                    if backend is not None:
+                        await backend.upsert(record)
+                plain = _tool_call("a").text
+                self.assertEqual(await self._stored_texts(rejected), {plain})
+
+                with patch.object(FileApprovalStore, "digest_key", side_effect=PermissionError(errno.EACCES, "denied")):
+                    with self.assertLogs("app.approvals", level="INFO") as logged:
+                        self.store = await self._store(sqlite=sqlite)
+                    alone = "\n".join(logged.output)
+                    self.assertIn("tool call approvals are keyed by this process alone", alone)
+                    # Nothing is rewritten, and no line says anything was.
+                    self.assertEqual(await self._stored_texts(rejected), {plain})
+                    self.assertNotIn("now keep their tool call digest keyed", alone)
+                    self.assertIn("1 approval record(s) stored before 1.18.0 still keep a tool call digest", alone)
+                    # In that process it refuses as before (both sides are keyed in memory), and is kept.
+                    await self._asked_again_and_refused_the_agents_approval("a")
+                    self.assertEqual(await self.store.prune_decided(), 0)
+                    self.assertEqual(await self._stored_texts(rejected), {plain})
+
+                with self.assertLogs("app.approvals", level="INFO") as logged:
+                    self.store = await self._store(sqlite=sqlite)
+                good = "\n".join(logged.output)
+                self.assertIn("1 approval record(s) stored before 1.18.0 now keep their tool call digest", good)
+                self.assertNotIn("operator rejection(s) of tool calls are kept under another key", good)
+                # Under the file's key now, in each store: what this start keeps for the same call.
+                under_the_files_key = self.store._stored_action(_tool_call("a")).text
+                self.assertNotEqual(under_the_files_key, plain)
+                self.assertEqual(await self._stored_texts(rejected), {under_the_files_key})
+                await self._asked_again_and_refused_the_agents_approval("a")
+                self.assertEqual(await self.store.prune_decided(), 0)
+                self.assertIn(rejected, await self._ids())
+
     async def test_a_record_whose_decision_time_cannot_be_read_is_kept_and_logged_once(self) -> None:
         undated = await self._decided("rejected", days=31, session_id="closed000001")
         garbled = await self._decided("executed", days=31)
