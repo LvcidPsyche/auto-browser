@@ -43,14 +43,26 @@ Downloads a page starts are capped by `DOWNLOAD_MAX_BYTES` (default 256 MiB; a l
 `CONTROLLER_ALLOWED_HOSTS` protects the controller itself from unexpected HTTP Host headers.
 Keep `ALLOWED_HOSTS` for browser navigation targets, and set `CONTROLLER_ALLOWED_HOSTS`
 to the hostnames operators use to reach the controller, such as `browser.example.com`
-or `localhost,127.0.0.1,::1` for a local-only install.
+or `localhost,127.0.0.1,::1` for a local-only install. An entry is an exact name, an
+IPv6 address with or without brackets (`[::1]`, `::1`), a suffix such as `*.example.com`,
+or `*`. Brackets round anything else (`[localhost]`, `[*]`) and a bare `*.` stop the
+controller at startup.
 
 When it is unset and the controller runs without a bearer credential (a loopback
 deployment with `API_ALLOW_TOKENLESS_LOOPBACK=true`), only loopback Host names —
 `localhost`, `127.0.0.1`, `[::1]` — are answered. An unauthenticated API that accepts
 any Host header can be driven by a web page through DNS rebinding, so this default
-holds until you either list the names clients use or let the controller use a token.
-`/healthz` is exempt.
+holds until you either list the exact names clients use or let the controller use a
+token. `/healthz` is exempt.
+
+On a controller without a bearer credential, a wildcard (`*`, `*.example.com`) admits
+no Host: anyone who can get a name under it can point that name at 127.0.0.1, and a
+page served from it would then drive the controller whole, with no token to ask for.
+Such a controller does not start with a wildcard in the list, and says what works
+instead: a token, or exact host names. An exact name is only as safe as its DNS:
+list only names whose DNS you control, or run with a token. A single-label name such as
+`controller` can be answered by another host on the same network (mDNS, LLMNR, a DHCP
+search domain). A controller with a token admits by its wildcards as before.
 
 ## API token
 
