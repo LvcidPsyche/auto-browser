@@ -16,6 +16,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from ..url_safety import browser_equivalent_url
+from ..utils import capped_for_log
 from .models import CapabilityGrant, DelegationRequest, PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -154,11 +155,12 @@ def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> 
 
 
 def _refused_url_shown(url: str) -> str:
-    """What a refusal says of the URL it refuses: its host name, and that it carries userinfo. Never the URL.
+    """What a refusal says of the URL it refuses: its host name, and what no pattern allows in it. Never the URL.
 
     The reason is logged (mesh.policy.denied), and the URL is the peer's text as it sent it: the userinfo, the path
-    and the query in it are not for a log. A URL with userinfo is refused for having it (_url_matches), so the
-    reason says so: its host alone may be one a pattern allows. The host is the peer's text too, so it is quoted.
+    and the query in it are not for a log. A URL with userinfo is refused for having it (_url_matches), and so is
+    one whose port cannot be read (99999, abc), so the reason says so: its host alone may be one a pattern allows.
+    The host is the peer's text too, as long as a request may be: it is quoted, and cut as a log line's text is.
     """
     try:
         parts = urlsplit(browser_equivalent_url(url))
@@ -166,9 +168,13 @@ def _refused_url_shown(url: str) -> str:
         return "A URL that cannot be read"
     if not parts.hostname:
         return "A URL with no host name"
-    shown = f"A URL of host {parts.hostname!r}"
+    shown = f"A URL of host {capped_for_log(parts.hostname)!r}"
     if parts.username is not None or parts.password is not None:
         return f"{shown} that carries userinfo, which no pattern allows,"
+    try:
+        parts.port  # read for the ValueError it raises on such a port, where _url_matches refuses the URL
+    except ValueError:
+        return f"{shown} and a port that cannot be read, which no pattern allows,"
     return shown
 
 

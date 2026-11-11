@@ -99,7 +99,16 @@ REFUSED_URLS = {
     ),
     "a port that is none": (
         "https://evil.example:99999999/private-path?token=SECRET-TOKEN-123",
-        "A URL of host 'evil.example' is",
+        "A URL of host 'evil.example' and a port that cannot be read, which no pattern allows, is",
+    ),
+    # The host alone is one the pattern allows: named with no reason beside it, the refusal read as a mistake.
+    "an allowed host and a port that is none": (
+        "https://example.com:99999/private-path?token=SECRET-TOKEN-123",
+        "A URL of host 'example.com' and a port that cannot be read, which no pattern allows, is",
+    ),
+    "an allowed host and a port that is no number": (
+        "https://example.com:abc/private-path?token=SECRET-TOKEN-123",
+        "A URL of host 'example.com' and a port that cannot be read, which no pattern allows, is",
     ),
     "no host name": ("https://:hunter2@/private-path?token=SECRET-TOKEN-123", "A URL with no host name is"),
     "not a URL": ("https://[::1/private-path?token=SECRET-TOKEN-123", "A URL that cannot be read is"),
@@ -139,6 +148,21 @@ def test_a_refused_urls_host_is_logged_on_one_line(mesh, caplog: pytest.LogCaptu
 
     assert reply_status(response) == "rejected"
     _the_line(caplog, "app.mesh.delegation", "mesh.policy.denied")
+
+
+def test_a_refused_urls_host_of_any_length_is_cut_in_the_line(mesh, caplog: pytest.LogCaptureFixture) -> None:
+    # A host name is as long as the body cap lets a request be, and the line is written at every refusal.
+    grant = CapabilityGrant(capability="tool:*", url_allowlist=["https://example.com/*"])
+    mesh.peers.add(PeerRecord(node_id=mesh.legit.node_id, pubkey_b64=mesh.legit.pubkey_b64, grants=[grant]))
+    caplog.set_level(logging.INFO)
+
+    response = _post(mesh, "tool:browser.navigate", arguments={"url": "https://" + "h" * 3000 + ".example/"})
+
+    assert reply_status(response) == "rejected"
+    messages = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
+    (line,) = [message for message in messages if message.startswith("mesh.policy.denied")]
+    assert "A URL of host 'hhhh" in line, line[:200]
+    assert len(line) < 600, len(line)
 
 
 def _post_unsigned(mesh, recipient: str, named: NodeIdentity | None = None):
