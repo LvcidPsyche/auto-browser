@@ -118,6 +118,9 @@ NAMED_BESIDE = """<title>start</title>
 <svg id="fifth" role="button" tabindex="0" width="120" height="90" onclick="document.title='DRAWN'"><rect
   width="120" height="90" fill="#ddd"/><text x="8" y="15">Q1</text><text x="8" y="30">Q2</text><text x="8"
   y="45">Q3</text><text x="8" y="60">Q4</text><text x="8" y="75">Delete account</text></svg>
+<svg id="fourth" role="button" tabindex="0" width="120" height="75" onclick="document.title='PRESSED'"><rect
+  width="120" height="75" fill="#ddd"/><text x="8" y="15">Q1</text><text x="8" y="30">Q2</text><text x="8"
+  y="45">Q3</text><text x="8" y="60">Delete account</text></svg>
 <script>
 document.getElementById('text').attachShadow({mode: 'open'}).innerHTML = `<span>Delete account</span>`;
 </script>
@@ -139,6 +142,10 @@ MENU = """<title>start</title>
 </ul>
 <div id="tile" role="button" tabindex="0" onclick="document.title='TILE'"><a id="tile-link"
   href="#tile">Remove member</a></div>
+<button id="in-button" style="display: block; margin: 6px" onclick="document.title='BUTTON'">Delete <a
+  id="button-link" href="#in-button">account</a></button>
+<div id="row" role="button" tabindex="0" onclick="document.title='ROW'">Delete request #12 <a id="own-role"
+  role="menuitem" href="#row" onclick="event.stopPropagation(); document.title='OPENED'">Open</a></div>
 """
 # A label for a button, and one around a button: a press on either is a press on the button, as HTML has it.
 LABELLED = """<title>start</title>
@@ -207,10 +214,8 @@ COVERED = """<title>start</title>
 <div id="zone"><button onclick="document.title='DELETED'">Delete account</button></div>
 <div id="bar">Cookies and such</div>
 """
-# A card that is a link. An inline element around a block has three boxes, and the first is empty, at the corner
-# of the block, where this card keeps a star of its own. The card is wider than the viewport, so its middle is
-# off the screen and its click is one Playwright places.
-# A form that draws its button again once it is ready: a new element in the disabled one's place.
+# A form whose button is disabled until it is ready: it then draws the button again, a new element in the
+# disabled one's place (renderAgain), or enables the one it has (enable).
 RENDERED_AGAIN = """<title>start</title>
 <body style="margin: 0">
 <button id="go" disabled>Go</button>
@@ -222,9 +227,16 @@ function renderAgain() {
   fresh.onclick = () => { document.title = 'DONE'; };
   document.getElementById('go').replaceWith(fresh);
 }
+function enable() {
+  const go = document.getElementById('go');
+  go.onclick = () => { document.title = 'DONE'; };
+  go.disabled = false;
+}
 </script>
 """
-
+# A card that is a link. An inline element around a block has three boxes, and the first is empty, at the corner
+# of the block, where this card keeps a star of its own. The card is wider than the viewport, so its middle is
+# off the screen and its click is one Playwright places.
 CARD = """<title>start</title>
 <style>
   body { margin: 0 }
@@ -235,6 +247,18 @@ CARD = """<title>start</title>
 <div id="place"><a id="card" href="#opened" onclick="document.title = 'OPENED'"><div><span id="star"
   onclick="event.preventDefault(); event.stopPropagation(); document.title = 'STARRED'">*</span>Card</div></a></div>
 """
+# The card with a quarter of a pixel of the link before its block: a first box of which the screen shows under a
+# square pixel, here under something of the page's own. A quarter, so that the box is under one square pixel
+# whichever height a platform's font gives a line of one pixel (one or two).
+THIN_FIRST_BOX = (
+    CARD.replace(
+        '<a id="card" href="#opened" onclick="document.title = \'OPENED\'"><div>',
+        '<a id="card" style="font: 1px/1px monospace" href="#opened" onclick="document.title = \'OPENED\'">'
+        '<i style="display: inline-block; width: 0.25px; height: 0.25px"></i><div style="font: 16px/1.2 sans-serif">',
+    )
+    + '<div id="lid" style="position: fixed; left: 0; top: 98px; width: 8px; height: 5px" '
+    "onclick=\"document.title = 'LID'\"></div>"
+)
 # A fixed card wider than the viewport, with under a pixel of its height on the screen, at the top edge.
 SLIVER = """<title>start</title>
 <style>
@@ -629,7 +653,7 @@ async def test_a_link_inside_a_menu_item_or_a_button_is_read_as_that_item(tmp_pa
         session_id = await env.create("/")
         page = env.page(session_id)
 
-        for link in ("#link", "#tile-link"):
+        for link in ("#link", "#tile-link", "#button-link"):
             for target in ({"selector": link}, await _centre(page.locator(link))):
                 with pytest.raises(ApprovalRequiredError) as asked:
                     await env.manager.execute_decision(session_id, _click("read", **target))
@@ -637,6 +661,10 @@ async def test_a_link_inside_a_menu_item_or_a_button_is_read_as_that_item(tmp_pa
         with pytest.raises(ApprovalRequiredError):
             await env.manager.execute_decision(session_id, _click("read", selector="text=Delete project"))
         assert await _title(env, session_id) == "start"
+
+        # A link that is itself an item is read by its own names, not by those of the row around it.
+        await env.manager.execute_decision(session_id, _click("read", selector="#own-role"))
+        assert await _title(env, session_id) == "OPENED"
 
 
 async def test_a_role_with_spaces_around_it_or_a_second_token_is_read_by_its_first(tmp_path: Path) -> None:
@@ -662,7 +690,8 @@ async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that
         session_id = await env.create("/")
 
         # And an SVG's name is its <title>, which is not rendered, or its <text>: innerText has neither.
-        for button in ("#titled", "#icon", "#image", "#shadow", "#drawn", "#svg"):
+        # (#fourth: the fourth of an SVG's names is still read.)
+        for button in ("#titled", "#icon", "#image", "#shadow", "#drawn", "#svg", "#fourth"):
             with pytest.raises(ApprovalRequiredError) as asked:
                 await env.manager.execute_decision(session_id, _click("read", selector=button))
             assert asked.value.approval.kind == "destructive", button
@@ -956,6 +985,28 @@ async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_
         assert await _title(env, session_id) == "OPENED"
 
 
+async def test_a_click_playwright_places_passes_over_a_first_box_of_under_a_square_pixel(tmp_path: Path) -> None:
+    # Playwright takes the first box of which the viewport shows more than 0.99 of a square pixel, and not the
+    # first it shows anything of. Half a pixel of this link stands before its block, under something of the
+    # page's own: a point taken there is one the pointer never finds the link at, and the click fails when
+    # its time is up, where Playwright's own (the click route) presses the card.
+    async with browser_env(tmp_path, {"/": THIN_FIRST_BOX}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        areas = await page.locator("#card").evaluate(
+            "(el) => Array.from(el.getClientRects()).map((box) => box.width * box.height)"
+        )
+        # The shape the fixture stands for: a box of under a square pixel, then the block's.
+        assert THIN_FIRST_BOX != CARD and 0 < areas[0] < 0.99 < areas[1], areas
+
+        await env.manager.execute_decision(session_id, _click("read", selector="#card"))
+        assert await _title(env, session_id) == "OPENED"
+
+        await page.evaluate("document.title = 'start'")
+        await env.manager.click(session_id, selector="#card")
+        assert await _title(env, session_id) == "OPENED"
+
+
 async def test_a_click_playwright_places_on_a_sliver_of_its_target_lands_where_playwrights_own_does(
     tmp_path: Path,
 ) -> None:
@@ -977,20 +1028,24 @@ async def test_a_click_playwright_places_on_a_sliver_of_its_target_lands_where_p
         assert await _title(env, session_id) == "OPENED"
 
 
+@pytest.mark.parametrize("ready", ["renderAgain()", "enable()"])
 @pytest.mark.parametrize("route", ["read", "direct"])
-async def test_a_disabled_target_the_page_renders_again_is_waited_for(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+async def test_a_disabled_target_the_page_enables_or_renders_again_is_waited_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, ready: str
 ) -> None:
     # Playwright's click looks its target up again when the element it was waiting on is replaced. The wait for
     # "enabled" that took the trial click's place held one element: a form that drew its disabled button again
     # ended the click at once ("Element is not attached to the DOM"), where every release had waited for the new
     # one. The page draws it again here once the checks are waiting, so no step before them meets the change.
+    # It is the checks that wait, on the same element as on a new one: a click that pressed without them is slow
+    # enough, along the pointer's path, to meet a button the page has enabled by then.
     real = actions_module.BrowserActionService._checks_of_a_click
-    waiting = asyncio.Event()
+    waiting, passed = asyncio.Event(), asyncio.Event()
 
     async def checks(*given: Any, **named: Any) -> None:
         waiting.set()
         await real(*given, **named)
+        passed.set()
 
     monkeypatch.setattr(actions_module.BrowserActionService, "_checks_of_a_click", staticmethod(checks))
     async with browser_env(tmp_path, {"/": RENDERED_AGAIN}) as env:
@@ -1004,7 +1059,8 @@ async def test_a_disabled_target_the_page_renders_again_is_waited_for(
             await asyncio.wait_for(waiting.wait(), 30)
             await asyncio.sleep(0.3)
             assert not clicking.done(), "the click did not wait for its disabled target"
-            await env.page(session_id).evaluate("renderAgain()")
+            assert not passed.is_set(), "the click's checks passed a disabled target"
+            await env.page(session_id).evaluate(ready)
             await clicking
         finally:
             clicking.cancel()

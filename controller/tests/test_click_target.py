@@ -534,6 +534,40 @@ class LabelRulesTests(unittest.TestCase):
         # marks is.
         "Send code to john@\u2026",
         "Send code to _john@example.com_",
+        # A label for each word of where a code goes that no label above needs.
+        "Send code to phone and email",
+        "Send code to phone or email",
+        "Send code to sign in with email",
+        "Send code to my e-mail",
+        "Send code by mail",
+        "Send code to my mobile",
+        "Send code to my cell",
+        "Send code by voice call",
+        "Send code to registered email",
+        "Send code to primary email",
+        "Send code to backup email",
+        "Send code to recovery email",
+        "Send code to work email",
+        "Send code to personal email",
+        "Send code to my other phone",
+        "Send code to my new phone",
+        "Send code to confirm my identity",
+        "Send code to my phone for login",
+        "Send code to this computer",
+        "Send code to the email of my account",
+        "Send code to the associated email",
+        "Send code to the number below",
+        "Send code to phone (last 4 digits: 1234)",
+        "Send code to my landline",
+        "Send code to my telephone",
+        "Send code to my second phone",
+        "Send code again in 5 minutes",
+        "Send code again in 1 minute",
+        "Send code to complete sign-up",
+        "Send code to complete log-in",
+        "Send code to complete signin",
+        "Send code to complete signup",
+        "Send code to my Microsoft account",
         # Not a label at all.
         "1",
         "shopping_cart",
@@ -563,6 +597,15 @@ class LabelRulesTests(unittest.TestCase):
             with self.subTest(word=word):
                 label = f"Send code\n{word.capitalize()} the gateway we set up for the whole team"
                 self.assertEqual(classified_risk(button(label), "write"), "post")
+
+    def test_every_word_of_where_a_code_goes_is_needed_by_a_label_that_runs(self) -> None:
+        # The docs test holds the list itself, and this that each word of it is read: taken out of the words a
+        # label goes on with, some label of the table that ran asks. 36 of the hundred were needed by none.
+        for word in SEND_DESTINATION_WORDS:
+            without = click_target._SEND_GOES_ON_WITH - {word}
+            with self.subTest(word=word), patch.object(click_target, "_SEND_GOES_ON_WITH", without):
+                asks = [label for label in self.MUST_NOT_ASK if classified_risk(button(label), "write")]
+                self.assertTrue(asks)
 
     def test_no_phrase_is_covered_by_a_shorter_one_of_its_kind(self) -> None:
         # "buy now" beside "buy" matches nothing "buy" does not: the table stays what is needed.
