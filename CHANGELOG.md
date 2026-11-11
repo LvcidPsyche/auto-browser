@@ -161,11 +161,11 @@ All notable changes to auto-browser are documented here.
   end nor a run was recorded, the next refusal may write no event: this version logs an error when that can be so,
   and 1.17.0 logs nothing. A job a named operator queued fails when a worker takes it, with an error that says so,
   if that credential has gone meanwhile. Moving to the shared `API_BEARER_TOKEN` or to no token counts: every job a
-  named operator created is then refused. Give the owner a named credential again, or delete the job and create it again under a credential that
-  stays. Deleting it needs the owner's credential as well, as listing it does: give the credential back for the
-  delete, or stop the controller and remove the job's entry from the cron store (`CRON_STORE_PATH`,
-  `/data/crons/crons.json` by default). A job created on the shared token or with no token is unowned and runs as
-  before, as does a job queued by an operator named only by a header.
+  named operator created is then refused. Give the owner a named credential again, or delete the job and create it
+  again under a credential that stays. Deleting it needs the owner's credential as well, as listing it does: give
+  the credential back for the delete, or stop the controller and remove the job's entry from the cron store
+  (`CRON_STORE_PATH`, `/data/crons/crons.json` by default). A job created on the shared token or with no token is
+  unowned and runs as before, as does a job queued by an operator named only by a header.
 - **A resumed agent run now gets its first run's `max_steps`, where it got what was left of them.**
   `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` with no `max_steps` queued a run of the steps the
   first had not used, and of one step when it had used them all. They now queue a run of the first run's whole
