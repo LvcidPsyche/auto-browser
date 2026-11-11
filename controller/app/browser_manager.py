@@ -62,7 +62,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
-from .utils import spawn_background_task
+from .utils import capped_for_log, spawn_background_task
 from .witness import (
     ReceiptList,
     WitnessActionContext,
@@ -831,7 +831,8 @@ class BrowserManager:
             normalized = pattern.removeprefix("*.")
             if fnmatch.fnmatch(host, pattern) or host == normalized or host.endswith(f".{normalized}"):
                 return
-        raise PermissionError(f"Host {host!r} is not allowlisted")
+        # The host is the caller's text, as long as its URL: cut, as a log line's text is.
+        raise PermissionError(f"Host {capped_for_log(host)!r} is not allowlisted")
 
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)

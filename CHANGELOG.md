@@ -298,7 +298,8 @@ All notable changes to auto-browser are documented here.
   one with the count of those between, and its error text is cut at 200 characters. The `mesh.policy.denied` line
   also quoted a URL a grant's `url_allowlist` refused, as the peer sent it: a URL with userinfo is refused for
   having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
-  quoted, and says when the URL carried userinfo; what the peer is answered is the fixed text it was. One line was
+  quoted and cut at 200 characters, and says when the URL carried userinfo or a port that cannot be read, for which
+  it is refused whatever its host; what the peer is answered is the fixed text it was. One line was
   left: under `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent (`no readable
   record for session`), the id of a peer's request or of an MCP call. It is quoted now too.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
@@ -667,7 +668,9 @@ All notable changes to auto-browser are documented here.
   default, and refused before its session is looked up) had a line of its own that wrote the session id as the
   caller sent it, a line break included: it is written as the others are. One refusal's text held the
   caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
-  name. It now says `The https URL has no host name`, to a tool's caller too.
+  name. It now says `The https URL has no host name`, to a tool's caller too. And the refusal of a host that
+  `ALLOWED_HOSTS` does not allow (`Host '...' is not allowlisted`) named the host whole, as long as the URL was: it
+  names its first 200 characters now, to a tool's caller too.
 - **An unknown approval id no longer writes a traceback to the log, and no `404` repeats a long id whole.** A REST
   route that maps no answer of its own for a `KeyError` gets the app's `404` `Not found: <key>` and its
   `unmapped KeyError` warning, which is there to tell a bug from an unknown id. The five approval routes by id

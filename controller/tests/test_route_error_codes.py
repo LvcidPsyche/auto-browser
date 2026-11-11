@@ -691,6 +691,24 @@ def test_an_argument_that_prints_a_line_break_starts_no_log_line(
     assert where and all(line.startswith("  ") for line in where), where
 
 
+class _CannotBePrinted:
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr\nINJECTED")
+
+
+def test_an_argument_that_cannot_be_printed_is_named_by_its_class_and_the_answer_stands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # No route passes one today (ids from a path, and numbers). The line is written while an error is being
+    # answered: a failure to print an argument must not take that answer's place.
+    answer, message = _answered_and_logged(caplog, ValueError("v"), "x failed for %s", _CannotBePrinted())
+
+    assert (answer.status_code, answer.detail) == (400, "Invalid request")
+    first, *where = message.splitlines()
+    assert first == "x failed for <a _CannotBePrinted that could not be printed>: answered 400 for ValueError: 'v'"
+    assert where and all(line.startswith("  ") for line in where), where
+
+
 def test_a_number_among_the_arguments_is_still_a_number(caplog: pytest.LogCaptureFixture) -> None:
     _answer, message = _answered_and_logged(caplog, ValueError("v"), "tab %d failed", 3)
 

@@ -86,6 +86,21 @@ class SchemeGateTests(unittest.TestCase):
                 for part in PARTS_OF_A_URL_WITH_NO_HOST_NAME:
                     self.assertNotIn(part, text)
 
+    def test_a_refused_host_is_named_whole_up_to_200_characters_and_cut_past_them(self) -> None:
+        # The host is the caller's text, and the fork route takes start_url as a query parameter no model bounds.
+        manager = BrowserManager(Settings(_env_file=None, ALLOWED_HOSTS="allowed.example"))
+        at_the_cut, past_it = "a" * 192 + ".example", "a" * 193 + ".example"
+        said = {}
+        for host in ("evil.example", at_the_cut, past_it, "a" * 3000 + ".example"):
+            with self.assertRaises(PermissionError) as refused:
+                manager._assert_url_allowed(f"https://{host}/x")
+            said[host] = str(refused.exception)
+
+        self.assertEqual(said["evil.example"], "Host 'evil.example' is not allowlisted")
+        self.assertEqual(said[at_the_cut], f"Host '{at_the_cut}' is not allowlisted")
+        self.assertEqual(said[past_it], f"Host '{past_it[:200]}...' is not allowlisted")
+        self.assertEqual(said["a" * 3000 + ".example"], f"Host '{'a' * 200}...' is not allowlisted")
+
 
 class ForkRouteTests(unittest.TestCase):
     def setUp(self) -> None:

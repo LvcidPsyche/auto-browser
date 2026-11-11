@@ -93,8 +93,18 @@ REFUSED_URLS = {
         "https://alice:hunter2@example.com/private-path?token=SECRET-TOKEN-123",
         "host 'example.com' that carries userinfo",
     ),
+    # A user name is userinfo with no password beside it, and the URL is refused for it all the same.
+    "a user name and no password": (
+        "https://alice@example.com/private-path?token=SECRET-TOKEN-123",
+        "host 'example.com' that carries userinfo",
+    ),
     "another host": (
         "https://evil.example/private-path?token=SECRET-TOKEN-123#hunter2",
+        "A URL of host 'evil.example' is",
+    ),
+    # Read as the browser reads it, which is how the allowlist judged it: urllib finds no host name in this one.
+    "backslashes where the slashes are": (
+        "https:\\\\evil.example\\private-path?token=SECRET-TOKEN-123",
         "A URL of host 'evil.example' is",
     ),
     "a port that is none": (
