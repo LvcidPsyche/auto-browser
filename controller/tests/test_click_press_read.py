@@ -200,7 +200,9 @@ def _locator(
         return place
 
     async def bounding_box(**given: Any) -> Any:
-        given_budget("box", given)
+        # Read twice by a placed click: for the place to be counted from, and again once the hover has put
+        # the pointer there.
+        given_budget("box again" if "box" in budgets else "box", given)
         return box
 
     return SimpleNamespace(
@@ -299,7 +301,7 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
             await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
         # The last is the question whether the pointer finds the target where it was put: its first message had
         # no bound of its own either, so a target that had left by then was waited for a whole default more.
-        assert list(locator.budgets) == ["enabled", "trial hover", "place", "hover", "box", "pointer"]
+        assert list(locator.budgets) == ["enabled", "trial hover", "box", "place", "hover", "box again", "pointer"]
         given = list(locator.budgets.values())
         # Never more than the step before had (a clock may not move in 20 ms), and the last has less than the first.
         assert given == sorted(given, reverse=True) and 0 < given[-1] < given[0] <= 250, given
@@ -309,7 +311,7 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         locator = _locator(done, each_step_takes=0.02)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, locator, timeout_ms=30)
-        assert (locator.budgets["box"], locator.budgets["pointer"]) == (1, 1), locator.budgets
+        assert (locator.budgets["box again"], locator.budgets["pointer"]) == (1, 1), locator.budgets
 
         # No budget named: the session's own (ACTION_TIMEOUT_MS), which is what Playwright gives a step left to
         # itself, and one deadline for the steps as well. The question has its own bound within that.
@@ -317,7 +319,7 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         locator = _locator(done)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, locator)
-        assert 14000 < locator.budgets["box"] <= locator.budgets["enabled"] <= 15000, locator.budgets
+        assert 14000 < locator.budgets["box again"] <= locator.budgets["enabled"] <= 15000, locator.budgets
         assert locator.budgets["pointer"] == POINTER_CHECK_TIMEOUT_MS
 
         # Not read, the click is Playwright's own, and its timeout is the budget.

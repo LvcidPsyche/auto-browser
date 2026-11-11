@@ -163,32 +163,44 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
 # thin: taken so only where an axis showed a whole pixel, a wide card with 0.9 px of its height on the screen
 # (area enough for Playwright to pick it) was aimed at above the screen. Of a box the viewport shows nothing
 # of, it is the middle of the box, which Playwright's hover scrolls to.
+# ``screen`` is [the box Playwright finds for el, in the main frame's viewport; that viewport's size, asked for
+# in a frame only]. Playwright counts a position from the box it finds: the box around the whole of el, turned
+# with it. That is not always the box around el's boxes as the screen has them (getBoundingClientRect): an
+# element of several boxes inside something CSS turns or skews has the two apart, 26 px on a link over two
+# lines turned 30 degrees. Counted from the script's own box, the position named a point beside such a link,
+# and Playwright's hover waited the click's time out there, where its own click pressed the link. In the main
+# frame the place is counted from Playwright's box. In a frame the two boxes are in different coordinates,
+# and the place is counted from the script's own: such a link in a frame is a limit the docs name.
 # In a frame the script sees what the frame shows of el, which is not what Playwright goes by: it cuts a box
 # by the screen alone, whatever a frame on the way cuts off, and the click's checks have just passed at that
-# point. So there it answers ``framed``, and is asked again with ``screen``, el's box in the main frame's
-# viewport and that viewport's size: what is shown is then what the screen shows, and no longer what the
-# frame does. Cut by both, a card link wider than its frame was placed at the middle of what the frame shows,
-# a point nothing had checked; with something of the frame's own there Playwright's hover waited the click's
-# time out, where its own click pressed the link. (Where the frame does not show Playwright's point, the
-# checks have failed before this is asked, as Playwright's own click does.) The two boxes of el differ in
-# size where a frame on the way is scaled: the place is then in the screen's pixels, as Playwright counts a
-# position from the box it finds on the screen (in the frame's own pixels the point was twice as far along
-# in a frame drawn at half its size).
+# point. So there it answers ``framed``, and is asked again with the size of the main frame's viewport as
+# well: what is shown is then what the screen shows, and no longer what the frame does. Cut by both, a card
+# link wider than its frame was placed at the middle of what the frame shows, a point nothing had checked;
+# with something of the frame's own there Playwright's hover waited the click's time out, where its own
+# click pressed the link. (Where the frame does not show Playwright's point, the checks have failed before
+# this is asked, as Playwright's own click does.) The two boxes of el differ in size where a frame on the
+# way is scaled: the place is then in the screen's pixels, as Playwright counts a position from the box it
+# finds on the screen (in the frame's own pixels the point was twice as far along in a frame drawn at half
+# its size).
 # ``boxless``: el has no box at all, so there is no corner to count from; ``contents``: because its children are
 # laid out in its place (display: contents), and not because it is not shown.
 _PRESS_PLACE_SCRIPT = """(el, screen) => {
   const view = el.ownerDocument.defaultView;
+  const framed = view !== view.top;
   const style = view.getComputedStyle(el);
   const border = [parseInt(style.borderLeftWidth, 10) || 0, parseInt(style.borderTopWidth, 10) || 0];
   const whole = el.getBoundingClientRect();
   const boxes = Array.from(el.getClientRects());
+  const [seen, size] = screen || [];
   let [left, top, right, bottom] = [0, 0, view.innerWidth, view.innerHeight];
   let [wider, taller] = [1, 1];
-  if (screen && whole.width > 0 && whole.height > 0 && screen[0].width > 0 && screen[0].height > 0) {
-    const [box, [width, height]] = screen;
-    [wider, taller] = [box.width / whole.width, box.height / whole.height];
-    const across = (x) => whole.left + (x - box.x) / wider, down = (y) => whole.top + (y - box.y) / taller;
-    [left, top, right, bottom] = [across(0), down(0), across(width), down(height)];
+  let corner = [whole.left, whole.top];
+  if (seen && !framed) {
+    corner = [seen.x, seen.y];
+  } else if (seen && size && whole.width > 0 && whole.height > 0 && seen.width > 0 && seen.height > 0) {
+    [wider, taller] = [seen.width / whole.width, seen.height / whole.height];
+    const across = (x) => whole.left + (x - seen.x) / wider, down = (y) => whole.top + (y - seen.y) / taller;
+    [left, top, right, bottom] = [across(0), down(0), across(size[0]), down(size[1])];
   }
   // As Playwright takes the first quad with an area over 0.99 inside the viewport.
   const shown = (box) =>
@@ -198,12 +210,12 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
   const first = picked || boxes[0] || whole;
   const middle = (low, high, from, to) => (picked ? (Math.max(low, from) + Math.min(high, to)) / 2 : (low + high) / 2);
   return {
-    x: (middle(first.left, first.right, left, right) - whole.left) * wider - border[0],
-    y: (middle(first.top, first.bottom, top, bottom) - whole.top) * taller - border[1],
+    x: (middle(first.left, first.right, left, right) - corner[0]) * wider - border[0],
+    y: (middle(first.top, first.bottom, top, bottom) - corner[1]) * taller - border[1],
     border,
     boxless: boxes.length === 0,
     contents: style.display === 'contents',
-    framed: view !== view.top,
+    framed,
   };
 }"""
 
@@ -1314,15 +1326,15 @@ class BrowserActionService:
             await locator.click(timeout=budget.left_ms())
             return
         await self._checks_of_a_click(locator, budget)
-        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=budget.left_ms())
-        if place["framed"] and not place["boxless"]:
-            # What the frame shows of the target is not what the screen shows of it: asked again with both.
-            seen = await locator.bounding_box(timeout=budget.left_ms())
+        # The place is counted from the box Playwright finds for the target, as Playwright counts a position.
+        seen = await locator.bounding_box(timeout=budget.left_ms())
+        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, None], timeout=budget.left_ms())
+        if place["framed"] and seen and not place["boxless"]:
+            # What the frame shows of the target is not what the screen shows of it: asked again with its size.
             size = await session.page.locator(":root").evaluate(
                 "() => [innerWidth, innerHeight]", timeout=budget.left_ms()
             )
-            if seen:
-                place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, size], timeout=budget.left_ms())
+            place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, size], timeout=budget.left_ms())
         if place["boxless"]:
             # Shown when the checks passed a moment ago, or they had not: one with no box now, and not for its
             # children's sake, was hidden since. It has nothing inside it to name.

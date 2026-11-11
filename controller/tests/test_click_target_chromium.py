@@ -1630,6 +1630,48 @@ async def test_a_link_wider_than_its_frame_is_placed_where_playwrights_own_click
         assert await _title(env, session_id) == "OPENED"
 
 
+# A link in two pieces over two lines, in a block CSS may turn: fixed sizes, so no font decides where the line breaks.
+# The middle of the link's box is on neither piece (the lead is there on the first line, nothing on the second), so
+# the click is one Playwright places.
+TURNED_LINES = (
+    "<!doctype html><title>start</title><style>body { margin: 0; font: 16px/30px monospace } "
+    "#block { position: absolute; left: 400px; top: 300px; width: 300px } "
+    "#block span { display: inline-block; height: 20px; vertical-align: top } </style>"
+    '<div id="block" style="transform: TURN"><span style="width: 200px"></span>'
+    '<a id="link" href="#" onclick="document.title = \'OPENED\'; return false">'
+    '<span style="width: 40px"></span> <span style="width: 100px"></span></a></div>'
+)
+
+
+@pytest.mark.parametrize("turn", ["none", "rotate(30deg)", "skewX(40deg)"])
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_link_over_two_lines_in_a_block_css_turns_is_pressed_where_playwright_presses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, turn: str
+) -> None:
+    # Playwright counts a position from the box it finds for an element: the box around the whole of it, turned
+    # with it. The place script counted from the box around the element's own boxes as the screen has them. The
+    # two are one box until an element of several boxes stands in something CSS turns or skews: 30 degrees put
+    # them 26 px apart on a link like this one. A read click was then placed off the link, and Playwright's hover
+    # at that position waited the click's time out, where the click that is not read pressed the link.
+    placed: list[Any] = []
+    real = actions_module.BrowserActionService.click_as_playwright_places_it
+
+    async def counted(self: Any, *given: Any, **named: Any) -> None:
+        placed.append(given)
+        await real(self, *given, **named)
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "click_as_playwright_places_it", counted)
+    async with browser_env(tmp_path, {"/": TURNED_LINES.replace("TURN", turn)}) as env:
+        session_id = await env.create("/")
+        if route == "direct":
+            await env.manager.click(session_id, selector="#link")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector="#link"))
+        assert await _title(env, session_id) == "OPENED"
+        # The shape the fixture stands for: the press at the middle of the box does not find the link.
+        assert len(placed) == 1
+
+
 @pytest.mark.parametrize("route", ["direct", "read"])
 async def test_a_button_the_page_turns_off_while_the_pointer_is_on_its_way_is_waited_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
