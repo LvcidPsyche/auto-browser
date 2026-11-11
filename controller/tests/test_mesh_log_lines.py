@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -197,6 +198,18 @@ REFUSED_PARTS = {
         "http://a.example.com/x",
         "and a scheme no pattern allows with that host, and no port written, where each pattern of that host names one,",
     ),
+    # An IPv6 host a pattern allows: the pattern's host is read up to its bracket, and the port is what it refuses.
+    "an IPv6 host and a port": (
+        ["https://[::1]/*"],
+        "https://[::1]:9000/x",
+        "and a port no pattern allows with that host,",
+    ),
+    # A pattern written with white space round it is read as the same pattern without, as the allowlist reads it.
+    "a path, of a pattern with white space round it": (
+        ["  https://*.example.com/api/*  "],
+        "https://a.example.com/private-path",
+        "and a path no pattern allows with that host,",
+    ),
 }
 
 
@@ -215,7 +228,7 @@ def test_a_refused_url_whose_host_a_pattern_allows_says_what_no_pattern_allows(
     messages = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
     lines = [message for message in messages if message.startswith("mesh.policy.denied")]
     assert len(lines) == 2, lines
-    assert f"A URL of host 'a.example.com' {named_as} is not in the allowlist" in lines[0], lines[0]
+    assert f"A URL of host {urlsplit(url).hostname!r} {named_as} is not in the allowlist" in lines[0], lines[0]
     # A host no pattern allows is named as it was, with nothing beside it.
     assert "A URL of host 'evil.example' is not in the allowlist" in lines[1], lines[1]
     assert [part for part in NOT_FOR_THE_LOG if part in caplog.text] == [], caplog.text

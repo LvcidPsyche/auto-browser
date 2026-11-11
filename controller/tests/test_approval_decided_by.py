@@ -459,6 +459,21 @@ class ListedOperatorTests(unittest.TestCase):
         "a short token after an underscore": ("ops_x1", "alice:x1", None, [kept_back(1)]),
         "a short token's letters after a digit": ("4dev", "alice:dev", None, ["lists '4dev', which no credential"]),
         "a short token's letters before a digit": ("dev2", "alice:dev", None, ["lists 'dev2', which no credential"]),
+        # Every place the token stands is judged, not only the first: here the first is inside a word.
+        "a short token as a word after its letters in a word": ("devx dev", "alice:dev", None, [kept_back(1)]),
+        # A letter or a digit of any script is one: beside the token, it makes the entry an id, named.
+        "a short token's letters before a letter outside ASCII": (
+            "dev\N{LATIN SMALL LETTER E WITH ACUTE}",
+            "alice:dev",
+            None,
+            ["lists 'dev\N{LATIN SMALL LETTER E WITH ACUTE}', which no credential"],
+        ),
+        "a short token's letters before a digit outside ASCII": (
+            "dev\N{ARABIC-INDIC DIGIT THREE}",
+            "alice:dev",
+            None,
+            ["lists 'dev\N{ARABIC-INDIC DIGIT THREE}', which no credential"],
+        ),
         # A token of eight characters or fewer has no eight in a row short of itself, and cut short by one it was
         # named: six characters of seven, and seven of eight.
         "a token of seven cut short by one": ("s3cr3t", "alice:s3cr3t!", None, [kept_back(1)]),
