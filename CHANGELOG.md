@@ -456,7 +456,10 @@ All notable changes to auto-browser are documented here.
 - **`tools/list` now shows the governed approval arguments.** Every tool with a governed kind accepts
   `workflow_profile` and `approval_id`, but its advertised schema named neither (`browser.execute_action`'s named only
   `approval_id`), so a client could not find the approval retry flow from it. Both are now optional properties on
-  exactly those tools. (MCP-20)
+  exactly those tools. `browser.queue_agent_run` and `browser.queue_agent_step` have no governed kind and act on
+  `workflow_profile` all the same (`governed` overrides the request's own), and their schema, which allows no
+  property it does not name, left it out: it now shows `workflow_profile`, described as what it does there, and no
+  `approval_id`. (MCP-20)
 - **A drag that fails on a hung page no longer leaves that page's world session cached.** Removing the drag's scroll
   watch had only its 2-second outer bound, so a hung setup was cancelled there and the world's CDP session stayed
   cached for the next call to hang on. The removal now has a setup budget below that bound: a hung setup ends there,

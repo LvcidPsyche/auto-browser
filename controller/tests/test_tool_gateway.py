@@ -17,6 +17,7 @@ from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.tool_gateway import CreateSessionRequest, McpToolGateway, ToolRegistry, ToolSpec
+from app.tool_gateway.gateway import QUEUE_TOOLS
 from app.tool_inputs import EmptyInput
 from app.witness import WitnessPolicyOutcome
 from tests._fake_element_ids import FakePageElementIds
@@ -246,6 +247,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             schema = tool["inputSchema"]
             properties = schema.get("properties", {})
             with self.subTest(tool=name):
+                if name in QUEUE_TOOLS:
+                    continue  # no governed kind, and they act on the profile: the test below
                 if specs[name].governed_kind is None:
                     self.assertNotIn("workflow_profile", properties)
                     self.assertEqual(schema, specs[name].input_model.model_json_schema())
@@ -256,6 +259,57 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("approval_id", schema.get("required", []))
                 self.assertTrue(properties["workflow_profile"]["description"])
                 self.assertTrue(properties["approval_id"]["description"])
+
+    async def test_the_two_queue_tools_advertise_the_profile_they_act_on_and_no_approval_id(self) -> None:
+        # They have no governed kind, so the test above left them out, and the gateway acts on a top-level
+        # workflow_profile for them all the same (tests/test_cron_governed.py): a client that keeps to the schema,
+        # which allows no other property, could not send it.
+        tools = {tool["name"]: tool["inputSchema"] for tool in self.full_gateway.list_tools()}
+        specs = self.full_gateway._registry.tools
+        self.assertEqual(QUEUE_TOOLS, {"browser.queue_agent_run", "browser.queue_agent_step"})
+        for name in sorted(QUEUE_TOOLS):
+            with self.subTest(tool=name):
+                schema = tools[name]
+                own = specs[name].input_model.model_json_schema()
+                self.assertIs(schema["additionalProperties"], False)
+
+                profile = schema["properties"]["workflow_profile"]
+
+                self.assertEqual((profile["type"], profile["enum"]), ("string", ["fast", "governed"]))
+                # What it does here, which is not what it does on a governed tool: no approval is asked for the call.
+                self.assertIn("request.workflow_profile", profile["description"])
+                self.assertNotIn("approval_id", profile["description"])
+                self.assertNotIn("workflow_profile", schema.get("required", []))
+                # Nothing else is new: queuing asks for no approval, so no approval_id is named.
+                self.assertNotIn("approval_id", schema["properties"])
+                self.assertEqual(
+                    {**schema["properties"], "workflow_profile": None}, {**own["properties"], "workflow_profile": None}
+                )
+                self.assertEqual({**schema, "properties": None}, {**own, "properties": None})
+                self.assertNotIn("workflow_profile", own["properties"])  # the model's own schema is left alone
+
+    async def test_workflow_profile_is_advertised_on_exactly_the_tools_that_refuse_an_unknown_one(self) -> None:
+        # Advertised where the gateway acts on it, and nowhere else: a tool that acts on the profile refuses a value
+        # it does not know before anything runs, and any other tool ignores the argument.
+        advertised = {
+            tool["name"]
+            for tool in self.full_gateway.list_tools()
+            if "workflow_profile" in tool["inputSchema"].get("properties", {})
+        }
+        refusing = set()
+        for name in self.full_gateway._registry.tools:
+            # The argument no tool takes stops one that ignores the profile at its own validation: nothing runs.
+            response = await self.full_gateway.call_tool(
+                McpToolCallRequest(name=name, arguments={"workflow_profile": "strict", "no_such_argument": 1})
+            )
+            if response.content[0].text == "workflow_profile must be one of: fast, governed":
+                refusing.add(name)
+            else:
+                self.assertIn("no_such_argument: Extra inputs are not permitted", response.content[0].text, name)
+
+        self.assertEqual(advertised, refusing)
+        self.assertLessEqual(QUEUE_TOOLS, advertised)
+        self.assertIn("browser.create_cron_job", advertised)
 
     async def test_a_field_a_governed_model_declares_itself_keeps_its_own_description(self) -> None:
         tools = {tool["name"]: tool for tool in self.gateway.list_tools()}

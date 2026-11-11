@@ -119,7 +119,7 @@ from ..tool_inputs import (
 from .drag import drag_drop
 from .packs import register_all
 from .previews import preview_arguments
-from .registry import ToolRegistry, ToolSpec
+from .registry import QUEUE_TOOLS, ToolRegistry, ToolSpec
 from .selection import withheld_tool_message
 from .write_records import cookie_digest, recorded_write
 
@@ -162,8 +162,6 @@ SESSION_STARTER_TOOLS = (
     "browser.wait_for_selector",
 )
 IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
-# Tools that queue an agent step or run: its request carries its own workflow_profile (_call_tool).
-QUEUE_TOOLS = frozenset({"browser.queue_agent_run", "browser.queue_agent_step"})
 # The tools whose approval_id is what they act on, not an approval presented for the call itself.
 APPROVAL_DECISION_TOOLS = frozenset({"browser.approve_approval", "browser.reject_approval", "browser.execute_approval"})
 
