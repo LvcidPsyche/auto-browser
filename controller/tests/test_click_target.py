@@ -33,6 +33,7 @@ from app.browser.click_target import (
     SEND_DESTINATION_WORDS,
     SEND_FILLER_WORDS,
     SEND_LINK_WORDS,
+    SEND_OPEN_ENDS,
     SEND_TAIL_WORDS,
     classified_reason,
     classified_risk,
@@ -274,6 +275,14 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send me a login link\nTo: the whole engineering team"),
         # Short enough to be read as one line, a name under "Send code" asks with no such word.
         ("post", "Send code\nJohn Smith"),
+        # A line of Send's that stops on a word that leaves it open goes on in the next line, whatever that
+        # opens with: the break one word later than "Send code" over "to all users".
+        ("post", "Send code to\nall users in the organization today"),
+        ("post", "Send code to the\nentire organization (543 people) now"),
+        ("post", "Send verification email to\nevery customer in the mailing list"),
+        ("post", "Send code via\nthe group chat for everyone in the org"),
+        ("post", "Send me a login link to\nthe whole engineering team's inbox"),
+        ("post", "Send code to my\nmanager and the whole of the finance team"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -411,6 +420,12 @@ class LabelRulesTests(unittest.TestCase):
         "Send code\nto the phone number ending in 1234 to continue",
         "Send code\nWe will text a code to the number we have on file",
         "Send code\nYou will get it within a minute or two",
+        # A line that stops on such a word and goes on with where the code goes, a line that ends on a word
+        # that ends it, and a whole label over a sentence.
+        "Send code to\nmy phone number ending in 1234 to continue",
+        "Send code again\nYou can ask for a new one in a minute or two",
+        "Send code now\nIt can take a minute or two to get to your inbox",
+        "Send code to my phone\nStandard message rates may apply to this text",
         "Send magic link to my inbox",
         "Send code to reset your password",
         "Send code to verify my email",
@@ -547,6 +562,9 @@ class LabelRulesTests(unittest.TestCase):
         self.assertEqual(set(SEND_DESTINATION_WORDS) & (phrases | {"all", "everyone", "users", "team"}), set())
         self.assertEqual(set(SEND_FILLER_WORDS) & set(HARMLESS_AFTER_SEND), set())
         self.assertEqual(set(SEND_TAIL_WORDS) & (set(SEND_FILLER_WORDS) | set(HARMLESS_AFTER_SEND)), set())
+        # A word that leaves a line open is one the grammar lets stand, and none of the three a label ends on.
+        self.assertLessEqual(set(SEND_OPEN_ENDS), set(SEND_TAIL_WORDS) | set(SEND_DESTINATION_WORDS))
+        self.assertEqual(set(SEND_TAIL_WORDS) - set(SEND_OPEN_ENDS), {"again", "now", "instead"})
         # A link is no way to sign in by itself, and every word that makes it one may stand before it.
         self.assertNotIn("link", HARMLESS_AFTER_SEND)
         self.assertTrue(SEND_LINK_WORDS)

@@ -332,6 +332,32 @@ SEND_DESTINATION_WORDS: tuple[str, ...] = (
     "alternate",
     "alternative",
 )
+# A line of Send's that stops on one of these is not the label's end: the line after it goes on with it,
+# whatever that opens with ("Send code to" over "all users in the organization today" ran, since the first
+# line asks nothing by itself). The tail words but the three a label ends on (again, now, instead), and the
+# words of the list above that only lead up to another.
+SEND_OPEN_ENDS: tuple[str, ...] = (
+    "to",
+    "via",
+    "by",
+    "through",
+    "using",
+    "in",
+    "on",
+    "the",
+    "a",
+    "an",
+    "my",
+    "your",
+    "this",
+    "and",
+    "or",
+    "at",
+    "with",
+    "of",
+    "for",
+    "into",
+)
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40
 # The read's bound, for the message that runs it and, apart, for the messages that set it up: past it the click
@@ -645,11 +671,17 @@ def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
 
 
 def _send_goes_on(reading: str, rest: str) -> bool:
-    """Whether ``rest``, the lines after a way to sign in that Send sends, opens with one of Send's tail words."""
-    rest = _worded(rest)
-    if not rest or _SIGN_IN_SEND.match(_worded(reading)) is None:
+    """Whether ``rest``, the lines after a way to sign in that Send sends, goes on with that line's sentence.
+
+    It does where it opens with one of Send's tail words ("Send code" over "to all users"), and where the
+    line itself stops on a word that leaves it open ("Send code to" over "all users in the organization").
+    """
+    reading, rest = _worded(reading), _worded(rest)
+    if not rest or _SIGN_IN_SEND.match(reading) is None:
         return False
-    return rest.split(maxsplit=1)[0].strip(_AROUND_A_WORD) in SEND_TAIL_WORDS
+    opens_with = rest.split(maxsplit=1)[0].strip(_AROUND_A_WORD)
+    stops_on = reading.rsplit(maxsplit=1)[-1].strip(_AROUND_A_WORD)
+    return opens_with in SEND_TAIL_WORDS or stops_on in SEND_OPEN_ENDS
 
 
 def _worded(text: str) -> str:

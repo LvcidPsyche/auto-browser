@@ -18,6 +18,7 @@ from app.browser.click_target import (
     SEND_DESTINATION_WORDS,
     SEND_FILLER_WORDS,
     SEND_LINK_WORDS,
+    SEND_OPEN_ENDS,
     SEND_TAIL_WORDS,
 )
 
@@ -30,6 +31,7 @@ _SEND_FILLERS = "- Between the two only these words may stand:"
 _SEND_LINK = "- A `link` is a way to sign in only where one of these words stands before it:"
 _SEND_TAILS = "- After it the label ends, or goes on with one of:"
 _SEND_DESTINATIONS = "- From such a word on the label may say only where the code goes or what it is for:"
+_SEND_OPEN_ENDS = "- A line of the label that stops on one of these words is not its end:"
 # A bullet that lists a kind's phrases: "- `payment`: ...".
 _KIND_BULLET = re.compile(r"^\s*- `(\w+)`:", re.MULTILINE)
 
@@ -73,6 +75,7 @@ class ClickTargetDocTests(unittest.TestCase):
         self.assertEqual(sorted(_listed(self.section, _SEND_LINK)), sorted(SEND_LINK_WORDS))
         self.assertEqual(sorted(_listed(self.section, _SEND_TAILS)), sorted(SEND_TAIL_WORDS))
         self.assertEqual(sorted(_listed(self.section, _SEND_DESTINATIONS)), sorted(SEND_DESTINATION_WORDS))
+        self.assertEqual(sorted(_listed(self.section, _SEND_OPEN_ENDS)), sorted(SEND_OPEN_ENDS))
 
 
 if __name__ == "__main__":
