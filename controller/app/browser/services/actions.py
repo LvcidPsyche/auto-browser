@@ -169,8 +169,12 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
 # element of several boxes inside something CSS turns or skews has the two apart, 26 px on a link over two
 # lines turned 30 degrees. Counted from the script's own box, the position named a point beside such a link,
 # and Playwright's hover waited the click's time out there, where its own click pressed the link. In the main
-# frame the place is counted from Playwright's box. In a frame the two boxes are in different coordinates,
-# and the place is counted from the script's own: such a link in a frame is a limit the docs name.
+# frame the place is counted from Playwright's box where that box is not the script's size. Of one size they
+# are one box (Playwright's holds the script's), and the script's own is the one to count from: it is read in
+# the run that picks the point, and Playwright's a round trip earlier, so a target the page moved between the
+# two was aimed at off by its move, and the hover waited the click's time out. (A link of several boxes in
+# something turned, moved in that round trip, still is.) In a frame the two boxes are in different
+# coordinates, and the place is counted from the script's own: such a link in a frame is a limit the docs name.
 # In a frame the script sees what the frame shows of el, which is not what Playwright goes by: it cuts a box
 # by the screen alone, whatever a frame on the way cuts off, and the click's checks have just passed at that
 # point. So there it answers ``framed``, and is asked again with the size of the main frame's viewport as
@@ -195,8 +199,9 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
   let [left, top, right, bottom] = [0, 0, view.innerWidth, view.innerHeight];
   let [wider, taller] = [1, 1];
   let corner = [whole.left, whole.top];
+  const sized = (box) => Math.abs(box.width - whole.width) < 0.5 && Math.abs(box.height - whole.height) < 0.5;
   if (seen && !framed) {
-    corner = [seen.x, seen.y];
+    if (!sized(seen)) corner = [seen.x, seen.y];
   } else if (seen && size && whole.width > 0 && whole.height > 0 && seen.width > 0 && seen.height > 0) {
     [wider, taller] = [seen.width / whole.width, seen.height / whole.height];
     const across = (x) => whole.left + (x - seen.x) / wider, down = (y) => whole.top + (y - seen.y) / taller;

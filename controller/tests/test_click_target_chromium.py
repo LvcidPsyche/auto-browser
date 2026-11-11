@@ -1672,6 +1672,69 @@ async def test_a_link_over_two_lines_in_a_block_css_turns_is_pressed_where_playw
         assert len(placed) == 1
 
 
+async def test_a_link_the_page_moves_while_its_place_is_read_is_pressed_where_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The place is counted from the box Playwright finds, which is read one round trip before the script that
+    # picks the point. Counted from that box whatever it was, a link the page moved between the two reads was aimed
+    # at off by its move, and Playwright's hover waited the click's time out there: counted from the script's own
+    # box, read in the one run that picks the point, it had been pressed. The two boxes are one unless they differ
+    # in size, so the place is counted from Playwright's box only where its size is not the script's.
+    placing = False
+    boxes = 0
+    real_place = actions_module.BrowserActionService.click_as_playwright_places_it
+    real_box = Locator.bounding_box
+
+    async def placed(self: Any, *given: Any, **named: Any) -> None:
+        nonlocal placing
+        placing = True
+        try:
+            await real_place(self, *given, **named)
+        finally:
+            placing = False
+
+    async def a_box_and_then_a_move(self: Any, *given: Any, **named: Any) -> Any:
+        nonlocal boxes
+        box = await real_box(self, *given, **named)
+        if placing:
+            boxes += 1
+            if boxes == 1:
+                await self.page.evaluate("() => { document.querySelector('#block').style.left = '440px'; }")
+        return box
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "click_as_playwright_places_it", placed)
+    monkeypatch.setattr(Locator, "bounding_box", a_box_and_then_a_move)
+    async with browser_env(tmp_path, {"/": TURNED_LINES.replace("TURN", "none")}) as env:
+        session_id = await env.create("/")
+        await env.manager.execute_decision(session_id, _click("read", selector="#link"))
+        assert await _title(env, session_id) == "OPENED"
+        # The box the place is counted from, where the move was made, and the box the pointer is moved by.
+        assert boxes == 2
+
+
+async def test_the_place_is_counted_from_playwrights_box_only_where_its_size_is_not_the_scripts(
+    tmp_path: Path,
+) -> None:
+    # Both sides of the half pixel that tells the two boxes apart, asked of the script itself: a box of the
+    # script's own size is the script's box wherever it says the link was (the page moved it since), and a box
+    # of another size is Playwright's box around a link of several boxes that CSS turns.
+    place = actions_module._PRESS_PLACE_SCRIPT
+    async with browser_env(tmp_path, {"/": TURNED_LINES.replace("TURN", "none")}) as env:
+        session_id = await env.create("/")
+        link = env.page(session_id).locator("#link")
+        box = await link.bounding_box()
+        assert box is not None
+        own = await link.evaluate(place, [box, None])
+        elsewhere = {**box, "x": box["x"] - 40, "y": box["y"] - 7}
+
+        assert await link.evaluate(place, [elsewhere, None]) == own
+        assert await link.evaluate(place, [{**elsewhere, "width": box["width"] + 0.4}, None]) == own
+        assert await link.evaluate(place, [{**elsewhere, "height": box["height"] - 0.4}, None]) == own
+        for other_size in ({"width": box["width"] + 1}, {"height": box["height"] - 1}):
+            counted = await link.evaluate(place, [{**elsewhere, **other_size}, None])
+            assert (counted["x"], counted["y"]) == pytest.approx((own["x"] + 40, own["y"] + 7))
+
+
 @pytest.mark.parametrize("route", ["direct", "read"])
 async def test_a_button_the_page_turns_off_while_the_pointer_is_on_its_way_is_waited_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
