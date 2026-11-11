@@ -141,13 +141,14 @@ def test_a_refused_urls_host_is_logged_on_one_line(mesh, caplog: pytest.LogCaptu
     _the_line(caplog, "app.mesh.delegation", "mesh.policy.denied")
 
 
-def _post_unsigned(mesh, recipient: str):
-    """An envelope that names the registered peer as its sender, signed with a key that is not that peer's.
+def _post_unsigned(mesh, recipient: str, named: NodeIdentity | None = None):
+    """An envelope that names a registered peer (the legit one, unless ``named``) as its sender, signed with a key
+    that is not that peer's.
 
     What a caller with no credential can send: a peer's id is no secret, and the route takes no token.
     """
     forged = make_envelope(mesh.attacker, {"capability": "tool:x"}, recipient_node_id=recipient)
-    forged.sender_node_id = mesh.legit.node_id
+    forged.sender_node_id = (named or mesh.legit).node_id
     return mesh.client.post("/mesh/receive", json=sign_as(mesh.attacker, forged))
 
 
@@ -172,6 +173,23 @@ def test_envelopes_nobody_signed_write_one_line_a_window_for_the_peer_they_name(
     assert len(lines) == 2
     assert "more" not in lines[0]
     assert "49 more" in lines[1]
+
+
+def test_each_peer_named_has_a_window_of_its_own(mesh, caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
+    # One window for every sender would pass the test above: envelopes that name one peer would then hold back the
+    # line of the first that names another.
+    add_legit_peer(mesh)
+    second = NodeIdentity(tmp_path / "second")
+    mesh.peers.add(PeerRecord(node_id=second.node_id, pubkey_b64=second.pubkey_b64, grants=[]))
+    caplog.set_level(logging.INFO)
+
+    for _ in range(3):
+        assert _post_unsigned(mesh, mesh.server.node_id).status_code == 403
+    for _ in range(2):
+        assert _post_unsigned(mesh, mesh.server.node_id, named=second).status_code == 403
+
+    lines = _invalid_envelope_lines(caplog)
+    assert [line.split()[1] for line in lines] == [f"sender={mesh.legit.node_id}", f"sender={second.node_id}"], lines
 
 
 def test_an_invalid_envelopes_line_is_cut_whatever_the_envelope_holds(mesh, caplog: pytest.LogCaptureFixture) -> None:

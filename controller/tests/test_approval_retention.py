@@ -357,6 +357,24 @@ class RetentionTests(RetentionBase):
         # A file caught half restored, or saved in another encoding for a while: the same, by the other error.
         await self._a_start_that_cannot_use_the_key_file_keeps_what_its_key_refuses(ValueError("holds no key"))
 
+    async def test_a_pass_that_is_the_first_to_read_the_key_keeps_what_its_own_key_refuses(self) -> None:
+        # A start reads the key before its retention asks. A store nothing has started reads it at first use, and
+        # the pass can be that use: asked whether it keys alone before it had tried the file, it answered no, and
+        # took the file's own key for one that is gone.
+        standing = await self._rejected_tool_call("a")
+        await _age(self.store, standing, days=31)
+        unstarted = ApprovalStore(self.root, retention_days=30, audit=self.audit)
+
+        with (
+            patch.object(FileApprovalStore, "digest_key", side_effect=PermissionError(errno.EACCES, "denied")),
+            self.assertLogs("app.approvals", level="WARNING") as logged,
+        ):
+            removed = await unstarted.prune_decided()
+
+        self.assertIn("tool call approvals are keyed by this process alone", "\n".join(logged.output))
+        self.assertEqual(removed, 0)
+        self.assertEqual(self._on_disk(), {standing})
+
     async def test_a_rejection_made_by_a_start_that_keyed_alone_goes_once_the_files_key_is_held_again(self) -> None:
         # That start's own key ends with its process, so what it rejected matches no call at any later start.
         with patch.object(FileApprovalStore, "digest_key", side_effect=PermissionError(errno.EACCES, "denied")):

@@ -1020,6 +1020,23 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
 
         self.manager.audit.append.assert_awaited_once()
 
+    async def test_a_mark_that_is_not_true_itself_is_no_mark_of_this_controllers(self) -> None:
+        # The store is a JSON file, and another program's write of the field is not this controller's word that the
+        # event is written: only `true` is, so beside anything else the refusal writes its event, and then its mark.
+        for stored in (1, "true", [True]):
+            with self.subTest(stored=stored):
+                self.manager.audit.append.reset_mock()
+                jobs = self.service._load()
+                jobs[self.job["id"]].update({"last_status": OWNER_CREDENTIAL_GONE, REFUSAL_AUDITED: stored})
+                self.service._save(jobs)
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+                await self.service._scheduled_run(self.job["id"])
+                await self.service._scheduled_run(self.job["id"])
+
+                self.manager.audit.append.assert_awaited_once()
+                self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
     async def test_the_mark_of_an_audited_refusal_is_the_controllers_own_and_in_no_answer(self) -> None:
         self.manager.settings.api_bearer_tokens = "bob:token-b"
         await self.service._scheduled_run(self.job["id"])

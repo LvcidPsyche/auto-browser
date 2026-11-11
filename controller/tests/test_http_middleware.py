@@ -563,7 +563,7 @@ LOOPBACK_ONLY = "Invalid host header: this controller runs without an API creden
 class TheHostRefusalsLogLineTests(unittest.TestCase):
     """The same for a request whose Host is no loopback name: a rebinding page's requests, as many as it sends."""
 
-    def refuse(self, client: TestClient, host: str = "rebound.example") -> None:
+    def refuse(self, client: TestClient, host: str | bytes = "rebound.example") -> None:
         response = client.get("/dashboard", headers={"Host": host})
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn(LOOPBACK_ONLY, response.json()["detail"])
@@ -612,6 +612,18 @@ class TheHostRefusalsLogLineTests(unittest.TestCase):
         message = logs.records[0].getMessage()
         self.assertIn("hhhh", message)
         self.assertLess(len(message), 400)
+
+    def test_a_host_holding_a_line_break_cannot_start_a_line_of_the_log(self) -> None:
+        # A server refuses a CR or an LF in a header and lets the byte 0x85 through (httptools; h11 lets three more).
+        # Read as the Host is, it is U+0085, where str.splitlines() ends a line: written with %s, the rest of the
+        # Host was a line of the rebinding page's own.
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            self.refuse(_client(), b"rebound\x85WARNING:app:forged by a page.example")
+
+        (message,) = (record.getMessage() for record in logs.records)
+        self.assertIn("forged by a page", message)
+        self.assertEqual(message.splitlines(), [message], ascii(message))
+        self.assertIn("\\x85", message)
 
 
 class ASessionNetworkPeersLogLineTests(unittest.IsolatedAsyncioTestCase):
