@@ -406,10 +406,13 @@ _SIGN_IN_SEND = re.compile(
 # "***-1234"), or a count of seconds ("30s"). Any token with a digit or an asterisk in it passed for one, so
 # "Send code to team2" and "Send code to *everyone*" ran. "@channel" is none. A name may be masked from its
 # first character where a domain with a dot follows ("***@gmail.com" asked; "*@backup" is a mention behind a
-# mark), and a group of a masked number may be x alone, two of them or more ("(XXX) XXX-1234" asked).
+# mark), and a group of a masked number may be x alone, two of them or more ("(XXX) XXX-1234" asked). A name
+# begins with a letter or a digit: an underscore is a mark, and "_@backup" a mention behind one (it ran).
 _MASKED = r"\dx*\u2022\u25cf\u00b7+().:\-"
 _MASK = r"*\u2022\u25cf\u00b7"
-_SEND_ADDRESS = re.compile(rf"\w[^\s@]*@\S+|[{_MASK}][^\s@]*@\S+\.\S+|[{_MASKED}]*(?:[\d{_MASK}]|xx)[{_MASKED}]*|\d+s")
+_SEND_ADDRESS = re.compile(
+    rf"[^\W_][^\s@]*@\S+|[{_MASK}][^\s@]*@\S+\.\S+|[{_MASKED}]*(?:[\d{_MASK}]|xx)[{_MASKED}]*|\d+s"
+)
 _SEND_GOES_ON_WITH = frozenset(SEND_TAIL_WORDS) | frozenset(SEND_DESTINATION_WORDS)
 # What may stand around a word without being part of it: "phone.", "(sms)".
 _AROUND_A_WORD = string.punctuation + "\u2026\u201c\u201d\u2018\u2019"

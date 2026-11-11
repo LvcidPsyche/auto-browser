@@ -257,6 +257,9 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code to *@backup"),
         ("post", "Send code to **@backup**"),
         ("post", "Send code to (*@backup)"),
+        # An underscore is a mark too, and the first letter of no address.
+        ("post", "Send code to _@backup"),
+        ("post", "Send code to _@1234"),
         ("post", "Send code to \u2022@backup"),
         ("post", "Send code to #work2"),
         ("post", "Send code to x"),
@@ -527,6 +530,10 @@ class LabelRulesTests(unittest.TestCase):
         "Confirm",
         "Save changes",
         "Clear",
+        # An address cut short where its domain would be: the whole token is one, though nothing inside its
+        # marks is.
+        "Send code to john@\u2026",
+        "Send code to _john@example.com_",
         # Not a label at all.
         "1",
         "shopping_cart",
