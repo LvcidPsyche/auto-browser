@@ -244,15 +244,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     `target_has_no_box`, and the agent names an element inside it. A target inside a frame is placed on what the
     screen shows of it, also where its frame runs off the screen or CSS draws the frame at another size.
     An element that CSS turns is placed at the middle of what the screen shows of the box around it (around the
-    first of its boxes, where it has several), where Playwright takes the mean of that box's corners, each held
-    to the screen. The two are one point while the turn is flat and none of the box is off the screen. Turned in
-    three dimensions with perspective they are apart (about 17 px on a button turned 50 degrees about two axes),
-    and wherever Playwright's own click pressed such a button, in the turns measured, the controller's did.
-    Where a corner of the screen cuts an element and its middle is off the screen, the controller's point can
-    be beside the element (a square turned 45 degrees is so), and the click
-    ends when its time does, where Playwright's own click presses. A link over two lines inside something CSS
-    turns or skews is placed where Playwright presses it; inside a frame as well, it can be placed beside the
-    link, and ends the same way.
+    first of its boxes that the screen shows, where it has several), where Playwright takes the mean of that box's
+    corners, each held to the screen. The two are one point while the turn is flat and none of the box is off the
+    screen. Turned in three dimensions with perspective they are apart (about 17 px on a button turned 50 degrees
+    about two axes), and wherever Playwright's own click pressed such a button, in the turns measured, the
+    controller's did. Where a corner of the screen cuts an element and its middle is off the screen, the
+    controller's point can be beside the element (a square turned 45 degrees is so), and the click ends when its
+    time does, where Playwright's own click presses. A link over two lines inside something CSS turns or skews is
+    placed where Playwright presses it; inside a frame as well, it can be placed beside the link, and ends the
+    same way.
     Playwright does not look through a frame that CSS transforms, or that stands inside anything
     CSS transforms (a dialog the page centres with a transform is one), so there the question above is the only
     one asked: where the page has put something of its own over such a frame, or the frame holds another frame
@@ -267,9 +267,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     included, goes down up and left of the element's middle by that much. The element is asked whether the
     pointer is over it before the controller presses. One less than twice as wide or as high as the border and
     padding together is not pressed: Playwright's checks before a click do not find it at the point they take,
-    and the click ends when its time does (Playwright's own click fails the same way from a pixel smaller). This
-    read has half a second to set up and half a second to run; when it fails or runs past either, the press goes
-    on, and an info-level log line says so.
+    and the click ends when its time does (Playwright's own click fails the same way from a pixel smaller). A
+    click Playwright places there is asked whether the pointer finds its target at a point off by the same amount,
+    so one whose part on the screen ends within that much of where Playwright presses (a button half off the
+    frame's right or lower edge) ends as `target_moved` with nothing pressed, where Playwright's own click presses
+    it. The read at the press has half a second to set up and half a second to run; when it fails or runs past
+    either, the press goes on, and an info-level log line says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as
@@ -290,25 +293,26 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     goes on to something the table has no phrase for ("Remove from list of admins"), and a short name ("Pay") that
     a fuller harmless name of the same button clears; a `Send` label that names another account in the list's own
     words or by a bare number ("Send code to another account", "Send code to 500"), or that says who else gets the
-    code on its next line, where the two lines together are past 40 characters and that line opens with no word a
-    label goes on with ("Send code" over "Everyone in the engineering group gets a copy"), and `Resend`, which is
-    no phrase of the table ("Resend code to all users"); a name that stands after the first 400 characters of a
-    label or below its third line, and a phrase in a sentence under a harmless name ("Remove from library" above
-    "and permanently delete all the downloaded files from the disk": a line of over 40 characters is not matched);
-    a frame of another origin (a point inside one is read as the frame), and a frame that CSS scales or rotates
-    (read at a point that is off); a control pressed by a key (Enter or Space on a focused button, Enter in a form
-    field) or by a drag, and a `select`, whose option is chosen with no press (`select_option`); a clickable
-    element that is not a button (a `div` with a handler and no role), one that chooses rather than commands
-    (`role=option`, `tab`, `switch`, `menuitemradio`, `menuitemcheckbox`) and a link in no button or menu item
-    ("How to delete your account" is an article); a role written after a token that is no role (`role="custom
-    menuitem"`: a browser takes the first token it knows for a role, the read the first token); a button inside a
-    closed shadow root, of which the read sees only the component around it; a label given only by
-    `aria-labelledby`, by an image with no alt text, or by text that CSS or a canvas draws; look-alike characters
-    (a Cyrillic "е" in "Delete"); and a page whose own script falsifies the read of a selector's element, or where
-    a script or a style in motion (an animation that shows a button for a few milliseconds) changes what is under
-    the pointer between the read at the press and the press, which are one message to the browser apart. A page
-    built for that can as well name its button "Continue": the read answers text that steers the model, not a site
-    that is itself hostile.
+    code on its next line, or on the line under that one where the line between stops on no word that leaves it
+    open (an address, "to my phone"), where the lines together are past 40 characters and that line opens with no
+    word a label goes on with ("Send code" over "Everyone in the engineering group gets a copy", "Send code to"
+    over "j***@example.com" over "and all users"), and `Resend`, which is no phrase of the table ("Resend code to
+    all users"); a name that stands after the first 400 characters of a label or below its third line, and a
+    phrase in a sentence under a harmless name ("Remove from library" above "and permanently delete all the
+    downloaded files from the disk": a line of over 40 characters is not matched); a frame of another origin (a
+    point inside one is read as the frame), and a frame that CSS scales or rotates (read at a point that is off);
+    a control pressed by a key (Enter or Space on a focused button, Enter in a form field) or by a drag, and a
+    `select`, whose option is chosen with no press (`select_option`); a clickable element that is not a button (a
+    `div` with a handler and no role), one that chooses rather than commands (`role=option`, `tab`, `switch`,
+    `menuitemradio`, `menuitemcheckbox`) and a link in no button or menu item ("How to delete your account" is an
+    article); a role written after a token that is no role (`role="custom menuitem"`: a browser takes the first
+    token it knows for a role, the read the first token); a button inside a closed shadow root, of which the read
+    sees only the component around it; a label given only by `aria-labelledby`, by an image with no alt text, or
+    by text that CSS or a canvas draws; look-alike characters (a Cyrillic "е" in "Delete"); and a page whose own
+    script falsifies the read of a selector's element, or where a script or a style in motion (an animation that
+    shows a button for a few milliseconds) changes what is under the pointer between the read at the press and the
+    press, which are one message to the browser apart. A page built for that can as well name its button
+    "Continue": the read answers text that steers the model, not a site that is itself hostile.
   - It asks more than it must where a harmless label starts with a phrase and no exception lists it: `Transfer
     files`, "Send feedback", "Pay monthly", "Buy again", "Post a job", a cart's "Remove item", "Deactivate dark
     mode", a `Post` tab that only opens a form, a counter ("1 Post"), a dash where a hyphen would have joined the

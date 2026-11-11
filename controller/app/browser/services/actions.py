@@ -182,7 +182,8 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
 # are one box (Playwright's holds the script's), and the script's own is the one to count from: it is read in
 # the run that picks the point, and Playwright's a round trip earlier, so a target the page moved between the
 # two was aimed at off by its move, and the hover waited the click's time out. (A link of several boxes in
-# something turned, moved in that round trip, still is.) In a frame the two boxes are in different
+# something turned, moved in that round trip, still is, and so is a target whose corner a resize in it moves:
+# one shrunk about its middle.) In a frame the two boxes are in different
 # coordinates, and the place is counted from the script's own: such a link in a frame is a limit the docs name.
 # In a frame the script sees what the frame shows of el, which is not what Playwright goes by: it cuts a box
 # by the screen alone, whatever a frame on the way cuts off, and the click's checks have just passed at that
