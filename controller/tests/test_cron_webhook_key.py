@@ -15,7 +15,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.browser_manager import BrowserManager
-from app.cron_service import CronService, StoredWebhookKeyUnreadable, WebhookKeyRefusedError
+from app.cron_service import (
+    OWNER_CREDENTIAL_REMOVED,
+    CronService,
+    StoredWebhookKeyUnreadable,
+    WebhookKeyRefusedError,
+)
 from app.models import McpToolCallRequest, OperatorIdentity
 from app.routes.operations import create_operations_router
 from app.session_ownership import acting_as, as_system
@@ -601,10 +606,15 @@ class CronStoredKeyUnreadableTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((rotated.status_code, rotated.json()), (404, {"detail": "Not found"}))
 
     async def test_the_start_leaves_such_a_job_as_it_is_with_a_warning_that_names_the_job_and_not_the_key(self) -> None:
+        store = self.service._store_path
         for cause, shape in self.SHAPES:
             with self.subTest(cause):
                 job_id, other_id = await self._stored_as(shape)
-                before = self.service._store_path.read_bytes()
+                # The other job holds its key as an earlier version stored it, so the start saves the store, beside
+                # the record it cannot read.
+                jobs = json.loads(store.read_text(encoding="utf-8"))
+                jobs[other_id] = {**jobs[other_id], "webhook_key_hash": None, "webhook_key": LEGACY_KEY}
+                store.write_text(json.dumps(jobs), encoding="utf-8")
 
                 with self.assertLogs("app.cron_service", level="WARNING") as logged:
                     try:
@@ -612,11 +622,102 @@ class CronStoredKeyUnreadableTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         await self.service.shutdown()
 
-                self.assertEqual(self.service._store_path.read_bytes(), before)
+                saved = json.loads(store.read_text(encoding="utf-8"))
+                self.assertEqual(saved[job_id], jobs[job_id])
+                self.assertNotIn("webhook_key", saved[other_id])
+                self.assertEqual(saved[other_id]["webhook_key_hash"], _digest(LEGACY_KEY))
                 (line,) = [record.getMessage() for record in logged.records]
                 self.assertTrue(line.startswith(f"cron job {job_id}: "), line)
                 for part in ("unreadable-key", "\ud800", "\\ud800", "position"):
                     self.assertNotIn(part, line)
+
+    async def test_the_start_removes_a_readable_plaintext_key_beside_a_hash_it_cannot_read(self) -> None:
+        # Such a record kept its plaintext key at rest, where the migration removes one. The trigger refused every
+        # key for it before the start, the plaintext one too, as the hash it cannot read is read first, and it
+        # refuses every key after it: what it answers does not change.
+        job_id, _ = await self._stored_as(lambda good: {**good, "webhook_key_hash": UNREAD, "webhook_key": LEGACY_KEY})
+        for key in (LEGACY_KEY, "any-key"):
+            with self.assertRaises(WebhookKeyRefusedError):
+                await self.service.trigger_via_webhook(job_id, key)
+
+        with self.assertLogs("app.cron_service", level="WARNING") as logged:
+            try:
+                await self.service.startup()
+            finally:
+                await self.service.shutdown()
+
+        saved = json.loads(self.service._store_path.read_text(encoding="utf-8"))[job_id]
+        self.assertNotIn("webhook_key", saved)
+        self.assertEqual(saved["webhook_key_hash"], UNREAD)
+        (line,) = [record.getMessage() for record in logged.records]
+        self.assertTrue(line.startswith(f"cron job {job_id}: "), line)
+        self.assertIn("plaintext webhook key is removed", line)
+        for part in (LEGACY_KEY, "unreadable-key", "\ud800"):
+            self.assertNotIn(part, line)
+        for key in (LEGACY_KEY, "any-key"):
+            with self.assertRaises(WebhookKeyRefusedError):
+                await self.service.trigger_via_webhook(job_id, key)
+
+
+class CronRecordThatIsNoObjectTests(unittest.IsolatedAsyncioTestCase):
+    """A record that is no JSON object (a store edited by hand) is no job to each reader of it.
+
+    Some readers took it for one: DELETE /crons/{id} answered 500 (and browser.delete_cron_job, which calls the same
+    function, failed), a refused fire and the mark of its refusal re-read the record and raised, and a scheduled fire
+    of a record edited after its registration raised TypeError, logged as an ERROR at each fire.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service, self.manager = _service(Path(self.tmp.name) / "crons.json")
+        app = FastAPI()
+        app.include_router(
+            create_operations_router(manager=self.manager, proxy_store=MagicMock(), cron_service=self.service)
+        )
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    async def _stored_as_no_object(self) -> str:
+        store = self.service._store_path
+        job = await self.service.create_job(name="edited", goal="g", schedule="* * * * *")
+        jobs = json.loads(store.read_text(encoding="utf-8"))
+        jobs[job["id"]] = ["not", "an", "object"]
+        store.write_text(json.dumps(jobs), encoding="utf-8")
+        return job["id"]
+
+    async def test_a_delete_answers_it_as_an_unknown_job(self) -> None:
+        job_id = await self._stored_as_no_object()
+        before = self.service._store_path.read_bytes()
+
+        response = self.client.delete(f"/crons/{job_id}")
+        unknown = self.client.delete("/crons/no-such-job").json()["detail"].replace("no-such-job", job_id)
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json(), {"detail": unknown})
+        # browser.delete_cron_job's call, which then answers deleted: false.
+        self.assertFalse(await self.service.delete_job(job_id))
+        self.assertEqual(self.service._store_path.read_bytes(), before)
+
+    async def test_a_refused_fire_and_the_mark_of_its_refusal_read_it_as_no_job(self) -> None:
+        # A record edited between the fire's read and these: each reads it again.
+        job_id = await self._stored_as_no_object()
+        before = self.service._store_path.read_bytes()
+
+        with as_system():
+            refused = await self.service._refuse_run(job_id, "carol")
+            for audited in (True, False):
+                await self.service._set_refusal_audited(job_id, audited)
+
+        self.assertEqual(refused, {"triggered": False, "job_id": job_id, "reason": OWNER_CREDENTIAL_REMOVED})
+        self.assertEqual(self.service._store_path.read_bytes(), before)
+
+    async def test_a_scheduled_fire_reads_it_as_no_job(self) -> None:
+        job_id = await self._stored_as_no_object()
+
+        with self.assertNoLogs("app.cron_service", level="ERROR"):
+            await self.service._scheduled_run(job_id)
+
+        self.manager.create_session.assert_not_awaited()
 
 
 class CronWebhookKeyMcpTests(unittest.IsolatedAsyncioTestCase):

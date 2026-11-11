@@ -831,9 +831,14 @@ All notable changes to auto-browser are documented here.
   and that the stored key cannot be read, and nothing of the key, where it answered `400` or `500`. Every other
   reader of such a job takes it as one with no key, where each answered `500`: `GET /crons` (for every job),
   `GET /crons/{id}`, `DELETE /crons/{id}/webhook-key` (`revoked: false`) and the rotate, which replaces it. A record
-  that is no JSON object is answered as no job, and `GET /crons` leaves it out. A start leaves such a job as it is,
-  with one WARNING that names the job, where a key held as it was sent, by a store of an earlier version, stopped
-  the controller's start. `browser.trigger_cron_job`, which takes no key, is unchanged.
+  that is no JSON object is answered as no job, and `GET /crons` leaves it out: `DELETE /crons/{id}` answers it
+  `404`, as an unknown job, where it answered `500`, and `browser.delete_cron_job` `deleted: false`; a fire refused
+  for its owner's credential, and the record of that refusal, no longer raise on one edited meanwhile; and a
+  scheduled fire of one edited since it was registered runs nothing and logs nothing, where it logged an ERROR at
+  each fire. A start leaves such a job as it is, with one WARNING that names the job, where a key held as it was
+  sent, by a store of an earlier version, stopped the controller's start; a readable key held so beside a hash that
+  cannot be read is removed from the store, as the start removes every other such key, and the WARNING says so.
+  `browser.trigger_cron_job`, which takes no key, is unchanged.
 - **With its key proved, a cron trigger no longer passes on what the run's session answers its own caller, nor
   answers `500` for a stored job a run cannot take.** `POST /crons/{id}/trigger` answered `403`
   `browser_action_blocked`, with the refused host in its text, for a `start_url` whose load the pre-request gate

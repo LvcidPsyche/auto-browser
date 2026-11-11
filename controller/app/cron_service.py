@@ -125,6 +125,13 @@ def _refuse_what_a_run_cannot_take(job: dict[str, Any]) -> None:
         raise ValueError("the stored job's max_steps is not a number")
 
 
+def _stored_job(jobs: dict[str, Any], job_id: str) -> dict[str, Any] | None:
+    """The job's record in ``jobs``, or None where there is none and where it is no JSON object (a store edited by
+    hand): such a record is no job to any reader of it."""
+    job = jobs.get(job_id)
+    return job if isinstance(job, dict) else None
+
+
 def _record_to_write(jobs: dict[str, Any], job_id: str, what: str) -> dict[str, Any] | None:
     """The job's record in ``jobs``, to write ``what`` into after its run is queued; None if the job is gone.
 
@@ -260,7 +267,8 @@ class CronService:
         only logged, and goes on working: a job still holding its key is compared by hashing that key.
 
         A job whose stored key cannot be read, or whose record is no JSON object (a store edited by hand), is left as
-        it is, with a WARNING that names the job: what reading it raised stopped the controller's start.
+        it is, with a WARNING that names the job: what reading it raised stopped the controller's start. Only a
+        readable plaintext key beside a hash that cannot be read goes, as any plaintext key does here.
         """
         async with self._lock:
             jobs = self._load()
@@ -272,6 +280,18 @@ class CronService:
                 try:
                     key_hash = self._read_stored_key(job)
                 except StoredWebhookKeyUnreadable as exc:
+                    # The hash is read before a plaintext key, so a readable one beside it here sits beside a hash
+                    # that cannot be read: it proves nothing, and goes, as the migration below takes one away.
+                    if self._stored_key_hash({"webhook_key": job.get("webhook_key")}) is not None:
+                        del job["webhook_key"]
+                        legacy.append(job)
+                        logger.warning(
+                            "cron job %s: %s, so its webhook refuses every key until the key is rotated; its "
+                            "plaintext webhook key is removed from the store, and the job is otherwise left as it is",
+                            job_id,
+                            exc,
+                        )
+                        continue
                     logger.warning(
                         "cron job %s: %s, so its webhook refuses every key until the key is rotated; the job is left "
                         "as it is",
@@ -389,8 +409,8 @@ class CronService:
     def _accessible(jobs: dict[str, Any], job_id: str) -> dict[str, Any]:
         """Another operator's job answers as if it did not exist, and so does a record that is no JSON object (a
         store edited by hand), which no caller can read."""
-        job = jobs.get(job_id)
-        if not isinstance(job, dict) or not may_use(job.get("owner")):
+        job = _stored_job(jobs, job_id)
+        if job is None or not may_use(job.get("owner")):
             raise KeyError(job_not_found_text(job_id))
         return job
 
@@ -441,7 +461,9 @@ class CronService:
     async def delete_job(self, job_id: str) -> bool:
         async with self._lock:
             jobs = self._load()
-            if job_id not in jobs or not may_use(jobs[job_id].get("owner")):
+            try:
+                self._accessible(jobs, job_id)
+            except KeyError:
                 return False
             del jobs[job_id]
             self._save(jobs)
@@ -572,10 +594,11 @@ class CronService:
         """
         try:
             with as_system():
-                jobs = self._load()
-                if job_id not in jobs:
+                # A record edited by hand since it was registered can be no JSON object: no job, as one deleted is.
+                job = _stored_job(self._load(), job_id)
+                if job is None:
                     return
-                await self._run_job_now(jobs[job_id])
+                await self._run_job_now(job)
         except Exception as exc:
             logger.error("cron job %s failed: %s", job_id, exc)
 
@@ -723,7 +746,7 @@ class CronService:
             try:
                 async with self._lock:
                     jobs = self._load()
-                    job = jobs.get(job_id)
+                    job = _stored_job(jobs, job_id)
                     if job is not None:
                         if job.get("last_status") == RUN_QUEUED_STATUS:
                             # A mark beside "queued" is that of a refusal an allowed fire has ended: only such a fire
@@ -779,7 +802,7 @@ class CronService:
         try:
             async with self._lock:
                 jobs = self._load()
-                job = jobs.get(job_id)
+                job = _stored_job(jobs, job_id)
                 if job is None or (job.get(_REFUSAL_AUDITED) is True) == audited:
                     return
                 if audited:
