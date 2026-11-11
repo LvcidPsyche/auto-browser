@@ -26,8 +26,9 @@ from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessService
 from app.harness.trace import TraceEnvelope
 from app.models import AgentJobCheckpoint, OperatorIdentity, SessionRecord
-from app.session_store import FileSessionStore
+from app.session_store import FileSessionStore, RedisSessionStore
 from app.utils import utc_now, without_lone_surrogates
+from tests.test_persist_after_close import _MemoryRedis
 
 # A lone surrogate, as a JSON "\ud800" escape decodes to: UTF-8 cannot encode it.
 LONE = "\ud800"
@@ -104,10 +105,9 @@ class AuditStoreTests(_Tmp):
 
 
 class SessionStoreTests(_Tmp):
-    async def test_a_record_whose_title_holds_a_lone_surrogate_is_saved_with_the_replacement_character(self) -> None:
-        store = FileSessionStore(self.root / "sessions")
-        await store.startup()
-        record = SessionRecord(
+    @staticmethod
+    def _record() -> SessionRecord:
+        return SessionRecord(
             id="s1",
             name="s1",
             created_at=utc_now(),
@@ -121,14 +121,31 @@ class SessionStoreTests(_Tmp):
             downloads=[{"id": "d1", "suggested_filename": f"a{LONE}.txt"}],
         )
 
-        await store.upsert(record)
-
-        saved = await store.get("s1")
+    def _assert_saved_with_the_replacement_character(self, saved: SessionRecord, record: SessionRecord) -> None:
         self.assertEqual(saved.title, f"Sale{REPLACED}today")
         self.assertEqual(saved.downloads, [{"id": "d1", "suggested_filename": f"a{REPLACED}.txt"}])
         self.assertEqual(
             saved.model_dump(exclude={"title", "downloads"}), record.model_dump(exclude={"title", "downloads"})
         )
+
+    async def test_a_record_whose_title_holds_a_lone_surrogate_is_saved_with_the_replacement_character(self) -> None:
+        store = FileSessionStore(self.root / "sessions")
+        await store.startup()
+        record = self._record()
+
+        await store.upsert(record)
+
+        self._assert_saved_with_the_replacement_character(await store.get("s1"), record)
+
+    async def test_the_redis_store_saves_such_a_record_the_same_way(self) -> None:
+        # The real RedisSessionStore over an in-memory client: its write is a line of its own, which no test held.
+        store = RedisSessionStore("redis://127.0.0.1:6379/0", "t")
+        store.client = _MemoryRedis()  # type: ignore[assignment]
+        record = self._record()
+
+        await store.upsert(record)
+
+        self._assert_saved_with_the_replacement_character(await store.get("s1"), record)
 
 
 class AgentJobStoreTests(_Tmp):

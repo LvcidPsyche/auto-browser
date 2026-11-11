@@ -99,14 +99,19 @@ class EndedInTheQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(self.ahead["id"], self.queue._running_tasks)
 
     async def test_the_worker_that_reaches_the_id_later_does_not_finish_it_again(self) -> None:
+        finishes: dict[str, _Finish] = {}
         for end in (self.queue.cancel_job, self.queue.discard_job):
             with self.subTest(end=end.__name__):
                 job, finish = await self.queued_behind()
                 await end(job["id"])
                 self.assertEqual(len(finish.calls), 1)
+                finishes[end.__name__] = finish
         await self.the_worker_reaches_everything()
 
-        self.assertEqual(len(finish.calls), 1)
+        # Both callbacks, not the last one made: the cancelled job's was never looked at after the worker had been by.
+        self.assertEqual(
+            {name: len(finish.calls) for name, finish in finishes.items()}, {"cancel_job": 1, "discard_job": 1}
+        )
         self.assertEqual(self.queue._on_finish, {}, "something is left registered for a job the worker has dealt with")
 
     async def test_a_second_cancel_and_a_discard_after_it_do_not_finish_it_again(self) -> None:

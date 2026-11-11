@@ -528,10 +528,19 @@ class CronWebhookKeyMcpTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_tool_that_changes_something_is_advertised_as_idempotent(self) -> None:
         # The rule the registry applies: only a read is advertised as safe to repeat. A second revoke changes nothing
         # more, and so does a second delete or close; none of them says so, and the revoke tool follows them.
-        for tool in self.gateway.list_tools():
-            hints = tool["annotations"]
-            if not hints["readOnlyHint"]:
-                self.assertFalse(hints["idempotentHint"], tool["name"])
+        changing = {
+            tool["name"]: tool["annotations"]
+            for tool in self.gateway.list_tools()
+            if not tool["annotations"]["readOnlyHint"]
+        }
+        # The tools the rule is about are found first: over an empty listing, or one that advertised every tool as a
+        # read, the loop below looked at nothing and passed.
+        self.assertLessEqual(
+            {"browser.rotate_cron_webhook_key", "browser.revoke_cron_webhook_key", "browser.delete_cron_job"},
+            changing.keys(),
+        )
+        for name, hints in changing.items():
+            self.assertFalse(hints["idempotentHint"], name)
 
     async def test_the_tools_validate_job_id_as_the_routes_do(self) -> None:
         for name in ("browser.rotate_cron_webhook_key", "browser.revoke_cron_webhook_key"):

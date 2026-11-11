@@ -323,6 +323,9 @@ class GatewayWriteRecordTests(SpendBase):
             "path": {**good, "path": "/\ud800"},
             "url": {"name": "sid", "value": "v", "url": "https://example.com/\ud800"},
             "nested": {**good, "partitionKey": {"topLevelSite": ["https://example.com\ud800"]}},
+            # In a key below the cookie's own (pydantic refuses one of those itself), where every value is ordinary
+            # text: the walk must look at a dict's keys too.
+            "a nested key": {**good, "partitionKey": {"topLevelSite\udc00": "https://example.com"}},
         }
         for field, cookie in cases.items():
             with self.subTest(field=field):
@@ -379,6 +382,20 @@ class GatewayWriteRecordTests(SpendBase):
         self.assertIn(SESSION, message)
         self.assertIn("the store refused it", message)
         self.assertNotIn(CANARY, "\n".join(logs.output))
+
+    async def test_a_line_break_in_the_stores_error_begins_no_line_of_that_log_line(self) -> None:
+        # The failure is written as its repr: a store's error text can quote what it was given (a path, a value).
+        failure = OSError("disk full\nERROR forged line")
+        self.manager.audit.append = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+        payload = SetCookiesInput(session_id=SESSION, cookies=[{"name": "sid", "value": "v", "domain": "example.com"}])
+
+        with self.assertLogs(WRITE_RECORDS_LOGGER, level="ERROR") as logs:
+            with self.assertRaises(OSError):
+                await self.gateway._set_cookies(payload)
+
+        (message,) = (record.getMessage() for record in logs.records)
+        self.assertNotIn("\n", message)
+        self.assertIn(repr(failure), message)
 
     async def test_a_governed_write_records_once(self) -> None:
         arguments = {

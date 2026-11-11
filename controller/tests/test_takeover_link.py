@@ -36,6 +36,7 @@ from app.routes.extensions import _DASHBOARD_HTML
 from app.routes.operations import create_operations_router
 from app.routes.sessions import (
     TAKEOVER_LINK_REFUSED_DETAIL,
+    TAKEOVER_REFUSAL_SOURCES_MAX,
     HeldBack,
     RefusedCall,
     TakeoverRefusalWindows,
@@ -443,6 +444,10 @@ class TakeoverRefusalWindowsHeldTests(unittest.TestCase):
         self.windows.event_not_written(source, call, held)
 
         self.assertEqual(self.windows.take_held(now=1003.0), [(self.SOURCE, refused_call("s9"), HeldBack(1, True))])
+
+    def test_the_bound_that_ships_is_the_one_the_changelog_states(self) -> None:
+        # Every test of the bound sets its own, so none of them holds the value: the CHANGELOG says 1024 sources.
+        self.assertEqual(TAKEOVER_REFUSAL_SOURCES_MAX, 1024)
 
     @patch("app.routes.sessions.TAKEOVER_REFUSAL_SOURCES_MAX", 3)
     def test_the_map_keeps_its_bound_with_refusals_held_and_taken(self) -> None:
