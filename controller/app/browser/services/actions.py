@@ -130,8 +130,17 @@ _step_clock = time.perf_counter
 # Playwright's placing: a yes can be an old one (a document is not told of a pointer that went on into another
 # process's, so the rest of the question stands), and a no a wrong one (a person moving the real pointer over a
 # headed browser).
-_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
+# ``wide``: the element is the target of a click Playwright placed, and it is asked as Playwright's own check of
+# a click asks it: an element inside a button or a link is taken for that button or link (its retarget,
+# "button-link"), unless it is a field or editable text. A selector that names a card's text names a node, and
+# where another piece of the card's link lay over that node (a span stretched over the card, a ::before over a
+# button) the pointer found the link and not the node: Playwright's hover said yes, this question said no, and
+# a no ends a placed click. Never of a frame on the way up, which must itself be what the pointer finds, and
+# not before a human-like press, where a no only hands the click to the placing.
+_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
   const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
+  const field = el.matches('input, textarea, select') || el.isContentEditable;
+  const target = (wide && !field && el.closest('button, [role=button], a, [role=link]')) || el;
   if (window !== window.top) {
     if (!box) return 'framed';
     const own = el.getBoundingClientRect();
@@ -149,7 +158,7 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
   const label = hit.closest ? hit.closest('label') : null;
   if (label && label.control === el) return over(label);
   for (let node = hit; node; node = node.assignedSlot || node.parentNode || node.host) {
-    if (node === el) return over(el);
+    if (node === target) return over(target);
   }
   return false;
 }"""
@@ -1392,20 +1401,22 @@ class BrowserActionService:
         """
         handles: list[Any] = []
         try:
-            found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None], timeout=timeout_ms)
+            found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None, False, placed], timeout=timeout_ms)
             if found != "framed":
                 return found is True
             # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
             # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
             node = await locator.element_handle(timeout=timeout_ms)
             handles.append(node)
-            # The element itself, before a human-like press, is asked as well that the pointer is over it.
-            arrived = not placed
+            # The element itself, before a human-like press, is asked as well that the pointer is over it, and
+            # where the click was placed, as the button or the link it is in. Neither is asked of a frame.
+            arrived, wide = not placed, placed
             for _ in range(POINTER_CHECK_FRAMES):
                 box = await node.bounding_box()
-                if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box, arrived]) is not True:
+                asked = [x, y, box, arrived, wide]
+                if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, asked) is not True:
                     return False
-                arrived = False
+                arrived = wide = False
                 frame = await node.owner_frame()
                 if frame is None or frame.parent_frame is None:
                     return True

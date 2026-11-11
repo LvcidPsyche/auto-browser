@@ -1735,6 +1735,89 @@ async def test_the_place_is_counted_from_playwrights_box_only_where_its_size_is_
             assert (counted["x"], counted["y"]) == pytest.approx((own["x"] + 40, own["y"] + 7))
 
 
+# Another piece of a button or a link laid over the node inside it that a selector names: a span stretched over
+# a card inside the card's link (how a whole card is made one link), a ::before stretched over a button, a scrim
+# inside a role=button card. The pointer at the node finds that piece, and with it the button or the link.
+LAID_OVER = {
+    "a span over a card's link": (
+        "<a href='#' onclick=\"document.title = 'PRESSED'; return false\" style='position: relative; "
+        "display: block; width: 300px; padding: 20px; margin: 40px'><span id='t'>Read more</span>"
+        "<span style='position: absolute; inset: 0'></span></a>"
+    ),
+    "a ::before over a button": (
+        "<style>#b { position: relative; padding: 10px 30px; margin: 40px } "
+        "#b::before { content: ''; position: absolute; inset: 0 }</style>"
+        "<button id='b' onclick=\"document.title = 'PRESSED'\"><span id='t'>Continue</span></button>"
+    ),
+    "a scrim in a role=button card": (
+        "<div role='button' tabindex='0' onclick=\"document.title = 'PRESSED'\" style='position: relative; "
+        "width: 300px; margin: 40px; padding: 20px'><h3 id='t' style='margin: 0'>Quarterly report</h3>"
+        "<div style='position: absolute; inset: 0'></div></div>"
+    ),
+}
+LAID_OVER_PAGE = "<!doctype html><title>start</title><body style='margin: 0'>"
+
+
+@pytest.mark.parametrize("shape", sorted(LAID_OVER))
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_node_inside_a_button_or_a_link_is_pressed_where_another_piece_of_that_one_lies_over_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, shape: str
+) -> None:
+    # Playwright's check of a click takes a target inside a button or a link for that button or link: the pointer
+    # has to find the button, not the very node a selector named (`text=Read more` names the innermost element
+    # that holds the text). The question a placed click asks once the pointer is there wanted the node itself, so
+    # a read click on a card's text ended as `target_moved` with nothing pressed, each time it was tried, where
+    # the click that is not read pressed the card.
+    placed: list[Any] = []
+    real = actions_module.BrowserActionService.click_as_playwright_places_it
+
+    async def counted(self: Any, *given: Any, **named: Any) -> None:
+        placed.append(given)
+        await real(self, *given, **named)
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "click_as_playwright_places_it", counted)
+    async with browser_env(tmp_path, {"/": LAID_OVER_PAGE + LAID_OVER[shape]}) as env:
+        session_id = await env.create("/")
+        if route == "direct":
+            await env.manager.click(session_id, selector="#t")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector="#t"))
+        assert await _title(env, session_id) == "PRESSED"
+        # The shape the fixture stands for: the pointer at the middle of the node does not find the node.
+        assert len(placed) == 1
+
+
+async def test_only_a_placed_click_takes_its_target_for_the_button_or_link_it_is_in_and_never_a_field(
+    tmp_path: Path,
+) -> None:
+    # The question asked of the script itself, at the middle of each node, with something of the node's own
+    # button laid over it. Before a human-like press it is asked of the node (a no hands the click to Playwright's
+    # placing, whose checks are made at Playwright's own point). Where the click was placed it is asked as
+    # Playwright's own check asks it: of the button or the link the node is in, but of the node itself where that
+    # is a field or editable text, which Playwright takes for no button.
+    asks = actions_module._RECEIVES_POINTER_SCRIPT
+    page = (
+        LAID_OVER_PAGE + LAID_OVER["a scrim in a role=button card"] + "<div role='button' style='position: "
+        "relative; width: 300px; margin: 40px; padding: 20px'><input id='field'><p id='text' contenteditable>"
+        "Notes</p><select id='choice'><option>One</option></select><textarea id='lines'></textarea>"
+        "<div style='position: absolute; inset: 0'></div></div>"
+    )
+    async with browser_env(tmp_path, {"/": page}) as env:
+        session_id = await env.create("/")
+
+        async def asked(selector: str, placed: bool) -> Any:
+            node = env.page(session_id).locator(selector)
+            box = await node.bounding_box()
+            assert box is not None
+            at = [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2]
+            return await node.evaluate(asks, [*at, None, False, placed])
+
+        assert await asked("#t", False) is False
+        assert await asked("#t", True) is True
+        for field in ("#field", "#text", "#choice", "#lines"):
+            assert await asked(field, True) is False, field
+
+
 @pytest.mark.parametrize("route", ["direct", "read"])
 async def test_a_button_the_page_turns_off_while_the_pointer_is_on_its_way_is_waited_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str

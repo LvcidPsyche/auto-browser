@@ -467,3 +467,42 @@ async def test_a_target_with_no_box_once_the_pointer_is_on_it_is_not_pressed() -
 async def test_the_press_read_is_short() -> None:
     # The pointer is there, waiting: a page that does not answer costs a press this much, twice at most.
     assert click_target.PRESS_READ_TIMEOUT_MS <= 500
+
+
+@pytest.mark.parametrize("placed", [False, True])
+async def test_only_the_target_of_a_placed_click_is_asked_as_the_button_or_link_it_is_in(placed: bool) -> None:
+    # The question's last argument: whether the pointer may find the button or the link the node is in, as
+    # Playwright's own check of a click allows its target. Of the target where the click was placed, and of no
+    # frame on the way up: a frame must itself be what the pointer finds, or the press goes to the page over it.
+    asked: list[tuple[str, Any]] = []
+
+    def node(name: str, frame: Any) -> SimpleNamespace:
+        async def evaluate(script: str, given: list[Any]) -> bool:
+            assert script == _RECEIVES_POINTER_SCRIPT
+            asked.append((name, given[-1]))
+            return True
+
+        return SimpleNamespace(
+            evaluate=evaluate,
+            bounding_box=AsyncMock(return_value={"x": 1, "y": 2, "width": 30, "height": 40}),
+            owner_frame=AsyncMock(return_value=frame),
+            dispose=AsyncMock(),
+        )
+
+    outer = node("the outer frame", SimpleNamespace(parent_frame=None))
+    inner = node("the inner frame", SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer)))
+    target = node("the target", SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=inner)))
+
+    async def first(script: str, given: list[Any], **_named: Any) -> str:
+        asked.append(("the target, first", given[-1]))
+        return "framed"
+
+    locator = SimpleNamespace(evaluate=first, element_handle=AsyncMock(return_value=target))
+
+    assert await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=placed) is True
+    assert asked == [
+        ("the target, first", placed),
+        ("the target", placed),
+        ("the inner frame", False),
+        ("the outer frame", False),
+    ]
