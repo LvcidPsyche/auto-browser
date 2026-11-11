@@ -649,7 +649,7 @@ one open always waits the 5 seconds. The log then shows uvicorn's
 each stream it ended (`the event stream on '/mcp' was still open at the shutdown limit: ended`). That is a normal
 stop, not a crash: the stream's body is finished and its connection closed, and a client can open it again when
 the controller is back. A client that is still connected and has stopped reading cannot be sent the end of the body:
-the controller waits one second for it and logs that the stream was `left unfinished`, and uvicorn logs
+the controller waits up to one second for it and logs that the stream was `left unfinished`, and uvicorn logs
 `ASGI callable returned without completing response.` at ERROR and asks the transport to close. A connection that
 still holds bytes its client has not taken stays until they are gone or the process ends. A call still running at
 the limit is cancelled too, and for that one uvicorn logs `Exception in ASGI application` with a traceback that ends

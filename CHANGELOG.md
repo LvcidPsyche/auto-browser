@@ -540,7 +540,7 @@ All notable changes to auto-browser are documented here.
   each. A stream whose body had already ended is sent nothing more, and its line says so. One whose client had gone
   by then is no error either: the controller's own streams end by themselves when their client goes and leave no
   line, and uvicorn's `send` writes nothing to a connection that is lost and raises nothing, so a stream still open
-  there is logged as ended. A client that is connected and no longer reads is waited for one second more: its
+  there is logged as ended. A client that is connected and no longer reads is waited for up to one second more: its
   stream is left unfinished, and uvicorn logs `ASGI callable returned without completing response.` at ERROR, with
   no traceback, and asks the transport to close. See the upgrade note.
 - **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
