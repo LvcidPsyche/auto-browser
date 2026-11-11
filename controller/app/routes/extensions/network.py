@@ -23,10 +23,11 @@ class NetworkHookRequest(BaseModel):
     The body was any object, and a number was stored as the pattern: fnmatch raised on it for every finished
     request, so no hook registered after it fired again, and the DELETE route, whose pattern is text, could not
     remove it. A list or an object, which the inspector's dict cannot key, answered 500. The default keeps a
-    missing pattern answered by the route, with the text an empty one gets.
+    missing pattern answered by the route, with the text an empty one gets, and so is a null: it is no pattern
+    either, and a client that sends one for "none" read that text.
     """
 
-    url_pattern: str = ""
+    url_pattern: str | None = ""
 
 
 @network_router.get("/requests")

@@ -160,8 +160,10 @@ class RoutesExtensionsTests(unittest.TestCase):
         self.assertEqual(client.get("/sessions/session-1/network/hooks").json()["hooks"], [])
 
     def test_a_missing_or_an_empty_hook_pattern_is_answered_as_it_was(self) -> None:
+        # A null is no pattern either. Typed as a string alone, it was refused as a number is, with a list for its
+        # detail where a client had read the text.
         client = self.make_client()
-        for body in ({}, {"url_pattern": ""}, {"other": "*.json"}):
+        for body in ({}, {"url_pattern": ""}, {"other": "*.json"}, {"url_pattern": None}):
             with self.subTest(body=body):
                 answer = client.post("/sessions/session-1/network/hooks", json=body)
 
@@ -174,10 +176,11 @@ class RoutesExtensionsTests(unittest.TestCase):
         client = self.make_client()
 
         refused = client.post("/sessions/missing/network/hooks", json={"url_pattern": 5})
-        others = [client.post("/sessions/missing/network/hooks", json=body) for body in ({"url_pattern": "*.json"}, {})]
+        bodies = ({"url_pattern": "*.json"}, {}, {"url_pattern": None})
+        others = [client.post("/sessions/missing/network/hooks", json=body) for body in bodies]
 
         self.assertEqual(refused.status_code, 422, refused.text)
-        self.assertEqual([answer.status_code for answer in others], [404, 404])
+        self.assertEqual([answer.status_code for answer in others], [404, 404, 404])
 
     def test_the_real_inspector_keeps_no_pattern_the_route_refused(self) -> None:
         from app.network_inspector import NetworkInspector

@@ -833,8 +833,8 @@ All notable changes to auto-browser are documented here.
   failed (one DEBUG line each), so no hook registered after it was called again, and
   `DELETE /sessions/{id}/network/hooks/{pattern}`, whose pattern is text, could not remove it. A list or an object
   answered `500`. Each now answers `422` and nothing is stored, and is refused before the session is looked for:
-  with a session the controller does not know it answers `422` where it answered `404`. A missing or an empty
-  pattern answers `422` `url_pattern required` as before.
+  with a session the controller does not know it answers `422` where it answered `404`. A missing, an empty or a
+  `null` pattern answers `422` `url_pattern required` as before.
 - **One MCP `initialize` can no longer stop every later one.** The transport keeps the `clientInfo` and the
   `capabilities` of each MCP session, and writes all its sessions to one file at every `initialize`. A lone
   surrogate in either (JSON's `"\ud800"` reads as one) could not be written as UTF-8: the caller was answered
