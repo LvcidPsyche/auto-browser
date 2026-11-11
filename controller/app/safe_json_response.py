@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -50,9 +51,15 @@ async def safe_http_exception_handler(request: Request, exc: HTTPException) -> R
 
 
 async def safe_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
-    """FastAPI's own 422, unless what was refused holds a lone surrogate: its errors quote the input."""
+    """FastAPI's own 422, unless what was refused holds a lone surrogate or a non-finite number: its errors quote
+    the input."""
     try:
         return await request_validation_exception_handler(request, exc)
     except UnicodeEncodeError:
         clean = RequestValidationError(without_lone_surrogates(list(exc.errors())), body=exc.body)
         return await request_validation_exception_handler(request, clean)
+    except ValueError:
+        # Python's JSON reader takes NaN, Infinity and a number too large for a float (1e999) from a body, and the 422
+        # quotes it back: no JSON, so the answer itself failed, a 500. FastAPI's content, written as any answer
+        # holding one is (null in its place, and U+FFFD for a lone surrogate beside it).
+        return SafeJSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})

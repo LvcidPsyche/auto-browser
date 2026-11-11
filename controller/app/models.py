@@ -17,7 +17,10 @@ CDP_URL_SCHEMES = ("http", "https", "ws", "wss")
 
 
 class StrictInputModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # allow_inf_nan: Python's JSON reader takes NaN, Infinity and a number too large for a float (1e999) as floats. A
+    # coordinate or a scroll distance took one, Playwright refused it, and the caller was told the action had failed
+    # and could be retried. Refused here, as an integer field refuses one ("Input should be a finite number").
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
 
 def validate_url(

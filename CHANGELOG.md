@@ -389,6 +389,15 @@ All notable changes to auto-browser are documented here.
   raised after its handler had run: a route with no declared return type (`GET /sessions/{id}/network/requests` is
   one) and a `BrowserActionError` whose details held one answered `500`. A tool result already sent `null` for one,
   and a REST answer now goes through the same walk.
+- **A NaN or an infinity in a request body is refused naming its field.** The controller's JSON reader takes the bare
+  words `NaN`, `Infinity` and `-Infinity`, and a number too large for a float (`1e999`), as numbers. The `422` that
+  refuses a body quotes each value it refused, and with such a number in one the answer itself failed: a `500`, for
+  `{"limit": NaN}` sent to `POST /sessions/{id}/observe`, and as much for one in a field of another type, in an
+  unknown field, or in a body that was no object. That `422` is now sent, with `null` where the number was. A
+  coordinate or a scroll distance (`x`, `y`, `delta_x`, `delta_y`, and `browser.drag_drop`'s four) took one and
+  handed it to the browser library, which refused it: the caller was told `browser_action_failed`, `retryable`
+  (`browser_error` from `browser.drag_drop`). Those fields now refuse it before any action is tried: `422` over REST,
+  and `Invalid arguments for <tool>: <field>: Input should be a finite number` from a tool.
 - **A stop with a client listening on an event stream now reaches the cleanup.** On SIGTERM uvicorn waits for the
   responses in flight before it runs the controller's shutdown, with no limit unless it is given one, and the image
   gave none. An open `GET /mcp` stream, or `GET /sessions/{id}/events`, never ends by itself, so the maintenance
