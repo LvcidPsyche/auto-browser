@@ -657,9 +657,12 @@ def test_only_the_frames_nearest_the_raise_are_logged(caplog: pytest.LogCaptureF
 
     (logged,) = _warnings_of(caplog, logger.name)
     _first, *where = logged.getMessage().splitlines()
-    # Two lines a frame: where it is, and its source line.
-    assert len(where) == 6, where
-    assert where[-1].strip() == 'raise ValueError("deep")', where
+    # Frames are counted, not lines. How a frame is written is the interpreter's: where it is and its source line,
+    # and from Python 3.13 a third line, the marks under a line that is a call.
+    frames = [index for index, line in enumerate(where) if line.lstrip().startswith('File "')]
+    assert len(frames) == 3, where
+    # The nearest ones: the raise itself is in the last.
+    assert 'raise ValueError("deep")' in [line.strip() for line in where[frames[-1] + 1 :]], where
 
 
 class _PrintsALineBreak:
