@@ -1530,6 +1530,29 @@ async def test_a_press_in_a_padded_frame_of_another_process_does_not_land_beside
 
 
 @pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_link_wider_than_its_frame_is_placed_where_playwrights_own_click_goes(
+    tmp_path: Path, route: str
+) -> None:
+    # Playwright's click takes the middle of what the screen shows of a box, whatever a frame on the way cuts off
+    # (590 px into this frame of 600), and the click's checks are made at that point. The placed click of a read
+    # action took the middle of what the frame shows of it (300 px in), a point nothing had checked: with
+    # something of the frame's own there (a chat bubble) Playwright's hover waited the click's time out, where
+    # the click that is not read pressed the link.
+    pages = _cut_by_its_frame(100, 600, 4000, "Next")
+    pages["/inner"] += (
+        "<div style='position: fixed; left: 250px; top: 10px; width: 100px; height: 80px' "
+        "onclick=\"top.document.title = 'CHAT OPENED'\">Chat</div>"
+    )
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/")
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#link")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
+        assert await _title(env, session_id) == "OPENED"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
 async def test_a_button_the_page_turns_off_while_the_pointer_is_on_its_way_is_waited_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
 ) -> None:

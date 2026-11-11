@@ -153,8 +153,8 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
   return false;
 }"""
 
-# (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of what its
-# frame's viewport shows of the first of el's boxes that it shows a part of (an inline element broken over lines
+# (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of what the
+# viewport shows of the first of el's boxes that it shows a part of (an inline element broken over lines
 # has a box a line, and one around a block an empty box before and after the block: the first box whatever its
 # size was the corner pixel of such a card), counted from the corner of its padding box, with the widths of the
 # border at that corner. Playwright presses a position where it is given, so the controller knows the point; the
@@ -162,9 +162,14 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
 # thin: taken so only where an axis showed a whole pixel, a wide card with 0.9 px of its height on the screen
 # (area enough for Playwright to pick it) was aimed at above the screen. Of a box the viewport shows nothing
 # of, it is the middle of the box, which Playwright's hover scrolls to.
-# In a frame the script sees what the frame shows of el, and the screen may show less (a frame that runs off
-# it): it answers ``framed``, and is asked again with ``screen``, el's box in the main frame's viewport and
-# that viewport's size, which narrow what is shown to what the screen shows. The two boxes of el differ in
+# In a frame the script sees what the frame shows of el, which is not what Playwright goes by: it cuts a box
+# by the screen alone, whatever a frame on the way cuts off, and the click's checks have just passed at that
+# point. So there it answers ``framed``, and is asked again with ``screen``, el's box in the main frame's
+# viewport and that viewport's size: what is shown is then what the screen shows, and no longer what the
+# frame does. Cut by both, a card link wider than its frame was placed at the middle of what the frame shows,
+# a point nothing had checked; with something of the frame's own there Playwright's hover waited the click's
+# time out, where its own click pressed the link. (Where the frame does not show Playwright's point, the
+# checks have failed before this is asked, as Playwright's own click does.) The two boxes of el differ in
 # size where a frame on the way is scaled: the place is then in the screen's pixels, as Playwright counts a
 # position from the box it finds on the screen (in the frame's own pixels the point was twice as far along
 # in a frame drawn at half its size).
@@ -182,8 +187,7 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
     const [box, [width, height]] = screen;
     [wider, taller] = [box.width / whole.width, box.height / whole.height];
     const across = (x) => whole.left + (x - box.x) / wider, down = (y) => whole.top + (y - box.y) / taller;
-    [left, top] = [Math.max(left, across(0)), Math.max(top, down(0))];
-    [right, bottom] = [Math.min(right, across(width)), Math.min(bottom, down(height))];
+    [left, top, right, bottom] = [across(0), down(0), across(width), down(height)];
   }
   // As Playwright takes the first quad with an area over 0.99 inside the viewport.
   const shown = (box) =>
