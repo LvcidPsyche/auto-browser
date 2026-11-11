@@ -116,15 +116,16 @@ class _RefusalWindow:
 
 
 class TakeoverRefusalWindows:
-    """Turns a flood of refused takeover-link calls into one audit event per source per window.
+    """Turns a flood of refused takeover-link calls into few audit events, whose counts add up to the refusals.
 
     The first refusal from a source audits as it always did. Later ones in the same window are only counted, and
     one event reports them: the source's next refusal after the window, or, if none has come, the event of the last
     of them, written when what is held is taken (take_held: by the maintenance sweep once the window is over, at the
     source's next read with the right token, and at shutdown). Either way every refusal is one event or one of an
-    event's count, so the events and their counts add up to the refusals. A source is the verified operator, else
-    the client host; the map is bounded, and a source pushed out of it is forgotten with what it held, and audits
-    as new. A refusal answers 403 every time.
+    event's count, so the events and their counts add up to the refusals. How many events a window sees is not
+    fixed: a read with the right token writes what is held and the window stands, so refusals between such reads
+    write an event after each. A source is the verified operator, else the client host; the map is bounded, and a
+    source pushed out of it is forgotten with what it held, and audits as new. A refusal answers 403 every time.
     """
 
     def __init__(self) -> None:
@@ -142,22 +143,26 @@ class TakeoverRefusalWindows:
             self._windows.popitem(last=False)
         return window.held_beside(call) if window is not None else HeldBack(0, False)
 
+    def _chosen(self, now: float | None, source: str | None) -> list[tuple[str, _RefusalWindow]]:
+        """The windows a taking is of: those over at ``now`` (all of them with no time), of ``source`` alone if named."""
+        named = self._windows.items() if source is None else [(source, self._windows.get(source))]
+        return [
+            (name, window)
+            for name, window in named
+            if window is not None and (now is None or now - window.started_at >= TAKEOVER_REFUSAL_WINDOW_SECONDS)
+        ]
+
+    def sources_holding(self, *, now: float | None = None) -> list[str]:
+        """The sources take_held would take something from, in its order; nothing is taken."""
+        return [name for name, window in self._chosen(now, None) if window.last is not None]
+
     def take_held(self, *, now: float | None = None, source: str | None = None) -> list[HeldRefusals]:
         """Take what is held, as the event to write for each source: (source, the call it describes, its count).
 
-        Of ``source`` alone, whether its window is over or not, when one is named; otherwise of every window that is
-        over at ``now``, and of every window when no time is given. The windows stand: a refusal in one still
-        running is counted again.
+        Of every window that is over at ``now``, and of every window, over or not, when no time is given; of
+        ``source``'s alone when one is named. The windows stand: a refusal in one still running is counted again.
         """
-        if source is not None:
-            chosen = [(source, self._windows[source])] if source in self._windows else []
-        else:
-            chosen = [
-                (name, window)
-                for name, window in self._windows.items()
-                if now is None or now - window.started_at >= TAKEOVER_REFUSAL_WINDOW_SECONDS
-            ]
-        return [(name, *taken) for name, window in chosen if (taken := window.take()) is not None]
+        return [(name, *taken) for name, window in self._chosen(now, source) if (taken := window.take()) is not None]
 
     def event_not_written(self, source: str, call: RefusedCall, held: HeldBack) -> None:
         """The event for ``call``, which was to report ``held``, was not written: both are held again.
@@ -211,16 +216,22 @@ async def write_held_takeover_refusals(
     For shutdown (every window) and the maintenance sweep (a window that is over): a burst that stops would
     otherwise leave its first refusal as the only one in the audit log. No request waits on these writes, so one
     that fails is logged, what it was to report stays held, and the rest are still tried.
+
+    Each source's is taken just before its own write. Taken from every window first, a sweep cancelled in one write
+    (maintenance.shutdown() cancels the sweep under way) had emptied the windows it never came to, and the
+    shutdown's drain found nothing in them to write. A source that opened a new window meanwhile is left to it.
     """
-    for source, call, held in windows.take_held(now=time.monotonic() if finished_only else None):
-        try:
-            await _write_refusal_event(manager, windows, source, call, held)
-        except Exception:
-            logger.warning(
-                "%d refused takeover-link calls that were only counted could not be audited: still held",
-                held.count + 1,
-                exc_info=True,
-            )
+    now = time.monotonic() if finished_only else None
+    for source in windows.sources_holding(now=now):
+        for held_source, call, held in windows.take_held(now=now, source=source):
+            try:
+                await _write_refusal_event(manager, windows, held_source, call, held)
+            except Exception:
+                logger.warning(
+                    "%d refused takeover-link calls that were only counted could not be audited: still held",
+                    held.count + 1,
+                    exc_info=True,
+                )
 
 
 def _refusal_source(request: Request) -> str:

@@ -106,11 +106,13 @@ All notable changes to auto-browser are documented here.
   answers `404` for a session that has gone, as for one with no inspector, where it read the log of a session
   being closed.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one for its first
-  refusal in a minute and at most one more for the rest of that minute's, which carries `details.count`: the
-  refusals it reports beside its own. An alert that counts these events must add that field: events and counts
-  add up to the refusals. The second event can come late (with the source's next call, at a maintenance sweep or at
-  a clean shutdown: see Fixed), so an alert on a rate should read `details.count` when it arrives, and a controller
-  that is killed loses what it had only counted.
+  refusal in a minute, and the rest of that minute's are only counted until an event reports them in its
+  `details.count`: the refusals it reports beside its own. An alert that counts these events must add that field:
+  events and counts add up to the refusals. How many events a minute sees is not fixed: a read with the right
+  token writes what is held and the minute goes on, so refusals between such reads write an event after each. An
+  event that reports others can come late (with the source's next call, at a maintenance sweep or at a clean
+  shutdown: see Fixed), so an alert on a rate should read `details.count` when it arrives, and a controller that is
+  killed loses what it had only counted.
 - **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
   replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
@@ -532,7 +534,7 @@ All notable changes to auto-browser are documented here.
   frames are part of the message.
 - **Repeated refused calls to `GET /sessions/{id}/takeover-link` no longer write an audit event each.** The first
   refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
-  seconds are only counted, and one event reports them. It is the source's first refusal after that, whose
+  seconds are only counted, until an event reports them. It is the source's first refusal after that, whose
   `details.count` says how many were held back; or, when no refusal has come, the event of the last of them, with
   the others as its `details.count`, written when the source next reads the link with the right token (before that
   read's own event), at the first maintenance sweep after the 60 seconds (`CLEANUP_INTERVAL_SECONDS`, an hour by

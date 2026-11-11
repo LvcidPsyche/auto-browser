@@ -19,6 +19,7 @@ import time
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -454,6 +455,99 @@ class TakeoverRefusalWindowsHeldTests(unittest.TestCase):
 
         self.assertEqual([source for source, _call, _held in taken], ["host:7", "host:8", "host:9"])
         self.assertEqual(len(self.windows._windows), 3)
+
+    def test_a_named_sources_window_that_still_runs_is_left_when_a_time_is_given(self) -> None:
+        # The sweep takes one source at a time: one that opened a new window since the sweep began is not its to take.
+        self.refuse(1000.0)
+        self.refuse(1001.0)
+
+        self.assertEqual(self.windows.take_held(now=1059.0, source=self.SOURCE), [])
+        self.assertEqual(
+            self.windows.take_held(now=1060.0, source=self.SOURCE), [(self.SOURCE, refused_call(), NONE_HELD)]
+        )
+
+    def test_the_sources_that_hold_something_are_named_and_nothing_is_taken(self) -> None:
+        self.refuse(1000.0, source="host:quiet")  # its first refusal's event is written: nothing held
+        for source, started in (("host:over", 1000.0), ("host:running", 1030.0)):
+            self.refuse(started, source=source)
+            self.refuse(started + 1, source=source)
+
+        self.assertEqual(self.windows.sources_holding(now=1060.0), ["host:over"])
+        self.assertEqual(self.windows.sources_holding(), ["host:over", "host:running"])
+        self.assertEqual(len(self.windows.take_held()), 2)
+
+
+class ASweepCancelledInAWriteTests(unittest.IsolatedAsyncioTestCase):
+    """A sweep cancelled while it writes one source's event leaves the sources it had not come to as they were.
+
+    maintenance.shutdown() cancels a sweep that is under way, and the shutdown's own drain then writes what is held:
+    taken from every window before the first write, the counts of the sources not yet written were gone by then.
+    """
+
+    def setUp(self) -> None:
+        self.windows = TakeoverRefusalWindows()
+        for source in ("host:a", "host:b"):
+            for _ in range(4):  # the first refusal's event, and three that are only counted
+                self.windows.record(source, refused_call(f"s-{source[-1]}"), now=1000.0)
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+        self.written: list[tuple[str | None, dict]] = []
+        self.manager = SimpleNamespace(audit=SimpleNamespace(append=self.append))
+        patcher = patch("app.routes.sessions.time", Mock(monotonic=lambda: 2000.0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def append(self, **event) -> None:
+        if not self.entered.is_set():
+            self.entered.set()
+            await self.release.wait()  # the first append is held: until its caller is cancelled, or a test lets it go
+        self.written.append((event["session_id"], event["details"]))
+
+    def held(self) -> dict[str, int]:
+        return {source: window.counted for source, window in self.windows._windows.items()}
+
+    async def cancelled_in_its_first_append(self, *, finished_only: bool) -> None:
+        sweep = asyncio.ensure_future(
+            write_held_takeover_refusals(self.manager, self.windows, finished_only=finished_only)
+        )
+        await asyncio.wait_for(self.entered.wait(), timeout=5)
+        sweep.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await sweep
+
+    async def test_every_source_still_holds_what_it_held_and_the_shutdowns_drain_writes_it(self) -> None:
+        await self.cancelled_in_its_first_append(finished_only=True)  # the maintenance sweep
+
+        self.assertEqual(self.written, [])
+        self.assertEqual(self.held(), {"host:a": 3, "host:b": 3})
+
+        await write_held_takeover_refusals(self.manager, self.windows)  # the shutdown's own drain
+
+        counted = {"reason": "wrong takeover token", "count": 2}
+        self.assertEqual(self.written, [("s-a", counted), ("s-b", counted)])
+        self.assertEqual(self.held(), {"host:a": 0, "host:b": 0})
+
+    async def test_a_drain_of_every_window_that_is_cancelled_loses_nothing_either(self) -> None:
+        await self.cancelled_in_its_first_append(finished_only=False)
+
+        self.assertEqual(self.held(), {"host:a": 3, "host:b": 3})
+
+        await write_held_takeover_refusals(self.manager, self.windows, finished_only=True)
+
+        self.assertEqual([details.get("count") for _session, details in self.written], [2, 2])
+
+    async def test_a_source_that_opened_a_new_window_during_the_sweep_is_left_to_that_window(self) -> None:
+        sweep = asyncio.ensure_future(write_held_takeover_refusals(self.manager, self.windows, finished_only=True))
+        await asyncio.wait_for(self.entered.wait(), timeout=5)
+        # While host:a's event is written, host:b is refused again: that refusal's own event reports the three, and
+        # one more is counted in the window it opened, which is not over.
+        self.assertEqual(self.windows.record("host:b", refused_call("s-b"), now=2000.5), HeldBack(3, False))
+        self.assertIsNone(self.windows.record("host:b", refused_call("s-b"), now=2000.6))
+        self.release.set()
+
+        await sweep
+
+        self.assertEqual(self.written, [("s-a", {"reason": "wrong takeover token", "count": 2})])
+        self.assertEqual(self.held(), {"host:a": 0, "host:b": 1})
 
 
 class TakeoverRefusalWindowTests(_Isolated):
