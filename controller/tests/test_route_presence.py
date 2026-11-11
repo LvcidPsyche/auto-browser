@@ -31,7 +31,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import APIRouter, FastAPI, WebSocket
 from fastapi.testclient import TestClient
+from starlette.routing import BaseRoute, Mount, Route, WebSocketRoute
 
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="auto-browser-route-presence-"))
 atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
@@ -150,6 +152,65 @@ class RouteDispatchTests(unittest.TestCase):
                     404,
                     f"GET {path} returned 404 — the route is in the schema but does not dispatch.",
                 )
+
+
+def _websocket_routes(routes: list[BaseRoute]) -> list[str]:
+    """The path of every WebSocket route under ``routes``, however it is mounted, as its own router names it.
+
+    Into include_router's wrappers (FastAPI 0.137 and later: ``original_router``) and into mounts. A route of a kind
+    this walk cannot see inside fails it, so a FastAPI that changes the wrapper cannot leave the walk blind.
+    """
+    found: list[str] = []
+    for route in routes:
+        if isinstance(route, WebSocketRoute):
+            found.append(route.path)
+        elif isinstance(route, Route):  # APIRoute among them: HTTP only
+            continue
+        elif isinstance(route, Mount):
+            found.extend(f"{route.path}{path}" for path in _websocket_routes(route.routes))
+        elif hasattr(route, "original_router"):
+            found.extend(_websocket_routes(route.original_router.routes))
+        else:
+            raise AssertionError(f"cannot see inside a route of type {type(route).__name__}: teach _websocket_routes")
+    return found
+
+
+class WebSocketRouteTests(unittest.TestCase):
+    """The app serves no WebSocket route.
+
+    The token gate, the cross-site write rule, the loopback-only Host rule and the rate limiter are HTTP middleware
+    (BaseHTTPMiddleware), which passes a WebSocket scope through without looking at it: only the Host allowlist and
+    the session-network peer check see one. A WebSocket route would answer without the API token even on a
+    controller that has one.
+    """
+
+    def test_no_route_of_the_app_is_a_websocket_route(self) -> None:
+        found = _websocket_routes(main_module.app.routes)
+
+        self.assertEqual(
+            found,
+            [],
+            "the app serves a WebSocket route, and no credential check sees a WebSocket: the bearer-token gate, the "
+            "cross-site and loopback-only rules and the rate limiter are HTTP middleware, which pass it through. Give "
+            "the route its own credential check (the policy and match_credential the token gate uses, on the "
+            "handshake's headers) and its own Origin check, then change this test with it.",
+        )
+
+    def test_the_walk_finds_a_websocket_route_however_it_is_mounted(self) -> None:
+        async def stand_in(websocket: WebSocket) -> None:
+            await websocket.close()
+
+        application = FastAPI()
+        application.add_api_websocket_route("/direct", stand_in)
+        included = APIRouter()
+        included.add_api_websocket_route("/included", stand_in)
+        application.include_router(included, prefix="/router")
+        mounted = FastAPI()
+        mounted.add_api_websocket_route("/mounted", stand_in)
+        application.mount("/sub", mounted)
+
+        # An included router's routes are named as that router names them, without its prefix.
+        self.assertEqual(sorted(_websocket_routes(application.routes)), ["/direct", "/included", "/sub/mounted"])
 
 
 if __name__ == "__main__":
