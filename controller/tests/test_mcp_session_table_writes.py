@@ -30,9 +30,11 @@ LONE = "\ud800"
 # As a client that decoded its own name with surrogateescape sends it: in a value, in a key and below the top level.
 CLIENT_INFO = {"name": "client" + LONE, "version": "1", "build" + LONE: {"tags": ["a" + LONE]}}
 CAPABILITIES = {"roots": {"listChanged": True}, "experimental": {"x" + LONE: "y" + LONE}}
-# Objects inside one another: more than the table's writer goes down (it takes two frames a level, of the 1,000 the
-# interpreter allows by default), fewer than the request's parser refuses.
-TOO_DEEP_TO_WRITE = 600
+# Objects inside one another. How many levels the request's parser, the cleaner of what the client sent and the
+# table's writer each go down before the interpreter stops them (RecursionError) is the interpreter's own: on Python
+# 3.11 and 3.12 the writer stops short of 600 and the parser does not, and on 3.14 the 600 are written and 1,000 are
+# what stops short. So more than one depth, and no depth is expected to be refused or to be written.
+DEEP = (600, 1_000)
 REPLACEMENT = chr(0xFFFD)  # U+FFFD, by its number: the character itself in this file would read as a mistake
 
 
@@ -142,22 +144,32 @@ class McpSessionTableWriteTests(unittest.TestCase):
         after = self.assert_an_ordinary_answer(self.initialize())
         self.assertEqual([record["id"] for record in self.stored()], [kept, after])
 
-    def test_capabilities_nested_deeper_than_the_writer_goes_cost_their_own_initialize_alone(self) -> None:
-        # No mock: the table's writer gives up (RecursionError) on a depth the request's parser takes, so this
+    def test_capabilities_nested_deep_are_answered_or_cost_their_own_initialize_alone(self) -> None:
+        # No mock: where the table's writer gives up (RecursionError) on a depth the request's parser takes, the
         # session could not be written either, and it stopped every later initialize as the lone surrogate did.
-        kept = self.assert_an_ordinary_answer(self.initialize())
-        deep = '{"a":' * TOO_DEEP_TO_WRITE + "1" + "}" * TOO_DEEP_TO_WRITE
+        answered = [self.assert_an_ordinary_answer(self.initialize())]
         body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"%s","capabilities":%s}}'
+        for depth in DEEP:
+            with self.subTest(depth=depth):
+                deep = '{"a":' * depth + "1" + "}" * depth
 
-        refused = self.client.post(
-            "/mcp", content=(body % (PROTOCOL, deep)).encode("ascii"), headers={"content-type": "application/json"}
-        )
+                response = self.client.post(
+                    "/mcp",
+                    content=(body % (PROTOCOL, deep)).encode("ascii"),
+                    headers={"content-type": "application/json"},
+                )
 
-        self.assertGreaterEqual(refused.status_code, 400, refused.text[:200])
-        self.assertNotIn(MCP_SESSION_HEADER, refused.headers)
-        self.assertEqual(list(self.transport._sessions), [kept])
-        after = self.assert_an_ordinary_answer(self.initialize())
-        self.assertEqual([record["id"] for record in self.stored()], [kept, after])
+                if response.status_code == 200:
+                    # Answered: a session like any other, in the table and in the file.
+                    answered.append(self.assert_an_ordinary_answer(response))
+                else:
+                    # Refused: no session, and the table is what it was.
+                    self.assertGreaterEqual(response.status_code, 400, response.text[:200])
+                    self.assertNotIn(MCP_SESSION_HEADER, response.headers)
+                self.assertEqual(sorted(self.transport._sessions), sorted(answered))
+                # Either way no later initialize pays for it, and the file holds the sessions answered and no other.
+                answered.append(self.assert_an_ordinary_answer(self.initialize()))
+                self.assertEqual([record["id"] for record in self.stored()], answered)
 
 
 if __name__ == "__main__":

@@ -795,9 +795,10 @@ All notable changes to auto-browser are documented here.
   `500`, the session stayed in memory, and every later write of the file failed the same way. Each `initialize` by
   any client then answered `500`, as did `notifications/initialized` and `DELETE /mcp` for a session made before,
   until a restart. Any client that may call `POST /mcp` could send one, and a client that decodes its own name
-  with `surrogateescape` sends one by accident. Capabilities nested 600 objects deep did the same. A lone surrogate
-  is now stored as U+FFFD, and that `initialize` is answered as any other. A session whose first write fails, for
-  such a depth or for a full disk, is dropped before the error is answered: `500`, for that request alone.
+  with `surrogateescape` sends one by accident. Capabilities nested some hundreds of objects deep (600, on the
+  image's Python 3.11) did the same. A lone surrogate is now stored as U+FFFD, and that `initialize` is answered as
+  any other. A session whose first write fails, for such a depth or for a full disk, is dropped before the error is
+  answered: `500`, for that request alone.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
