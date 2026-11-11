@@ -834,7 +834,9 @@ All notable changes to auto-browser are documented here.
   `DELETE /sessions/{id}/network/hooks/{pattern}`, whose pattern is text, could not remove it. A list or an object
   answered `500`. Each now answers `422` and nothing is stored, and is refused before the session is looked for:
   with a session the controller does not know it answers `422` where it answered `404`. A missing, an empty or a
-  `null` pattern answers `422` `url_pattern required` as before.
+  `null` pattern answers `422` `url_pattern required` as before. A `false` or a `0` was answered so too, and
+  stored nothing: it is now refused as a `true` or a `5` is, so the `detail` of its `422` is a list that names
+  `body.url_pattern` where it was that text.
 - **One MCP `initialize` can no longer stop every later one.** The transport keeps the `clientInfo` and the
   `capabilities` of each MCP session, and writes all its sessions to one file at every `initialize`. A lone
   surrogate in either (JSON's `"\ud800"` reads as one) could not be written as UTF-8: the caller was answered
@@ -860,7 +862,8 @@ All notable changes to auto-browser are documented here.
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
   `browser.create_cron_job` created its job at once and stored it `fast`, and a run queued by
   `browser.queue_agent_run` kept the profile its request named. A call is now `governed` when either argument
-  says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before.
+  says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before (a `null` is
+  none: it reads as an argument left out).
 
 ### Changed
 

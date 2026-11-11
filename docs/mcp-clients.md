@@ -802,8 +802,9 @@ These three tools refuse a `workflow_profile` (or `policy_profile`) other than `
 every governed tool does, and create or queue nothing: read as `fast`, a mistyped value stored or queued
 `fast`. `policy_profile` is a second name for the same argument, for these tools and for every governed
 one: a call that gives both is `governed` when either says `governed`, and is refused when either holds
-another value. The two queue tools are not governed: their `tools/list` schema shows `workflow_profile`, with
-what it does there, and no `approval_id`, since queuing a run or step asks for no approval.
+another value (`null` reads as left out). The two queue tools are not governed: their `tools/list` schema
+shows `workflow_profile`, with what it does there, and no `approval_id`, since queuing a run or step asks
+for no approval.
 A job created through REST (`POST /crons`) stores the `workflow_profile` the request body names, `fast`
 by default. A job created before this release stores `fast`: it keeps running as `fast` unless
 `FORCE_GOVERNED_APPROVALS=true` (below). A job's profile is fixed when it is created (jobs cannot be
