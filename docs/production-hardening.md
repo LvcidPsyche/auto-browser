@@ -165,13 +165,17 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       `automated`, `telegram`, `google`, `microsoft`, `registration`, `2fa`, `mfa`, `alternate`, `alternative`.
       Two such words may be joined by a slash ("SMS/Email"). One of the words a label goes on with (the bullet
       before) may stand there too, and an address as a page shows the user's own: a name with an at sign after it,
-      or a number as a page masks one, made of digits, asterisks, bullets, the letter x and a phone number's marks
-      and nothing else ("j***@example.com", "+1 (***) ***-1234"); a count of seconds ("30s") too. A mark that is
-      no letter and no digit (an arrow, a tick) says nothing, here and anywhere in a label that Send opens ("Send
-      code →" runs; "Send code → John" asks). A word behind an at sign or a hash names somebody or a channel,
-      whatever the word. So "Send code to my phone" and "Send code to reset your password" run, and "Send code to
-      all users", "Send verification email to John", "Send code to team2", "Send code to #work" and "Send code to
-      verify payment" ask. An address written out in full ("Send code to pat@example.com") runs, whoever's it is.
+      which may be masked from its first character where a domain with a dot follows ("j***@example.com",
+      "***@gmail.com"), or a number as a page masks one, made of digits, asterisks, bullets, the letter x and a
+      phone number's marks and nothing else, each group of it with a digit, an asterisk, a bullet or two x in it
+      ("+1 (***) ***-1234", "(XXX) XXX-1234"); a count of seconds ("30s") too. A mark that is no letter and no
+      digit (an arrow, a tick) says nothing, here and anywhere in a label that Send opens ("Send code →" runs;
+      "Send code → John" asks). A word behind an at sign names somebody, whatever the word and whatever mark
+      stands before the sign ("@backup", "@1234", "-@backup"), and a word behind a hash names a channel unless it
+      is such a number ("#work" asks, "phone #1234" runs). So "Send code to my phone" and "Send code to reset your
+      password" run, and "Send code to all users", "Send verification email to John", "Send code to team2", "Send
+      code to #work" and "Send code to verify payment" ask. An address written out in full ("Send code to
+      pat@example.com") runs, whoever's it is.
     - A line of the label that stops on one of these words is not its end: `to`, `via`, `by`, `through`, `using`,
       `in`, `on`, `the`, `a`, `an`, `my`, `your`, `this`, `and`, `or`, `at`, `with`, `of`, `for`, `into`. The line
       after it is read with it, whatever that line opens with, so "Send code to" over "all users in the

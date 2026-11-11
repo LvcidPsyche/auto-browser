@@ -249,6 +249,17 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code to #work"),
         ("post", "Send code to @backup"),
         ("post", "Send code to (@backup)"),
+        # A mention is one behind any mark, and whatever the word behind the at sign: a number is no address
+        # there, and a mask before an at sign makes one only of a name with a domain.
+        ("post", "Send code to @1234"),
+        ("post", "Send code to @x2"),
+        ("post", "Send code to -@backup"),
+        ("post", "Send code to *@backup"),
+        ("post", "Send code to **@backup**"),
+        ("post", "Send code to (*@backup)"),
+        ("post", "Send code to \u2022@backup"),
+        ("post", "Send code to #work2"),
+        ("post", "Send code to x"),
         # A mark says nothing, so it hides nothing either: the words beside it are read as they stand.
         ("post", "Send code \u2192 to all users"),
         ("post", "Send code \u2192 John"),
@@ -371,6 +382,17 @@ class LabelRulesTests(unittest.TestCase):
         "Send code to (555) 555-0199",
         "Send code to number ending 1234.",
         "Send code to phone #1234",
+        "Send code to #1234",
+        # A name masked from its first character before a domain, a mask of x in groups, an address in
+        # brackets.
+        "Send code to ***@gmail.com",
+        "Send code to \u2022\u2022\u2022\u2022\u2022\u2022@gmail.com",
+        "Send code to *****@e******.com",
+        "Send code to email ***@gmail.com",
+        "Send code to (XXX) XXX-1234",
+        "Send code to XXX XXX 1234",
+        "Send code to (j***@example.com)",
+        "Send code to email (***@gmail.com).",
         "Send code to *my* phone",
         # What a sign-in page says every day, and a mark after it.
         "Send code to my phone \u2192",

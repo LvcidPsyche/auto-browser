@@ -403,17 +403,20 @@ _SIGN_IN_SEND = re.compile(
 )
 # An address as a page shows the user's own: a name with an at sign after it, or a number as a page masks one,
 # made of digits, asterisks, bullets, x and a phone number's marks and nothing else ("j***@example.com", "+1",
-# "***-1234", "#1234"), or a count of seconds ("30s"). Any token with a digit or an asterisk in it passed for
-# one, so "Send code to team2" and "Send code to *everyone*" ran. "@channel" is none.
+# "***-1234"), or a count of seconds ("30s"). Any token with a digit or an asterisk in it passed for one, so
+# "Send code to team2" and "Send code to *everyone*" ran. "@channel" is none. A name may be masked from its
+# first character where a domain with a dot follows ("***@gmail.com" asked; "*@backup" is a mention behind a
+# mark), and a group of a masked number may be x alone, two of them or more ("(XXX) XXX-1234" asked).
 _MASKED = r"\dx*\u2022\u25cf\u00b7+().:\-"
-_SEND_ADDRESS = re.compile(rf"\w[^\s@]*@\S+|#?[{_MASKED}]*[\d*\u2022\u25cf\u00b7][{_MASKED}]*|\d+s")
-# What a token opens with when it names somebody or a channel ("@backup", "#work"): the word behind the mark is
-# then a name, though it is a word of the list.
-_NAMES_SOMEBODY = ("@", "#")
-_OPENING_MARKS = "([{<\"'\u201c\u2018"
+_MASK = r"*\u2022\u25cf\u00b7"
+_SEND_ADDRESS = re.compile(rf"\w[^\s@]*@\S+|[{_MASK}][^\s@]*@\S+\.\S+|[{_MASKED}]*(?:[\d{_MASK}]|xx)[{_MASKED}]*|\d+s")
 _SEND_GOES_ON_WITH = frozenset(SEND_TAIL_WORDS) | frozenset(SEND_DESTINATION_WORDS)
 # What may stand around a word without being part of it: "phone.", "(sms)".
 _AROUND_A_WORD = string.punctuation + "\u2026\u201c\u201d\u2018\u2019"
+# The marks a mention or a channel may stand behind ("(@backup)", "-@backup"): any of those but its own.
+_BEFORE_A_NAME = "".join(mark for mark in _AROUND_A_WORD if mark not in "@#")
+# And around an address: those but an asterisk, which masks a name from its first character ("(***@a.com)").
+_AROUND_AN_ADDRESS = _BEFORE_A_NAME.replace("*", "")
 _LEADING_SYMBOLS = re.compile(r"^[^\w]+")
 # Characters that show nothing and would split a word from the table's: Unicode's format characters (zero-width
 # space, joiner and non-joiner, word joiner, byte order mark, soft hyphen, the marks and isolates that set a text's
@@ -703,9 +706,16 @@ def _says_only_where_it_goes(rest: str) -> bool:
         # A token with no letter and no digit says nothing: an arrow, a tick, a dash, a mask alone.
         if not any(char.isalnum() for char in word):
             continue
-        if _SEND_ADDRESS.fullmatch(token) or _SEND_ADDRESS.fullmatch(word):
+        if _SEND_ADDRESS.fullmatch(token) or _SEND_ADDRESS.fullmatch(token.strip(_AROUND_AN_ADDRESS)):
             continue
-        if token.lstrip(_OPENING_MARKS).startswith(_NAMES_SOMEBODY) or word not in _SEND_GOES_ON_WITH:
+        # A mention or a channel, behind whatever marks: the word behind the sign is a name, though it is a
+        # word of the list. Looked for before the word inside the marks is tried as a number, which made a
+        # number of "@1234", and behind any mark, not an opening one only: "-@backup" was the word "backup".
+        # A hash before a number is that number ("phone #1234").
+        behind = token.lstrip(_BEFORE_A_NAME)
+        if behind.startswith("@") or (behind.startswith("#") and not _SEND_ADDRESS.fullmatch(word)):
+            return False
+        if not _SEND_ADDRESS.fullmatch(word) and word not in _SEND_GOES_ON_WITH:
             return False
     return True
 
