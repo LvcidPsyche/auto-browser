@@ -113,6 +113,10 @@ NAMED_BESIDE = """<title>start</title>
 <svg id="svg" role="button" tabindex="0" width="120" height="40" onclick="document.title='PRESSED'"><rect
   width="120" height="40" fill="#ddd"/><text x="8" y="24">Remove member</text></svg>
 <button id="plain" title="Close this panel" onclick="document.title='CLOSED'">&#10005;</button>
+<button id="html-named" onclick="document.title='OPENED'"><title>Delete account</title><text>Open</text></button>
+<svg id="fifth" role="button" tabindex="0" width="120" height="90" onclick="document.title='DRAWN'"><rect
+  width="120" height="90" fill="#ddd"/><text x="8" y="15">Q1</text><text x="8" y="30">Q2</text><text x="8"
+  y="45">Q3</text><text x="8" y="60">Q4</text><text x="8" y="75">Delete account</text></svg>
 <script>
 document.getElementById('text').attachShadow({mode: 'open'}).innerHTML = `<span>Delete account</span>`;
 </script>
@@ -591,6 +595,14 @@ async def test_a_button_named_by_a_title_or_by_what_is_inside_it_is_read_by_that
         await env.manager.execute_decision(session_id, _click("read", selector="#plain"))
         assert await _title(env, session_id) == "CLOSED"
 
+        # Those names are an SVG's own. An HTML element called title is no name: it is not shown, and what one
+        # called text shows is in innerText. And the first four are read, as the docs say, however many an
+        # SVG holds: a chart that is a button has a text for every tick.
+        await env.manager.execute_decision(session_id, _click("read", selector="#html-named"))
+        assert await _title(env, session_id) == "OPENED"
+        await env.manager.execute_decision(session_id, _click("read", selector="#fifth"))
+        assert await _title(env, session_id) == "DRAWN"
+
 
 async def test_a_point_inside_a_frame_of_another_origin_is_not_read(tmp_path: Path) -> None:
     async with browser_env(tmp_path, {"/": FRAMES}) as env:
@@ -811,9 +823,9 @@ async def test_a_click_that_names_the_wrapper_of_a_button_asks_at_the_press(tmp_
         assert await _title(env, session_id) == "DELETED"
 
 
-@pytest.mark.parametrize("wrapper", ["#wide", "#pieces"])
+@pytest.mark.parametrize(("wrapper", "pressed"), [("#wide", "DELETED"), ("#pieces", "REMOVED")])
 async def test_a_wrapper_whose_middle_is_not_where_its_click_lands_asks_at_the_press(
-    tmp_path: Path, wrapper: str
+    tmp_path: Path, wrapper: str, pressed: str
 ) -> None:
     # The human-like press aims at the middle of the element's box, and where the element is not what is there the
     # click went to Playwright's own, which picks its own point: the read was made at the middle (off the screen,
@@ -839,12 +851,12 @@ async def test_a_wrapper_whose_middle_is_not_where_its_click_lands_asks_at_the_p
         await env.manager.execute_decision(
             session_id, _click("read", selector=wrapper), approval_id=asked.value.approval.id
         )
-        assert await _title(env, session_id) in ("DELETED", "REMOVED")
+        assert await _title(env, session_id) == pressed
 
         # The click route, which reads nothing, still clicks as Playwright places it.
         await page.evaluate("document.title = 'start'")
         await env.manager.click(session_id, selector=wrapper)
-        assert await _title(env, session_id) in ("DELETED", "REMOVED")
+        assert await _title(env, session_id) == pressed
 
 
 async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_own_does(tmp_path: Path) -> None:
@@ -866,6 +878,35 @@ async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_
         await page.evaluate("document.title = 'start'")
         await env.manager.click(session_id, selector="#card")
         assert await _title(env, session_id) == "OPENED"
+
+
+async def test_a_target_the_page_hides_once_its_checks_have_passed_is_told_it_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Between Playwright's checks and the read of its place a page can take the target away. Hidden then, it has
+    # no box and nothing inside it to name: the click presses nothing and says the target moved (retryable),
+    # where it said "Name an element inside it". A page cannot be timed to hide it between two of the
+    # controller's steps, so the step before does it here, once its real checks have passed.
+    real = actions_module.BrowserActionService._checks_of_a_click
+    calls = 0
+
+    async def checks_then_the_page_hides_it(locator: Any, *, timeout_ms: float | None = None) -> None:
+        nonlocal calls
+        calls += 1
+        await real(locator, timeout_ms=timeout_ms)
+        if calls == 2:  # the placed click's own checks; the first are the human-like press's
+            await locator.evaluate("(el) => { el.hidden = true }")
+
+    monkeypatch.setattr(
+        actions_module.BrowserActionService, "_checks_of_a_click", staticmethod(checks_then_the_page_hides_it)
+    )
+    async with browser_env(tmp_path, {"/": PAST_THE_MIDDLE}) as env:
+        session_id = await env.create("/")
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector="#wide"))
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        assert calls == 2
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_wrapper_covered_at_its_middle_asks_at_the_press(tmp_path: Path) -> None:
