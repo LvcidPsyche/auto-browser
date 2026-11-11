@@ -85,6 +85,15 @@ class RefusalLogWindows:
 # Server.shutdown); a test fails if the installed uvicorn no longer says it.
 UVICORN_SHUTDOWN_CANCEL = "Task cancelled, timeout graceful shutdown exceeded"
 _CANCEL_CHAIN_MAX = 16
+# How long a stream's closing chunk waits for a client that is not reading: uvicorn's send waits there, without limit,
+# for the transport's buffer to drain. uvicorn has by then waited its whole limit for the stream, and it does not
+# wait for the tasks it cancels: it runs the lifespan's shutdown next, and when that returns its loop ends and
+# cancels what is left, with no message. A client that reads takes the chunk at once. One whose buffer is still full
+# gets this second more, so its task and its connection do not stay for the whole cleanup (up to the stop's grace);
+# a cleanup shorter than that ends the loop inside the wait, and that cancel is ended quietly as well. Either way the
+# body is left unfinished and the layer returns: uvicorn closes the connection, with one ERROR line and no traceback
+# ("ASGI callable returned without completing response.").
+STREAM_CLOSING_SEND_SECONDS = 1.0
 
 
 def _is_uvicorns_shutdown_cancel(cancelled: BaseException | None) -> bool:
@@ -119,7 +128,8 @@ class EventStreamShutdownMiddleware:
     while the app is still in its cleanup, is sent nothing more: a second last chunk is one a strict server refuses.
     A client that has gone when the closing chunk is sent (an OSError from the server's send) has nobody to end the
     body for: that is said in the one line and raised no further, or the quiet stop is a traceback again. Any other
-    error of that send is the server's refusal of the chunk, and is raised.
+    error of that send is the server's refusal of the chunk, and is raised. A client that is there and does not read
+    is waited for STREAM_CLOSING_SEND_SECONDS and no longer, and the line says "ended" only once the chunk is out.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -150,8 +160,24 @@ class EventStreamShutdownMiddleware:
             if ended:
                 logger.info("the event stream on %r had ended and was still closing at the shutdown limit", path)
                 return
+            closing: Message = {"type": "http.response.body", "body": b"", "more_body": False}
             try:
-                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                await asyncio.wait_for(send(closing), STREAM_CLOSING_SEND_SECONDS)
+            except asyncio.TimeoutError:  # ahead of OSError, which it is a kind of
+                logger.info(
+                    "the event stream on %r was still open at the shutdown limit, and its client took nothing more "
+                    "in %g s: left unfinished",
+                    path,
+                    STREAM_CLOSING_SEND_SECONDS,
+                )
+            except asyncio.CancelledError:
+                # The loop's own cancel at its end (see STREAM_CLOSING_SEND_SECONDS). Nothing is left to stop here
+                # but this wait, and it has stopped: raised, the cancel would be uvicorn's traceback after all.
+                logger.info(
+                    "the event stream on %r was still open at the shutdown limit, and was cancelled again before "
+                    "its client took anything more: left unfinished",
+                    path,
+                )
             except OSError as gone:
                 logger.info(
                     "the event stream on %r was still open at the shutdown limit, and its client had gone (%s)",

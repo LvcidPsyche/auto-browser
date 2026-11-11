@@ -648,8 +648,11 @@ one open always waits the 5 seconds. The log then shows uvicorn's
 `Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR, and one INFO line from the controller for
 each stream it ended (`the event stream on '/mcp' was still open at the shutdown limit: ended`). That is a normal
 stop, not a crash: the stream's body is finished and its connection closed, and a client can open it again when
-the controller is back. A call still running at the limit is cancelled too, and for that one uvicorn logs
-`Exception in ASGI application` with a traceback that ends in `CancelledError`.
+the controller is back. A client that is still connected and has stopped reading cannot be sent the end of the body:
+the controller waits one second for it, logs that the stream was `left unfinished`, and uvicorn closes the
+connection with `ASGI callable returned without completing response.` at ERROR. A call still running at the limit
+is cancelled too, and for that one uvicorn logs `Exception in ASGI application` with a traceback that ends in
+`CancelledError`.
 
 If you start uvicorn yourself (your own image or command, a process manager), give it the limit too, in seconds and
 well under what your supervisor waits before it kills the process:

@@ -146,9 +146,19 @@ def _uvicorn_internals_missing() -> str | None:
     return None
 
 
+def _httptools_missing() -> str | None:
+    """Why uvicorn's httptools protocol cannot be driven here, or None."""
+    try:
+        from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol  # noqa: F401
+    except ImportError as missing:
+        return f"uvicorn has no httptools protocol class here ({missing})"
+    return _uvicorn_internals_missing()
+
+
 @unittest.skipIf(_uvicorn_internals_missing() is not None, _uvicorn_internals_missing() or "")
 class AnOpenStreamDoesNotHoldTheShutdownTests(unittest.IsolatedAsyncioTestCase):
     LIMIT_SECONDS = 0.5
+    HTTP = "h11"
 
     async def asyncSetUp(self) -> None:
         import app.main as main
@@ -159,7 +169,7 @@ class AnOpenStreamDoesNotHoldTheShutdownTests(unittest.IsolatedAsyncioTestCase):
         session.start()
         self.addCleanup(session.stop)
         # log_config=None: uvicorn's own logging setup would stay behind for the rest of the test run.
-        config = uvicorn.Config(app=main.app, lifespan="off", http="h11", log_config=None)
+        config = uvicorn.Config(app=main.app, lifespan="off", http=self.HTTP, log_config=None)
         config.load()
         self.config = config
         self.server = uvicorn.Server(config)
@@ -167,9 +177,7 @@ class AnOpenStreamDoesNotHoldTheShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.server.lifespan = _Lifespan()
 
     def connect(self) -> tuple[Any, _Transport]:
-        from uvicorn.protocols.http.h11_impl import H11Protocol
-
-        protocol = H11Protocol(self.config, self.server.server_state, {})
+        protocol = self.config.http_protocol_class(self.config, self.server.server_state, {})
         transport = _Transport()
         transport.protocol = protocol
         protocol.connection_made(transport)
@@ -273,6 +281,61 @@ class AnOpenStreamDoesNotHoldTheShutdownTests(unittest.IsolatedAsyncioTestCase):
         # The app tells uvicorn's shutdown cancel from any other by its message, which is uvicorn's own text.
         self.assertIn(UVICORN_SHUTDOWN_CANCEL, inspect.getsource(uvicorn.Server.shutdown))
 
+    async def test_a_client_that_has_stopped_reading_keeps_no_task_or_connection_past_the_closing_wait(self) -> None:
+        # uvicorn's send waits for a full buffer to drain before it writes. The closing chunk waited there without
+        # limit: the task and the connection stayed, and the loop's own cancel at its end was logged as a crash.
+        streams = await self.open_streams()
+        for connection in list(self.server.server_state.connections):
+            connection.pause_writing()  # what asyncio calls when a transport's buffer passes its high-water mark
+        self.config.timeout_graceful_shutdown = self.LIMIT_SECONDS
+
+        with (
+            patch("app.middleware.http.STREAM_CLOSING_SEND_SECONDS", 0.2, create=True),
+            self.assertLogs("uvicorn.error", level="INFO") as server_log,
+            self.assertLogs("app.middleware.http", level="INFO") as ended,
+        ):
+            await asyncio.wait_for(self.server.shutdown(), 10)
+            for _ in range(150):
+                if not self.server.server_state.tasks and not self.server.server_state.connections:
+                    break
+                await asyncio.sleep(0.02)
+            left = list(self.server.server_state.tasks)
+            for task in left:  # not left running for the next test, whatever this one finds
+                task.cancel()
+            await asyncio.sleep(0.05)
+
+        self.assertEqual(left, [], "a stream's task still waits for a client that does not read")
+        self.assertEqual(len(self.server.server_state.connections), 0)
+        # No traceback. The body could not be ended, and uvicorn says so in a line of its own as it closes each.
+        self.assertEqual([record for record in server_log.records if record.exc_info], [])
+        errors = [record.getMessage() for record in server_log.records if record.levelno >= logging.ERROR]
+        self.assertEqual(
+            errors,
+            ["Cancel 2 running task(s), timeout graceful shutdown exceeded"]
+            + ["ASGI callable returned without completing response."] * 2,
+        )
+        self.assertEqual([record.levelname for record in ended.records], ["INFO", "INFO"], ended.output)
+        for record in ended.records:
+            self.assertIn("left unfinished", record.getMessage())
+        for transport in streams:
+            self.assertFalse(bytes(transport.written).endswith(b"0\r\n\r\n"))
+            self.assertTrue(transport.closed)
+
+
+@unittest.skipIf(_httptools_missing() is not None, _httptools_missing() or "")
+class AnOpenStreamDoesNotHoldTheShutdownOverHttptoolsTests(AnOpenStreamDoesNotHoldTheShutdownTests):
+    """The same over the protocol class the image runs: uvicorn[standard] installs httptools, and uvicorn takes it."""
+
+    HTTP = "httptools"
+
+    async def test_this_class_drives_the_httptools_protocol(self) -> None:
+        from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
+
+        protocol, transport = self.connect()
+        self.assertIsInstance(protocol, HttpToolsProtocol)
+        transport.close()
+        await asyncio.sleep(0.02)
+
 
 class OnlyUvicornsShutdownCancelIsEndedQuietlyTests(unittest.IsolatedAsyncioTestCase):
     """The layer itself, with no server: what it ends, and what it leaves to propagate."""
@@ -309,8 +372,44 @@ class OnlyUvicornsShutdownCancelIsEndedQuietlyTests(unittest.IsolatedAsyncioTest
                 await self.run_stream(content_type=b"text/event-stream", cancel_message=message)
 
     async def test_a_response_that_is_no_event_stream_propagates_the_shutdown_cancel(self) -> None:
+        # text/plain and text/html: another text type is no event stream either.
+        for content_type in (b"application/json", b"text/plain; charset=utf-8", b"text/html", b""):
+            with self.subTest(content_type=content_type), self.assertRaises(asyncio.CancelledError):
+                await self.run_stream(content_type=content_type, cancel_message=UVICORN_SHUTDOWN_CANCEL)
+
+    async def test_a_bare_cancellation_raised_while_uvicorns_unwinds_is_still_uvicorns(self) -> None:
+        # What a task group cancelled from outside raises on its way out: a CancelledError of its own, with the one
+        # that cancelled it behind it. Two groups deep here.
+        sent: list[dict] = []
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            await send(self.START)
+            try:
+                try:
+                    raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)
+                except asyncio.CancelledError:
+                    raise asyncio.CancelledError("Cancelled by cancel scope 1f3")
+            except asyncio.CancelledError:
+                raise asyncio.CancelledError
+
+        with self.assertLogs("app.middleware.http", level="INFO"):
+            await self.run_app(downstream, send)
+
+        self.assertEqual(sent, [self.START, self.LAST])
+
+    async def test_a_bare_cancellation_raised_over_another_error_propagates(self) -> None:
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            await send(self.START)
+            try:
+                raise ValueError(UVICORN_SHUTDOWN_CANCEL)  # the text alone, in an error that is no cancellation
+            except ValueError:
+                raise asyncio.CancelledError
+
         with self.assertRaises(asyncio.CancelledError):
-            await self.run_stream(content_type=b"application/json", cancel_message=UVICORN_SHUTDOWN_CANCEL)
+            await self.run_app(downstream, AsyncMock())
 
     async def test_a_stream_cancelled_before_its_response_started_propagates(self) -> None:
         with self.assertRaises(asyncio.CancelledError):
@@ -407,6 +506,70 @@ class OnlyUvicornsShutdownCancelIsEndedQuietlyTests(unittest.IsolatedAsyncioTest
                 self.assertEqual([record.levelname for record in logged.records], ["INFO"])
                 self.assertIsNone(logged.records[0].exc_info)
                 self.assertIn(type(gone).__name__, logged.records[0].getMessage())
+
+    def stalled(self, sent: list[dict], entered: asyncio.Event, outcome: list[str]) -> Any:
+        """A send whose closing chunk waits for a client that never reads, and the app that is cancelled over it."""
+
+        async def send(message: dict) -> None:
+            if message == self.LAST:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()  # the transport's buffer never drains
+                except asyncio.CancelledError:
+                    outcome.append("the waiting send was cancelled")
+                    raise
+            sent.append(message)
+
+        async def downstream(scope: dict, receive: Any, send: Any) -> None:
+            await send(self.START)
+            await send(self.CHUNK)
+            raise asyncio.CancelledError(UVICORN_SHUTDOWN_CANCEL)
+
+        return downstream, send
+
+    async def test_the_closing_chunk_waits_only_so_long_for_a_client_that_does_not_read(self) -> None:
+        sent: list[dict] = []
+        outcome: list[str] = []
+        downstream, send = self.stalled(sent, asyncio.Event(), outcome)
+
+        with (
+            patch("app.middleware.http.STREAM_CLOSING_SEND_SECONDS", 0.05, create=True),
+            self.assertLogs("app.middleware.http", level="INFO") as logged,
+        ):
+            await asyncio.wait_for(self.run_app(downstream, send), 5)
+
+        self.assertEqual(sent, [self.START, self.CHUNK])
+        self.assertEqual(outcome, ["the waiting send was cancelled"])
+        self.assertEqual([record.levelname for record in logged.records], ["INFO"])
+        self.assertIn("left unfinished", logged.records[0].getMessage())
+        self.assertIsNone(logged.records[0].exc_info)
+
+    async def test_the_loops_own_cancel_during_that_wait_ends_the_stream_with_no_error(self) -> None:
+        # uvicorn does not wait for the tasks it cancels: a short cleanup ends the loop inside the closing wait, and
+        # the loop cancels what is left with no message. Raised from here, that was the traceback again.
+        sent: list[dict] = []
+        outcome: list[str] = []
+        entered = asyncio.Event()
+        downstream, send = self.stalled(sent, entered, outcome)
+
+        with self.assertLogs("app.middleware.http", level="INFO") as logged:
+            running = asyncio.ensure_future(self.run_app(downstream, send))
+            await asyncio.wait_for(entered.wait(), 5)
+            running.cancel()
+            await asyncio.wait({running}, timeout=5)
+
+        self.assertTrue(running.done())
+        self.assertFalse(running.cancelled())
+        self.assertIsNone(running.exception())
+        self.assertEqual(outcome, ["the waiting send was cancelled"])
+        self.assertEqual([record.levelname for record in logged.records], ["INFO"])
+        self.assertIn("left unfinished", logged.records[0].getMessage())
+
+    def test_the_closing_wait_is_short_beside_the_cleanup_it_runs_beside(self) -> None:
+        from app.middleware.http import STREAM_CLOSING_SEND_SECONDS
+
+        self.assertGreater(STREAM_CLOSING_SEND_SECONDS, 0)
+        self.assertLessEqual(STREAM_CLOSING_SEND_SECONDS, 2)
 
     async def test_any_other_failure_of_the_closing_chunk_is_raised(self) -> None:
         # A server that refuses the chunk says this layer misread the response: that is not a client that left.
