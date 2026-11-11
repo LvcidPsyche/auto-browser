@@ -426,7 +426,8 @@ All notable changes to auto-browser are documented here.
   controller presses itself, the point is taken on what the screen shows of the element (also through a frame that
   runs off the screen, or one CSS draws at another size), and the frames are asked again where the press goes
   down. One limit is Playwright's: it does not look through a frame that CSS transforms, so its own click, which a
-  click that is not read still is, presses what the page has put over such a frame. Older than this release.
+  click that is not read still is, presses what the page has put over such a frame, or has beside it where the
+  element is larger than the frame shows, and ends as done. Older than this release.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
