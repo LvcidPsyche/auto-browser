@@ -16,7 +16,7 @@ from .auth_policy import (
     tokenless_loopback_allowed,
 )
 from .config import Settings
-from .providers.base import BaseProviderAdapter
+from .providers.base import BaseProviderAdapter, auth_mode_shown
 from .url_safety import refuse_ambiguous_host
 
 
@@ -33,10 +33,6 @@ class RuntimePolicyReport:
 # Production floor for API_BEARER_TOKEN. "Required" alone was satisfied by
 # API_BEARER_TOKEN=x, which is not meaningfully different from no token.
 MIN_PRODUCTION_BEARER_TOKEN_LENGTH = 32
-
-# An invalid *_AUTH_MODE is quoted in the error up to this length. The longest mode is "host_bridge": a longer value
-# is no mistyped mode, and may be the provider's API key set on the wrong line, which a refused start would log.
-MAX_AUTH_MODE_QUOTED = 16
 
 # An entry of APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS with this many characters in a row of a bearer token of the
 # deployment is taken for the token, or a part of it, and is not printed. Eight: a quarter of the shortest token
@@ -94,10 +90,9 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         auth_mode = (getattr(settings, auth_mode_attr.lower()) or "").strip().lower()
         if auth_mode not in allowed_modes:
             supported = ", ".join(sorted(allowed_modes))
-            shown = f"={auth_mode or '<empty>'}"
-            if len(auth_mode) > MAX_AUTH_MODE_QUOTED:
-                shown = f" (a value of {len(auth_mode)} characters, not printed)"
-            report.errors.append(f"{auth_mode_attr}{shown} is invalid; expected one of: {supported}")
+            # A refused start logs this: a value too long to be a mode is not printed (auth_mode_shown).
+            shown = auth_mode_shown(auth_mode) or "<empty>"
+            report.errors.append(f"{auth_mode_attr}={shown} is invalid; expected one of: {supported}")
             continue
 
         if auth_mode == "api":

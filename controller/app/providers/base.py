@@ -42,6 +42,24 @@ PAGE_DATA_NOTICE = (
 
 DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
 
+# A *_AUTH_MODE that is no mode is quoted up to this length. The longest mode is "host_bridge": a longer value is
+# no mistyped mode, and may be the provider's API key set on the wrong line (.env.example has each mode a few
+# lines under its key).
+MAX_AUTH_MODE_QUOTED = 16
+
+
+def auth_mode_shown(value: str) -> str:
+    """A provider's auth mode as anything shows it: the value, or past MAX_AUTH_MODE_QUOTED its length alone.
+
+    For every place the value leaves the controller: a refused start's error (the log), the provider's readiness
+    detail and its auth_mode in GET /agent/providers and browser.list_providers, and the error of a step that
+    names the provider. A mode and a mistyped short one are named, an empty one is empty.
+    """
+    if len(value) > MAX_AUTH_MODE_QUOTED:
+        return f"<a value of {len(value)} characters, not printed>"
+    return value
+
+
 # What a provider CLI child may inherit from the controller: what any program needs to run, and to reach
 # the network through a proxy. Everything else (the controller's own tokens, other providers' keys, Stripe
 # and so on) stays out; each adapter adds the few variables its own CLI reads, and
@@ -563,7 +581,7 @@ class BaseProviderAdapter(ABC):
         return value in self.supported_auth_modes
 
     def invalid_auth_mode_detail(self, value: str) -> str:
-        value_label = value or "<empty>"
+        value_label = auth_mode_shown(value) or "<empty>"
         supported = ", ".join(self.supported_auth_modes)
         return f"{self.provider} auth mode '{value_label}' is invalid; expected one of: {supported}"
 
