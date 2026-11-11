@@ -248,6 +248,11 @@ class LabelRulesTests(unittest.TestCase):
         # The everyday words name no one: beside a word that does, the label still asks.
         ("post", "Send code to all trusted users"),
         ("post", "Send code to the same people \u2192"),
+        # Past 40 characters a label is read line by line, and "Send code" alone is a sign-in button's name:
+        # a next line that opens with "to", "via" and the like goes on with where the code is sent.
+        ("post", "Send code\nto all users in the organization"),
+        ("post", "Send verification code\nvia the group chat for everyone"),
+        ("post", "Send me a login link\nTo: the whole engineering team"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -357,6 +362,10 @@ class LabelRulesTests(unittest.TestCase):
         "Send code to my linked email",
         "Send code to the address above",
         "Send code by push notification",
+        # The same over two lines, and a name over a sentence about it.
+        "Send code\nto the phone number ending in 1234 to continue",
+        "Send code\nWe will text a code to the number we have on file",
+        "Send code\nYou will get it within a minute or two",
         "Send magic link to my inbox",
         "Send code to reset your password",
         "Send code to verify my email",

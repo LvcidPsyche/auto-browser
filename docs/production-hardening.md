@@ -172,13 +172,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
     of over 40 characters is a sentence, not a name, and is not matched, and the page hands over the first 400
     characters of each name. A line the table matches is let go when the label from that line on is one of the
-    harmless continuations, however the page breaks it ("Remove" over "filter"). Case and spacing do not count;
-    characters that show nothing (zero-width ones, soft hyphens, the marks that set a text's direction) are
-    removed; up to two leading tokens that are a number, a mark or an icon font's ligature name are skipped
-    ("1 Delete", "credit_card Pay now"), and a label that is one ligature name is read with its underscores as
-    spaces ("delete_forever"; one with a dot is a file's name, "delete_me.txt"); a hyphen goes on with its word
-    ("Pay-as-you-go" is not "Pay"; a dash does not, so "Pay – as you go" asks); the comma of `Yes, delete` may be
-    missing.
+    harmless continuations, however the page breaks it ("Remove" over "filter"), and when the line by itself is
+    one ("Send code" over a sentence about it), unless it is one of Send's and the next line opens with a word a
+    label goes on with: "Send code" over "to all users in the organization" asks, and the same label on one line,
+    which is past 40 characters, is not read. Case and spacing do not count; characters that show nothing
+    (zero-width ones, soft hyphens, the marks that set a text's direction) are removed; up to two leading tokens
+    that are a number, a mark or an icon font's ligature name are skipped ("1 Delete", "credit_card Pay now"), and
+    a label that is one ligature name is read with its underscores as spaces ("delete_forever"; one with a dot is
+    a file's name, "delete_me.txt"); a hyphen goes on with its word ("Pay-as-you-go" is not "Pay"; a dash does
+    not, so "Pay – as you go" asks); the comma of `Yes, delete` may be missing.
   - An icon font's name of one word stands on the label's line as a word in lower case ("payment Pay now",
     "warning Delete account"). So where one or two such words lead up to a capitalised one, the line is read
     from that one too, and asks when either reading does: "delete Remove filter" and "send Send code" ask,

@@ -589,17 +589,28 @@ def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
     """The kind a line asks for; ``rest`` is what the label goes on with after it, case folded.
 
     Each reading of the line (_readings) is matched by itself, and one that is a harmless continuation, alone or
-    with the rest of the label, asks nothing.
+    with the rest of the label, asks nothing. Alone only where the rest does not go on with it: "Send code" over
+    "to all users in the organization" is one sentence, too long to be read whole, and its first line alone
+    let it go.
     """
     if not shown or len(shown) > MAX_LABEL_CHARS:
         return None
     for reading in _readings(shown):
-        if _asks_nothing(reading) or (rest and _asks_nothing(f"{reading} {rest}")):
+        if rest and _asks_nothing(f"{reading} {rest}"):
+            continue
+        if _asks_nothing(reading) and not _send_goes_on(reading, rest):
             continue
         for kind, pattern in _PHRASE_PATTERNS.items():
             if pattern.match(reading):
                 return kind
     return None
+
+
+def _send_goes_on(reading: str, rest: str) -> bool:
+    """Whether ``rest``, the lines after a way to sign in that Send sends, opens with one of Send's tail words."""
+    if not rest or _SIGN_IN_SEND.match(reading) is None:
+        return False
+    return rest.split(maxsplit=1)[0].strip(_AROUND_A_WORD) in SEND_TAIL_WORDS
 
 
 def _says_only_where_it_goes(rest: str) -> bool:
