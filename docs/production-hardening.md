@@ -294,8 +294,10 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     picker button named by its field's `label` ("Transfer to", "Delete after", "Publish date"), and a button
     inside a `label` that says more ("Delete account?" beside its `Cancel`). And where an icon font's name is a
     phrase of the table on a button that does something else: Material's `remove` is the minus of a quantity
-    stepper, `remove_red_eye` an eye, `publish` an upload arrow. An agent run unattended stops at each of these
-    until somebody approves.
+    stepper, `remove_red_eye` an eye, `publish` an upload arrow. And a short note under a sign-in button, which
+    on one line with the label is no longer than a name would be: "Send code to my phone" over "Rates may apply"
+    asks (37 characters together), where a longer note runs. An agent run unattended stops at each of these until
+    somebody approves.
   - A target that is not there (no element at the point, an `element_id` the page no longer has) is not
     classified, and neither is one that cannot be read: a page that does not answer within 2 seconds (for an
     `element_id` or a point, 2 to set the read up and 2 more to run it), or a selector that matches nothing in
