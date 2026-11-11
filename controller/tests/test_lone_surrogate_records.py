@@ -4,6 +4,10 @@ A cookie's name, a page's title or a model's reply can hold a lone surrogate, an
 store, the session store and the agent job store raised on it, after the change they were recording had been made.
 Each now writes U+FFFD in its place, as the witness chain and actions.jsonl do, and the session event stream sends
 it so.
+
+A harness run failed the same way on a value of its contract's metadata, on its mock observation, and in a live
+attempt on a page's accessible name (the accessibility outline decodes the aria snapshot's escapes, a lone
+surrogate's too). Its contract and its trace are hashed as UTF-8, so it replaces one before it hashes or writes.
 """
 
 from __future__ import annotations
@@ -12,10 +16,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from app import events
 from app.agent_jobs import AgentJobStore
 from app.audit import AuditStore
+from app.browser.aria_outline import outline_from_aria_snapshot
+from app.harness import Budget, Postcondition, TaskContract
+from app.harness.iterate import HarnessService
+from app.harness.trace import TraceEnvelope
 from app.models import AgentJobCheckpoint, OperatorIdentity, SessionRecord
 from app.session_store import FileSessionStore
 from app.utils import utc_now
@@ -138,6 +147,87 @@ class AgentJobStoreTests(_Tmp):
         self.assertEqual(saved.status, "completed")
         self.assertEqual(saved.result, {"steps": [{"observation": {"title": f"Sale{REPLACED}"}}]})
         self.assertEqual([(item.title, item.reason) for item in saved.checkpoints], [(f"Sale{REPLACED}", REPLACED)])
+
+
+DONE = {"url": "https://example.com/done", "text": "done"}
+
+
+def _contract(**extra: Any) -> TaskContract:
+    return TaskContract(
+        id="example-read",
+        goal="Open the example page and confirm done state.",
+        postconditions=[Postcondition(kind="url_contains", value="example.com/done")],
+        budget=Budget(max_attempts=1, max_steps=2, max_wall_seconds=300),
+        **extra,
+    )
+
+
+class _OneStep:
+    """Stands in for the orchestrator of a live attempt: one step, whose observation holds the outline it was given."""
+
+    def __init__(self, accessibility_outline: dict[str, Any]) -> None:
+        self.accessibility_outline = accessibility_outline
+
+    async def run(self, **_: object) -> dict[str, Any]:
+        observation = {
+            "url": "https://example.com/done",
+            "title": "Done",
+            "accessibility_outline": self.accessibility_outline,
+        }
+        step = {
+            "status": "acted",
+            "decision": {"action": "done", "reason": "finished"},
+            "observation": observation,
+            "execution": {"action": "done"},
+        }
+        final_session = {"current_url": "https://example.com/done", "title": "Done"}
+        return {"status": "completed", "steps": [step], "final_session": final_session}
+
+
+class HarnessRunTests(_Tmp):
+    """A run's contract and trace are hashed as UTF-8 before they are written, so the replacement comes first."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.service = HarnessService(self.root / "harness")
+
+    def _run_dirs(self) -> list[Path]:
+        return sorted((self.root / "harness" / "runs").iterdir())
+
+    async def test_a_contract_whose_metadata_holds_a_lone_surrogate_runs_and_is_stored_under_its_own_hash(self) -> None:
+        # A value of the caller's: the contract refuses a lone surrogate in every string it types, a metadata key too.
+        contract = _contract(metadata={"note": f"n{LONE}", "nested": {f"k{LONE}": [LONE]}})
+
+        record = await self.service.start_convergence(contract, mock_final_observation=DONE)
+
+        self.assertEqual(record.status, "converged", record.attempts)
+        (run_dir,) = self._run_dirs()  # and no directory of a run that never was
+        stored = TaskContract.model_validate_json((run_dir / "contract.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored.metadata, {"note": f"n{REPLACED}", "nested": {f"k{REPLACED}": [REPLACED]}})
+        self.assertEqual(stored.hash(), record.contract_hash)
+
+    async def test_a_mock_observation_holding_a_lone_surrogate_is_recorded_with_the_replacement_character(self) -> None:
+        observation = {**DONE, "text": f"done{LONE}", "title": f"Done{LONE}"}
+
+        record = await self.service.start_convergence(_contract(), mock_final_observation=observation)
+
+        self.assertEqual(record.status, "converged", record.attempts)
+        trace = TraceEnvelope.read_json(record.attempts[0].trace_path)  # its chain verifies
+        self.assertEqual(trace.final_observation, {**DONE, "text": f"done{REPLACED}", "title": f"Done{REPLACED}"})
+
+    async def test_a_live_attempt_on_a_page_with_a_lone_surrogate_in_an_accessible_name_keeps_its_trace(self) -> None:
+        # As Chromium's aria snapshot writes a button named "Pay" and a lone surrogate: the name's escape, which the
+        # outline decodes. (A page's title and text reach the controller with U+FFFD already.)
+        outline = outline_from_aria_snapshot('- button "Pay\\ud800"')
+        self.assertEqual(outline["nodes"][0]["name"], f"Pay{LONE}")
+
+        record = await self.service.start_convergence(_contract(), orchestrator=_OneStep(outline), session_id="s1")
+
+        self.assertEqual(record.status, "converged", record.attempts)
+        trace = TraceEnvelope.read_json(record.attempts[0].trace_path)  # its chain verifies
+        (action,) = [event for event in trace.events if event.event_type == "action"]
+        self.assertEqual(action.payload["observation"]["accessibility_outline"]["nodes"][0]["name"], f"Pay{REPLACED}")
+        self.assertEqual(trace.final_observation["accessibility_outline"]["nodes"][0]["name"], f"Pay{REPLACED}")
 
 
 class SessionEventStreamTests(unittest.IsolatedAsyncioTestCase):

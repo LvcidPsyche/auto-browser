@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
-from ..utils import run_to_completion
+from ..utils import holds_lone_surrogate, run_to_completion, without_lone_surrogates
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -506,6 +506,13 @@ class HarnessService:
         provider: str = "openai",
         max_attempts: int | None = None,
     ) -> HarnessRunRecord:
+        # The metadata's values and a mock observation are the caller's own (Any). A lone surrogate in one, which
+        # UTF-8 cannot encode, could be neither hashed nor written: the contract's write raised and left the run's
+        # empty directory, and the attempt failed. Replaced with U+FFFD before either, as the stores replace it
+        # (what a live attempt observed: TraceEnvelope.from_agent_result).
+        if holds_lone_surrogate(contract.metadata):
+            contract = contract.model_copy(update={"metadata": without_lone_surrogates(contract.metadata)})
+        mock_final_observation = without_lone_surrogates(mock_final_observation)
         owner = verified_operator()
         run_id = uuid.uuid4().hex[:12]
         # Admissions run one at a time (W5-5). With a cap set, the stored runs are read in a worker thread holding no

@@ -16,7 +16,7 @@ from ..config import get_settings
 from ..network_inspector import URL_SCRUB_MAX_BYTES, scrub_url
 from ..pii_scrub import PiiScrubber
 from ..sqlite_utils import connect_sqlite
-from ..utils import SECRET_KEY_FRAGMENTS
+from ..utils import SECRET_KEY_FRAGMENTS, without_lone_surrogates
 
 _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
@@ -160,6 +160,10 @@ class TraceEnvelope(BaseModel):
         for index, step in enumerate(result.get("steps") or [], start=1):
             if isinstance(step, BaseModel):
                 step = step.model_dump()
+            # An observation's accessibility outline can hold a lone surrogate (aria_outline decodes the snapshot's
+            # escapes, and a page chooses its accessible names), which UTF-8 cannot encode: no event could be hashed,
+            # and the attempt failed with no trace of what it had done. U+FFFD, before anything is hashed.
+            step = without_lone_surrogates(step)
             decision = step.get("decision") or {}
             had_decision = bool(decision)  # before the sensitive flag below, which is not a decision
             if _execution_redacted_the_text(step.get("execution")):

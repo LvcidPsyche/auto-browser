@@ -827,7 +827,9 @@ class McpToolGateway:
         """
         args = arguments.model_dump(mode="json", exclude={"session_id", "approval_id"}, exclude_none=True)
         canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        # surrogatepass: a value the tool's input does not type (harness.start_convergence's metadata) can hold a
+        # lone surrogate, which UTF-8 refuses, and the caller was answered "utf-8". Any other text hashes as before.
+        digest = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
         reason = f"Approve {spec.name}"
         if arguments_size is not None:
             # Every character past ASCII as its \uXXXX escape: a homoglyph host, an invisible name or a
