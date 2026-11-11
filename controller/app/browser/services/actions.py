@@ -226,10 +226,11 @@ class _Budget:
     def spent(self) -> bool:
         return time.monotonic() >= self._ends
 
-    def left_ms(self) -> int:
+    def left_ms(self, at_most: int | None = None) -> int:
         # Never 0, which Playwright reads as no limit at all: a wait begun with nothing left has a millisecond,
-        # and ends as the timeout it is.
-        return max(1, round((self._ends - time.monotonic()) * 1000))
+        # and ends as the timeout it is. ``at_most``: for a wait that has a bound of its own within the budget.
+        left = max(1, round((self._ends - time.monotonic()) * 1000))
+        return left if at_most is None else min(left, at_most)
 
 
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
@@ -384,13 +385,16 @@ class BrowserActionService:
                 target["x"], target["y"] = await self.elements.click(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
-                await locator.scroll_into_view_if_needed()
-                coords = await self.locator_center(locator)
+                # One budget for every wait of the click, as Playwright's own click has one timeout. The scroll
+                # and the read of the box each waited by Playwright's default, a whole budget more apiece.
+                budget = self._budget(None)
+                await locator.scroll_into_view_if_needed(timeout=budget.left_ms())
+                coords = await self.locator_center(locator, timeout_ms=budget.left_ms())
                 if coords is None:
-                    await self.click_as_playwright_places_it(session, locator)
+                    await self.click_as_playwright_places_it(session, locator, budget=budget)
                 else:
                     target["x"], target["y"] = coords
-                    await self.click_locator_human_like(session, locator, coords)
+                    await self.click_locator_human_like(session, locator, coords, budget=budget)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "click", target, operation)
@@ -1079,9 +1083,9 @@ class BrowserActionService:
         haystack = " ".join(str(value or "") for value in attributes.values()).lower()
         return bool(re.search(r"password|passcode|otp|one[- ]time|verification|token|secret|2fa|mfa", haystack))
 
-    async def locator_center(self, locator: Any) -> tuple[float, float] | None:
+    async def locator_center(self, locator: Any, *, timeout_ms: float | None = None) -> tuple[float, float] | None:
         try:
-            box = await locator.bounding_box()
+            box = await locator.bounding_box(timeout=timeout_ms)
         except Exception:
             return None
         if not box:
@@ -1165,6 +1169,7 @@ class BrowserActionService:
         coords: tuple[float, float],
         *,
         timeout_ms: float | None = None,
+        budget: _Budget | None = None,
     ) -> None:
         """Click `locator` along a human-like path, but only if it is what the pointer hits.
 
@@ -1183,22 +1188,31 @@ class BrowserActionService:
         controller's press where that put the pointer. Either clicks the element if
         it can and otherwise refuses: neither clicks what covers it, and both wait
         for a target that is not enabled.
+
+        The click has one budget for all its waits, as Playwright's own click has
+        one timeout: ``budget`` where the caller began it (a step of the same
+        click came first), else one of ``timeout_ms``. The placed click is given
+        what is left of it. It had a whole budget of its own, so a target that
+        kept the checks waiting and then the placing held its session for two.
         """
-        await self._checks_of_a_click(locator, self._budget(timeout_ms))
+        budget = budget or self._budget(timeout_ms)
+        await self._checks_of_a_click(locator, budget)
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
         await self.pause_before_press()
-        if await self._receives_pointer_at(locator, x, y) and await self._is_enabled_now(locator):
+        if await self._receives_pointer_at(
+            locator, x, y, timeout_ms=budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+        ) and await self._is_enabled_now(locator, budget.left_ms(POINTER_CHECK_TIMEOUT_MS)):
             await self.press_mouse(session, x, y)
         else:
-            await self.click_as_playwright_places_it(session, locator, timeout_ms=timeout_ms)
+            await self.click_as_playwright_places_it(session, locator, budget=budget)
 
     @staticmethod
-    async def _is_enabled_now(locator: Any) -> bool:
+    async def _is_enabled_now(locator: Any, timeout_ms: float) -> bool:
         """Whether the target is enabled as its press is about to be made. What cannot be told is a no."""
         try:
-            return bool(await locator.is_enabled(timeout=POINTER_CHECK_TIMEOUT_MS))
+            return bool(await locator.is_enabled(timeout=timeout_ms))
         except Exception:
             return False
 
@@ -1233,7 +1247,12 @@ class BrowserActionService:
         await locator.hover(trial=True, timeout=budget.left_ms())
 
     async def click_as_playwright_places_it(
-        self, session: "BrowserSession", locator: Any, *, timeout_ms: float | None = None
+        self,
+        session: "BrowserSession",
+        locator: Any,
+        *,
+        timeout_ms: float | None = None,
+        budget: _Budget | None = None,
     ) -> None:
         """Playwright's own click on ``locator``, for a target the human-like press could not take.
 
@@ -1254,12 +1273,13 @@ class BrowserActionService:
         never comes, and it calls that done), and between its hover and the press a page can take the target
         away. An element made invisible keeps its box, which was all that was asked for then, and the press
         went to what was behind it. The steps share the click's budget (_Budget), as the steps of Playwright's
-        own click share its timeout.
+        own click share its timeout: ``budget`` where the click began before this (a human-like try, the scroll
+        into view), else one of ``timeout_ms``. Playwright's own click is given what is left of it.
         """
+        budget = budget or self._budget(timeout_ms)
         if not press_is_read():
-            await locator.click(timeout=timeout_ms)
+            await locator.click(timeout=budget.left_ms())
             return
-        budget = self._budget(timeout_ms)
         await self._checks_of_a_click(locator, budget)
         place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=budget.left_ms())
         if place["framed"] and not place["boxless"]:
@@ -1283,12 +1303,15 @@ class BrowserActionService:
         x = float(box["x"] + place["border"][0] + position["x"])
         y = float(box["y"] + place["border"][1] + position["y"])
         await session.page.mouse.move(x, y)
-        if not await self._receives_pointer_at(locator, x, y, placed=True):
+        asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+        if not await self._receives_pointer_at(locator, x, y, placed=True, timeout_ms=asked_within):
             raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)
 
     @staticmethod
-    async def _receives_pointer_at(locator: Any, x: float, y: float, *, placed: bool = False) -> bool:
+    async def _receives_pointer_at(
+        locator: Any, x: float, y: float, *, placed: bool = False, timeout_ms: float = POINTER_CHECK_TIMEOUT_MS
+    ) -> bool:
         """Whether the pointer at (x, y) finds the element ``locator`` names, through the frames it is in.
 
         A target in the main frame is asked in one message, as before. One inside a frame is asked in its own
@@ -1300,13 +1323,17 @@ class BrowserActionService:
         ``placed``: (x, y) is where Playwright's hover has put the pointer, and a no ends the click. There a
         target more than POINTER_CHECK_FRAMES frames down is a yes: the frames asked said so, the ones above
         them are Playwright's hover's to check, and a no would end a click that Playwright's own makes.
+
+        ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the
+        click has left where that is less. The first message had no bound given, so it waited by Playwright's
+        default, a whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed.
         """
         handles: list[Any] = []
         try:
-            found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None])
+            found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None], timeout=timeout_ms)
             if found != "framed":
                 return found is True
-            node = await locator.element_handle(timeout=POINTER_CHECK_TIMEOUT_MS)
+            node = await locator.element_handle(timeout=timeout_ms)
             # The element itself, before a human-like press, is asked as well that the pointer is over it.
             arrived = not placed
             for _ in range(POINTER_CHECK_FRAMES):

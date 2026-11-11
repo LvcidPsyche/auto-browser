@@ -1,6 +1,7 @@
 import errno
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -206,6 +207,31 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reload_result["action"], "reload")
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
+
+    async def test_every_wait_of_a_selector_click_is_given_what_is_left_of_one_budget(self) -> None:
+        # The scroll into view, the read of the box and the question what the pointer finds each waited by
+        # Playwright's default, a whole ACTION_TIMEOUT_MS apiece beside the checks' own: a target that left
+        # between two of them held its session for several. One budget is made where the click begins.
+        locator = FakeLocator("#submit")
+        self.session.page.locators["#submit"] = locator
+        # The scroll takes a tenth of a second here, which every wait after it must have less for.
+        locator.scroll_into_view_if_needed = AsyncMock(side_effect=lambda **_given: time.sleep(0.1))
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.click("session-1", selector="#submit")
+
+        whole = self.manager.settings.action_timeout_ms
+        given = {
+            "scroll": locator.scroll_into_view_if_needed.await_args.kwargs.get("timeout"),
+            "box": locator.bounding_box.await_args_list[0].kwargs.get("timeout"),
+            "enabled": locator.is_enabled.await_args_list[0].kwargs.get("timeout"),
+            "trial hover": locator.hover.await_args_list[0].kwargs.get("timeout"),
+        }
+        for step, timeout in given.items():
+            self.assertIsInstance(timeout, int, step)
+        self.assertTrue(whole - 50 < given["scroll"] <= whole, given)
+        self.assertTrue(0 < given["trial hover"] <= given["enabled"] <= given["box"] <= whole - 50, given)
+        # The question has a bound of its own within that (POINTER_CHECK_TIMEOUT_MS).
+        self.assertEqual(locator.evaluate.await_args_list[0].kwargs.get("timeout"), 1000)
 
     async def test_a_long_text_typed_into_a_password_field_leaves_no_trace_of_its_preview(self) -> None:
         # The preview of a field found secret only when typing starts goes, and so does the mark that it was cut.

@@ -67,7 +67,7 @@ class FakeLocator:
         # No box until Playwright's hover has put the pointer on it, so every click is one Playwright places.
         self.box: dict[str, float] | None = None
 
-    async def scroll_into_view_if_needed(self) -> None:
+    async def scroll_into_view_if_needed(self, **_given: Any) -> None:
         return None
 
     async def bounding_box(self, **_given: Any):

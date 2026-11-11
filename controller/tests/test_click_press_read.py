@@ -34,6 +34,7 @@ from app.browser.services.actions import (
     _PRESS_PLACE_SCRIPT,
     _RECEIVES_POINTER_SCRIPT,
     ENABLED_POLL_SECONDS,
+    POINTER_CHECK_TIMEOUT_MS,
     BrowserActionService,
 )
 
@@ -190,6 +191,7 @@ def _locator(
 
     async def evaluate(script: str, *_args: Any, **given: Any) -> Any:
         if script == _RECEIVES_POINTER_SCRIPT:
+            given_budget("pointer", given)
             done.append(ASKED)
             return under_the_pointer
         assert script == _PRESS_PLACE_SCRIPT
@@ -294,7 +296,9 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         locator = _locator(done, each_step_takes=0.02)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
-        assert list(locator.budgets) == ["enabled", "trial hover", "place", "hover", "box"]
+        # The last is the question whether the pointer finds the target where it was put: its first message had
+        # no bound of its own either, so a target that had left by then was waited for a whole default more.
+        assert list(locator.budgets) == ["enabled", "trial hover", "place", "hover", "box", "pointer"]
         given = list(locator.budgets.values())
         # Never more than the step before had (a clock may not move in 20 ms), and the last has less than the first.
         assert given == sorted(given, reverse=True) and 0 < given[-1] < given[0] <= 250, given
@@ -304,15 +308,78 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         locator = _locator(done, each_step_takes=0.02)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, locator, timeout_ms=30)
-        assert locator.budgets["box"] == 1, locator.budgets
+        assert (locator.budgets["box"], locator.budgets["pointer"]) == (1, 1), locator.budgets
 
         # No budget named: the session's own (ACTION_TIMEOUT_MS), which is what Playwright gives a step left to
-        # itself, and one deadline for the steps as well.
+        # itself, and one deadline for the steps as well. The question has its own bound within that.
         service, session, done = _service(CLOSE)
         locator = _locator(done)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, locator)
         assert 14000 < locator.budgets["box"] <= locator.budgets["enabled"] <= 15000, locator.budgets
+        assert locator.budgets["pointer"] == POINTER_CHECK_TIMEOUT_MS
+
+        # Not read, the click is Playwright's own, and its timeout is the budget.
+        service, session, done = _service(CLOSE)
+        locator = _locator(done)
+        await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
+        assert done == ["click"] and 200 < locator.budgets["click"] <= 250, locator.budgets
+
+
+@pytest.mark.parametrize("read", [False, True])
+async def test_a_click_playwright_places_after_a_human_like_try_has_what_the_try_left(read: bool) -> None:
+    # The placed click began a budget of its own, or gave Playwright's click the whole one again: a target that
+    # kept the checks waiting and then the placing held its session for two budgets. A click has one, made where
+    # it begins and handed down. Each step here takes about 50 ms (the clock moves in steps of some 16 ms).
+    service, session, done = _service(CLOSE)
+    locator = _locator(done, each_step_takes=0.05)
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    service._receives_pointer_at = AsyncMock(side_effect=[False, True])
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        if read:
+            with reading_presses("click", "read", None):
+                await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=1000)
+        else:
+            await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=1000)
+    if read:
+        # The try's two checks, then the placed click's two: four steps before the place is read, where a
+        # budget of its own had lost two.
+        assert done == [*CHECKS, *CHECKS, "hover at {'x': 12.0, 'y': 7.0}", "mouse down", "mouse up"]
+        assert 0 < locator.budgets["place"] <= 1000 - 3 * 50, locator.budgets
+    else:
+        # Two steps before Playwright's click, which had the whole budget again.
+        assert done == [*CHECKS, "click"]
+        assert 0 < locator.budgets["click"] <= 1000 - 50, locator.budgets
+
+
+async def test_the_last_questions_before_a_human_like_press_are_bounded_by_the_clicks_budget() -> None:
+    # What the pointer finds, and whether the target is enabled still: a second each at most, and never more than
+    # the click has left.
+    service, session, done = _service(CLOSE)
+    locator = _locator(done, each_step_takes=0.05)
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    asked: list[Any] = []
+    real = locator.is_enabled
+
+    async def is_enabled(**given: Any) -> bool:
+        asked.append(given.get("timeout"))
+        return await real(**given)
+
+    locator.is_enabled = is_enabled
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=1000)
+    assert done == [*CHECKS, ASKED, "is it enabled", "mouse down", "mouse up"]
+    assert 0 < asked[1] <= locator.budgets["pointer"] <= 1000 - 50, (asked, locator.budgets)
+
+    service, session, done = _service(CLOSE)
+    locator = _locator(done)
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        await service.click_locator_human_like(session, locator, (40.0, 50.0))
+    assert locator.budgets["pointer"] == POINTER_CHECK_TIMEOUT_MS
 
 
 async def test_the_checks_before_a_human_like_press_are_no_click_either() -> None:

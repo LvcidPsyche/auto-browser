@@ -450,6 +450,12 @@ All notable changes to auto-browser are documented here.
   Playwright's: it does not look through a frame that CSS transforms, so its own click, which a click that is not
   read still is, presses what the page has put over such a frame, or has beside it where the element is larger
   than the frame shows, and ends as done. Older than this release.
+- **A selector click has one time limit for all its waits.** The scroll into view, the read of the element's box,
+  the checks, the question what the pointer finds and the click Playwright places each waited up to
+  `ACTION_TIMEOUT_MS` of their own. A target that left the page once the checks had passed held its session for
+  7 seconds under a limit of 3, and one that kept every step waiting could hold it for several limits. The
+  waits now share the one limit, counted from where the click begins, as the steps of Playwright's own click
+  share its timeout: the same target ends the click after 3.3 seconds. Older than this release.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
