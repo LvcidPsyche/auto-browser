@@ -649,7 +649,8 @@ All notable changes to auto-browser are documented here.
   fault raises the same errors: an audit file whose last line a kill cut short no longer decodes, which is a
   `ValueError`, so `GET /audit/events` (one of the routes the entry above adds to those) would have answered
   `Invalid request` with nothing in the log. Each is now logged at WARNING before it is answered: the route's
-  message, the error's class and text, and the last three frames it was raised through. So is a route's own fixed
+  message, the error's class and text, and the last three frames it was raised through, a line each (the file, the
+  line and the function). So is a route's own fixed
   answer for one of the three: the `409` `Conflict` of an approval's approve, reject or execute and of
   `POST /proxy-personas`, the `403` of a page or a tab `ALLOWED_HOSTS` refuses (observe, screenshot, screenshot
   compare, the network log, tab activation), the `400` and `403` of the cron routes and of
@@ -657,11 +658,12 @@ All notable changes to auto-browser are documented here.
   answers in that refusal's own words (a tab another tab refused, a busy session), and a refused page at
   `GET /share/{token}/observe`, which the shared page asks for every five seconds. A caller's own mistake is logged
   the same way: an ordinary bad request, a refused navigation or a webhook trigger with a wrong key writes one
-  WARNING of at most ten lines, as often as the request rate limit lets it be sent, which is worth knowing before
+  WARNING of at most four lines, as often as the request rate limit lets it be sent, which is worth knowing before
   alerting on WARNING. The error's text and the route's
   arguments can be the caller's, so each is written escaped and cut at 200 characters (the line says when the text
   was cut); a request model's refusal is written as its fields and the kind of each refusal, never the values
-  (the trigger's body holds the webhook key); and the frames are part of the message. One refusal's text held the
+  (the trigger's body holds the webhook key); and the frames are part of the message, written by the controller and
+  not as a Python prints a traceback, which is longer on a newer one. One refusal's text held the
   caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
   name. It now says `The https URL has no host name`, to a tool's caller too.
 - **An unknown approval id no longer writes a traceback to the log, and no `404` repeats a long id whole.** A REST

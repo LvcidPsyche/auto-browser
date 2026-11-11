@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -657,12 +658,13 @@ def test_only_the_frames_nearest_the_raise_are_logged(caplog: pytest.LogCaptureF
 
     (logged,) = _warnings_of(caplog, logger.name)
     _first, *where = logged.getMessage().splitlines()
-    # Frames are counted, not lines. How a frame is written is the interpreter's: where it is and its source line,
-    # and from Python 3.13 a third line, the marks under a line that is a call.
-    frames = [index for index, line in enumerate(where) if line.lstrip().startswith('File "')]
-    assert len(frames) == 3, where
-    # The nearest ones: the raise itself is in the last.
-    assert 'raise ValueError("deep")' in [line.strip() for line in where[frames[-1] + 1 :]], where
+    # A line a frame, written by the controller: the file, the line and the function. What an interpreter prints of
+    # a frame is its own (two lines on Python 3.12, and from 3.13 as many as the call is written over, which made
+    # ten lines of a record thirteen), so the record was as long as the Python it ran on made it.
+    code = _raise_from_depth.__code__
+    calls, raises = code.co_firstlineno + 2, code.co_firstlineno + 4
+    # The nearest three: two of the calls, and the raise itself last.
+    assert where == [f"  {code.co_filename}:{line} in _raise_from_depth" for line in (calls, calls, raises)], where
 
 
 class _PrintsALineBreak:
@@ -815,6 +817,9 @@ def test_a_cron_trigger_with_a_body_the_route_refuses_logs_no_part_of_the_key(
     first, where = _the_routes_line(caplog)
     assert ": answered 400 for ValidationError: " in first and "webhook_key: string_type" in first, first
     assert "sentinel-webhook-key" not in "\n".join([first, *where])
+    # A record of four lines at most, for a mistake any caller can repeat. The frames are pydantic's, a call written
+    # over several lines: as Python 3.14 prints them the record was thirteen lines.
+    assert 1 <= len(where) <= 3 and all(re.fullmatch(r"  .+:\d+ in \S+", line) for line in where), where
 
 
 def test_a_cron_trigger_whose_body_the_json_reader_cannot_go_down_is_an_invalid_request(
@@ -976,8 +981,9 @@ def test_unmapped_key_error_is_404_and_logged(client: TestClient, caplog: pytest
     first, *where = record.getMessage().splitlines()
     assert first.startswith(f"unmapped KeyError on 'GET' '/sessions/{SID}/observe': answered 404 for KeyError: ")
     assert "internal_dict_key" in first
-    # Where it was raised is in the message (log_hidden_cause), and not a traceback a handler prints under it.
-    assert [line for line in where if line.lstrip().startswith('File "')], where
+    # Where it was raised is in the message (log_hidden_cause), a line a frame and three at most, and not a
+    # traceback a handler prints under it.
+    assert 1 <= len(where) <= 3 and all(re.fullmatch(r"  .+:\d+ in \S+", line) for line in where), where
     assert record.exc_info is None and _as_a_handler_writes(record) == record.getMessage()
 
 

@@ -170,10 +170,13 @@ def log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str
     error then quotes), so each is written quoted and cut (_on_one_line; a number stays a number, for a %d): a
     line break in one starts no line of its own in the log, and a megabyte of path is not a megabyte of log. That
     is why the traceback is written here and not by exc_info, which prints the error's text as it is; of its
-    frames only the last HIDDEN_CAUSE_FRAMES are kept.
+    frames only the last HIDDEN_CAUSE_FRAMES are kept, a line each: the file, the line and the function. A frame
+    as the interpreter prints it is two lines on Python 3.12 and, from 3.13, as many as its call is written over,
+    so the record would be as long as the Python it ran on made it.
     """
     shown = tuple(arg if isinstance(arg, (int, float)) else _on_one_line(arg) for arg in args)
-    where = "".join(traceback.format_tb(cause.__traceback__, limit=-HIDDEN_CAUSE_FRAMES)).rstrip()
+    frames = traceback.extract_tb(cause.__traceback__, limit=-HIDDEN_CAUSE_FRAMES)
+    where = "\n".join(f"  {frame.filename}:{frame.lineno} in {frame.name}" for frame in frames)
     text = _cause_text(cause)
     logger.warning(message + ": answered %d for %s: %s\n%s", *shown, status, type(cause).__name__, text, where)
 
