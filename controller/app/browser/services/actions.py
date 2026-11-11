@@ -130,13 +130,13 @@ _step_clock = time.perf_counter
 # Playwright's placing: a yes can be an old one (a document is not told of a pointer that went on into another
 # process's, so the rest of the question stands), and a no a wrong one (a person moving the real pointer over a
 # headed browser).
-# ``wide``: the element is the target of a click Playwright placed, and it is asked as Playwright's own check of
-# a click asks it: an element inside a button or a link is taken for that button or link (its retarget,
-# "button-link"), unless it is a field or editable text. A selector that names a card's text names a node, and
-# where another piece of the card's link lay over that node (a span stretched over the card, a ::before over a
-# button) the pointer found the link and not the node: Playwright's hover said yes, this question said no, and
-# a no ends a placed click. Never of a frame on the way up, which must itself be what the pointer finds, and
-# not before a human-like press, where a no only hands the click to the placing.
+# ``wide``: the element is the target of a click Playwright placed, and it is asked as Playwright's own check of a
+# click asks it: an element inside a button or a link is taken for that button or link (its retarget,
+# "button-link"), unless it is a field or editable text. A selector that names a card's text names a node, and where
+# another piece of the card's link lay over that node (a span stretched over the card, a ::before over a button) the
+# pointer found the link or the button and not the node: Playwright's hover said yes, this question said no, and a
+# no ends a placed click. Never of a frame on the way up, which must itself be what the pointer finds, and not
+# before a human-like press, where a no only hands the click to the placing.
 _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
   const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
   const field = el.matches('input, textarea, select') || el.isContentEditable;
@@ -218,7 +218,8 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
     const across = (x) => whole.left + (x - seen.x) / wider, down = (y) => whole.top + (y - seen.y) / taller;
     [left, top, right, bottom] = [across(0), down(0), across(size[0]), down(size[1])];
   }
-  // As Playwright takes the first quad with an area over 0.99 inside the viewport.
+  // As Playwright takes the first quad with an area over 0.99 inside the viewport, measured here on the rectangle
+  // round each box: a long thin box of less, turned, has a rectangle of more (a limit the docs name).
   const shown = (box) =>
     Math.max(0, Math.min(box.right, right) - Math.max(box.left, left)) *
     Math.max(0, Math.min(box.bottom, bottom) - Math.max(box.top, top));
@@ -1374,11 +1375,11 @@ class BrowserActionService:
         asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
         if not await self._receives_pointer_at(locator, x, y, placed=True, timeout_ms=asked_within):
             if budget.spent:
-                # No answer of the page's: the question had no time left to be answered in, and one that goes
-                # unanswered reads as a no. The click ends as any step before this one ends it then.
+                # The question had no time left, and a no and no answer are one here (_receives_pointer_at): the
+                # click ends as any step before this one ends it then, and says no more than that.
                 raise PlaywrightTimeoutError(
-                    f"Timeout {budget.timeout_ms:g}ms exceeded: the pointer was placed, and the click's time was "
-                    "up before the target answered whether the pointer finds it."
+                    f"Timeout {budget.timeout_ms:g}ms exceeded: the pointer was placed, and the click's time ran "
+                    "out at its last question, whether the pointer finds the target."
                 )
             raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)

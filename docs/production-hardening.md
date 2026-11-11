@@ -246,13 +246,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     An element that CSS turns is placed at the middle of what the screen shows of the box around it (around the
     first of its boxes that the screen shows, where it has several), where Playwright takes the mean of that box's
     corners, each held to the screen. The two are one point while the turn is flat and none of the box is off the
-    screen. Turned in three dimensions with perspective they are apart (about 17 px on a button turned 50 degrees
-    about two axes), and wherever Playwright's own click pressed such a button, in the turns measured, the
-    controller's did. Where a corner of the screen cuts an element and its middle is off the screen, the
-    controller's point can be beside the element (a square turned 45 degrees is so), and the click ends when its
-    time does, where Playwright's own click presses. A link over two lines inside something CSS turns or skews is
-    placed where Playwright presses it; inside a frame as well, it can be placed beside the link, and ends the
-    same way.
+    screen, but for a first box that is long and thin: turned, one of under a square pixel (a sixteenth of a pixel
+    wide and ten high) has a rectangle round it of more, and the controller takes it where Playwright skips it, so
+    a click it places presses that box, or ends when its time does where something covers it. Turned in three
+    dimensions with perspective they are apart (about 17 px on a button turned 50 degrees about two axes), and
+    wherever Playwright's own click pressed such a button, in the turns measured, the controller's did. Where a
+    corner of the screen cuts an element and its middle is off the screen, the controller's point can be beside
+    the element (a square turned 45 degrees is so), and the click ends when its time does, where Playwright's own
+    click presses. A link over two lines inside something CSS turns or skews is placed where Playwright presses
+    it; inside a frame as well, it can be placed beside the link, and ends the same way.
     Playwright does not look through a frame that CSS transforms, or that stands inside anything
     CSS transforms (a dialog the page centres with a transform is one), so there the question above is the only
     one asked: where the page has put something of its own over such a frame, or the frame holds another frame
