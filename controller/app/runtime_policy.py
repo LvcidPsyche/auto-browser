@@ -277,7 +277,8 @@ def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_
 
 def _holds_as_a_word(text: str, word: str) -> bool:
     """Whether ``word`` stands in ``text`` with, on each side, an end of the text or a character that is no letter
-    and no digit: 'dev' in 'Bearer dev', 'alice=dev' or "'dev'", not in 'developer' or '4dev'."""
+    and no number, of any script (str.isalnum: a Roman numeral and a fraction are numbers): 'dev' in 'Bearer dev',
+    'alice=dev' or "'dev'", not in 'developer' or '4dev'."""
     start = text.find(word)
     while start != -1:
         end = start + len(word)

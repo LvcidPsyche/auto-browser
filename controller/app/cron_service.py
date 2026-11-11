@@ -116,7 +116,7 @@ def _refuse_what_a_run_cannot_take(job: dict[str, Any]) -> None:
     The store is JSON a hand can edit. Such a value raised whatever the first code to use it raised (a TypeError
     from min(), an AttributeError in the URL check), which no caller of a run maps: the webhook's route answered an
     unhandled 500, with the key proved. A ValueError, as a job the run's request model refuses is, that names the
-    field and nothing of what it holds. An empty value (null, false, 0, an empty list) is no value, as it was.
+    field and nothing of what it holds. An empty value (null, false, 0, "", an empty list) is no value, as it was.
     """
     for field in _TEXT_OF_A_RUN:
         if job.get(field) and not isinstance(job[field], str):

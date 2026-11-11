@@ -451,7 +451,7 @@ class ListedOperatorTests(unittest.TestCase):
         # The token itself is still one, in whatever case: two entries.
         "a short token alone, in two cases": ("dev,DEV", "alice:dev", None, [kept_back(2)]),
         # So is such a token as a word of its own, with something round it, where it was named: on each side an end
-        # of the entry or a character that is no letter and no digit. Its letters in a word are an id's.
+        # of the entry or a character that is no letter and no number. Its letters in a word are an id's.
         "a short token after Bearer": ("Bearer dev", "alice:dev", None, [kept_back(1)]),
         "a short token in single quotes": ("'dev'", "alice:dev", None, [kept_back(1)]),
         "a short token after an id and =": ("alice=dev", "alice:dev", None, [kept_back(1)]),

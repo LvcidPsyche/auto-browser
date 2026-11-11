@@ -392,7 +392,7 @@ All notable changes to auto-browser are documented here.
   what would be printed holds, in whatever case, eight characters in a row of a bearer token of the deployment or,
   of a token of five to eight characters, all but one of them in a row (a token after `Bearer` or `alice=`, in
   quotes, with a character too many or cut short), or holds a token shorter than that as a word of its own, with an
-  end of the entry or a character that is no letter and no digit on each side (`Bearer dev`, `'dev'`, `alice=dev`;
+  end of the entry or a character that is no letter and no number on each side (`Bearer dev`, `'dev'`, `alice=dev`;
   `developer` and `dev2` are named). A part of a token that
   stands in its own operator's id as well is not counted (with `alice-prod:alice-prod-9f8a...`, `alice-prod2` is
   named), and an operator id of `API_BEARER_TOKENS`, in whatever case, is still named where its letters are also a
@@ -823,8 +823,8 @@ All notable changes to auto-browser are documented here.
   `5xx` again and not a `4xx`, and the page may answer next time. A stored job that holds, where a run reads text
   or a number, a value that is neither (`max_steps` a string or a list, `start_url` or `auth_profile` a number or
   a list, `proxy_persona` a list: a store edited by hand), or whose `id` is a list or an object, was an unhandled
-  `500` and now answers that `409`; an empty value in one of the first four (`null`, `false`, `0`, an empty list)
-  is no value, as it was. Each writes its WARNING with the cause. For such a job `browser.trigger_cron_job` now
+  `500` and now answers that `409`; an empty value in one of the first four (`null`, `false`, `0`, `""`, an empty
+  list) is no value, as it was. Each writes its WARNING with the cause. For such a job `browser.trigger_cron_job` now
   answers an error that names the field, where it answered `Tool execution failed`, and a scheduled fire logs the
   same.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
