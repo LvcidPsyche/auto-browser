@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ...browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError, locked_read
+from ...utils import capped_for_log
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ async def _reading_an_allowed_page(app, session_id: str) -> AsyncIterator[None]:
 async def network_register_hook(session_id: str, body: NetworkHookRequest, request: Request):
     inspector = _get_inspector(request.app, session_id)
     if inspector is None:
-        raise HTTPException(404, f"No network inspector for session {session_id!r}")
+        raise _no_inspector(session_id)
     pattern = body.url_pattern
     if not pattern:
         raise HTTPException(422, "url_pattern required")
@@ -92,7 +93,7 @@ async def network_register_hook(session_id: str, body: NetworkHookRequest, reque
 async def network_list_hooks(session_id: str, request: Request):
     inspector = _get_inspector(request.app, session_id)
     if inspector is None:
-        raise HTTPException(404, f"No network inspector for session {session_id!r}")
+        raise _no_inspector(session_id)
     return {"hooks": inspector.list_hooks()}
 
 
@@ -102,13 +103,14 @@ async def network_list_hooks(session_id: str, request: Request):
 async def network_remove_hook(session_id: str, pattern: str, request: Request):
     inspector = _get_inspector(request.app, session_id)
     if inspector is None:
-        raise HTTPException(404, f"No network inspector for session {session_id!r}")
+        raise _no_inspector(session_id)
     removed = inspector.remove_hook(pattern)
     return {"removed": removed, "pattern": pattern}
 
 
 def _no_inspector(session_id: str) -> HTTPException:
-    return HTTPException(404, f"No network inspector for session {session_id!r}")
+    """The 404 of a session with no inspector. Its id is the caller's, as long as the path: it is named cut."""
+    return HTTPException(404, f"No network inspector for session {capped_for_log(session_id)!r}")
 
 
 def _get_inspector(app, session_id: str):

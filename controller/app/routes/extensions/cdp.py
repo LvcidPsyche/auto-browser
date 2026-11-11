@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ...browser.page_read import SESSION_BUSY_DETAIL, start_read
 from ...cdp.passthrough import CDPParamsError, CDPPassthrough
+from ...utils import capped_for_log
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ async def _allowed_cdp(app, session_id: str) -> AsyncIterator[Any]:
     manager = getattr(app.state, "browser_manager", None)
     session = manager.sessions.get(session_id) if manager is not None else None
     if session is None:
-        raise HTTPException(404, f"No CDP session for {session_id!r}")
+        # The id is the caller's, as long as the path: it is named cut.
+        raise HTTPException(404, f"No CDP session for {capped_for_log(session_id)!r}")
     try:
         await asyncio.wait_for(session.lock.acquire(), timeout=CDP_TIMEOUT_SECONDS)
     except TimeoutError:
@@ -71,7 +73,7 @@ async def _allowed_cdp(app, session_id: str) -> AsyncIterator[Any]:
             raise HTTPException(403, OFF_LIST_PAGE_DETAIL) from None
         cdp = await _get_cdp(app, session_id)
         if cdp is None:
-            raise HTTPException(404, f"No CDP session for {session_id!r}")
+            raise HTTPException(404, f"No CDP session for {capped_for_log(session_id)!r}")
         try:
             yield cdp
         except Exception:

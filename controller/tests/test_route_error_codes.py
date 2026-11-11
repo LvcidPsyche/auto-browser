@@ -1026,6 +1026,37 @@ def test_an_unknown_id_of_any_length_is_cut_in_its_404_and_writes_no_line(
     assert _app_warnings(caplog) == []
 
 
+# Routes that answer an id they do not know with a 404 of their own words, which name the id. No patching: the real
+# service, or the real manager, holds no such persona, job or session.
+NO_INSPECTOR, NO_CDP = "No network inspector for session {!r}", "No CDP session for {!r}"
+OWN_WORDS_404_ROUTES = [
+    (
+        Route("delete", "/proxy-personas/{}", None, "delete_persona", owner="proxy_store", sync=True),
+        "Proxy persona not found: {!r}",
+    ),
+    (Route("delete", "/crons/{}", None, "delete_job", owner="cron_service"), "Cron job not found: {}"),
+    (Route("get", "/sessions/{}/network/requests", None, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("get", "/sessions/{}/network/hooks", None, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("post", "/sessions/{}/network/hooks", {"url_pattern": "*"}, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("delete", "/sessions/{}/network/hooks/x", None, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("get", "/sessions/{}/cdp/element?selector=a", None, "sessions.get", sync=True), NO_CDP),
+    (Route("post", "/sessions/{}/cdp/raw", {"method": "DOM.getDocument"}, "sessions.get", sync=True), NO_CDP),
+]
+
+
+@pytest.mark.parametrize(("route", "words"), OWN_WORDS_404_ROUTES, ids=[route.id for route, _ in OWN_WORDS_404_ROUTES])
+def test_a_404_in_a_routes_own_words_cuts_a_long_id(client: TestClient, route: Route, words: str) -> None:
+    # Each repeated the caller's id whole: an id of 60,000 characters came back in a body of 60,033 bytes or more.
+    long_id = "x" + "y" * 59_999
+    response = _call(client, _with_id(route, long_id))
+
+    assert (response.status_code, response.json()) == (404, {"detail": words.format(long_id[:200] + "...")})
+    assert len(response.content) < 1024
+    # An id of an ordinary length is named whole, in the route's words as before.
+    response = _call(client, _with_id(route, "nope-1"))
+    assert (response.status_code, response.json()) == (404, {"detail": words.format("nope-1")})
+
+
 @pytest.mark.parametrize("route", [route for route, _ in UNKNOWN_ID_ROUTES], ids=_UNKNOWN_ID_ROUTE_IDS)
 def test_these_routes_other_key_errors_are_not_an_unknown_id(
     client: TestClient, caplog: pytest.LogCaptureFixture, route: Route

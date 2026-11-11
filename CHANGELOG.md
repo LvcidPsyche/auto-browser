@@ -705,7 +705,10 @@ All notable changes to auto-browser are documented here.
   `GET /crons/{id}` and `GET /sessions/{id}/auth-state` reached that handler the same way for an id they do not know,
   and `POST /sessions/{id}/actions/execute` and `/actions/upload` for an `approval_id` no record answers to (or
   another operator's): each answers the `404` it answered and writes nothing now. `GET /agent/jobs/{id}` still writes
-  the warning for an id it does not know.
+  the warning for an id it does not know. Eight routes answer an id they do not know with a `404` in words of their
+  own, and those words repeated it whole: `DELETE /proxy-personas/{name}`, `DELETE /crons/{id}`, the four
+  `/sessions/{id}/network` routes and the two `/sessions/{id}/cdp` routes, for a session with no inspector or no CDP
+  session. Each says what it said, with the id cut at 200 characters.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host
