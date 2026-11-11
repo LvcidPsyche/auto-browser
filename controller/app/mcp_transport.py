@@ -650,11 +650,9 @@ class McpHttpTransport:
             owner=verified_operator(),
         )
         self._sessions[session.id] = session
-        # Here as well as in _persist_sessions: with no store path configured
-        # nothing else bounds the session table.
-        self._evict_stale_sessions(keep=session.id)
         try:
-            self._persist_sessions()
+            # The sessions this one puts out of the table go once it is written, and not before.
+            self._persist_sessions(keep=session.id)
         except Exception:
             # The table is written whole, so a session that cannot be written would fail every later write too:
             # each initialize by anybody, until a restart. Its id was never answered, so nobody holds it; it is
@@ -824,20 +822,27 @@ class McpHttpTransport:
         self._sessions = restored
 
     def _evict_stale_sessions(self, *, keep: str | None = None) -> None:
+        for session in self._sessions_past_the_caps(keep):
+            self._forget_session(session.id)
+
+    def _sessions_past_the_caps(self, keep: str | None) -> list[McpSession]:
         # Sessions without a live stream go first, so a client that only listens outlasts a flood of initializations,
         # and within each group the least recently used goes first. Ordering by creation evicted a client that had been
         # connected (and busy) the longest as soon as 500 newer sessions, most of them abandoned without a DELETE,
         # piled up behind it. keep is the session an initialize has just created: see _eviction_order.
+        order = self._eviction_order(keep)
         by_owner: dict[str, list[McpSession]] = {}
-        for session in self._eviction_order(keep):
+        for session in order:
             if session.owner is not None:
                 by_owner.setdefault(session.owner, []).append(session)
-        for sessions in by_owner.values():
-            for session in sessions[: max(0, len(sessions) - MAX_MCP_SESSIONS_PER_OWNER)]:
-                self._forget_session(session.id)
-        excess = len(self._sessions) - MAX_MCP_SESSIONS
-        for session in self._eviction_order(keep)[: max(0, excess)]:
-            self._forget_session(session.id)
+        going = {
+            session.id: session
+            for sessions in by_owner.values()
+            for session in sessions[: max(0, len(sessions) - MAX_MCP_SESSIONS_PER_OWNER)]
+        }
+        staying = [session for session in order if session.id not in going]
+        going.update((session.id, session) for session in staying[: max(0, len(staying) - MAX_MCP_SESSIONS)])
+        return list(going.values())
 
     def _eviction_order(self, keep: str | None) -> list[McpSession]:
         """Every session without a live stream, then those with one, each least recently used first.
@@ -852,17 +857,25 @@ class McpHttpTransport:
 
         return sorted(self._sessions.values(), key=order)
 
-    def _persist_sessions(self) -> None:
-        if self._session_store_path is None:
-            return
-        self._evict_stale_sessions()
-        self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [asdict(session) for session in self._sessions.values()]
-        atomic_write_text(
-            self._session_store_path,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            mode=PRIVATE_FILE_MODE,
-        )
+    def _persist_sessions(self, *, keep: str | None = None) -> None:
+        """Write the table without the sessions past its caps, and then drop those: the caps hold with no store too.
+
+        In that order, so that a write that fails leaves the table what it was, in memory as in the file. Dropped
+        first, a session was gone from memory and its stream was ended for an initialize that was then answered 500,
+        while the file still held it. keep is the session an initialize has just created: see _eviction_order.
+        """
+        going = self._sessions_past_the_caps(keep)
+        if self._session_store_path is not None:
+            gone = {session.id for session in going}
+            self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = [asdict(session) for session in self._sessions.values() if session.id not in gone]
+            atomic_write_text(
+                self._session_store_path,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                mode=PRIVATE_FILE_MODE,
+            )
+        for session in going:
+            self._forget_session(session.id)
 
     @staticmethod
     def _coerce_dict(value: Any) -> dict[str, Any]:

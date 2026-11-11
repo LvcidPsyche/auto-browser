@@ -211,6 +211,30 @@ class McpSessionTableWriteTests(_Transport):
         after = self.assert_an_ordinary_answer(self.initialize())
         self.assertEqual([record["id"] for record in self.stored()], [kept, after])
 
+    def test_at_the_cap_a_session_whose_first_write_fails_puts_no_other_session_out(self) -> None:
+        # Room was made for the new session before the write that failed: the least recently used session was gone
+        # from memory and its stream ended, though the file still held it and a restart brought it back.
+        with patch.object(mcp_transport, "MAX_MCP_SESSIONS", 3):
+            kept = [self.assert_an_ordinary_answer(self.initialize()) for _ in range(3)]
+            for second, session_id in enumerate(kept):
+                self.transport._sessions[session_id].last_used_at = f"2026-11-01T00:00:0{second}Z"
+            streams = [self.transport._take_over_event_stream(session_id) for session_id in kept]
+            table_before = self.store.read_text(encoding="utf-8")
+
+            with patch.object(mcp_transport, "atomic_write_text", side_effect=OSError(28, "No space left on device")):
+                refused = self.initialize()
+
+            self.assertEqual(refused.status_code, 500)
+            self.assertEqual(list(self.transport._sessions), kept)
+            self.assertEqual([stop.is_set() for stop in streams], [False, False, False])
+            self.assertEqual(self.store.read_text(encoding="utf-8"), table_before)
+
+            # An initialize that is written still puts the least recently used out, of memory and of the file.
+            after = self.assert_an_ordinary_answer(self.initialize())
+            self.assertEqual(list(self.transport._sessions), [*kept[1:], after])
+            self.assertEqual([stop.is_set() for stop in streams], [True, False, False])
+            self.assertEqual([record["id"] for record in self.stored()], [*kept[1:], after])
+
 
 class McpClientObjectBoundsTests(_Transport):
     """clientInfo and capabilities are each kept up to two bounds of the controller's own, and refused past either."""

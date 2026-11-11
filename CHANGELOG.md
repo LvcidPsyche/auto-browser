@@ -831,7 +831,9 @@ All notable changes to auto-browser are documented here.
   version stored past either bound is dropped when the file is read, with one WARNING that counts them and quotes
   none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down answers `400` `-32700`,
   as a body that is no JSON does, where it was an unhandled `500`. A session whose first write fails (a full disk)
-  is dropped before the error is answered: `500`, for that request alone.
+  is dropped before the error is answered: `500`, for that request alone. With the table at its cap, the session
+  it would have put out stays, and its event stream with it: sessions past a cap now go once the table is written
+  without them, where they went before the write.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
