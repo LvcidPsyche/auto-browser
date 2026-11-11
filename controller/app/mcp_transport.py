@@ -632,21 +632,27 @@ class McpHttpTransport:
                 negotiated_version,
             )
 
-        client_info = self._coerce_dict(params.get("clientInfo"))
-        client_capabilities = self._coerce_dict(params.get("capabilities"))
-        # Before either is cleaned or kept. The answer names the field and the bound, and nothing of the value.
-        for name, value in (("clientInfo", client_info), ("capabilities", client_capabilities)):
-            past_a_bound = _past_a_client_object_bound(value)
+        # The client's own, kept in the session table, which is written as UTF-8: a lone surrogate in either (JSON's
+        # "\ud800" reads as one) could not be written, so it is kept as U+FFFD, as the stores do. Each is measured as
+        # sent, before it is cleaned, and then as it is kept, which is what the next start measures: keys that meet
+        # once their lone surrogates are replaced are numbered, so what is kept can be longer than what was sent. The
+        # walk on what was sent stops at the first thing past a bound, so a million keys are not cleaned to be
+        # refused. The answer names the field and the bound, and nothing of the value.
+        kept: dict[str, dict[str, Any]] = {}
+        for name, value in (("clientInfo", params.get("clientInfo")), ("capabilities", params.get("capabilities"))):
+            sent = self._coerce_dict(value)
+            past_a_bound = _past_a_client_object_bound(sent)
+            if past_a_bound is None:
+                kept[name] = without_lone_surrogates(sent)
+                past_a_bound = _past_a_client_object_bound(kept[name])
             if past_a_bound is not None:
                 return self._json_error_response(request_id, -32602, f"initialize: {name} {past_a_bound}")
 
         session = McpSession(
             id=uuid4().hex,
             protocol_version=negotiated_version,
-            # The client's own, kept in the session table, which is written as UTF-8: a lone surrogate in either
-            # (JSON's "\ud800" reads as one) could not be written, so it is stored as U+FFFD, as the stores do.
-            client_info=without_lone_surrogates(client_info),
-            client_capabilities=without_lone_surrogates(client_capabilities),
+            client_info=kept["clientInfo"],
+            client_capabilities=kept["capabilities"],
             owner=verified_operator(),
         )
         self._sessions[session.id] = session

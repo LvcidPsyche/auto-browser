@@ -35,6 +35,7 @@ from app.mcp_transport import (
     MCP_SESSION_HEADER,
     McpHttpTransport,
 )
+from app.utils import without_lone_surrogates
 
 PROTOCOL = "2025-11-25"
 LONE = "\ud800"
@@ -73,6 +74,27 @@ def _of_bytes(size: int, *, letter: str = "x") -> str:
     assert len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) == size
     # ASCII on the wire, so more bytes there than are counted: what is counted is what the controller would write.
     return json.dumps(value)
+
+
+def _compact_size(value: object) -> int:
+    """The bytes ``value`` takes written compactly as JSON in UTF-8, a lone surrogate as the three U+FFFD takes."""
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass"))
+
+
+# 2,000 keys of one lone surrogate each: once each is replaced by U+FFFD they meet, and all but the first are numbered.
+MEETING_KEYS = {chr(0xD800 + number): 0 for number in range(2000)}
+
+
+def _padded(value: dict, size: int, *, as_kept: bool) -> dict:
+    """``value`` and a key of x's that make it ``size`` bytes as sent, or as kept (its lone surrogates replaced)."""
+
+    def measured(padded: dict) -> int:
+        return _compact_size(without_lone_surrogates(padded) if as_kept else padded)
+
+    padded = {**value, "pad": ""}
+    padded["pad"] = "x" * (size - measured(padded))
+    assert measured(padded) == size
+    return padded
 
 
 TOO_DEEP = f"is nested deeper than {MAX_CLIENT_OBJECT_DEPTH} levels"
@@ -323,6 +345,43 @@ class McpClientObjectBoundsTests(_Transport):
         # The sessions that are kept go on, and the next write of the table leaves the others out of the file too.
         self.assertEqual(self.delete("plain").status_code, 204)
         self.assertEqual([item["id"] for item in self.stored()], ["at-the-bounds"])
+
+    def test_what_is_kept_is_measured_and_not_only_what_was_sent(self) -> None:
+        # Keys that meet once their lone surrogates are replaced are numbered (" (2)", " (3)", ...), so what is kept
+        # is longer than what was sent: a value at the bound as sent was kept past it, written at every write of the
+        # table, and dropped by the next start, which measures what was kept.
+        at_the_bound_as_sent = _padded(MEETING_KEYS, MAX_CLIENT_OBJECT_JSON_BYTES, as_kept=False)
+        self.assertGreater(_compact_size(without_lone_surrogates(at_the_bound_as_sent)), MAX_CLIENT_OBJECT_JSON_BYTES)
+        kept = self.assert_an_ordinary_answer(self.initialize())
+        table = self.store.read_bytes()
+
+        for field, argument in self.SENT_AS.items():
+            with self.subTest(field=field):
+                refused = self.initialize(**{argument: at_the_bound_as_sent})
+
+                self.assertEqual(refused.status_code, 200, refused.text[:300])
+                error = {"code": -32602, "message": f"initialize: {field} {TOO_LARGE}"}
+                self.assertEqual(refused.json(), {"jsonrpc": "2.0", "id": 1, "error": error})
+                self.assertNotIn(MCP_SESSION_HEADER, refused.headers)
+                self.assertEqual(list(self.transport._sessions), [kept])
+                self.assertEqual(self.store.read_bytes(), table)
+
+    def test_a_value_at_the_bound_as_kept_is_kept_and_read_back_at_the_next_start(self) -> None:
+        at_the_bound_as_kept = _padded(MEETING_KEYS, MAX_CLIENT_OBJECT_JSON_BYTES, as_kept=True)
+        made = {
+            argument: self.assert_an_ordinary_answer(self.initialize(**{argument: at_the_bound_as_kept}))
+            for argument in self.SENT_AS.values()
+        }
+        stored = {record["id"]: record for record in self.stored()}
+        self.assertEqual(stored[made["client_info"]]["client_info"], without_lone_surrogates(at_the_bound_as_kept))
+        self.assertEqual(
+            stored[made["capabilities"]]["client_capabilities"], without_lone_surrogates(at_the_bound_as_kept)
+        )
+
+        with self.assertNoLogs("app.mcp_transport", level="WARNING"):
+            self.transport = self.transport_over_the_store()
+
+        self.assertEqual(sorted(self.transport._sessions), sorted(made.values()))
 
     def test_a_body_the_json_reader_cannot_go_down_is_answered_as_one_that_cannot_be_read(self) -> None:
         # How deep Python's JSON reader goes before it gives up (RecursionError, which is no ValueError) is the

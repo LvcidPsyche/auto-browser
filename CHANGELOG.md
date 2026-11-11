@@ -890,14 +890,16 @@ All notable changes to auto-browser are documented here.
   size of either, and the file is written whole at every write of it by anybody. A lone surrogate is now stored as
   U+FFFD, and that `initialize` is answered as any other. An `initialize` whose `clientInfo` or `capabilities` is
   nested deeper than 32 levels (the object itself is the first, and a list is a level as an object is) or takes
-  more than 64 KiB written compactly as JSON in UTF-8 is refused with JSON-RPC error `-32602`, whose message names
-  the field and the bound and nothing of the value: no session is made and nothing is written. A session an older
-  version stored past either bound is dropped when the file is read, with one WARNING that counts them and quotes
-  none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down answers `400` `-32700`,
-  as a body that is no JSON does, where it was an unhandled `500`. A session whose first write fails (a full disk)
-  is dropped before the error is answered: `500`, for that request alone. With the table at its cap, the session
-  it would have put out stays, and its event stream with it: sessions past a cap now go once the table is written
-  without them, where they went before the write.
+  more than 64 KiB written compactly as JSON in UTF-8, as it is kept, is refused with JSON-RPC error `-32602`,
+  whose message names the field and the bound and nothing of the value: no session is made and nothing is
+  written. What is kept can be longer than what was sent, and it is what the next start measures: keys that differ
+  only in a lone surrogate meet once it is replaced, and all but one of them are numbered (`" (2)"`, `" (3)"`, ...).
+  A session an older version stored past either bound is dropped when the file is read, with one WARNING that
+  counts them and quotes none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down
+  answers `400` `-32700`, as a body that is no JSON does, where it was an unhandled `500`. A session whose first
+  write fails (a full disk) is dropped before the error is answered: `500`, for that request alone. With the table
+  at its cap, the session it would have put out stays, and its event stream with it: sessions past a cap now go
+  once the table is written without them, where they went before the write.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
