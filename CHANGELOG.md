@@ -368,7 +368,9 @@ All notable changes to auto-browser are documented here.
   written to the log: an entry with a colon is named only up to it, and an entry is counted and not printed when
   what would be printed holds, in whatever case, eight characters in a row of a bearer token of the deployment or,
   of a token of five to eight characters, all but one of them in a row (a token after `Bearer` or `alice=`, in
-  quotes, with a character too many or cut short), or is itself a token shorter than that. A part of a token that
+  quotes, with a character too many or cut short), or holds a token shorter than that as a word of its own, with an
+  end of the entry or a character that is no letter and no digit on each side (`Bearer dev`, `'dev'`, `alice=dev`;
+  `developer` and `dev2` are named). A part of a token that
   stands in its own operator's id as well is not counted (with `alice-prod:alice-prod-9f8a...`, `alice-prod2` is
   named), and an operator id of `API_BEARER_TOKENS`, in whatever case, is still named where its letters are also a
   token's, unless it holds a whole token of eight characters or more. (AUTH-36)

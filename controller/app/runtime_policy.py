@@ -43,7 +43,8 @@ MIN_TOKEN_RUN_NOT_PRINTED = 8
 # A token of that length or shorter (a development setup's: production's are 32 or more) has no such run short of
 # itself, so the run that counts for it is one character fewer than it has, and such a token cut short by one is
 # not printed either. Never fewer than this many, which the two or three above rule out: a token of this length or
-# shorter keeps an entry back only when the entry is that token ('dev' does not hide 'developer').
+# shorter keeps an entry back only where the entry holds it as a word of its own ('dev' hides 'Bearer dev', and does
+# not hide 'developer').
 MIN_SHORT_TOKEN_RUN_NOT_PRINTED = 4
 
 CLI_PROVIDER_CHECKS = (
@@ -242,7 +243,8 @@ def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_
 
     In part is MIN_TOKEN_RUN_NOT_PRINTED of a token's characters in a row, and for a token no longer than that all
     but one of them, down to MIN_SHORT_TOKEN_RUN_NOT_PRINTED: below it an id holds a token's letters by chance, and
-    only a text that is the token shows it. A run that stands in the token's own operator id is no secret, and
+    only a text that holds the token as a word of its own shows it (_holds_as_a_word: 'Bearer dev', not
+    'developer'). A run that stands in the token's own operator id is no secret, and
     does not count: with alice-prod:alice-prod-9f8a..., 'alice-prod2' is an id like any other.
 
     An operator id of API_BEARER_TOKENS shows a token only where it holds one of MIN_TOKEN_RUN_NOT_PRINTED
@@ -257,7 +259,7 @@ def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_
             continue
         run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(token) - 1)
         if run < MIN_SHORT_TOKEN_RUN_NOT_PRINTED:
-            if token == folded:
+            if _holds_as_a_word(folded, token):
                 return True
             continue
         if token in folded:
@@ -267,6 +269,18 @@ def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_
             part = token[start : start + run]
             if part in folded and part not in own_id:
                 return True
+    return False
+
+
+def _holds_as_a_word(text: str, word: str) -> bool:
+    """Whether ``word`` stands in ``text`` with, on each side, an end of the text or a character that is no letter
+    and no digit: 'dev' in 'Bearer dev', 'alice=dev' or "'dev'", not in 'developer' or '4dev'."""
+    start = text.find(word)
+    while start != -1:
+        end = start + len(word)
+        if (start == 0 or not text[start - 1].isalnum()) and (end == len(text) or not text[end].isalnum()):
+            return True
+        start = text.find(word, start + 1)
     return False
 
 

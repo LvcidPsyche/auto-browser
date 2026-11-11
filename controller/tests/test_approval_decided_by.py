@@ -441,6 +441,15 @@ class ListedOperatorTests(unittest.TestCase):
         "an id that is its own short token": ("Alice", "alice:alice", None, ["It differs from 'alice' only by case"]),
         # The token itself is still one, in whatever case: two entries.
         "a short token alone, in two cases": ("dev,DEV", "alice:dev", None, [kept_back(2)]),
+        # So is such a token as a word of its own, with something round it, where it was named: on each side an end
+        # of the entry or a character that is no letter and no digit. Its letters in a word are an id's.
+        "a short token after Bearer": ("Bearer dev", "alice:dev", None, [kept_back(1)]),
+        "a short token in single quotes": ("'dev'", "alice:dev", None, [kept_back(1)]),
+        "a short token after an id and =": ("alice=dev", "alice:dev", None, [kept_back(1)]),
+        "a short token before a hyphen, in upper case": ("DEV-team", "alice:dev", None, [kept_back(1)]),
+        "a short token after an underscore": ("ops_x1", "alice:x1", None, [kept_back(1)]),
+        "a short token's letters after a digit": ("4dev", "alice:dev", None, ["lists '4dev', which no credential"]),
+        "a short token's letters before a digit": ("dev2", "alice:dev", None, ["lists 'dev2', which no credential"]),
         # A token of eight characters or fewer has no eight in a row short of itself, and cut short by one it was
         # named: six characters of seven, and seven of eight.
         "a token of seven cut short by one": ("s3cr3t", "alice:s3cr3t!", None, [kept_back(1)]),
