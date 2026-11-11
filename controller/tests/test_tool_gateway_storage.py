@@ -365,7 +365,9 @@ class GatewayWriteRecordTests(SpendBase):
     async def test_a_write_whose_record_cannot_be_written_is_logged_by_tool_and_session(self) -> None:
         # The gateway answers a store's ValueError with its text and logs nothing itself: without this line a cookie
         # write whose record failed left no evidence on the controller that the cookies were set.
-        self.manager.audit.append = AsyncMock(side_effect=ValueError("the store refused it"))  # type: ignore[method-assign]
+        self.manager.audit.append = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ValueError("the store refused it")
+        )
 
         with self.assertLogs(WRITE_RECORDS_LOGGER, level="ERROR") as logs:
             response = await self.call(

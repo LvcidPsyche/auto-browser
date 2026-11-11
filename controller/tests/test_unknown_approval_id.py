@@ -153,7 +153,9 @@ class UnknownApprovalIdTests(SpendBase):
 
     async def test_another_missing_thing_keeps_its_own_words(self) -> None:
         # Only a KeyError that names the presented id is the approval's.
-        self.manager.execute_approval = AsyncMock(side_effect=KeyError("Memory profile not found"))  # type: ignore[method-assign]
+        self.manager.execute_approval = AsyncMock(  # type: ignore[method-assign]
+            side_effect=KeyError("Memory profile not found")
+        )
 
         answer = await self.call("browser.execute_approval", approval_id=UNKNOWN)
 

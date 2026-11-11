@@ -145,7 +145,9 @@ class TakeoverRefusalWindows:
         return window.held_beside(call) if window is not None else HeldBack(0, False)
 
     def _chosen(self, now: float | None, source: str | None) -> list[tuple[str, _RefusalWindow]]:
-        """The windows a taking is of: those over at ``now`` (all of them with no time), of ``source`` alone if named."""
+        """The windows a taking is of: those over at ``now`` (all of them with no time),
+        of ``source`` alone if named.
+        """
         named = self._windows.items() if source is None else [(source, self._windows.get(source))]
         return [
             (name, window)
