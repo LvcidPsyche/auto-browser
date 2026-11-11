@@ -14,6 +14,7 @@ from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
+from ..utils import RefusalLogWindows, capped_for_log, held_back_note
 from .identity import NodeIdentity
 from .models import (
     DelegationRequest,
@@ -212,6 +213,8 @@ class DelegationManager:
         self._started_at = time.time()
         self._tool_gateway = tool_gateway
         self._approval_fn = approval_fn
+        # Which envelopes that failed verification are logged, by the peer each names as its sender.
+        self._invalid_envelope_log = RefusalLogWindows()
 
     # ------------------------------------------------------------------
     # Outbound
@@ -328,7 +331,17 @@ class DelegationManager:
                 expected_recipient_node_id=self._identity.node_id,
             )
         except EnvelopeVerificationError as exc:
-            logger.warning("mesh.delegation.envelope_invalid sender=%s error=%s", sender_id, exc)
+            # To get here a caller needs no key and no credential, only the id of a registered peer, and the error
+            # quotes the envelope's own fields, as long as the body cap allows. So one line a window for the peer
+            # named, with the count of the rest in the next, and the error cut as a refused request's path is.
+            held_back = self._invalid_envelope_log.due(sender_id, now=time.monotonic())
+            if held_back is not None:
+                logger.warning(
+                    "mesh.delegation.envelope_invalid sender=%s error=%s%s",
+                    sender_id,
+                    capped_for_log(str(exc)),
+                    held_back_note(held_back, "sender"),
+                )
             raise DelegationRejected(f"envelope verification failed: {exc}") from exc
 
         # Decode request

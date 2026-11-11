@@ -35,18 +35,12 @@ from .safe_json_response import SafeJSONResponse
 from .session_ownership import may_use
 from .session_share import SessionShareManager
 from .tool_gateway import McpToolGateway
+from .utils import capped_for_log
 from .vision_target import VisionTargeter
 
 logger = logging.getLogger(__name__)
 
 LifespanFactory = Callable[[FastAPI], AbstractAsyncContextManager[None] | AsyncIterator[None]]
-
-# The most characters of a client-supplied path (or of an error that quotes it) one log line carries.
-MAX_LOGGED_PATH_CHARS = 200
-
-
-def _capped(text: str) -> str:
-    return text if len(text) <= MAX_LOGGED_PATH_CHARS else text[:MAX_LOGGED_PATH_CHARS] + "..."
 
 
 @dataclass(slots=True)
@@ -174,7 +168,7 @@ class SessionArtifactFiles(StaticFiles):
                 # The path is the client's, and Windows says EINVAL (not ENAMETOOLONG) for a name it
                 # cannot parse and puts that name in the error too: cap both, or one request writes a
                 # log line as long as the request line allows.
-                logger.warning("artifact lookup failed for %r: %s", _capped(path), _capped(str(exc)))
+                logger.warning("artifact lookup failed for %r: %s", capped_for_log(path), capped_for_log(str(exc)))
             raise HTTPException(status_code=404) from None
         # A path that resolves to nothing is the parent's 404, so nothing is leaked.
         if session_id is not None and not await self._may_serve(session_id):

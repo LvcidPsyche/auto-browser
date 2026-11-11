@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 import time
+from collections import OrderedDict
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,51 @@ SECRET_KEY_FRAGMENTS = (
 )
 
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+# The most characters of a caller's own text one log line carries: a request's path or Host, or an error that quotes
+# what the caller sent. A server lets a request line run to megabytes, and each of these lines is written for a
+# request that was refused.
+MAX_LOGGED_PATH_CHARS = 200
+
+
+def capped_for_log(text: str) -> str:
+    """``text`` cut to MAX_LOGGED_PATH_CHARS for a log line, with "..." where something was cut."""
+    return text if len(text) <= MAX_LOGGED_PATH_CHARS else text[:MAX_LOGGED_PATH_CHARS] + "..."
+
+
+# A caller refused ahead of the rate limiter, or one that needs no credential to be refused, can be refused without
+# end, and a warning a refusal fills the log: one line a source a window, and the next says how many were only counted.
+REFUSAL_LOG_WINDOW_SECONDS = 60.0
+REFUSAL_LOG_SOURCES_MAX = 1024
+
+
+class RefusalLogWindows:
+    """Which refusals of one kind are logged: a source's first, then one a window with the count held back.
+
+    Bounded as the takeover-link refusals are (routes/sessions.py): the source logged longest ago is forgotten
+    first, with its count, and logs as new.
+    """
+
+    def __init__(self) -> None:
+        self._windows: OrderedDict[str, list[float]] = OrderedDict()  # source -> [window start, refusals counted]
+
+    def due(self, source: str, *, now: float) -> int | None:
+        """How many refusals the line due now reports as held back (0: none), or None: this one is only counted."""
+        window = self._windows.get(source)
+        if window is not None and now - window[0] < REFUSAL_LOG_WINDOW_SECONDS:
+            window[1] += 1
+            return None
+        self._windows[source] = [now, 0]
+        self._windows.move_to_end(source)
+        while len(self._windows) > REFUSAL_LOG_SOURCES_MAX:
+            self._windows.popitem(last=False)
+        return int(window[1]) if window is not None else 0
+
+
+def held_back_note(held_back: int, source: str) -> str:
+    """What a line that is due adds for the refusals only counted since the one before it ("" when there are none)."""
+    return f" ({held_back} more from this {source} were refused since the last such line)" if held_back else ""
+
 
 # A UTF-16 surrogate code point, which a Python string holds only on its own (a JSON "\ud800" escape
 # decodes to one, and a valid pair decodes to the character it encodes). UTF-8 cannot encode it.

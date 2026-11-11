@@ -261,12 +261,19 @@ All notable changes to auto-browser are documented here.
   refused from a session's browser network and the path in the `unmapped KeyError` warning. The refusal also wrote
   one warning a request, ahead of the rate limiter, so a page left open could write them without end: a client
   host's first refusal is logged, later ones in the next 60 seconds are only counted, and the first after that is
-  logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count.
+  logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count. Two
+  more refusals are answered ahead of the rate limiter, and each now has such a window of its own: a request whose
+  `Host` is no loopback name, by client host, and a request from a session's browser network, by its address. A
+  path or a `Host` in any of these lines, and the path in the `unmapped KeyError` warning, is cut at 200 characters:
+  one refused request could write a line as long as the server lets a request line be.
 - **A mesh peer can no longer write a line of its own into the controller's log.** The capability a registered
   peer's signed request asks for, and the session id it names, were logged as sent: a line break in either ended the
   line. Both are logged quoted now, in the `mesh.policy.denied`, `mesh.policy: PERMIT`,
   `mesh.delegation.approval_required`, `mesh.delegation.approval_denied` and `mesh.delegation.session_verb` lines,
-  where `capability=tool:browser.observe` now reads `capability='tool:browser.observe'`.
+  where `capability=tool:browser.observe` now reads `capability='tool:browser.observe'`. An envelope that fails
+  verification needs no key, only the id of a registered peer, and its `mesh.delegation.envelope_invalid` warning
+  quoted the envelope's own fields whole: that line is now written once in 60 seconds for the peer named, the next
+  one with the count of those between, and its error text is cut at 200 characters.
 - **A refused start no longer quotes a long `*_AUTH_MODE` value.** With `APP_ENV=production`, an `OPENAI_AUTH_MODE`,
   `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the start with an error that quoted the value,
   and `.env.example` has each a few lines under its provider's API key: a key set on the wrong line was written to

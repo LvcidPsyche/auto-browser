@@ -30,6 +30,7 @@ from .routes.sessions import TakeoverRefusalWindows, create_sessions_router, wri
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
 from .safe_json_response import SafeJSONResponse, safe_http_exception_handler, safe_validation_exception_handler
+from .utils import capped_for_log
 from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -163,8 +164,9 @@ async def handle_key_not_found(request: Request, exc: KeyError) -> SafeJSONRespo
         return SafeJSONResponse(status_code=404, content=content)
     # A plain KeyError is either an unknown id a service chose to raise as one or a bug
     # reaching the client as a 404; the log line is the only way to tell them apart.
-    # %r: the path is the caller's, decoded, and a control character in it must not reach the log as itself.
-    logger.warning("unmapped KeyError on %s %r", request.method, request.url.path, exc_info=exc)
+    # %r: the path is the caller's, decoded, and a control character in it must not reach the log as itself. Cut, as
+    # in the refusals' lines: it is as long as the server lets a request line be.
+    logger.warning("unmapped KeyError on %s %r", request.method, capped_for_log(request.url.path), exc_info=exc)
     key = exc.args[0] if exc.args else "unknown"
     return SafeJSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
 

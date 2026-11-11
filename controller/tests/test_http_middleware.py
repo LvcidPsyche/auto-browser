@@ -502,7 +502,7 @@ class TheRefusalsLogLineTests(unittest.TestCase):
                 self.refuse()
             self.assertEqual(len(logs.records), 1, logs.output)
             self.assertNotIn("more", logs.records[0].getMessage())
-            with patch("app.middleware.http.REFUSAL_LOG_WINDOW_SECONDS", 0):  # the window is over
+            with patch("app.utils.REFUSAL_LOG_WINDOW_SECONDS", 0):  # the window is over
                 self.refuse()
 
         self.assertEqual(len(logs.records), 2, logs.output)
@@ -511,7 +511,7 @@ class TheRefusalsLogLineTests(unittest.TestCase):
     def test_a_refusal_after_a_quiet_window_is_a_plain_line_again(self) -> None:
         with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
             self.refuse()
-            with patch("app.middleware.http.REFUSAL_LOG_WINDOW_SECONDS", 0):
+            with patch("app.utils.REFUSAL_LOG_WINDOW_SECONDS", 0):
                 self.refuse()
 
         self.assertEqual(len(logs.records), 2, logs.output)
@@ -520,7 +520,7 @@ class TheRefusalsLogLineTests(unittest.TestCase):
     def test_the_sources_remembered_are_bounded(self) -> None:
         windows = RefusalLogWindows()
 
-        with patch("app.middleware.http.REFUSAL_LOG_SOURCES_MAX", 2):
+        with patch("app.utils.REFUSAL_LOG_SOURCES_MAX", 2):
             for source in ("a", "b", "c"):
                 self.assertEqual(windows.due(source, now=0.0), 0)
             self.assertIsNone(windows.due("c", now=1.0))
@@ -528,8 +528,141 @@ class TheRefusalsLogLineTests(unittest.TestCase):
             # The oldest was forgotten, with whatever it had counted: it logs as new.
             self.assertEqual(windows.due("a", now=1.0), 0)
 
+    def test_each_client_has_a_window_of_its_own(self) -> None:
+        # One window for every client would pass the flood test above: a second client's first refusal is a line.
+        application = _application()
+        first, second = (
+            TestClient(application, base_url=BASE_URL, client=(address, 50000)) for address in ("10.0.0.1", "10.0.0.2")
+        )
+        cross_site = {"Sec-Fetch-Site": "cross-site"}
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            for _ in range(3):
+                first.post("/maintenance/cleanup", headers=cross_site)
+            for _ in range(2):
+                second.post("/maintenance/cleanup", headers=cross_site)
+            self.assertEqual(len(logs.records), 2, logs.output)
+            with patch("app.utils.REFUSAL_LOG_WINDOW_SECONDS", 0):
+                second.post("/maintenance/cleanup", headers=cross_site)
+
+        self.assertIn("1 more", logs.records[2].getMessage())  # its own count: the other client held back 2
+
+    def test_a_path_of_any_length_is_cut_in_the_line(self) -> None:
+        # One refused request wrote a line as long as the server lets a request line be: megabytes, over h11.
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            self.refuse("/x/" + "p" * 5000)
+
+        message = logs.records[0].getMessage()
+        self.assertIn("/x/pppp", message)
+        self.assertLess(len(message), 400)
+
+
+LOOPBACK_ONLY = "Invalid host header: this controller runs without an API credential"
+
+
+class TheHostRefusalsLogLineTests(unittest.TestCase):
+    """The same for a request whose Host is no loopback name: a rebinding page's requests, as many as it sends."""
+
+    def refuse(self, client: TestClient, host: str = "rebound.example") -> None:
+        response = client.get("/dashboard", headers={"Host": host})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn(LOOPBACK_ONLY, response.json()["detail"])
+
+    def test_fifty_refused_requests_write_one_line_and_the_next_window_says_how_many_it_held_back(self) -> None:
+        client = _client()
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            for _ in range(50):
+                self.refuse(client)
+            self.assertEqual(len(logs.records), 1, logs.output[:3])
+            self.assertNotIn("more", logs.records[0].getMessage())
+            with patch("app.utils.REFUSAL_LOG_WINDOW_SECONDS", 0):
+                self.refuse(client)
+
+        self.assertEqual(len(logs.records), 2, logs.output)
+        self.assertIn("49 more", logs.records[1].getMessage())
+
+    def test_each_client_has_a_window_of_its_own(self) -> None:
+        application = _application()
+        first, second = (
+            TestClient(application, base_url=BASE_URL, client=(address, 50000)) for address in ("10.0.0.1", "10.0.0.2")
+        )
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            for _ in range(3):
+                self.refuse(first)
+            self.refuse(second)
+
+        self.assertEqual(len(logs.records), 2, logs.output)
+
+    def test_a_refused_host_and_a_refused_write_do_not_share_a_window(self) -> None:
+        # Two refusals, two lines: a client's cross-site write is not held back because its Host was just refused.
+        client = _client()
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            self.refuse(client)
+            client.post("/maintenance/cleanup", headers={"Sec-Fetch-Site": "cross-site"})
+
+        self.assertEqual(len(logs.records), 2, logs.output)
+
+    def test_a_host_of_any_length_is_cut_in_the_line(self) -> None:
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            self.refuse(_client(), "h" * 5000 + ".example")
+
+        message = logs.records[0].getMessage()
+        self.assertIn("hhhh", message)
+        self.assertLess(len(message), 400)
+
 
 class ASessionNetworkPeersLogLineTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    async def refuse(middleware: Any, *, peer: str = "172.30.0.5", path: str = "/sessions", kind: str = "http") -> None:
+        await middleware({"type": kind, "client": (peer, 1234), "path": path, "headers": []}, AsyncMock(), AsyncMock())
+
+    async def test_fifty_refused_requests_from_one_peer_write_one_line_and_the_next_says_how_many_it_held_back(
+        self,
+    ) -> None:
+        # This layer answers ahead of the rate limiter, and a page in a session's browser sends what it likes.
+        downstream = AsyncMock()
+        middleware = SessionNetworkPeerMiddleware(downstream, refuses_peer=lambda host: True)
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            for number in range(50):
+                await self.refuse(middleware, kind="websocket" if number % 10 == 9 else "http")
+            self.assertEqual(len(logs.records), 1, logs.output[:3])
+            self.assertNotIn("more", logs.records[0].getMessage())
+            with patch("app.utils.REFUSAL_LOG_WINDOW_SECONDS", 0):  # the window is over
+                await self.refuse(middleware)
+
+        self.assertEqual(len(logs.records), 2, logs.output)
+        self.assertIn("49 more", logs.records[1].getMessage())
+        downstream.assert_not_awaited()  # each of them was refused all the same
+
+    async def test_each_peer_has_a_window_of_its_own(self) -> None:
+        middleware = SessionNetworkPeerMiddleware(AsyncMock(), refuses_peer=lambda host: True)
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            for _ in range(3):
+                await self.refuse(middleware, peer="172.30.0.5")
+            for _ in range(2):
+                await self.refuse(middleware, peer="172.30.1.5")
+            self.assertEqual(len(logs.records), 2, logs.output)
+            with patch("app.utils.REFUSAL_LOG_WINDOW_SECONDS", 0):
+                await self.refuse(middleware, peer="172.30.1.5")
+
+        self.assertIn("172.30.1.5", logs.records[2].getMessage())
+        self.assertIn("1 more", logs.records[2].getMessage())
+
+    async def test_a_path_of_any_length_is_cut_in_the_line(self) -> None:
+        middleware = SessionNetworkPeerMiddleware(AsyncMock(), refuses_peer=lambda host: True)
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as logs:
+            await self.refuse(middleware, path="/x/" + "p" * 5000)
+
+        message = logs.records[0].getMessage()
+        self.assertIn("/x/pppp", message)
+        self.assertLess(len(message), 400)
+
     async def test_a_path_holding_line_breaks_cannot_start_a_line_of_the_log(self) -> None:
         # A page in a session's browser chooses the path, and this refusal logs it.
         sent: list[dict[str, Any]] = []

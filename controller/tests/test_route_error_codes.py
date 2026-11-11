@@ -596,6 +596,21 @@ def test_an_unmapped_key_errors_log_line_shows_a_control_character_of_the_path_e
     assert "\\x1b[2Jpe" in message
 
 
+def test_an_unmapped_key_errors_log_line_cuts_a_path_of_any_length(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The path is the caller's, as long as the server lets a request line be.
+    route = Route("get", "/sessions/" + "s" * 5000, None, "get_session_record")
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
+        response = _call(client, route)
+    assert response.status_code == 404, response.text
+    logged = [r for r in caplog.records if r.name == "app.main" and "unmapped KeyError" in r.getMessage()]
+    assert logged, "an unmapped KeyError was answered 404 without a log line"
+    message = logged[0].getMessage()
+    assert "/sessions/ssss" in message
+    assert len(message) < 400
+
+
 def test_unknown_session_is_not_logged_as_an_unmapped_key_error(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:

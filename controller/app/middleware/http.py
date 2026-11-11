@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import OrderedDict
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request
@@ -28,6 +27,7 @@ from ..auth_policy import (
     tokenless_loopback_allowed,
 )
 from ..rate_limits import build_rate_limit_key, is_exempt_path
+from ..utils import RefusalLogWindows, capped_for_log, held_back_note
 from .hosts import install_controller_host_middleware, origin_matches_host
 
 logger = logging.getLogger(__name__)
@@ -52,33 +52,9 @@ CROSS_SITE_WRITE_DETAIL = (
     "web origin. A web page must be served from the controller's own origin. A browser extension, or another client "
     "that names an origin, needs the controller to have a token, and sends it as a bearer token."
 )
-# A page the operator's browser has open can send refused writes without end, and this layer answers ahead of the
-# rate limiter: one warning a source (the client host) a window, and the next one says how many were only counted.
-REFUSAL_LOG_WINDOW_SECONDS = 60.0
-REFUSAL_LOG_SOURCES_MAX = 1024
-
-
-class RefusalLogWindows:
-    """Which refused cross-site writes are logged: a source's first, then one a window with the count held back.
-
-    Bounded as the takeover-link refusals are (routes/sessions.py): the source logged longest ago is forgotten
-    first, with its count, and logs as new.
-    """
-
-    def __init__(self) -> None:
-        self._windows: OrderedDict[str, list[float]] = OrderedDict()  # source -> [window start, refusals counted]
-
-    def due(self, source: str, *, now: float) -> int | None:
-        """How many refusals the line due now reports as held back (0: none), or None: this one is only counted."""
-        window = self._windows.get(source)
-        if window is not None and now - window[0] < REFUSAL_LOG_WINDOW_SECONDS:
-            window[1] += 1
-            return None
-        self._windows[source] = [now, 0]
-        self._windows.move_to_end(source)
-        while len(self._windows) > REFUSAL_LOG_SOURCES_MAX:
-            self._windows.popitem(last=False)
-        return int(window[1]) if window is not None else 0
+# The three refusals this module logs (a cross-site write, a Host that is no loopback name, a session network peer)
+# are answered ahead of the rate limiter, to a page that can send them without end: each kind logs one warning a
+# source a window (RefusalLogWindows), and cuts the path or the Host it quotes (capped_for_log).
 
 
 # The message uvicorn cancels a request's task with once its graceful-shutdown limit has passed (uvicorn/server.py,
@@ -197,11 +173,14 @@ class SessionNetworkPeerMiddleware:
     refused before the Host check, the rate limiter, the token check and every
     route. Only the ASGI client address counts, never a forwarded-for header. A
     WebSocket is closed before it is accepted, which the server answers with 403.
+    A page can send these without end, so a peer's refusals are logged one a
+    window, with the count of the rest in the next line.
     """
 
     def __init__(self, app: ASGIApp, refuses_peer: Callable[[str], bool]) -> None:
         self.app = app
         self.refuses_peer = refuses_peer
+        self._refusal_log = RefusalLogWindows()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -212,8 +191,15 @@ class SessionNetworkPeerMiddleware:
         if not host or not self.refuses_peer(host):
             await self.app(scope, receive, send)
             return
-        # %r: a page in the session's browser chooses the path, and a line break in it must not start a log line.
-        logger.warning("refused a request from session network peer %s to %r", host, scope.get("path", ""))
+        held_back = self._refusal_log.due(host, now=time.monotonic())
+        if held_back is not None:
+            # %r: a page in the session's browser chooses the path, and a line break in it must not start a log line.
+            logger.warning(
+                "refused a request from session network peer %s to %r%s",
+                host,
+                capped_for_log(scope.get("path", "")),
+                held_back_note(held_back, "peer"),
+            )
         if scope["type"] == "websocket":
             await WebSocketClose(code=1008, reason="session network peer")(scope, receive, send)
             return
@@ -438,6 +424,7 @@ def install_controller_http_middleware(
     # deployment with a bearer credential is unaffected.
     configured_hosts = list(getattr(settings, "controller_allowed_host_patterns", None) or [])
     refusal_log = RefusalLogWindows()
+    host_refusal_log = RefusalLogWindows()  # its own: a client's refused write is not held back by its refused Host
 
     # Installed before the Host check, so it runs after it: a rebinding hostname is refused there as a Host error, and
     # the refusal here spends no rate-limit budget. Sits with the Host check for the same reason: a page reaches a
@@ -458,8 +445,8 @@ def install_controller_http_middleware(
             # %r: the path is logged decoded, and a line break a page put in it (%0A) must not start a log line.
             logger.warning(
                 "refused a write to %r from another web origin%s",
-                _request_path(request),
-                f" ({held_back} more from this client were refused since the last such line)" if held_back else "",
+                capped_for_log(_request_path(request)),
+                held_back_note(held_back, "client"),
             )
         return JSONResponse(status_code=403, content={"detail": CROSS_SITE_WRITE_DETAIL})
 
@@ -470,7 +457,14 @@ def install_controller_http_middleware(
         host = request.headers.get("host", "")
         if is_loopback_host(host):
             return await call_next(request)
-        logger.warning("refused unauthenticated request for non-loopback Host %r", host)
+        # A page that rebinds its name sends these as freely as it sends cross-site writes, and chooses the Host.
+        held_back = host_refusal_log.due(request.client.host if request.client else "unknown", now=time.monotonic())
+        if held_back is not None:
+            logger.warning(
+                "refused unauthenticated request for non-loopback Host %r%s",
+                capped_for_log(host),
+                held_back_note(held_back, "client"),
+            )
         return JSONResponse(
             status_code=400,
             content={
