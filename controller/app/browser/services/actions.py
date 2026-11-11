@@ -176,9 +176,6 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
   };
 }"""
 
-# Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
-# longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
-# rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
 # How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
 # 20 to 500 ms between its looks.
 ENABLED_POLL_SECONDS = 0.1
@@ -209,6 +206,9 @@ class _Budget:
         return max(1, round((self._ends - time.monotonic()) * 1000))
 
 
+# Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
+# longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
+# rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
 HUMAN_TYPING_BUDGET_SECONDS = 20.0
 # The least a keystroke or the final insert is given once the budget is spent, before it counts as hung. The worst
 # case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest

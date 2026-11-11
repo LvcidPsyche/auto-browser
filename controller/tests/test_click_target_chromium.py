@@ -987,9 +987,9 @@ async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_
 
 async def test_a_click_playwright_places_passes_over_a_first_box_of_under_a_square_pixel(tmp_path: Path) -> None:
     # Playwright takes the first box of which the viewport shows more than 0.99 of a square pixel, and not the
-    # first it shows anything of. Half a pixel of this link stands before its block, under something of the
-    # page's own: a point taken there is one the pointer never finds the link at, and the click fails when
-    # its time is up, where Playwright's own (the click route) presses the card.
+    # first it shows anything of. A quarter of a pixel of this link stands before its block, under something
+    # of the page's own: a point taken there is one the pointer never finds the link at, and the click fails
+    # when its time is up, where Playwright's own (the click route) presses the card.
     async with browser_env(tmp_path, {"/": THIN_FIRST_BOX}) as env:
         session_id = await env.create("/")
         page = env.page(session_id)
