@@ -297,6 +297,11 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code via\nthe group chat for everyone in the org"),
         ("post", "Send me a login link to\nthe whole engineering team's inbox"),
         ("post", "Send code to my\nmanager and the whole of the finance team"),
+        # The two lines read together go on in the third where they stop on such a word in turn, or where the
+        # third opens with a word a label goes on with.
+        ("post", "Send code to\nmy phone and to\nall users in the organization today"),
+        ("post", "Send code to\nthe\nwhole engineering team's shared inbox today"),
+        ("post", "Send code to\nmy phone\nvia the group chat for everyone in the org"),
         # An icon's name that is itself a phrase of the table asks, whatever follows it: with a verb in lower
         # case, "delete Purchase history" is a label too.
         ("destructive", "delete Purchase history"),
@@ -451,6 +456,15 @@ class LabelRulesTests(unittest.TestCase):
         "Send code again\nYou can ask for a new one in a minute or two",
         "Send code now\nIt can take a minute or two to get to your inbox",
         "Send code to my phone\nStandard message rates may apply to this text",
+        # A tile for a way to sign in: its line that stops on such a word is read with the line after it, the
+        # address, and not with the small print under that. Read with every line after it, each of these asked.
+        "Send code to\nj***@example.com\nStandard message rates may apply",
+        "Send code to\n(***) ***-1234\nMessage and data rates may apply",
+        "Send code to my\nphone ending in 1234\nMessage and data rates may apply",
+        "Send code via\nSMS\nCarrier charges may apply to this message",
+        "Send code by\ntext message\nIt can take up to a minute to arrive",
+        "Send code to your\nphone\nMake sure you have it with you right now",
+        "Text message\nSend code to\n(***) ***-1234\nRecommended",
         "Send magic link to my inbox",
         "Send code to reset your password",
         "Send code to verify my email",

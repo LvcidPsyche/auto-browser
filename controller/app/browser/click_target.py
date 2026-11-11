@@ -49,7 +49,7 @@ import logging
 import re
 import string
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -647,7 +647,7 @@ def _label_kind(label: str) -> ApprovalKind | None:
     if kind is not None:
         return kind
     for index, line in enumerate(lines[:MAX_LABEL_LINES]):
-        kind = _line_kind(line, " ".join(lines[index + 1 :]).casefold())
+        kind = _line_kind(line, [after.casefold() for after in lines[index + 1 :]])
         if kind is not None:
             return kind
     return None
@@ -666,25 +666,41 @@ def _without_invisible(label: str) -> str:
     )
 
 
-def _line_kind(shown: str, rest: str = "") -> ApprovalKind | None:
-    """The kind a line asks for; ``rest`` is what the label goes on with after it, case folded.
+def _line_kind(shown: str, after: Sequence[str] = ()) -> ApprovalKind | None:
+    """The kind a line asks for; ``after`` is the lines the label goes on with after it, case folded.
 
     Each reading of the line (_readings) is matched by itself, and one that is a harmless continuation, alone or
     with the rest of the label, asks nothing. Alone only where the rest does not go on with it: "Send code" over
     "to all users in the organization" is one sentence, too long to be read whole, and its first line alone
-    let it go.
+    let it go. Such a line is read with the lines its sentence goes on over (_with_what_it_goes_on_over).
     """
     if not shown or len(shown) > MAX_LABEL_CHARS:
         return None
+    rest = " ".join(after)
     for reading in _readings(shown):
         if rest and _asks_nothing(f"{reading} {rest}"):
             continue
-        if _asks_nothing(reading) and not _send_goes_on(reading, rest):
+        if _asks_nothing(_with_what_it_goes_on_over(reading, after)):
             continue
         for kind, pattern in _PHRASE_PATTERNS.items():
             if pattern.match(reading):
                 return kind
     return None
+
+
+def _with_what_it_goes_on_over(reading: str, after: Sequence[str]) -> str:
+    """``reading`` with the lines after it that its sentence goes on over: none, for most lines.
+
+    A way to sign in that Send sends is read with the next line while it goes on there (_send_goes_on), a line
+    at a time, and no further: "Send code to" over a masked address is where the code goes, and a line of small
+    print under the address is another sentence. Read with every line after it, such a tile asked for its small
+    print. The reading that comes back asks or does not as a line by itself would.
+    """
+    for index, line in enumerate(after):
+        if not _send_goes_on(reading, " ".join(after[index:])):
+            break
+        reading = f"{reading} {line}"
+    return reading
 
 
 def _send_goes_on(reading: str, rest: str) -> bool:

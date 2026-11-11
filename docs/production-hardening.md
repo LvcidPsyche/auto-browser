@@ -179,8 +179,10 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     - A line of the label that stops on one of these words is not its end: `to`, `via`, `by`, `through`, `using`,
       `in`, `on`, `the`, `a`, `an`, `my`, `your`, `this`, `and`, `or`, `at`, `with`, `of`, `for`, `into`. The line
       after it is read with it, whatever that line opens with, so "Send code to" over "all users in the
-      organization today" asks, and "Send code to" over "my phone number ending in 1234" runs. "Send code again"
-      over a sentence about it runs: a label ends on "again", "now" or "instead".
+      organization today" asks, and "Send code to" over "my phone number ending in 1234" runs. The line after
+      that is read with the two only where they go on into it in the same way, so the small print under an address
+      is no part of where the code goes: "Send code to" over "j***@example.com" over "Standard message rates may
+      apply" runs. "Send code again" over a sentence about it runs: a label ends on "again", "now" or "instead".
   - A label is read as its whole text on one line, and then each of its first three lines by itself, so a name
     over a sentence ("Delete account" above "This permanently removes your profile") is read by its name. A line
     of over 40 characters is a sentence, not a name, and is not matched, and the page hands over the first 400
