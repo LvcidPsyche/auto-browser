@@ -303,7 +303,8 @@ All notable changes to auto-browser are documented here.
   also quoted a URL a grant's `url_allowlist` refused, as the peer sent it: a URL with userinfo is refused for
   having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
   quoted and cut at 200 characters, and says when the URL carried userinfo or a port that cannot be read, for which
-  it is refused whatever its host; what the peer is answered is the fixed text it was. One line was
+  it is refused whatever its host, and, of a host a pattern allows, which of the URL's scheme, port (as written) and
+  path no pattern allows with that host; what the peer is answered is the fixed text it was. One line was
   left: under `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent (`no readable
   record for session`), the id of a peer's request or of an MCP call. It is quoted now too.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With

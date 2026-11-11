@@ -104,21 +104,30 @@ def _url_matches(url: str, pattern: str) -> bool:
     (`*.example.com`) matches the host alone. A URL carrying userinfo never
     matches — `https://example.com@evil.com/` is how a host is disguised.
     """
-    try:
-        parts = urlsplit(browser_equivalent_url(url))
-        port = parts.port
-    except ValueError:
-        return False
-    host = (parts.hostname or "").lower()
-    if not host or parts.username is not None or parts.password is not None:
+    read = _url_parts(url)
+    if read is None:
         return False
 
     pattern = pattern.strip()
     if "://" not in pattern:
-        return fnmatch.fnmatchcase(host, pattern.lower())
+        return fnmatch.fnmatchcase(read[1], pattern.lower())
 
-    pattern_scheme, _, pattern_rest = pattern.partition("://")
-    pattern_authority, slash, pattern_path = pattern_rest.partition("/")
+    allows = _pattern_allows(read, pattern)
+    return allows["scheme"] and allows["authority"] and allows["path"]
+
+
+def _url_parts(url: str) -> tuple[str, str, str, str] | None:
+    """A URL as the allowlist reads it: scheme, host, authority (the host with its port as written; an IPv6 literal
+    keeps its brackets) and path (with its query and fragment). None for one no pattern matches: no host,
+    userinfo, or a port that cannot be read."""
+    try:
+        parts = urlsplit(browser_equivalent_url(url))
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host or parts.username is not None or parts.password is not None:
+        return None
     authority = f"[{host}]" if ":" in host else host  # IPv6 literals keep their brackets
     if port is not None:
         authority = f"{authority}:{port}"
@@ -127,12 +136,30 @@ def _url_matches(url: str, pattern: str) -> bool:
         path += f"?{parts.query}"
     if parts.fragment:
         path += f"#{parts.fragment}"
-    return (
-        fnmatch.fnmatchcase(parts.scheme.lower(), pattern_scheme.lower())
-        # Brackets in an authority are IPv6 delimiters, not fnmatch classes.
-        and fnmatch.fnmatchcase(authority, pattern_authority.lower().translate(_LITERAL_BRACKETS))
-        and fnmatch.fnmatchcase(path, f"/{pattern_path}" if slash else "/")
+    return parts.scheme.lower(), host, authority, path
+
+
+def _pattern_allows(read: tuple[str, str, str, str], pattern: str) -> dict[str, bool]:
+    """Which parts of a URL (_url_parts) a pattern with a scheme allows: scheme, authority and path, each matched
+    alone (_url_matches), and the host with any port, for what a refusal says of the URL (_refused_url_shown)."""
+    scheme, host, authority, path = read
+    pattern_scheme, _, pattern_rest = pattern.partition("://")
+    pattern_authority, slash, pattern_path = pattern_rest.partition("/")
+    pattern_authority = pattern_authority.lower()
+    # The pattern's host: its authority without a port after it.
+    bracket = pattern_authority.find("]") if pattern_authority.startswith("[") else -1
+    pattern_host = pattern_authority[: bracket + 1] if bracket >= 0 else pattern_authority.rpartition(":")[0]
+    # Brackets in an authority are IPv6 delimiters, not fnmatch classes.
+    authority_allowed = fnmatch.fnmatchcase(authority, pattern_authority.translate(_LITERAL_BRACKETS))
+    host_allowed = fnmatch.fnmatchcase(
+        f"[{host}]" if ":" in host else host, (pattern_host or pattern_authority).translate(_LITERAL_BRACKETS)
     )
+    return {
+        "scheme": fnmatch.fnmatchcase(scheme, pattern_scheme.lower()),
+        "authority": authority_allowed,
+        "host": authority_allowed or host_allowed,
+        "path": fnmatch.fnmatchcase(path, f"/{pattern_path}" if slash else "/"),
+    }
 
 
 def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> None:
@@ -149,18 +176,24 @@ def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> 
     for url in _url_arguments(request.arguments):
         if not any(_url_matches(url, pattern) for pattern in grant.url_allowlist):
             raise PolicyDenied(
-                f"{_refused_url_shown(url)} is not in the allowlist for capability {grant.capability!r}. "
-                f"Allowed patterns: {grant.url_allowlist}"
+                f"{_refused_url_shown(url, grant.url_allowlist)} is not in the allowlist for capability "
+                f"{grant.capability!r}. Allowed patterns: {grant.url_allowlist}"
             )
 
 
-def _refused_url_shown(url: str) -> str:
+# The parts of a URL a refusal names (_refused_url_shown), by the key _pattern_allows gives each.
+_PARTS_NAMED = (("scheme", "scheme"), ("port", "authority"), ("path", "path"))
+
+
+def _refused_url_shown(url: str, patterns: list[str]) -> str:
     """What a refusal says of the URL it refuses: its host name, and what no pattern allows in it. Never the URL.
 
     The reason is logged (mesh.policy.denied), and the URL is the peer's text as it sent it: the userinfo, the path
     and the query in it are not for a log. A URL with userinfo is refused for having it (_url_matches), and so is
     one whose port cannot be read (99999, abc), so the reason says so: its host alone may be one a pattern allows.
-    The host is the peer's text too, as long as a request may be: it is quoted, and cut as a log line's text is.
+    So may the host of a URL whose scheme, port or path no pattern of that host allows: the reason names that part,
+    or says that each such pattern refuses another. The host is the peer's text too, as long as a request may be:
+    it is quoted, and cut as a log line's text is.
     """
     try:
         parts = urlsplit(browser_equivalent_url(url))
@@ -175,7 +208,25 @@ def _refused_url_shown(url: str) -> str:
         parts.port  # read for the ValueError it raises on such a port, where _url_matches refuses the URL
     except ValueError:
         return f"{shown} and a port that cannot be read, which no pattern allows,"
-    return shown
+    read = _url_parts(url)
+    if read is None:
+        return shown
+    # What each pattern that allows the host refuses. A pattern with no scheme matches the host alone: one that
+    # allows it would have allowed the URL.
+    refused_by_each = [
+        [name for name, key in _PARTS_NAMED if not allows[key]]
+        for allows in (_pattern_allows(read, pattern.strip()) for pattern in patterns if "://" in pattern)
+        if allows["host"]
+    ]
+    if not refused_by_each or [] in refused_by_each:  # no pattern allows the host; one allows the URL
+        return shown
+    named = [name for name, _ in _PARTS_NAMED if all(name in refused for refused in refused_by_each)]
+    if not named:
+        return f"{shown} with a scheme, port and path no one pattern allows together,"
+    if "path" in named and ("?" in read[3] or "#" in read[3]):
+        named[-1] = "path (with its query or fragment)"
+    listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
+    return f"{shown} and a {listed} no pattern allows with that host,"
 
 
 def _check_expires_at(grant: CapabilityGrant) -> None:

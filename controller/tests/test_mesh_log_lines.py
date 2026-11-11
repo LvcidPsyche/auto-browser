@@ -146,6 +146,68 @@ def test_a_url_the_allowlist_refuses_is_logged_by_its_host_alone(
     assert [part for part in NOT_FOR_THE_LOG if part in caplog.text] == [], caplog.text
 
 
+# A host a pattern allows, in a URL that another part keeps out: named with no reason beside it, the refusal read as a
+# mistake. What follows the host in the line, for each.
+PATTERNS = ["https://*.example.com/api/*", "*.example.org"]
+REFUSED_PARTS = {
+    "a port": (PATTERNS, "https://a.example.com:8443/api/private-path", "and a port no pattern allows with that host,"),
+    # The authority is matched with its port as written: the scheme's own, written out, is a port the pattern lacks.
+    "the scheme's own port written out": (
+        PATTERNS,
+        "https://a.example.com:443/api/private-path",
+        "and a port no pattern allows with that host,",
+    ),
+    "a scheme": (PATTERNS, "http://a.example.com/api/private-path", "and a scheme no pattern allows with that host,"),
+    "a path": (PATTERNS, "https://a.example.com/private-path", "and a path no pattern allows with that host,"),
+    "a path and a query": (
+        PATTERNS,
+        "https://a.example.com/private-path?token=SECRET-TOKEN-123",
+        "and a path (with its query or fragment) no pattern allows with that host,",
+    ),
+    "a scheme and a path": (
+        PATTERNS,
+        "http://a.example.com/private-path",
+        "and a scheme and path no pattern allows with that host,",
+    ),
+    "a scheme, a port and a path": (
+        PATTERNS,
+        "http://a.example.com:8443/private-path",
+        "and a scheme, port and path no pattern allows with that host,",
+    ),
+    "two patterns of the host, each refusing another part": (
+        ["https://*.example.com/api/*", "http://*.example.com/*"],
+        "https://a.example.com/private-path",
+        "with a scheme, port and path no one pattern allows together,",
+    ),
+    "a pattern with a port of its own": (
+        ["https://*.example.com:8443/*"],
+        "https://a.example.com/private-path",
+        "and a port no pattern allows with that host,",
+    ),
+}
+
+
+@pytest.mark.parametrize(("patterns", "url", "named_as"), REFUSED_PARTS.values(), ids=REFUSED_PARTS.keys())
+def test_a_refused_url_whose_host_a_pattern_allows_says_what_no_pattern_allows(
+    mesh, caplog: pytest.LogCaptureFixture, patterns: list[str], url: str, named_as: str
+) -> None:
+    grant = CapabilityGrant(capability="tool:*", url_allowlist=patterns)
+    mesh.peers.add(PeerRecord(node_id=mesh.legit.node_id, pubkey_b64=mesh.legit.pubkey_b64, grants=[grant]))
+    caplog.set_level(logging.INFO)
+
+    response = _post(mesh, "tool:browser.navigate", arguments={"url": url})
+    host_not_allowed = _post(mesh, "tool:browser.navigate", arguments={"url": "https://evil.example/private-path"})
+
+    assert reply_status(response) == reply_status(host_not_allowed) == "rejected"
+    messages = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
+    lines = [message for message in messages if message.startswith("mesh.policy.denied")]
+    assert len(lines) == 2, lines
+    assert f"A URL of host 'a.example.com' {named_as} is not in the allowlist" in lines[0], lines[0]
+    # A host no pattern allows is named as it was, with nothing beside it.
+    assert "A URL of host 'evil.example' is not in the allowlist" in lines[1], lines[1]
+    assert [part for part in NOT_FOR_THE_LOG if part in caplog.text] == [], caplog.text
+
+
 def test_a_refused_urls_host_is_logged_on_one_line(mesh, caplog: pytest.LogCaptureFixture) -> None:
     # A host name is the peer's text too: only a tab, a line feed and a carriage return are taken out of a URL.
     grant = CapabilityGrant(capability="tool:*", url_allowlist=["https://example.com/*"])
