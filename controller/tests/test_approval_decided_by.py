@@ -394,6 +394,18 @@ class ListedOperatorTests(unittest.TestCase):
         "an id nobody proves": ("carol", NAMED, None, ["lists 'carol', which no credential"]),
         "an id that differs by case": ("Alice", NAMED, None, ["It differs from 'alice' only by case"]),
         "a short id that stands inside a token": (A[5:10], NAMED, None, [f"lists '{A[5:10]}', which no credential"]),
+        # A token of fewer than eight characters (a development setup's): an id that holds its letters is an id like
+        # any other. Each was counted as a token and not named, and the slip of case in the third went unsaid.
+        "an id that begins with a short token": (
+            "developer,carol",
+            "alice:dev",
+            None,
+            ["lists 'carol', which no credential", "lists 'developer', which no credential"],
+        ),
+        "an id that ends with a short token": ("max1", "alice:x1", None, ["lists 'max1', which no credential"]),
+        "an id that is its own short token": ("Alice", "alice:alice", None, ["It differs from 'alice' only by case"]),
+        # The token itself is still one, in whatever case.
+        "a short token alone, in two cases": ("dev,DEV", "alice:dev", None, [f"lists 1 {PRINTS_NOTHING}"]),
     }
 
     def test_no_warning_holds_eight_characters_in_a_row_of_a_token(self) -> None:
@@ -404,8 +416,14 @@ class ListedOperatorTests(unittest.TestCase):
                 self.assertEqual(len(warnings), len(expected), warnings)
                 for warning, text in zip(warnings, expected, strict=True):
                     self.assertIn(text, warning)
+                ids = {pair.partition(":")[0].casefold() for pair in named.split(",")}
                 tokens = [pair.partition(":")[2] for pair in named.split(",")] + ([shared] if shared else [])
                 for token in tokens:
+                    if len(token) < 8:
+                        # No run of eight to hold: such a token is not named as an entry, unless it is an id too.
+                        if token.casefold() not in ids:
+                            self.assertNotIn(f"'{token}'".upper(), "\n".join(warnings).upper(), (token, warnings))
+                        continue
                     for start in range(len(token) - 7):
                         self.assertNotIn(token[start : start + 8], "\n".join(warnings), (token, warnings))
                     self.assertNotIn(token.upper()[:8], "\n".join(warnings).upper(), (token, warnings))

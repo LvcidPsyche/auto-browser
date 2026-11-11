@@ -353,8 +353,10 @@ All notable changes to auto-browser are documented here.
   `API_BEARER_TOKENS` proves refuses nobody, and a start logs a warning that names each such id and says when it
   differs from a credential's only by case. The list takes ids alone, and a secret set there by mistake is not
   written to the log: an entry with a colon is named only up to it, and an entry is counted and not printed when
-  what would be printed holds a bearer token of the deployment, or eight characters in a row of one, in whatever
-  case (a token after `Bearer` or `alice=`, in quotes, with a character too many or cut short). (AUTH-36)
+  what would be printed holds a bearer token of the deployment of eight characters or more, or eight characters in
+  a row of one, in whatever case (a token after `Bearer` or `alice=`, in quotes, with a character too many or cut
+  short), or is itself a shorter token. An operator id of `API_BEARER_TOKENS`, in whatever case, is still named
+  where its letters are also a token's, unless it holds a whole token of eight characters or more. (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read`,
   `write` or `upload` asked for no approval, and that label is written by a model reading the page, which text on
   the page can steer. Before the approval decision the target of such a click is now read, found as the click will
