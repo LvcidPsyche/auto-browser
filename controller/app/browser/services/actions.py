@@ -1259,7 +1259,9 @@ class BrowserActionService:
         be told is a no, and the click is then one Playwright places.
 
         ``frames_only`` leaves the element itself out and asks the frames alone: for a point Playwright's
-        hover has checked on the element, which does not look through a frame that CSS transforms.
+        hover has checked on the element, which does not look through a frame that CSS transforms. There a
+        target more than POINTER_CHECK_FRAMES frames down is a yes: the frames asked said so, the ones above
+        them are Playwright's hover's to check, and a no would end a click that Playwright's own makes.
         """
         handles: list[Any] = []
         try:
@@ -1280,7 +1282,7 @@ class BrowserActionService:
                 if frame is None or frame.parent_frame is None:
                     return True
                 node = await frame.frame_element()
-            return False
+            return frames_only
         except Exception:
             return False
         finally:

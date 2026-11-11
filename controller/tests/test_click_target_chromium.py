@@ -1389,6 +1389,77 @@ async def test_a_click_playwright_places_over_a_frame_presses_nothing_before_it_
         assert await _title(env, session_id) == "start"
 
 
+def _frames_deep(depth: int) -> dict[str, str]:
+    """A page with ``depth`` frames one inside the other, each filling the one around it, a button in the last."""
+    frame = (
+        "<body style='margin: 0'><iframe id='frame' src='/dNEXT' "
+        "style='position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0'></iframe>"
+    )
+    pages = {"/": "<title>start</title>" + frame.replace("NEXT", "1")}
+    for level in range(1, depth):
+        pages[f"/d{level}"] = frame.replace("NEXT", str(level + 1))
+    pages[f"/d{depth}"] = (
+        "<body style='margin: 0'><button id='deep' style='margin: 40px' "
+        "onclick=\"top.document.title = 'PRESSED'\">Open</button>"
+    )
+    return pages
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed(tmp_path: Path, route: str) -> None:
+    # The check that the pointer finds a target through its frames goes up POINTER_CHECK_FRAMES of them and then
+    # gives the click to Playwright's placing. Asked once more where Playwright's hover had put the pointer, it
+    # ran out the same way, and there a no ends the click: a read click on a button eight frames down failed
+    # every time, where the click that is not read, Playwright's own, pressed it.
+    depth = actions_module.POINTER_CHECK_FRAMES
+    async with browser_env(tmp_path, _frames_deep(depth)) as env:
+        session_id = await env.create("/")
+        selector = IN_THE_FRAME * depth + "#deep"
+        if route == "direct":
+            await env.manager.click(session_id, selector=selector)
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=selector))
+        assert await _title(env, session_id) == "PRESSED"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_what_the_page_puts_over_a_button_that_many_frames_down_is_not_pressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    # Past the frames it asks, the check before a human-like press cannot tell, and that is a no: the click is
+    # then Playwright's to place, whose own check goes all the way up. A yes there presses what the page has put
+    # over the frames while the pointer was on its way. Playwright's checks, made before the pointer sets out,
+    # have to pass first, so the step that makes them puts the cover up here once they have.
+    real = actions_module.BrowserActionService._checks_of_a_click
+    calls = 0
+    cover = (
+        '<div style="position: fixed; left: 0; top: 0; width: 300px; height: 200px" '
+        "onclick=\"document.title = 'COVER PRESSED'\"></div>"
+    )
+
+    async def checks_then_the_page_covers_it(locator: Any, budget: Any) -> None:
+        nonlocal calls
+        calls += 1
+        await real(locator, budget)
+        if calls == 1:
+            await locator.page.evaluate("(cover) => document.body.insertAdjacentHTML('beforeend', cover)", cover)
+
+    monkeypatch.setattr(
+        actions_module.BrowserActionService, "_checks_of_a_click", staticmethod(checks_then_the_page_covers_it)
+    )
+    depth = actions_module.POINTER_CHECK_FRAMES
+    async with browser_env(tmp_path, _frames_deep(depth)) as env:
+        session_id = await env.create("/")
+        selector = IN_THE_FRAME * depth + "#deep"
+        with pytest.raises(BrowserActionError):
+            if route == "direct":
+                await env.manager.click(session_id, selector=selector)
+            else:
+                await env.manager.execute_decision(session_id, _click("read", selector=selector))
+        assert calls >= 1
+        assert await _title(env, session_id) == "start"
+
+
 async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(tmp_path: Path) -> None:
     # A row shows its "Delete" only while the pointer is over the row. Read before the pointer moved, the point
     # was the row; the press landed on the button the pointer's arrival had just shown.
