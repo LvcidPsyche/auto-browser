@@ -101,6 +101,22 @@ class SchemeGateTests(unittest.TestCase):
         self.assertEqual(said[past_it], f"Host '{past_it[:200]}...' is not allowlisted")
         self.assertEqual(said["a" * 3000 + ".example"], f"Host '{'a' * 200}...' is not allowlisted")
 
+    def test_a_refused_scheme_is_named_whole_up_to_200_characters_and_cut_past_them(self) -> None:
+        # As the host is. No door hands the gate a long scheme today (the tools bound a URL at 2,000 characters and
+        # refuse a scheme that is not http(s) before it; so does the fork route), so the gate is asked itself.
+        manager = BrowserManager(Settings(_env_file=None, ALLOWED_HOSTS="allowed.example"))
+        refused = " is not allowed; only http and https are"
+        said = {}
+        for scheme in ("ftp", "s" * 200, "s" * 201, "s" * 3000):
+            with self.assertRaises(PermissionError) as raised:
+                manager._assert_url_allowed(f"{scheme}://allowed.example/x")
+            said[scheme] = str(raised.exception)
+
+        self.assertEqual(said["ftp"], "URL scheme 'ftp'" + refused)
+        self.assertEqual(said["s" * 200], f"URL scheme '{'s' * 200}'" + refused)
+        self.assertEqual(said["s" * 201], f"URL scheme '{'s' * 200}...'" + refused)
+        self.assertEqual(said["s" * 3000], f"URL scheme '{'s' * 200}...'" + refused)
+
 
 class ForkRouteTests(unittest.TestCase):
     def setUp(self) -> None:

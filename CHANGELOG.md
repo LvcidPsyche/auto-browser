@@ -710,7 +710,8 @@ All notable changes to auto-browser are documented here.
   caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
   name. It now says `The https URL has no host name`, to a tool's caller too. And the refusal of a host that
   `ALLOWED_HOSTS` does not allow (`Host '...' is not allowlisted`) named the host whole, as long as the URL was: it
-  names its first 200 characters now, to a tool's caller too.
+  names its first 200 characters now, to a tool's caller too, and so does the refusal of a scheme that is not
+  http(s) (`URL scheme '...' is not allowed`), though no tool or route hands that check a long scheme today.
 - **An unknown approval id no longer writes a traceback to the log, and no `404` repeats a long id whole.** A REST
   route that maps no answer of its own for a `KeyError` gets the app's `404` `Not found: <key>` and its
   `unmapped KeyError` warning, which is there to tell a bug from an unknown id. The five approval routes by id

@@ -817,7 +817,10 @@ class BrowserManager:
         # fork route had none, and file://localhost/... passed this gate on the
         # strength of its host and opened local files in the browser.
         if parsed.scheme.lower() not in HTTP_URL_SCHEMES:
-            raise PermissionError(f"URL scheme {parsed.scheme!r} is not allowed; only http and https are")
+            # Cut as the host is below: the scheme is the caller's text, as long as its URL.
+            raise PermissionError(
+                f"URL scheme {capped_for_log(parsed.scheme)!r} is not allowed; only http and https are"
+            )
         host = parsed.hostname
         if not host:
             # No more of the URL than its scheme: a refusal's text is logged and kept in records, and this URL
