@@ -253,10 +253,11 @@ If a provider still proposes a side effect, the controller does not trust it bli
   on the element: a bound per message, not a deadline for the whole action. A page that does not answer in time
   fails with `page_not_responding` (not retryable; HTTP 504 over REST, an MCP tool error with that code). A call
   that gave up waiting while another call was still opening the page's session fails with the same code and is
-  retryable: it sent the page nothing. Other calls still wait on the page (its title, mouse and keyboard input,
-  the checks after an action), so a page that hangs in its click handler holds that action until it answers. A
-  change sent to the world (a focus, a selection, the upload's marker) whose answer is lost after it was sent
-  fails as `change_unconfirmed` (not retryable): observe the page before acting again.
+  retryable: it sent the page nothing more (a read whose answer was lost is asked a second time, and that second
+  asking is what gave up). Other calls still wait on the page (its title, mouse and keyboard input, the checks
+  after an action), so a page that hangs in its click handler holds that action until it answers. A change sent to
+  the world (a focus, a selection, the upload's marker) whose answer is lost after it was sent fails as
+  `change_unconfirmed` (not retryable): observe the page before acting again.
 - Provider calls are awaited HTTP requests made from the API process; there is no separate model worker.
 - Provider HTTP calls retry timeouts, network errors, `429` and `5xx` responses with exponential backoff (`MODEL_MAX_RETRIES`, `MODEL_RETRY_BACKOFF_SECONDS`); a `Retry-After` header on a `429`/`5xx` lengthens the wait (capped).
 - Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME` (OpenAI can also use `host_bridge`).

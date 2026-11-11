@@ -346,7 +346,9 @@ async def test_a_call_waits_for_the_session_another_call_is_opening_no_longer_th
         assert f"within {SHORT_MS} ms" in str(error)
         # In its own words: this call sent the page nothing, and was told the page "may have crashed or hung, and
         # nothing more was sent to it. Reload the page", which is what a page that did not answer is told.
-        assert "sent the page nothing" in str(error)
+        # Nothing more: a read or an idempotent call whose answer was lost is sent a second time, and the one
+        # that gives up here had then been sent once.
+        assert "sent the page nothing more" in str(error)
         assert "crashed" not in str(error)
         # "Retry it", its message says, and the error said retryable: false beside it.
         assert error.retryable is True

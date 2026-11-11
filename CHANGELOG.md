@@ -366,9 +366,10 @@ All notable changes to auto-browser are documented here.
     click that Playwright has to place (on a wrapper wider than the viewport, one broken over two lines, or one
     covered at its middle) is pressed by the controller at the point Playwright would have picked, so it is read
     where it lands too; on a wrapper with no box of its own (`display: contents`) such an action now answers
-    `target_has_no_box` and presses nothing, where it used to click a child, and a target that is no longer shown
-    when it is to be pressed answers `target_moved`, which is retryable (one that has left the page is waited for,
-    as a click waits, and ends the click when its time does).
+    `target_has_no_box` and presses nothing, where it used to click a child, and a target the page has taken out
+    of its layout when it is to be pressed (`hidden`, `display: none`) answers `target_moved`, which is retryable
+    (one that has left the page, or is made invisible where it stands, is waited for, as a click waits, and ends
+    the click when its time does).
   - A new approval's reason opens with the controller's sentence, which says what the target (or, asked at the
     press, what the click would press) reads as and what the agent labelled the action, before the agent's own
     reason (one already pending for the same action and kind is reused as it stands); the dashboard's confirm
@@ -540,8 +541,8 @@ All notable changes to auto-browser are documented here.
   the budget, and `waited_ms`, beside `code` in the error, says what that message itself waited. The wait for a
   session that another call is opening had no bound at all; it now comes out of the same budget, and past it only
   the call that waited gives up, with a message of its own under the same code: another call was still opening the
-  session, and this one sent the page nothing. That one is retryable, where a page that did not answer is not.
-  (N7)
+  session, and this one sent the page nothing more. That one is retryable, where a page that did not answer is
+  not. (N7)
 - **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
   candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the

@@ -227,12 +227,13 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     the middle of its box (a wrapper wider than the viewport, a link broken over two lines, something over its
     middle), the click is one Playwright places, at a point it picks itself. For an action that is read,
     Playwright then only puts the pointer, at that point, which the controller gives it, and the press is the
-    controller's own, read where it lands as any other; a target that is no longer shown by then is not pressed
-    (`target_moved`, retryable; one that has left the page is waited for, as a click waits, and ends the click
-    when its time does), and neither is one with no box of its own, whose children are laid out in its place
-    (`display: contents`): where a press on it would land cannot be read, so the action answers
-    `target_has_no_box`, and the agent names an element inside it. This read has half a second to set up and half
-    a second to run; when it fails or runs past either, the press goes on, and an info-level log line says so.
+    controller's own, read where it lands as any other; a target the page has taken out of its layout by then
+    (`hidden`, `display: none`) is not pressed (`target_moved`, retryable; one that has left the page, or that the
+    page has made invisible where it stands, is waited for, as a click waits, and ends the click when its time
+    does), and neither is one with no box of its own, whose children are laid out in its place (`display:
+    contents`): where a press on it would land cannot be read, so the action answers `target_has_no_box`, and the
+    agent names an element inside it. This read has half a second to set up and half a second to run; when it
+    fails or runs past either, the press goes on, and an info-level log line says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as
@@ -263,13 +264,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     field) or by a drag, and a `select`, whose option is chosen with no press (`select_option`); a clickable
     element that is not a button (a `div` with a handler and no role), one that chooses rather than commands
     (`role=option`, `tab`, `switch`, `menuitemradio`, `menuitemcheckbox`) and a link in no button or menu item
-    ("How to delete your account" is an article); a button inside a closed shadow root, of which the read sees
-    only the component around it; a label given only by `aria-labelledby`, by an image with no alt text, or by
-    text that CSS or a canvas draws; look-alike characters (a Cyrillic "е" in "Delete"); and a page whose own
-    script falsifies the read of a selector's element, or where a script or a style in motion (an animation that
-    shows a button for a few milliseconds) changes what is under the pointer between the read at the press and the
-    press, which are one message to the browser apart. A page built for that can as well name its button
-    "Continue": the read answers text that steers the model, not a site that is itself hostile.
+    ("How to delete your account" is an article); a role written after a token that is no role (`role="custom
+    menuitem"`: a browser takes the first token it knows for a role, the read the first token); a button inside a
+    closed shadow root, of which the read sees only the component around it; a label given only by
+    `aria-labelledby`, by an image with no alt text, or by text that CSS or a canvas draws; look-alike characters
+    (a Cyrillic "е" in "Delete"); and a page whose own script falsifies the read of a selector's element, or where
+    a script or a style in motion (an animation that shows a button for a few milliseconds) changes what is under
+    the pointer between the read at the press and the press, which are one message to the browser apart. A page
+    built for that can as well name its button "Continue": the read answers text that steers the model, not a site
+    that is itself hostile.
   - It asks more than it must where a harmless label starts with a phrase and no exception lists it: `Transfer
     files`, "Send feedback", "Pay monthly", "Buy again", "Post a job", a cart's "Remove item", "Deactivate dark
     mode", a `Post` tab that only opens a form, a counter ("1 Post"), a dash where a hyphen would have joined the
@@ -277,12 +280,16 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     goes on to a word of the table ("Remove filter: Pay later"). A sign-in button's `Send code` above a sentence
     that opens with any of the ten words a label goes on with (`To`, `Via`, `By`, `In`, `On`, `Now` and the rest)
     and then says anything but where the code goes ("Send code" over "To protect your account we text you a
-    code"). A navigation link that is a menu item ("Donate", "Pay a bill" or "Send money" on an `a` with
-    `role=menuitem`), and a menu item that holds its open submenu, whose commands are in its text. A picker button
-    named by its field's `label` ("Transfer to", "Delete after", "Publish date"), and a button inside a `label`
-    that says more ("Delete account?" beside its `Cancel`). And where an icon font's name is a phrase of the table
-    on a button that does something else: Material's `remove` is the minus of a quantity stepper, `remove_red_eye`
-    an eye, `publish` an upload arrow. An agent run unattended stops at each of these until somebody approves.
+    code"). A navigation link that is a menu item or stands in one ("Donate", "Pay a bill" or "Send money" on an
+    `a` with `role=menuitem`, or in an `li` with it). A link inside a card or a row that is itself `role=button`
+    or `role=menuitem`, which is read by that element's whole text and the names inside it: "Read more" in a card
+    that opens "Post: release notes", "Terms apply" under "Buy 2, get 1 free", a file's name beside an icon button
+    named "Delete report.pdf". And a menu item that holds its open submenu, whose commands are in its text. A
+    picker button named by its field's `label` ("Transfer to", "Delete after", "Publish date"), and a button
+    inside a `label` that says more ("Delete account?" beside its `Cancel`). And where an icon font's name is a
+    phrase of the table on a button that does something else: Material's `remove` is the minus of a quantity
+    stepper, `remove_red_eye` an eye, `publish` an upload arrow. An agent run unattended stops at each of these
+    until somebody approves.
   - A target that is not there (no element at the point, an `element_id` the page no longer has) is not
     classified, and neither is one that cannot be read: a page that does not answer within 2 seconds (for an
     `element_id` or a point, 2 to set the read up and 2 more to run it), or a selector that matches nothing in
