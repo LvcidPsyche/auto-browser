@@ -437,12 +437,16 @@ All notable changes to auto-browser are documented here.
   target is read still asked at such a press for a button of the table's kinds;
   `POST /sessions/{id}/actions/click` read nothing. The pointer is now looked for in the element's document and
   in each document on the way up, where the frame must be what the pointer finds; when it is not, the click is one
-  Playwright places, on what the viewport shows of the element. For an action that is read, whose placed click the
-  controller presses itself, the point is taken on what the screen shows of the element (also through a frame that
-  runs off the screen, or one CSS draws at another size), and the element and its frames are asked again where the
-  press goes down. One limit is Playwright's: it does not look through a frame that CSS transforms, so its own
-  click, which a click that is not read still is, presses what the page has put over such a frame, or has beside
-  it where the element is larger than the frame shows, and ends as done. Older than this release.
+  Playwright places, on what the viewport shows of the element. An element in a frame is asked as well whether
+  the browser has the pointer over it: in a frame that runs in a process of its own (another site's, or a
+  sandboxed one) and has a border or padding, Playwright gives every element a box up and left of it by that
+  much, the pointer was looked for by that box, and a press near the edge of a small element went down on what
+  stands beside it. For an action that is read, whose placed click the controller presses itself, the point is
+  taken on what the screen shows of the element (also through a frame that runs off the screen, or one CSS draws
+  at another size), and the element and its frames are asked again where the press goes down. One limit is
+  Playwright's: it does not look through a frame that CSS transforms, so its own click, which a click that is not
+  read still is, presses what the page has put over such a frame, or has beside it where the element is larger
+  than the frame shows, and ends as done. Older than this release.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)

@@ -119,7 +119,18 @@ _step_clock = time.perf_counter
 # The way up from what the pointer hits goes by the slot a node is given to, as a click's event does: a label
 # slotted into a component's button is that button's. By its parents alone it was not, which only sent the
 # click to Playwright's placing while nothing asked the target after that; the same question is asked there now.
-_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box]) => {
+# ``arrived``: the pointer is at (x, y) now, and the element, in a frame, is asked as well whether the pointer is
+# over it as the browser has it (:hover). The box that carries the point is Playwright's, and in a frame that is
+# in a process of its own (another site's, a sandboxed one) Playwright counts a box from the corner of the frame's
+# border: with a border or padding there, every box is up and left of its element by that much, the point was
+# carried by that same box, and the answer was yes wherever the pointer was. No box comes into :hover. It is
+# asked inside :is(), since a document in quirks mode matches a bare :hover to links alone, and of the label
+# where a label stands for the element. Before a human-like press only, where a no hands the click to
+# Playwright's placing: a yes can be an old one (a document is not told of a pointer that went on into another
+# process's, so the rest of the question stands), and a no a wrong one (a person moving the real pointer over a
+# headed browser).
+_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived]) => {
+  const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
   if (window !== window.top) {
     if (!box) return 'framed';
     const own = el.getBoundingClientRect();
@@ -135,9 +146,9 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box]) => {
   }
   if (!hit) return false;
   const label = hit.closest ? hit.closest('label') : null;
-  if (label && label.control === el) return true;
+  if (label && label.control === el) return over(label);
   for (let node = hit; node; node = node.assignedSlot || node.parentNode || node.host) {
-    if (node === el) return true;
+    if (node === el) return over(el);
   }
   return false;
 }"""
@@ -1284,11 +1295,14 @@ class BrowserActionService:
             if found != "framed":
                 return found is True
             node = await locator.element_handle(timeout=POINTER_CHECK_TIMEOUT_MS)
+            # The element itself, before a human-like press, is asked as well that the pointer is over it.
+            arrived = not placed
             for _ in range(POINTER_CHECK_FRAMES):
                 handles.append(node)
                 box = await node.bounding_box()
-                if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box]) is not True:
+                if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box, arrived]) is not True:
                     return False
+                arrived = False
                 frame = await node.owner_frame()
                 if frame is None or frame.parent_frame is None:
                     return True

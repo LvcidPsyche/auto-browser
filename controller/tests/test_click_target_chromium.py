@@ -366,6 +366,21 @@ OVER_IT = (
     "<body style='margin: 0'><button style='width: 80px; height: 44px' "
     "onclick=\"top.document.title = 'THE FRAME OVER IT PRESSED'\">Next</button>"
 )
+# A frame the page cannot reach into (sandboxed, so in a process of its own) with padding, and in it two buttons,
+# one over the other, each noting its own press. Playwright counts a box in such a frame from the corner of the
+# frame's border, so the box it gives is up and left of the element by the padding: 11 px here, which leaves the
+# middle of that box one pixel inside the lower button's top edge.
+PADDED_APART = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 400px; height: 200px; border: 0; padding: 11px }</style>"
+    '<iframe id="frame" sandbox="allow-scripts" srcdoc="'
+    "<body style='margin: 0'>"
+    "<button id='above' style='position: absolute; left: 100px; top: 56px; width: 120px; height: 24px' "
+    "onclick=&quot;this.textContent = 'PRESSED'&quot;>Next</button>"
+    "<button id='go' style='position: absolute; left: 100px; top: 80px; width: 120px; height: 24px' "
+    "onclick=&quot;this.textContent = 'PRESSED'&quot;>Go</button>"
+    '"></iframe>'
+)
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -1393,9 +1408,9 @@ async def test_a_target_the_page_makes_invisible_once_the_pointer_is_placed_is_n
 
 
 async def test_a_shadow_button_under_its_slotted_label_in_a_frame_is_still_pressed(tmp_path: Path) -> None:
-    # Where a placed click is pressed the frames are asked, and not the target once more: Playwright's hover has
-    # checked the target there, and it knows a label slotted into a component's button as that button's, which
-    # the controller's own question does not. Asked of the target too, this click was refused.
+    # Where a placed click is pressed the target is asked once more, and then its frames. The way up from what the
+    # pointer hits goes by the slot a node is given to, so a label slotted into a component's button is that
+    # button's, as Playwright's check has it. By its parents alone it was not, and this click was refused.
     inner = SLOTTED.replace("document.title = 'PRESSED '", "top.document.title = 'PRESSED '")
     assert inner != SLOTTED
     page = (
@@ -1441,6 +1456,20 @@ async def test_a_click_on_a_button_in_a_frame_that_the_pointer_finds_is_still_th
         await env.manager.click(session_id, selector=IN_THE_FRAME + "button")
         assert await _title(env, session_id) == "DELETED x1"
         assert placed == []
+    # And in a frame whose document came with no doctype (quirks mode), where a bare :hover matches links alone:
+    # whether the pointer is over the target is asked in a form that holds there too.
+    quirks = {
+        "/": '<title>start</title><body style="margin: 0">'
+        '<iframe id="frame" src="/inner" style="width: 300px; height: 120px; border: 0"></iframe>',
+        "/inner": "<button onclick=\"top.document.title = 'PRESSED'\">Go</button>",
+    }
+    async with browser_env(tmp_path, quirks) as env:
+        session_id = await env.create("/")
+        button = env.page(session_id).frame_locator("#frame").locator("button")
+        assert await button.evaluate("() => document.compatMode") == "BackCompat"
+        await env.manager.click(session_id, selector=IN_THE_FRAME + "button")
+        assert await _title(env, session_id) == "PRESSED"
+        assert placed == []
 
 
 async def test_a_click_playwright_places_over_a_frame_presses_nothing_before_it_is_read(tmp_path: Path) -> None:
@@ -1461,6 +1490,37 @@ async def test_a_click_playwright_places_over_a_frame_presses_nothing_before_it_
             await env.manager.execute_decision(session_id, _click("read", selector="#wrap"))
         assert refused.value.code == "target_has_no_box"
         assert await _title(env, session_id) == "start"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_press_in_a_padded_frame_of_another_process_does_not_land_beside_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    # Where Playwright's box of an element is off (above), the question asked before a human-like press was off
+    # with it: the point is carried into the frame by that same box, so it always found the element. The press at
+    # the middle of the box, moved by the jitter, went down on the button above, and the action ended as done.
+    # The element is asked as well whether the pointer is over it, as the browser has it. Where it is not, the
+    # click is Playwright's to place, whose own point, with no jitter, is still on the element here.
+    real = actions_module.random.uniform
+
+    def up_and_left(low: float, high: float) -> float:
+        return -2.0 if (low, high) == (-actions_module.JITTER_PX, actions_module.JITTER_PX) else real(low, high)
+
+    monkeypatch.setattr(actions_module.random, "uniform", up_and_left)
+    async with browser_env(tmp_path, {"/": PADDED_APART}) as env:
+        session_id = await env.create("/")
+        frame = env.page(session_id).frame_locator("#frame")
+        # The shape the fixture stands for: the frame's document begins at 111, 111, and the button at 100, 80 of
+        # it is given a box that begins at 200, 180.
+        box = await frame.locator("#go").bounding_box()
+        assert (box["x"], box["y"]) == (200, 180), box
+
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#go")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#go"))
+        assert await frame.locator("#above").inner_text() == "Next"
+        assert await frame.locator("#go").inner_text() == "PRESSED"
 
 
 def _frames_deep(depth: int) -> dict[str, str]:
