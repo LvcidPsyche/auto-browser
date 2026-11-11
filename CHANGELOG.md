@@ -90,9 +90,12 @@ All notable changes to auto-browser are documented here.
   `storage_state_path` under `profiles/`, where each answered `403`, and `browser.get_auth_profile` and
   `browser.create_session` answer their not-found text, where they named the owner. A client that took `403` to mean
   "it exists but is not yours" must treat `404` as either. A save over such a profile and an import that overwrites
-  one stay refused (`403`), and the refusal no longer names the owner. `profile_dir` and `auth_state.path` are gone
-  from the answers of `GET /auth-profiles/{name}`, `GET /auth-profiles`, `browser.get_auth_profile` and
-  `browser.list_auth_profiles`: use `profile_name`. `GET /sessions/{id}/auth-state` keeps its `path`.
+  one stay refused (`403`), and the refusal no longer names the owner. A cron job that names one is refused too:
+  `POST /crons` answers `403`, where it accepts a name not saved yet, and `browser.create_cron_job` says the
+  profile belongs to another operator. The reads hide whether a profile exists; these writes do not.
+  `profile_dir` and `auth_state.path` are gone from the answers of `GET /auth-profiles/{name}`,
+  `GET /auth-profiles`, `browser.get_auth_profile` and `browser.list_auth_profiles`: use `profile_name`.
+  `GET /sessions/{id}/auth-state` keeps its `path`.
 - **The network log of a page `ALLOWED_HOSTS` refuses is now refused, as a raw CDP read of it is.**
   `GET /sessions/{id}/network/requests` and `GET /sessions/{id}/network-log` answer `403` with the same fixed text as
   the raw CDP route, `browser.get_network_log` is a refusal, and `browser://<id>/network` answers `-32603`. The page
@@ -421,27 +424,32 @@ All notable changes to auto-browser are documented here.
   coordinate or a scroll distance (`x`, `y`, `delta_x`, `delta_y`, and `browser.drag_drop`'s four) took one and
   handed it to the browser library, which refused it: the caller was told `browser_action_failed`, `retryable`
   (`browser_error` from `browser.drag_drop`). Those fields now refuse it before any action is tried: `422` over REST,
-  and `Invalid arguments for <tool>: <field>: Input should be a finite number` from a tool.
+  and `Invalid arguments for <tool>: <field>: Input should be a finite number` from a tool. One in a field its
+  action never read (`x` beside a selector, `delta_y` on a click), in a call or in a model's reply, did nothing
+  before and the action ran: that is refused now too.
 - **A stop with a client listening on an event stream now reaches the cleanup.** On SIGTERM uvicorn waits for the
   responses in flight before it runs the controller's shutdown, with no limit unless it is given one, and the image
   gave none. An open `GET /mcp` stream, or `GET /sessions/{id}/events`, never ends by itself, so the maintenance
   loop, the cron scheduler, the job queue and the sessions were never shut down: `docker compose stop` and `restart`
   waited out the 60-second grace and Docker killed the controller, with sessions, browser containers and tunnels
-  left as they were. The image's command and the Glama entrypoint now pass `--timeout-graceful-shutdown 5`. At the
-  limit uvicorn cancels an open stream, and the controller finishes the stream's body and logs one INFO line for
-  it, where uvicorn would log `Exception in ASGI application` with a traceback for each. A stream whose body had
-  already ended is sent nothing more, and one whose client had gone by then is no error: the line says which. A
-  client that is connected and no longer reads is waited for one second more: its stream is left unfinished and
-  uvicorn closes the connection with `ASGI callable returned without completing response.` at ERROR, with no
-  traceback. See the upgrade note.
+  left as they were. The image's command and the Glama entrypoint now pass `--timeout-graceful-shutdown 5` (in the
+  Glama inspection image for parity only: a stop there signals the stdio bridge and never uvicorn, so the flag
+  changes nothing in it). At the limit uvicorn cancels an open stream, and the controller finishes the stream's
+  body and logs one INFO line for it, where uvicorn would log `Exception in ASGI application` with a traceback for
+  each. A stream whose body had already ended is sent nothing more, and one whose client had gone by then is no
+  error: the line says which. A client that is connected and no longer reads is waited for one second more: its
+  stream is left unfinished and uvicorn closes the connection with
+  `ASGI callable returned without completing response.` at ERROR, with no traceback. See the upgrade note.
 - **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
   after the change the event records had been made: `browser.set_cookies` with one in a cookie's name set the
   cookies, then failed with no audit event, no receipt and no log line. The audit store now writes U+FFFD in its
   place, in both backends, as the witness chain and `actions.jsonl` already did. The session store and the agent job
   store had the same fault and write U+FFFD too: a session whose page title held one could not have its record
   saved, at its close included, and an agent run that finished with one in its result was recorded `failed` with no
-  result, though its steps had run. A tool write whose record still cannot be written (a full disk) is now logged
-  at ERROR with the tool and the session, whatever the error's class. `browser.set_cookies` also refuses a cookie
+  result, though its steps had run. A tool write that was made and whose record still cannot be written (a full
+  disk) is now logged at ERROR with the tool and the session, whatever error the store raised (a cancellation
+  during that write is not logged so); the record of a write that failed, when it cannot be written either, is
+  logged at WARNING with the tool and not the session. `browser.set_cookies` also refuses a cookie
   with a lone surrogate in any of its strings before anything reaches the browser, as `browser.set_local_storage`
   refuses one in its key or value: Chromium stored such a cookie with U+FFFD in the surrogate's place, and a good
   cookie sent in the same call with it. Two keys of one object that differ only in a lone surrogate take one name
@@ -595,7 +603,10 @@ All notable changes to auto-browser are documented here.
   The temp file a publish keeps beside a file until it is whole (`.node_public.pem.<random>.tmp`), another start's
   or one a killed start left, is one of the identity's own files: it no longer makes a group- or world-accessible
   identity directory read as holding other files, which left its mode as it was. Only a regular file is such a
-  temp file: a directory or a link under that name is still another's entry. (R5C-8)
+  temp file: a directory or a link under that name is still another's entry. A start that is killed during a
+  publish leaves its temp file there (`.node_public.pem.*.tmp` or `.node_meta.json.*.tmp`), and nothing removes
+  or names it, as with the cron store's `.crons.json.*.tmp`; unlike that one it holds nothing secret (the public
+  key, or the node id beside it) and can be deleted. (R5C-8)
 - **The session replay page's URL line now shows, and links only an http(s) URL.** The page read a key a session
   summary and a stored record do not have (`url`, not `current_url`), so its URL line never rendered. It now shows
   the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)
@@ -652,7 +663,8 @@ All notable changes to auto-browser are documented here.
   before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
   Only the full queue is answered so. The resume route answered every `RuntimeError` as `503` with nothing logged, so
   a fault after the job was queued read as "try again later" with the job left queued: on all three routes any other
-  error now answers `500` `Internal error` and is logged. A full queue's `503` is logged as well, on all three: one
+  fault now answers `500` `Internal error` and is logged (the resume route still answers `404` for a job that is not
+  there and `400` for one that cannot be resumed). A full queue's `503` is logged as well, on all three: one
   warning that names the session, or the job for a resume, with no traceback. `POST /crons/{id}/trigger` answered
   `500` when the queue refused its run, and now answers the same `503` with the same warning, naming the cron job;
   the session the run was given is closed, as it was.

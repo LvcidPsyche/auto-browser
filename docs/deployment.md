@@ -1261,8 +1261,10 @@ Schedules are read in the zone `CRON_TIMEZONE` names, `UTC` by default, whatever
 IANA zone name such as `America/Chicago` for a job to fire at that zone's hour. A name the zone database does not know
 stops the controller at startup, and the name is in the message. The controller image carries the zone database. In a
 zone with daylight saving time, a job set inside the hour the clocks skip fires an hour later by the clock that night,
-and one set inside the hour they repeat fires twice, once in each pass of that hour (`30 1 * * *` in `America/Chicago`
-runs at 01:30 before the change and again at 01:30 after it).
+and one set inside the hour they repeat is due twice, once in each pass of that hour (`30 1 * * *` in `America/Chicago`
+is due at 01:30 before the change and again at 01:30 after it). The second is a fire like any other: it is skipped,
+with a warning in the log, while the run the first started is still queued or running, and, as for every fire, one the
+scheduler reaches more than five minutes late is not made and several it missed are made once.
 
 A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (on a controller with a
 token, the bearer token is needed as well, as on any route). The key is 256 random bits, answered once by the call that

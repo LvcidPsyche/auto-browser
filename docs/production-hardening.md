@@ -274,8 +274,10 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - decided approvals, deleted `APPROVAL_RETENTION_DAYS` (30 by default; `0` keeps them) after their decision. Kept
     whatever its age: an approval still pending, held by an action, or approved and not expired, and an operator's
     rejection in controller scope or in a session still open, which goes on refusing an agent's approval of the
-    same action there, and a record whose decision time (or, for an approved one, expiry time) cannot be read,
-    which the log names once a start.
+    same action there, and a record whose decision time (or, for an approved one, expiry time) cannot be read.
+    The log names such a record once a start, when the retention comes to read that time: one it keeps for an
+    earlier reason (still pending, held by an action, or an operator's rejection that still stands) is kept
+    before its time is read, and is not named.
 - Containerized CI for controller tests + compose validation
 - A deployment/runbook document with exact credential handoff steps
 - `STEALTH_ENABLED=false`
