@@ -154,12 +154,12 @@ def _locator(
     *,
     box: Any = BOX,
     place: dict[str, Any] = PLACE,
-    enabled: tuple[bool, ...] = (True,),
+    enabled: tuple[Any, ...] = (True,),
     each_step_takes: float = 0.0,
     under_the_pointer: Any = True,
 ) -> SimpleNamespace:
-    """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds, the last
-    one for good; ``each_step_takes`` is the time a step holds the click for (the clock is the real one);
+    """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds (an
+    exception is raised), the last one for good; ``each_step_takes`` is the time a step holds the click for (the clock is the real one);
     ``under_the_pointer`` is what the page answers when asked whether the pointer finds the target."""
     budgets: dict[str, Any] = {}
     looks = list(enabled)
@@ -171,7 +171,10 @@ def _locator(
     async def is_enabled(**given: Any) -> bool:
         given_budget("enabled", given)
         done.append("is it enabled")
-        return looks.pop(0) if len(looks) > 1 else looks[0]
+        look = looks.pop(0) if len(looks) > 1 else looks[0]
+        if isinstance(look, BaseException):
+            raise look
+        return look
 
     async def hover(**given: Any) -> None:
         if given.get("trial"):
@@ -321,9 +324,24 @@ async def test_the_checks_before_a_human_like_press_are_no_click_either() -> Non
     service._receives_pointer_at = AsyncMock(return_value=True)
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
         await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
-    assert done == [*CHECKS, "mouse down", "mouse up"]
+    # Enabled is asked once more where the press is about to be made: the pointer was a while on its way.
+    assert done == [*CHECKS, "is it enabled", "mouse down", "mouse up"]
     assert set(locator.budgets) == {"enabled", "trial hover"}
     assert all(200 < budget <= 250 for budget in locator.budgets.values()), locator.budgets
+
+
+@pytest.mark.parametrize("at_the_press", [False, PlaywrightTimeoutError("the target has left")])
+async def test_a_target_that_is_not_enabled_when_the_pointer_arrives_is_not_pressed_there(at_the_press: Any) -> None:
+    # It was: a mouse down on a button the page had turned off since the checks, and the action ended as done.
+    # The click is handed to Playwright's placing, whose checks wait for the target. What cannot be told is a no.
+    service, session, done = _service(CLOSE)
+    locator = _locator(done, enabled=(True, at_the_press, True))
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    service._receives_pointer_at = AsyncMock(return_value=True)
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
+    assert done == [*CHECKS, "is it enabled", "click"]
 
 
 async def test_a_disabled_target_is_looked_at_again_until_it_is_enabled() -> None:
@@ -335,7 +353,7 @@ async def test_a_disabled_target_is_looked_at_again_until_it_is_enabled() -> Non
     service._receives_pointer_at = AsyncMock(return_value=True)
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()) as waited:
         await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
-    assert done == ["is it enabled", "is it enabled", "is it enabled", "trial hover", "mouse down", "mouse up"]
+    assert done == [*["is it enabled"] * 3, "trial hover", "is it enabled", "mouse down", "mouse up"]
     assert [call.args for call in waited.await_args_list[:2]] == [(ENABLED_POLL_SECONDS,)] * 2
 
 

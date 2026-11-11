@@ -381,6 +381,12 @@ PADDED_APART = (
     "onclick=&quot;this.textContent = 'PRESSED'&quot;>Go</button>"
     '"></iframe>'
 )
+# A button that notes its press, for a page that turns it off for a while (a form does while it validates).
+TURNED_OFF = (
+    "<title>start</title><body style='margin: 0'>"
+    "<button id='go' style='position: absolute; left: 100px; top: 100px; width: 120px; height: 40px' "
+    "onclick=\"document.title = 'PRESSED'\">Go</button>"
+)
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -1521,6 +1527,54 @@ async def test_a_press_in_a_padded_frame_of_another_process_does_not_land_beside
             await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#go"))
         assert await frame.locator("#above").inner_text() == "Next"
         assert await frame.locator("#go").inner_text() == "PRESSED"
+
+
+@pytest.mark.parametrize("route", ["direct", "read"])
+async def test_a_button_the_page_turns_off_while_the_pointer_is_on_its_way_is_waited_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    # "Enabled" was waited for before the pointer set out, and the last check before the press asked only what
+    # the pointer finds. The pointer's way and the pause take about half a second: a button the page turned off
+    # in that time got a mouse down that the browser gives to nobody, and the action ended as done with nothing
+    # done. Enabled is asked once more with the last check; a no is a click Playwright places, whose checks wait
+    # for the button as a click waits.
+    pages: list[Any] = []
+    off_for_ms = [400]
+    real = actions_module.BrowserActionService.pause_before_press
+
+    async def turned_off_in_the_pause() -> None:
+        await real()
+        await pages.pop().evaluate(
+            "(ms) => { const go = document.querySelector('#go'); go.disabled = true; "
+            "setTimeout(() => { go.disabled = false }, ms) }",
+            off_for_ms[0],
+        )
+
+    monkeypatch.setattr(
+        actions_module.BrowserActionService, "pause_before_press", staticmethod(turned_off_in_the_pause)
+    )
+
+    async def click(env: Any, session_id: str) -> None:
+        pages.append(env.page(session_id))
+        if route == "direct":
+            await env.manager.click(session_id, selector="#go")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector="#go"))
+        assert pages == []
+
+    async with browser_env(tmp_path, {"/": TURNED_OFF}) as env:
+        session_id = await env.create("/")
+        await click(env, session_id)
+        assert await _title(env, session_id) == "PRESSED"
+
+    # One that stays off ends the click when its time does, and the action is not called done.
+    off_for_ms[0] = 60_000
+    async with browser_env(tmp_path, {"/": TURNED_OFF}) as env:
+        session_id = await env.create("/")
+        with pytest.raises(BrowserActionError) as refused:
+            await click(env, session_id)
+        assert (refused.value.code, refused.value.retryable) == ("browser_action_failed", True)
+        assert await _title(env, session_id) == "start"
 
 
 def _frames_deep(depth: int) -> dict[str, str]:

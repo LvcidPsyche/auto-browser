@@ -426,7 +426,10 @@ All notable changes to auto-browser are documented here.
   `type`, since 1.9.0. A click listener a site keeps on `window` in the capture phase saw the trial click as one
   more click too. The checks are now made with no click: a wait for the element to be enabled, then a trial
   hover, which sends the pointer's move and nothing else. The approval read of a fast-profile click depends on
-  it: nothing is pressed before the target has been read.
+  it: nothing is pressed before the target has been read. Enabled is asked once more as the pointer arrives,
+  about half a second later: a button the page had turned off by then got a mouse down that the browser gives to
+  nobody, under an action that ended as done. Such a click now waits for the button, as Playwright's own does,
+  and fails when it stays off. That gap is older than this release.
 - **A click on an element inside a frame is pressed only where the pointer finds that element.** A selector that
   goes into a frame names an element there, and its click is pressed at the middle of the element's box once the
   pointer is found to be on it. For an element in a frame that was never asked: the check ran in the frame's own

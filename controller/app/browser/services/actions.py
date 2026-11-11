@@ -1174,21 +1174,33 @@ class BrowserActionService:
         own checks run first (visible, stable, enabled, receiving events at its
         click point, frames included), and the point is checked again once the
         pointer has arrived and the pause before the press is over, so a cover
-        put up during the move or the pause is caught as well. When that last
+        put up during the move or the pause is caught as well. Enabled is asked
+        again with it: the move and the pause take about half a second, and a
+        button the page turned off in that time got a mouse down that the browser
+        gives to nobody, under an action that ended as done. When that last
         check fails the click is one Playwright places (click_as_playwright_places_it):
         its own `click()`, or for an action whose target is read its hover and the
         controller's press where that put the pointer. Either clicks the element if
-        it can and otherwise refuses: neither clicks what covers it.
+        it can and otherwise refuses: neither clicks what covers it, and both wait
+        for a target that is not enabled.
         """
         await self._checks_of_a_click(locator, self._budget(timeout_ms))
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
         await self.pause_before_press()
-        if await self._receives_pointer_at(locator, x, y):
+        if await self._receives_pointer_at(locator, x, y) and await self._is_enabled_now(locator):
             await self.press_mouse(session, x, y)
         else:
             await self.click_as_playwright_places_it(session, locator, timeout_ms=timeout_ms)
+
+    @staticmethod
+    async def _is_enabled_now(locator: Any) -> bool:
+        """Whether the target is enabled as its press is about to be made. What cannot be told is a no."""
+        try:
+            return bool(await locator.is_enabled(timeout=POINTER_CHECK_TIMEOUT_MS))
+        except Exception:
+            return False
 
     def _budget(self, timeout_ms: float | None) -> _Budget:
         """A click's budget: the caller's, or the one Playwright gives an action of this session (ACTION_TIMEOUT_MS)."""
