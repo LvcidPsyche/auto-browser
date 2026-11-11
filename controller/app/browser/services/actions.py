@@ -1350,6 +1350,13 @@ class BrowserActionService:
         await session.page.mouse.move(x, y)
         asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
         if not await self._receives_pointer_at(locator, x, y, placed=True, timeout_ms=asked_within):
+            if budget.spent:
+                # No answer of the page's: the question had no time left to be answered in, and one that goes
+                # unanswered reads as a no. The click ends as any step before this one ends it then.
+                raise PlaywrightTimeoutError(
+                    f"Timeout {budget.timeout_ms:g}ms exceeded: the pointer was placed, and the click's time was "
+                    "up before the target could be asked whether the pointer finds it."
+                )
             raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)
 

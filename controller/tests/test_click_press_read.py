@@ -329,6 +329,20 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         assert done == ["click"] and 200 < locator.budgets["click"] <= 250, locator.budgets
 
 
+async def test_a_placed_click_whose_time_is_up_at_its_last_question_ends_as_a_timeout() -> None:
+    # The question asked with the pointer placed has what the click has left, a millisecond when nothing is, and a
+    # question that goes unanswered reads as a no. With the click's time spent the caller was told the target had
+    # moved (target_moved), where the click had run out of time, as any step before the question would have said.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, done = _service(CLOSE)
+        late = _locator(done, each_step_takes=0.02, under_the_pointer=False)
+        with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError) as ended:
+            await service.click_as_playwright_places_it(session, late, timeout_ms=30)
+        assert "Timeout 30ms exceeded" in str(ended.value)
+        assert late.budgets["pointer"] == 1 and done[-1] == ASKED, (late.budgets, done)
+        service.manager.element_ids.evaluate.assert_not_awaited()
+
+
 @pytest.mark.parametrize("read", [False, True])
 async def test_a_click_playwright_places_after_a_human_like_try_has_what_the_try_left(read: bool) -> None:
     # The placed click began a budget of its own, or gave Playwright's click the whole one again: a target that
