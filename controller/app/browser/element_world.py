@@ -335,14 +335,22 @@ class PageWorld:
         setup message and had no bound, so a read with half a second for its setup waited out an attach of many
         seconds. Past the budget this call alone gives up: the session being opened is the other call's, and is
         left to it. A call with no setup budget waits as it did.
+
+        The error is retryable, as its message says: this call sent the page nothing. For an action that had
+        already changed the page, that is what records the change (ActionPipeline) instead of raising an error
+        the agent answers by doing the action again.
         """
         if setup is None:
             await self._lock.acquire()
             return
         waited_ms = setup.left_ms()
         try:
-            await asyncio.wait_for(self._lock.acquire(), waited_ms / 1000)
-        except asyncio.TimeoutError:
+            # asyncio.timeout, not wait_for: with no time left wait_for gives up before the lock is asked for, so
+            # a retry after the budget was spent was told another call was opening the session when the lock was
+            # free. A free lock is taken without a wait, and the next setup message says the budget is spent.
+            async with asyncio.timeout(waited_ms / 1000):
+                await self._lock.acquire()
+        except TimeoutError:
             # Its own words, and nothing reset: _within's are for a page that did not answer a message ("it may
             # have crashed", "reload the page"), and this call sent it none.
             raise BrowserActionError(
@@ -350,7 +358,7 @@ class PageWorld:
                 "the page nothing. Retry it; if this goes on, the page has hung: reload it or open a new tab.",
                 code=PAGE_NOT_RESPONDING,
                 status_code=504,
-                retryable=False,
+                retryable=True,
                 details={"waited_ms": waited_ms},
             ) from None
 

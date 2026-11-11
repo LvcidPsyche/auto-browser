@@ -320,6 +320,10 @@ async def test_a_setup_message_that_would_start_after_the_budget_is_spent_fails_
     # It names the budget that was spent: "within 0 ms" said the page had no time at all.
     assert f"within {budget_ms} ms" in str(error)
     assert "within 0 ms" not in str(error)
+    # And it says what happened. Nobody held the session's lock: a wait of no time gave up on it all the same,
+    # and the retry was told that "another call was still opening this page's session".
+    assert "Another call" not in str(error)
+    assert "did not answer" in str(error)
     assert failed_after_s < 0.5  # a retry with a budget of its own would have waited a whole second
 
 
@@ -344,6 +348,8 @@ async def test_a_call_waits_for_the_session_another_call_is_opening_no_longer_th
         # nothing more was sent to it. Reload the page", which is what a page that did not answer is told.
         assert "sent the page nothing" in str(error)
         assert "crashed" not in str(error)
+        # "Retry it", its message says, and the error said retryable: false beside it.
+        assert error.retryable is True
         assert 0 < error.details["waited_ms"] <= SHORT_MS  # what was left of its budget when it began to wait
         assert not opening.done()  # it gave up while the other call was still attaching
         # Only the call that waited gave up: the one that was opening the session gets it, and its answer.

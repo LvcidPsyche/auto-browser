@@ -527,7 +527,8 @@ All notable changes to auto-browser are documented here.
   the budget, and `waited_ms`, beside `code` in the error, says what that message itself waited. The wait for a
   session that another call is opening had no bound at all; it now comes out of the same budget, and past it only
   the call that waited gives up, with a message of its own under the same code: another call was still opening the
-  session, and this one sent the page nothing. (N7)
+  session, and this one sent the page nothing. That one is retryable, where a page that did not answer is not.
+  (N7)
 - **`harness.check_drift` and `harness.check_all_drifts` no longer claim to be read-only.** They re-verify a staged
   candidate and write `drift.json`, and their annotations said `readOnlyHint: true`. Both now say false. (MCP-21)
 - **`browser.get_local_storage` passes a key as an argument, not spliced into the script.** A key went into the
