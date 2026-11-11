@@ -641,6 +641,8 @@ class CronRunOutcomeTests(unittest.IsolatedAsyncioTestCase):
 ALICE = OperatorIdentity(id="alice", source="token")
 BOB = OperatorIdentity(id="bob", source="token")
 OWNER_CREDENTIAL_GONE = "refused: owner credential removed"
+# The stored name of the mark that a refusal's audit event is written: a rename would orphan the stores that hold it.
+REFUSAL_AUDITED = "refusal_audited"
 
 
 class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
@@ -664,9 +666,10 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
         return self.service._load()[self.job["id"]]
 
     def _forget_the_refusal(self) -> None:
-        """The job as it is before its first refusal: a refusal is audited when it changes the job's status."""
+        """The job as it is before its first refusal: no status, and no mark that a refusal's event is written."""
         jobs = self.service._load()
         jobs[self.job["id"]]["last_status"] = None
+        jobs[self.job["id"]].pop(REFUSAL_AUDITED, None)
         self.service._save(jobs)
 
     def _assert_refused(self, result: dict | None) -> None:
@@ -846,6 +849,157 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("app.cron_service", level="ERROR"):
                 await self.service._scheduled_run(self.job["id"])
                 await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_refusal_whose_audit_event_could_not_be_written_is_audited_at_the_next_fire(self) -> None:
+        # The status was saved before the append failed, and every later fire took the saved status for an audited
+        # refusal: the job stayed refused with no event at all.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        self.manager.audit.append.side_effect = [OSError("audit store full"), None, None]
+
+        with self.assertLogs("app.cron_service", level="ERROR"):
+            await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)  # the one that failed, and the one that wrote
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+    async def test_a_restart_after_an_allowed_fire_that_wrote_no_status_audits_the_next_refusal(self) -> None:
+        # That fire was remembered in memory alone, so a restart took the next refusal for the old one.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        self.service._active_runs[self.job["id"]] = "session-0"  # a previous run is active: nothing is started
+        await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        restarted = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await restarted._scheduled_run(self.job["id"])
+        await restarted._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_deleted_job_leaves_nothing_in_memory_and_one_made_again_with_its_id_starts_clean(self) -> None:
+        job_id = self.job["id"]
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(job_id)
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        self.service._active_runs[job_id] = "session-0"
+        await self.service._scheduled_run(job_id)  # allowed, and starts nothing
+        self.service._active_runs.clear()
+
+        with acting_as(ALICE):
+            self.assertTrue(await self.service.delete_job(job_id))
+
+        # The ids of deleted jobs stayed in a set for the life of the process.
+        kept = {
+            name: held
+            for name, held in vars(self.service).items()
+            if isinstance(held, set | dict | list) and job_id in held
+        }
+        self.assertEqual(kept, {})
+        with acting_as(ALICE), patch("app.cron_service.uuid4", return_value=SimpleNamespace(hex=job_id)):
+            again = await self.service.create_job(name="mine again", goal="g")
+        self.assertEqual(again["id"], job_id)
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(job_id)
+        await self.service._scheduled_run(job_id)
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)  # the first job's refusal, and this one's
+
+    async def test_an_old_run_that_finishes_between_two_refusals_leaves_one_event(self) -> None:
+        # The run was started while the credential stood. Its finish wrote "completed" over the refusal's status,
+        # and the next fire audited the same refusal again.
+        self.queue.store.get = AsyncMock(return_value=SimpleNamespace(status="completed"))
+        await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self.service._active_runs, {self.job["id"]: "session-1"})
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+
+        await self.service._finish_run(self.job["id"], "session-1", "agent-job-1")
+        self.assertEqual(self._stored()["last_status"], "completed")
+        await self.service._scheduled_run(self.job["id"])
+
+        self.manager.audit.append.assert_awaited_once()
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)  # the latest fire was refused
+
+    async def test_a_refusal_stored_before_the_mark_existed_is_audited_once_more_and_never_not_at_all(self) -> None:
+        # A record whose last_status reads refused with no mark: whether its event was written cannot be told.
+        jobs = self.service._load()
+        jobs[self.job["id"]]["last_status"] = OWNER_CREDENTIAL_GONE
+        self.service._save(jobs)
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.manager.audit.append.assert_awaited_once()
+
+    async def test_the_mark_of_an_audited_refusal_is_the_controllers_own_and_in_no_answer(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+        with acting_as(ALICE):
+            answers = [
+                await self.service.get_job(self.job["id"]),
+                *await self.service.list_jobs(),
+                await self.service.update_job(self.job["id"], {"name": "renamed", REFUSAL_AUDITED: False}),
+                await self.service.rotate_webhook_key(self.job["id"]),
+            ]
+
+        for answer in answers:
+            self.assertNotIn(REFUSAL_AUDITED, answer)
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)  # nor does an update write it
+
+    async def test_two_refusals_at_once_leave_one_event(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        writing, written = asyncio.Event(), asyncio.Event()
+
+        async def append(**_kwargs) -> None:
+            writing.set()
+            await written.wait()
+
+        self.manager.audit.append = AsyncMock(side_effect=append)
+        first = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.wait_for(writing.wait(), timeout=5)
+        second = asyncio.ensure_future(self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+        await asyncio.sleep(0.05)  # the second is refused while the first one's event is still being written
+        written.set()
+        await first
+
+        self.assertEqual((await second)["reason"], "owner_credential_removed")
+        self.manager.audit.append.assert_awaited_once()
+
+    async def test_an_allowed_fire_during_a_refusals_audit_still_ends_that_refusal(self) -> None:
+        # The allowed fire waits for the event being written, so the mark of that event cannot land after it.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        writing, written = asyncio.Event(), asyncio.Event()
+
+        async def append(**_kwargs) -> None:
+            writing.set()
+            await written.wait()
+
+        self.manager.audit.append = AsyncMock(side_effect=append)
+        refused = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.wait_for(writing.wait(), timeout=5)
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        allowed = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.sleep(0.05)
+        written.set()
+        await asyncio.gather(refused, allowed)
+        self.manager.create_session.assert_awaited_once()
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        self.service._active_runs.clear()  # that run is over
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
 
         self.assertEqual(self.manager.audit.append.await_count, 2)
 

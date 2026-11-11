@@ -143,7 +143,10 @@ All notable changes to auto-browser are documented here.
   `{"triggered": false, "reason": "owner_credential_removed"}`, `last_status` reads
   `refused: owner credential removed`, no session is opened, and a `cron_job_refused` audit event is written when
   the job becomes refused, as the operator `system` for a scheduled fire and as its caller for a trigger; later
-  fires of a job still refused write no event and are logged at debug. A job
+  fires of a job still refused write no event and are logged at debug. The job's entry in the cron store records
+  that the event is written, so a restart writes no second one. An event the audit store could not take is written
+  at the job's next refused fire, and so is one whose writing the cron store could not record, which the audit log
+  then holds twice. A fire the credential allows ends the refusal, and the next refusal writes its own event. A job
   a named operator queued fails when a worker takes it, with an error that says so, if that credential has gone
   meanwhile. Moving to the shared `API_BEARER_TOKEN` or to no token counts: every job a named operator created is then
   refused. Give the owner a named credential again, or delete the job and create it again under a credential that

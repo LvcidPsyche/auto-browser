@@ -28,6 +28,8 @@ Job schema:
                    "interrupted" or "discarded", or "unknown" when its record could not say; or
                    "refused: owner credential removed" when a fire was refused),
     "run_count":   int,
+    "refusal_audited": true (present once the audit event of the refusal the job is in has been written, until a
+                   fire is allowed again; the controller's own: no answer hands it out),
   }
 
 Depends on APScheduler for cron execution (optional install).
@@ -80,6 +82,11 @@ RUN_OUTCOME_UNKNOWN = "unknown"
 # A fire refused because no named credential proves the job's owner any more: the answer's reason, and last_status.
 OWNER_CREDENTIAL_REMOVED = "owner_credential_removed"
 OWNER_CREDENTIAL_REMOVED_STATUS = "refused: owner credential removed"
+# The job's own record of the refusal it is in: there once that refusal's audit event has been written, gone at the
+# first fire the credential allows (_refuse_run, _end_refusal). Nothing else writes it, and no answer shows it.
+_REFUSAL_AUDITED = "refusal_audited"
+# What a job's record holds that no answer hands out (_safe_job).
+_KEPT_TO_THE_CONTROLLER = frozenset({"webhook_key", "webhook_key_hash", _REFUSAL_AUDITED})
 
 
 def _hash_webhook_key(key: str) -> str:
@@ -137,9 +144,11 @@ class CronService:
         # cron job id -> session id currently hosting its run. Guards against
         # overlapping fires and records what _release_run must close.
         self._active_runs: dict[str, str] = {}
-        # Jobs whose last_status still reads refused although a later fire was allowed: that fire wrote no status
-        # (it started nothing), and the next refusal is a new one to audit (_refuse_run).
-        self._allowed_since_refused: set[str] = set()
+        # Held while a refusal reads its job's mark, writes its audit event and sets the mark, and while an allowed
+        # fire clears it (_refuse_run, _end_refusal): one at a time, so two refusals at once write one event, and a
+        # mark never lands after the allowed fire that was to end its refusal. Taken before the store lock, never
+        # inside it, and not held by anything else: the store is not kept from its other writers by an audit append.
+        self._refusal_lock = asyncio.Lock()
 
     async def startup(self) -> None:
         """Start the scheduler and register all enabled cron jobs."""
@@ -463,10 +472,11 @@ class CronService:
         # From the settings as they are now, whoever fired it: a job does not outlive its owner's credential. A
         # deployment moved to the shared token or to none has no named credential left, so it refuses named owners too.
         owner_id = job.get("owner")
-        if owner_id and not credential_names_operator(self.manager.settings, owner_id):
-            return await self._refuse_run(job_id, owner_id)
-        if job.get("last_status") == OWNER_CREDENTIAL_REMOVED_STATUS:
-            self._allowed_since_refused.add(job_id)
+        if owner_id:
+            if not credential_names_operator(self.manager.settings, owner_id):
+                return await self._refuse_run(job_id, owner_id)
+            # Only an owned job can have been refused. Whatever this fire goes on to do, it was allowed.
+            await self._end_refusal(job_id)
 
         from .models import AGENT_RUN_MAX_STEPS, AgentRunRequest
 
@@ -560,47 +570,99 @@ class CronService:
         """Refuse a fire whose owner no named credential proves any more: no session and no agent job.
 
         One audit event when the job becomes refused, not one a fire: a job on ``* * * * *`` filled the audit log in a
-        week. last_status remembers the refusal, across a restart too. A fire the credential allowed since ends it
-        whether or not it wrote a status (a previous run still active, a session that could not be created), and a
-        refusal the store could not take is audited again at the next fire.
+        week. The job's record says whether the event of the refusal it is in has been written, in a field of its own
+        (_REFUSAL_AUDITED), set here once the event is written and cleared by the first fire the credential allows
+        (_end_refusal). So the event is written once across a restart too, and it is written again, never not at
+        all, where the record cannot say that it was: the append failed, the mark could not be saved, the caller was
+        cancelled between the two, or the record is one stored before the field existed.
+
+        last_status is not what remembers it, as it was: the status was saved before the append and read as the
+        event's having been written, and an older run that finished afterwards wrote its own status over it
+        (_finish_run), so the same refusal was audited twice. It is still written at every refused fire that does
+        not find it, so it reads refused while the latest fire was.
         """
         refused = {"triggered": False, "job_id": job_id, "reason": OWNER_CREDENTIAL_REMOVED}
-        already_refused = False
+        async with self._refusal_lock:
+            audited = False
+            try:
+                async with self._lock:
+                    jobs = self._load()
+                    job = jobs.get(job_id)
+                    if job is not None:
+                        audited = job.get(_REFUSAL_AUDITED) is True
+                        if job.get("last_status") != OWNER_CREDENTIAL_REMOVED_STATUS:
+                            job["last_status"] = OWNER_CREDENTIAL_REMOVED_STATUS
+                            self._save(jobs)
+            except (CronStoreUnreadableError, OSError) as exc:
+                logger.error("cron job %s: its refusal could not be saved in last_status: %s", job_id, exc)
+            if audited:
+                logger.debug("cron job %s refused again: no named credential proves its owner %s", job_id, owner_id)
+                return refused
+            logger.warning("cron job %s refused: no named credential proves its owner %s any more", job_id, owner_id)
+            written = await self._audit_quietly(
+                job_id,
+                event_type="cron_job_refused",
+                status="refused",
+                action="fire_cron_job",
+                details={"cron_job": job_id, "owner": owner_id, "reason": OWNER_CREDENTIAL_REMOVED},
+            )
+            if written:
+                await self._set_refusal_audited(job_id, True)
+        return refused
+
+    async def _end_refusal(self, job_id: str) -> None:
+        """A fire the credential allows ends the refusal before it: the next refusal is a new one, with its own event.
+
+        Whether or not the fire goes on to start a run (a previous run still active, a session that cannot be
+        created, both of which write no status). Behind a refusal whose event is still being written
+        (_refusal_lock), whose mark would otherwise land after this and be taken for the next refusal's.
+        """
+        async with self._refusal_lock:
+            await self._set_refusal_audited(job_id, False)
+
+    async def _set_refusal_audited(self, job_id: str, audited: bool) -> None:
+        """Set or clear the job's mark that its refusal's event is written; a store that cannot take it is logged.
+
+        Not set, the next refused fire writes the event once more. Not cleared, the next refusal is taken for the one
+        before it and writes none, until an allowed fire's clear is saved: every allowed fire tries.
+        """
         try:
             async with self._lock:
                 jobs = self._load()
-                if job_id in jobs:
-                    already_refused = (
-                        jobs[job_id].get("last_status") == OWNER_CREDENTIAL_REMOVED_STATUS
-                        and job_id not in self._allowed_since_refused
-                    )
-                    if not already_refused:
-                        jobs[job_id]["last_status"] = OWNER_CREDENTIAL_REMOVED_STATUS
-                        self._save(jobs)
-                        self._allowed_since_refused.discard(job_id)
+                job = jobs.get(job_id)
+                if job is None or (job.get(_REFUSAL_AUDITED) is True) == audited:
+                    return
+                if audited:
+                    job[_REFUSAL_AUDITED] = True
+                else:
+                    del job[_REFUSAL_AUDITED]
+                self._save(jobs)
         except (CronStoreUnreadableError, OSError) as exc:
-            logger.error("cron job %s: its refusal could not be saved in last_status: %s", job_id, exc)
-        if already_refused:
-            logger.debug("cron job %s refused again: no named credential proves its owner %s", job_id, owner_id)
-            return refused
-        logger.warning("cron job %s refused: no named credential proves its owner %s any more", job_id, owner_id)
-        await self._audit_quietly(
-            job_id,
-            event_type="cron_job_refused",
-            status="refused",
-            action="fire_cron_job",
-            details={"cron_job": job_id, "owner": owner_id, "reason": OWNER_CREDENTIAL_REMOVED},
-        )
-        return refused
+            if audited:
+                logger.error(
+                    "cron job %s: that its refusal's audit event is written could not be saved, so its next refused "
+                    "fire writes the event again: %s",
+                    job_id,
+                    exc,
+                )
+            else:
+                logger.error(
+                    "cron job %s: its record could not be read or saved to end a refusal: if the job was in one, its "
+                    "next refusal may write no audit event: %s",
+                    job_id,
+                    exc,
+                )
 
-    async def _audit_quietly(self, job_id: str, *, event_type: str, status: str, action: str, details: dict) -> None:
-        """Audit what has already happened: a failure is logged, never raised over it."""
+    async def _audit_quietly(self, job_id: str, *, event_type: str, status: str, action: str, details: dict) -> bool:
+        """Audit what has already happened, and say whether it was written: a failure is logged, never raised."""
         if self.manager is None:
-            return
+            return False
         try:
             await self.manager.audit.append(event_type=event_type, status=status, action=action, details=details)
         except Exception:
             logger.exception("cron job %s: the %s audit event could not be written", job_id, event_type)
+            return False
+        return True
 
     async def _finish_run(self, job_id: str, session_id: str, agent_job_id: str) -> None:
         """The agent job's finish callback: record how the run ended in last_status, then release its session.
@@ -715,9 +777,10 @@ class CronService:
 
     @classmethod
     def _safe_job(cls, job: dict[str, Any]) -> dict[str, Any]:
-        """The job as callers see it: neither the key nor its hash, and a non-secret id instead of them."""
+        """The job as callers see it: neither the key nor its hash, and a non-secret id instead of them; nor the mark
+        of an audited refusal, which is the controller's own."""
         key_hash = cls._stored_key_hash(job)
-        result = {key: value for key, value in job.items() if key not in {"webhook_key", "webhook_key_hash"}}
+        result = {key: value for key, value in job.items() if key not in _KEPT_TO_THE_CONTROLLER}
         result["webhook_enabled"] = key_hash is not None
         if key_hash is not None:
             result["webhook_key_id"] = _webhook_key_id(key_hash)
