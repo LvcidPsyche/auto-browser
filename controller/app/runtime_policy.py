@@ -40,6 +40,11 @@ MIN_PRODUCTION_BEARER_TOKEN_LENGTH = 32
 # characters it does (an id of two hexadecimal digits stands in one 40-digit token in seven), and the warning
 # would then hide the very id it is there to name.
 MIN_TOKEN_RUN_NOT_PRINTED = 8
+# A token of that length or shorter (a development setup's: production's are 32 or more) has no such run short of
+# itself, so the run that counts for it is one character fewer than it has, and such a token cut short by one is
+# not printed either. Never fewer than this many, which the two or three above rule out: a token of this length or
+# shorter keeps an entry back only when the entry is that token ('dev' does not hide 'developer').
+MIN_SHORT_TOKEN_RUN_NOT_PRINTED = 4
 
 CLI_PROVIDER_CHECKS = (
     {
@@ -231,34 +236,38 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
         report.errors.append(str(exc))
 
 
-def _tokens_shown_by(text: str, tokens: Iterable[str], *, an_operator_id: bool) -> set[str]:
-    """The tokens that printing ``text`` would show: each that occurs in it and, unless the text is
-    ``an_operator_id``, each that has MIN_TOKEN_RUN_NOT_PRINTED characters in a row in common with it. Compared
-    without regard to case: a token of hexadecimal digits in upper case is the same secret.
+def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_id: bool) -> bool:
+    """Whether printing ``text`` would show a bearer token of the deployment, whole or in part. Compared without
+    regard to case: a token of hexadecimal digits in upper case is the same secret.
 
-    A token shorter than MIN_TOKEN_RUN_NOT_PRINTED (a development setup's) stands in an id by chance, as a short run
-    of a long token does: 'dev' in 'developer'. Only a text that is that token shows it, and never an operator's id.
+    In part is MIN_TOKEN_RUN_NOT_PRINTED of a token's characters in a row, and for a token no longer than that all
+    but one of them, down to MIN_SHORT_TOKEN_RUN_NOT_PRINTED: below it an id holds a token's letters by chance, and
+    only a text that is the token shows it. A run that stands in the token's own operator id is no secret, and
+    does not count: with alice-prod:alice-prod-9f8a..., 'alice-prod2' is an id like any other.
+
+    An operator id of API_BEARER_TOKENS shows a token only where it holds one of MIN_TOKEN_RUN_NOT_PRINTED
+    characters or more whole.
     """
     folded = text.casefold()
-    runs = {
-        folded[start : start + MIN_TOKEN_RUN_NOT_PRINTED]
-        for start in range(len(folded) - MIN_TOKEN_RUN_NOT_PRINTED + 1)
-    }
-    shown: set[str] = set()
-    for token in tokens:
-        token_folded = token.casefold()
-        if len(token_folded) < MIN_TOKEN_RUN_NOT_PRINTED:
-            if token_folded == folded and not an_operator_id:
-                shown.add(token)
+    for credential in credentials:
+        token = credential.token.casefold()
+        if an_operator_id:
+            if len(token) >= MIN_TOKEN_RUN_NOT_PRINTED and token in folded:
+                return True
             continue
-        token_runs = range(len(token_folded) - MIN_TOKEN_RUN_NOT_PRINTED + 1)
-        if token_folded in folded:
-            shown.add(token)
-        elif not an_operator_id and any(
-            token_folded[start : start + MIN_TOKEN_RUN_NOT_PRINTED] in runs for start in token_runs
-        ):
-            shown.add(token)
-    return shown
+        run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(token) - 1)
+        if run < MIN_SHORT_TOKEN_RUN_NOT_PRINTED:
+            if token == folded:
+                return True
+            continue
+        if token in folded:
+            return True
+        own_id = (credential.operator_id or "").casefold()
+        for start in range(len(token) - run + 1):
+            part = token[start : start + run]
+            if part in folded and part not in own_id:
+                return True
+    return False
 
 
 def _warn_listed_operators_no_credential_proves(settings: Settings, report: RuntimePolicyReport) -> None:
@@ -268,17 +277,16 @@ def _warn_listed_operators_no_credential_proves(settings: Settings, report: Runt
     The warnings go to the log, and an entry can be a secret in the wrong place: API_BEARER_TOKENS pasted whole
     (id:token pairs), a token alone, or a token with something round it (Bearer, a quote, alice=) or cut short.
     Nothing after an entry's colon is printed. What would be printed, the entry or the text before its colon, is
-    printed only when it shows no token of this deployment, whole or in part (_tokens_shown_by): decided by what
-    it contains, since an entry that is a token and one character more is no token by equality. A token shorter
-    than MIN_TOKEN_RUN_NOT_PRINTED is the exception, and is one by equality alone: an id holds its letters by chance.
+    printed only when it shows no token of this deployment, whole or in part (_shows_a_token): decided by what it
+    contains, since an entry that is a token and one character more is no token by equality. The entries kept back
+    are counted. The tokens they hold cannot be: an entry that holds one of three tokens that begin alike holds a
+    part of each.
     """
     credentials = credentials_for(settings)
     named = {credential.operator_id for credential in credentials if credential.operator_id}
     named_whatever_the_case = {name.casefold() for name in named}
-    tokens = {credential.token for credential in credentials}
     pairs: set[str] = set()
-    # The tokens, not the entries: one listed twice (alone, and before a colon) is one token.
-    listed_tokens: set[str] = set()
+    kept_back = 0
     for listed in sorted(settings.approval_refuse_self_approval_operator_ids):
         if credential_names_operator(settings, listed):
             continue
@@ -288,9 +296,8 @@ def _warn_listed_operators_no_credential_proves(settings: Settings, report: Runt
         # An operator id of API_BEARER_TOKENS, in whatever case, is no secret, though a token may begin with it
         # (alice-prod:alice-prod-9f8a...): only a whole token in it keeps it out of the log, and only one of
         # MIN_TOKEN_RUN_NOT_PRINTED characters or more (alice:alice is a development setup's).
-        shown = _tokens_shown_by(printed, tokens, an_operator_id=printed.casefold() in named_whatever_the_case)
-        if shown:
-            listed_tokens |= shown
+        if _shows_a_token(printed, credentials, an_operator_id=printed.casefold() in named_whatever_the_case):
+            kept_back += 1
             continue
         if ":" in listed:
             pairs.add(before_colon)
@@ -313,10 +320,14 @@ def _warn_listed_operators_no_credential_proves(settings: Settings, report: Runt
             "printed). The setting takes operator ids, not id:token pairs: an operator id holds no colon, so the "
             "entry refuses nobody"
         )
-    if listed_tokens:
+    if kept_back:
+        counted = "1 entry that is not printed here, because it holds"
+        if kept_back != 1:
+            counted = f"{kept_back} entries that are not printed here, because each holds"
         report.warnings.append(
-            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {len(listed_tokens)} of this deployment's bearer tokens, "
-            "whole or in part (not printed), where it takes operator ids: an entry that holds one refuses nobody"
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {counted} a bearer token of this deployment or a part of "
+            f"one ({MIN_TOKEN_RUN_NOT_PRINTED} characters in a row, or all but one of a token no longer than that), "
+            "where it takes operator ids: such an entry refuses nobody"
         )
 
 

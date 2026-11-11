@@ -23,7 +23,11 @@ from app.audit import get_current_operator
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, OperatorIdentity
-from app.runtime_policy import validate_runtime_policy
+from app.runtime_policy import (
+    MIN_SHORT_TOKEN_RUN_NOT_PRINTED,
+    MIN_TOKEN_RUN_NOT_PRINTED,
+    validate_runtime_policy,
+)
 from app.session_ownership import acting_as
 from app.utils import UTC
 
@@ -248,6 +252,16 @@ class RefuseSelfApprovalTests(StoreBase):
             self.assertEqual((await store.approve(approval.id)).decided_by, "alice")
 
 
+def kept_back(entries: int) -> str:
+    """How the warning of entries that are not printed begins. It counts entries: the tokens they hold it cannot
+    count, since tokens that begin alike are all held by an entry that holds one. The eight is written out: it is
+    what the CHANGELOG says, whatever MIN_TOKEN_RUN_NOT_PRINTED is changed to."""
+    counted = "1 entry that is not printed here, because it holds"
+    if entries != 1:
+        counted = f"{entries} entries that are not printed here, because each holds"
+    return f"lists {counted} a bearer token of this deployment or a part of one (8 characters in a row, or all but one"
+
+
 class ListedOperatorTests(unittest.TestCase):
     """A start names each listed id that refuses nobody: the list is compared to the proven operator id exactly."""
 
@@ -338,7 +352,7 @@ class ListedOperatorTests(unittest.TestCase):
         warnings = self._warnings(f"{named},{shared},{with_colon}", tokens=tokens, shared=shared)
 
         self.assertEqual(len(warnings), 1, warnings)
-        self.assertIn("3 of this deployment's bearer tokens", warnings[0])
+        self.assertIn(kept_back(3), warnings[0])
         self.assertIn("refuses nobody", warnings[0])
         for secret in (named, shared, "f" * 20, "g" * 20):
             self.assertNotIn(secret, warnings[0])
@@ -350,45 +364,66 @@ class ListedOperatorTests(unittest.TestCase):
     WITH_BOTH = "s3Kd8Fj2Lq:x5Zc1Vb9Nm,t7Bn4Mh6Gy0Ru3Te8Ia2"
     NAMED = f"alice:{A},bob:{B}"
     NAMED_WITH_COLON = f"alice:{A},bob:{WITH_COLON}"
-    PRINTS_NOTHING = "of this deployment's bearer tokens, whole or in part (not printed)"
+    # Three tokens that begin alike, as tokens made to one pattern do.
+    ALIKE = ",".join(
+        f"ops{n}:prod-key-{part}" for n, part in enumerate(("1a2B3c4D5e6F7g8H", "9i0J1k2L3m4N5o6P", "7q8R9s0T"))
+    )
+    N = MIN_TOKEN_RUN_NOT_PRINTED
     # A row: what is listed, API_BEARER_TOKENS, API_BEARER_TOKEN, and a text each warning holds, in their order.
     # Where an entry is not exactly a token, each of these wrote a token, or a part of one, to the log.
     SHAPES = {
-        "a token alone": (A, NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a token after Bearer": (f"Bearer {A}", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "two tokens and a space": (f"{A} {B}", NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
-        "two tokens and a semicolon": (f"{A};{B}", NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
-        "pairs written with =": (f"alice={A},bob={B}", NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
-        "the list in double quotes": (f'"{A},{B}"', NAMED, None, [f"lists 2 {PRINTS_NOTHING}"]),
-        "a token in single quotes": (f"'{A}'", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a token and one character more": (f"{A}x", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a token cut short by one": (A[:-1], NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a token cut short, after a stray quote": ('"' + A[:-1], NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a token in upper case": (A.upper(), NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        # The list is split at commas and the shared token is not: its halves are two entries, and one token.
-        "a shared token that holds a comma": (WITH_COMMA, NAMED, WITH_COMMA, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a shared token that holds a comma and a colon": (WITH_BOTH, NAMED, WITH_BOTH, [f"lists 1 {PRINTS_NOTHING}"]),
-        "a token that holds a colon": (WITH_COLON, NAMED_WITH_COLON, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a token alone": (A, NAMED, None, [kept_back(1)]),
+        "a token after Bearer": (f"Bearer {A}", NAMED, None, [kept_back(1)]),
+        "two tokens and a space": (f"{A} {B}", NAMED, None, [kept_back(1)]),
+        "two tokens and a semicolon": (f"{A};{B}", NAMED, None, [kept_back(1)]),
+        "pairs written with =": (f"alice={A},bob={B}", NAMED, None, [kept_back(2)]),
+        "the list in double quotes": (f'"{A},{B}"', NAMED, None, [kept_back(2)]),
+        "a token in single quotes": (f"'{A}'", NAMED, None, [kept_back(1)]),
+        "a token and one character more": (f"{A}x", NAMED, None, [kept_back(1)]),
+        "a token cut short by one": (A[:-1], NAMED, None, [kept_back(1)]),
+        "a token cut short, after a stray quote": ('"' + A[:-1], NAMED, None, [kept_back(1)]),
+        "a token in upper case": (A.upper(), NAMED, None, [kept_back(1)]),
+        # The list is split at commas and the shared token is not: its halves are two entries.
+        "a shared token that holds a comma": (WITH_COMMA, NAMED, WITH_COMMA, [kept_back(2)]),
+        "a shared token that holds a comma and a colon": (WITH_BOTH, NAMED, WITH_BOTH, [kept_back(2)]),
+        "a token that holds a colon": (WITH_COLON, NAMED_WITH_COLON, None, [kept_back(1)]),
         "Bearer and a token that holds a colon": (
             f"Bearer {WITH_COLON}",
             NAMED_WITH_COLON,
             None,
-            [f"lists 1 {PRINTS_NOTHING}"],
+            [kept_back(1)],
         ),
         "a token that holds a colon, and more after another": (
             f"{WITH_COLON}:x",
             NAMED_WITH_COLON,
             None,
-            [f"lists 1 {PRINTS_NOTHING}"],
+            [kept_back(1)],
         ),
         "the first half of such a token before another colon": (
             f"{WITH_COLON[:20]}:zzz",
             NAMED_WITH_COLON,
             None,
-            [f"lists 1 {PRINTS_NOTHING}"],
+            [kept_back(1)],
         ),
-        "a pair the wrong way round": (f"{A}:alice", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
-        "one token twice, alone and before a colon": (f"{A},{A}:x", NAMED, None, [f"lists 1 {PRINTS_NOTHING}"]),
+        "a pair the wrong way round": (f"{A}:alice", NAMED, None, [kept_back(1)]),
+        "one token twice, alone and before a colon": (f"{A},{A}:x", NAMED, None, [kept_back(2)]),
+        # The count is of entries. It was of the tokens an entry has eight characters in common with: 3 for each
+        # of these, of which the first lists one token and the second none.
+        "one of three tokens that begin alike": (
+            ALIKE.partition(":")[2].partition(",")[0],
+            ALIKE,
+            None,
+            [kept_back(1)],
+        ),
+        "an id that begins as three tokens do": ("prod-key-admins", ALIKE, None, [kept_back(1)]),
+        # Both sides of MIN_TOKEN_RUN_NOT_PRINTED: with one more, or one fewer, every other shape here passed.
+        "a token's first characters, as many as are not printed": (A[:N], NAMED, None, [kept_back(1)]),
+        "a token's first characters, one fewer": (
+            A[: N - 1],
+            NAMED,
+            None,
+            [f"lists '{A[: N - 1]}', which no credential"],
+        ),
         # What a start still names: an id, and the id of a pasted pair.
         "the list pasted whole": (NAMED, NAMED, None, ["begins 'alice:'", "begins 'bob:'"]),
         "an id nobody proves": ("carol", NAMED, None, ["lists 'carol', which no credential"]),
@@ -404,8 +439,16 @@ class ListedOperatorTests(unittest.TestCase):
         ),
         "an id that ends with a short token": ("max1", "alice:x1", None, ["lists 'max1', which no credential"]),
         "an id that is its own short token": ("Alice", "alice:alice", None, ["It differs from 'alice' only by case"]),
-        # The token itself is still one, in whatever case.
-        "a short token alone, in two cases": ("dev,DEV", "alice:dev", None, [f"lists 1 {PRINTS_NOTHING}"]),
+        # The token itself is still one, in whatever case: two entries.
+        "a short token alone, in two cases": ("dev,DEV", "alice:dev", None, [kept_back(2)]),
+        # A token of eight characters or fewer has no eight in a row short of itself, and cut short by one it was
+        # named: six characters of seven, and seven of eight.
+        "a token of seven cut short by one": ("s3cr3t", "alice:s3cr3t!", None, [kept_back(1)]),
+        "a token of eight after Bearer, cut short by one": ("Bearer abcdefg", "alice:abcdefgh", None, [kept_back(1)]),
+        "a token of eight without its first character": ("bcdefgh", "alice:abcdefgh", None, [kept_back(1)]),
+        # Both sides of MIN_SHORT_TOKEN_RUN_NOT_PRINTED, written out: four in a row keep an entry back, three do not.
+        "a token of five cut short by one": ("q7Zk", "alice:q7Zk2", None, [kept_back(1)]),
+        "a token of four cut short by one": ("q7Z", "alice:q7Zk", None, ["lists 'q7Z', which no credential"]),
     }
 
     def test_no_warning_holds_eight_characters_in_a_row_of_a_token(self) -> None:
@@ -418,15 +461,20 @@ class ListedOperatorTests(unittest.TestCase):
                     self.assertIn(text, warning)
                 ids = {pair.partition(":")[0].casefold() for pair in named.split(",")}
                 tokens = [pair.partition(":")[2] for pair in named.split(",")] + ([shared] if shared else [])
+                said = "\n".join(warnings)
                 for token in tokens:
-                    if len(token) < 8:
-                        # No run of eight to hold: such a token is not named as an entry, unless it is an id too.
-                        if token.casefold() not in ids:
-                            self.assertNotIn(f"'{token}'".upper(), "\n".join(warnings).upper(), (token, warnings))
+                    if token.casefold() in ids:
+                        # alice:alice, a development setup's: the token is the id, and an id is named.
                         continue
-                    for start in range(len(token) - 7):
-                        self.assertNotIn(token[start : start + 8], "\n".join(warnings), (token, warnings))
-                    self.assertNotIn(token.upper()[:8], "\n".join(warnings).upper(), (token, warnings))
+                    # Eight in a row, and for a token of eight or fewer all but one of its characters.
+                    run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(token) - 1)
+                    if run < MIN_SHORT_TOKEN_RUN_NOT_PRINTED:
+                        # Too short a run to tell from an id's letters: only the token itself is not named.
+                        self.assertNotIn(f"'{token}'".upper(), said.upper(), (token, warnings))
+                        continue
+                    for start in range(len(token) - run + 1):
+                        self.assertNotIn(token[start : start + run], said, (token, warnings))
+                    self.assertNotIn(token.upper()[:run], said.upper(), (token, warnings))
 
     def test_an_id_its_own_token_begins_with_is_still_named(self) -> None:
         # An operator id of API_BEARER_TOKENS is no secret, though ten characters of a token are that id: a slip of
@@ -439,7 +487,19 @@ class ListedOperatorTests(unittest.TestCase):
         self.assertIn("lists 'Alice-Prod'", slip)
         self.assertIn("It differs from 'alice-prod' only by case", slip)
         self.assertIn("begins 'alice-prod:'", pasted)
-        for warning in (slip, pasted):
+        # Nor does that id hide another: what such a token has in common with its own operator's id is no secret,
+        # and an id that holds eight characters of it was counted as a token and not named.
+        said = [slip, pasted]
+        for near in ("alice-prod2", "alice-production", "malice-prod"):
+            with self.subTest(near=near):
+                [warning] = self._warnings(near, tokens=tokens)
+
+                self.assertIn(f"lists '{near}', which no credential", warning)
+                said.append(warning)
+        # Eight in a row that go on past the id are the token's own.
+        [goes_on] = self._warnings(f"alice-prod-{self.A[:1]}", tokens=tokens)
+        self.assertIn(kept_back(1), goes_on)
+        for warning in [*said, goes_on]:
             for start in range(len(self.A) - 7):
                 self.assertNotIn(self.A[start : start + 8], warning)
 
