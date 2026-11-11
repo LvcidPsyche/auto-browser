@@ -418,3 +418,43 @@ class CostOfKeysThatMeetTests(unittest.TestCase):
 
         steps = {more - fewer for fewer, more in zip(visits, visits[1:], strict=False)}
         self.assertEqual(len(steps), 1, visits)
+
+    def test_keys_of_one_dict_that_all_meet_are_each_named_at_one_try(self) -> None:
+        # Every key counted up from " (2)" again, so 4,000 keys that met (68 KB of JSON) tried eight million names and
+        # held the event loop for five seconds. The names are the same: none below the last one given is ever free.
+        keys = 500
+        tried = 0
+
+        class Name(str):
+            """A cleaned key that counts each numbered name made from it."""
+
+            def __format__(self, spec: str) -> str:
+                nonlocal tried
+                tried += 1
+                if tried > 10 * keys:
+                    raise AssertionError(f"more than {10 * keys} numbered names were tried for {keys} keys")
+                return str(self).__format__(spec)
+
+        clean = utils.without_lone_surrogates
+
+        def named(part: Any) -> Any:
+            cleaned = clean(part)
+            return Name(cleaned) if isinstance(cleaned, str) else cleaned
+
+        meeting = {f"k{chr(0xD800 + number)}": number for number in range(keys)}
+        with patch.object(utils, "without_lone_surrogates", named):
+            cleaned = clean(meeting)
+
+        wanted = f"k{REPLACED}"
+        self.assertEqual(list(cleaned), [wanted, *(f"{wanted} ({number})" for number in range(2, keys + 1))])
+        self.assertEqual(list(cleaned.values()), list(range(keys)))
+        self.assertEqual(tried, keys - 1)
+
+    def test_a_numbered_name_a_later_key_holds_is_passed_over_by_every_key_that_meets_it(self) -> None:
+        taken = f"a{REPLACED} (3)"
+
+        cleaned = without_lone_surrogates({f"a{LONE}": 1, f"a{OTHER_LONE}": 2, f"a{chr(0xD801)}": 3, taken: 4})
+
+        self.assertEqual(
+            list(cleaned.items()), [(f"a{REPLACED}", 1), (f"a{REPLACED} (2)", 2), (f"a{REPLACED} (4)", 3), (taken, 4)]
+        )

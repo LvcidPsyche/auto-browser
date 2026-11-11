@@ -138,13 +138,18 @@ def _with_no_key_lost(entries: list[tuple[Any, Any, Any]]) -> dict[Any, Any]:
     cleaned: this only gives the names out, and cleans nothing.
     """
     taken = {name for key, name, _ in entries if name == key}
+    # The last number given to a name. A name once taken stays taken, so no number below it is free again; counted
+    # up from " (2)" for each key, keys that all met cost the square of their count.
+    last_number: dict[Any, int] = {}
     cleaned: dict[Any, Any] = {}
     for key, wanted, item in entries:
         name = wanted
-        number = 1
-        while name != key and name in taken:
-            number += 1
-            name = f"{wanted} ({number})"
+        if name != key:
+            number = last_number.get(wanted, 1)
+            while name in taken:
+                number += 1
+                name = f"{wanted} ({number})"
+            last_number[wanted] = number
         taken.add(name)
         cleaned[name] = item
     return cleaned
