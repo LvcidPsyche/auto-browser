@@ -600,6 +600,20 @@ class LabelRulesTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(classified_risk(button(label), "read"), kind)
 
+    def test_a_line_of_sends_that_stops_on_any_of_the_open_ends_goes_on_in_the_next(self) -> None:
+        # The labels above stop a line on four of the words. Each of them here: a line that asks nothing by
+        # itself over one that names everybody asks, and by that word (with it out of the list the label is two
+        # lines again, and runs).
+        for word in SEND_OPEN_ENDS:
+            first = f"Send code to my phone {word}"
+            label = f"{first}\nall users in the organization today"
+            with self.subTest(word=word):
+                self.assertIsNone(classified_risk(button(first), "read"))
+                self.assertEqual(classified_risk(button(label), "read"), "post")
+                without = tuple(end for end in SEND_OPEN_ENDS if end != word)
+                with patch.object(click_target, "SEND_OPEN_ENDS", without):
+                    self.assertIsNone(classified_risk(button(label), "read"))
+
     def test_labels_that_must_not_ask(self) -> None:
         for label in self.MUST_NOT_ASK:
             with self.subTest(label=label):

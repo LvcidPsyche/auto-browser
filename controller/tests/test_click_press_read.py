@@ -160,8 +160,9 @@ def _locator(
     under_the_pointer: Any = True,
 ) -> SimpleNamespace:
     """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds (an
-    exception is raised), the last one for good; ``each_step_takes`` is the time a step holds the click for (the clock is the real one);
-    ``under_the_pointer`` is what the page answers when asked whether the pointer finds the target."""
+    exception is raised), the last one for good; ``each_step_takes`` is the time a step holds the click for (the
+    clock is the real one); ``under_the_pointer`` is what the page answers when asked whether the pointer finds
+    the target."""
     budgets: dict[str, Any] = {}
     looks = list(enabled)
 
@@ -431,8 +432,9 @@ async def test_a_target_that_stays_disabled_ends_the_click_when_its_budget_does(
         patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()),
         pytest.raises(PlaywrightTimeoutError, match="enabled"),
     ):
-        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=50)
-    # 20 ms a look, or more, under a budget of 50: looked at more than once, and nothing else was done.
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=500)
+    # 20 ms a look under a budget of 500: looked at more than once, also where a look is held up for ten
+    # times as long (under a budget of 50 one stall of 30 ms left it at a single look), and nothing else done.
     assert len(done) >= 2 and set(done) == {"is it enabled"}, done
 
 

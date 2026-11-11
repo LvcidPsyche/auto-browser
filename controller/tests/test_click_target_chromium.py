@@ -1405,7 +1405,37 @@ async def test_a_read_click_in_a_scaled_frame_does_not_press_what_the_page_puts_
         with pytest.raises(BrowserActionError) as refused:
             await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#link"))
         assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        # The cause, and not a click that failed there for another reason (a hover that ran out of time).
+        assert "the pointer does not find the target" in str(refused.value)
         assert await _title(env, session_id) == "start"
+
+
+async def test_a_read_click_two_frames_down_in_a_scaled_frame_does_not_press_what_the_page_puts_over_them(
+    tmp_path: Path,
+) -> None:
+    # The same with the link one frame further down. The target's own document finds it, and so does the
+    # document of the frame around that one: it is the page's own, the third asked, that finds its cover. A
+    # check that stopped at the frame around the target's own said yes, and the cover was pressed.
+    cover = (
+        '<div style="position: fixed; left: 600px; top: 120px; width: 80px; height: 60px" '
+        "onclick=\"document.title = 'PAGE COVER PRESSED'\"></div>"
+    )
+    between = (
+        "<body style='margin: 0'><iframe id='frame' src='/deeper' "
+        "style='position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0'></iframe>"
+    )
+    pages = {"/": SCALED_FRAME + cover, "/inner": between, "/deeper": SCALED_LINK}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/")
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME * 2 + "#link"))
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        assert await _title(env, session_id) == "start"
+    # With nothing over them the link is pressed.
+    async with browser_env(tmp_path, {**pages, "/": SCALED_FRAME}) as env:
+        session_id = await env.create("/")
+        await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME * 2 + "#link"))
+        assert await _title(env, session_id) == "OPENED"
 
 
 async def test_a_read_click_does_not_press_into_a_frame_that_lies_over_its_target_in_a_transformed_frame(
@@ -1699,6 +1729,29 @@ async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed
             await env.manager.execute_decision(session_id, _click("read", selector=selector))
         assert await _title(env, session_id) == "PRESSED"
         assert len(taken) > depth and [handle for handle in taken if handle not in disposed] == []
+
+
+@pytest.mark.parametrize(("depth", "by_playwright"), [(7, 0), (8, 1)])
+async def test_the_controllers_own_press_reaches_a_button_seven_frames_down_and_no_further(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: int, by_playwright: int
+) -> None:
+    # The check asks POINTER_CHECK_FRAMES documents, the target's own first: seven frames down the eighth is the
+    # page's own and answers, and the press is the controller's; eight down the check runs out, and the click is
+    # Playwright's to place.
+    assert actions_module.POINTER_CHECK_FRAMES == 8
+    placed: list[Any] = []
+    real = actions_module.BrowserActionService.click_as_playwright_places_it
+
+    async def counted(self: Any, *given: Any, **named: Any) -> None:
+        placed.append(given)
+        await real(self, *given, **named)
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "click_as_playwright_places_it", counted)
+    async with browser_env(tmp_path, _frames_deep(depth)) as env:
+        session_id = await env.create("/")
+        await env.manager.click(session_id, selector=IN_THE_FRAME * depth + "#deep")
+        assert await _title(env, session_id) == "PRESSED"
+        assert len(placed) == by_playwright
 
 
 @pytest.mark.parametrize("route", ["direct", "read"])
