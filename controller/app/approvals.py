@@ -532,7 +532,8 @@ class ApprovalStore:
         A record stored before 1.18.0 that a start could not rewrite (_key_stored_digests) keeps its plain digest
         in the stores. Handed out as stored, it was listed and answered to the repeated call with that digest, and
         a decision, a claim or a give-back wrote it back plain. Nothing is written here: the next write of the
-        record, or the next start, replaces what the stores hold. The passes that compare or rewrite what is
+        record, or the next start, replaces what the stores hold (in a process that keys alone only the next start
+        that holds the key: _as_the_stores_hold_it). The passes that compare or rewrite what is
         stored read the backends themselves (_catch_sqlite_up, _key_stored_digests, _write). The record is changed
         in place: a backend reads one anew at every call, so no one else holds it.
         """
@@ -987,6 +988,7 @@ class ApprovalStore:
         later than SQLite's was read as a write SQLite missed, and caught up at the next start (a give-back
         reported as failed, revived beside the new approval the agent asked for).
         """
+        approval = await self._as_the_stores_hold_it(approval)
         if self.sqlite_store is None or self._primary is not self.sqlite_store:
             await self.file_store.upsert(approval)
             return
@@ -1000,6 +1002,28 @@ class ApprovalStore:
         except Exception:
             await self._put_the_file_back(approval.id, before)
             raise
+
+    async def _as_the_stores_hold_it(self, approval: ApprovalRecord) -> ApprovalRecord:
+        """``approval`` to be written: in a process that keys alone, a copy with the plain stand-in its store holds.
+
+        Such a process rewrites no record stored before 1.18.0 (_key_stored_digests), but hands each out keyed under
+        its own key (_handed_out), and a decision, a claim or a give-back wrote it back so. No later start holds that
+        key: an operator's rejection made there, or made again, no longer stopped the agent's own approval of the
+        call after the next good start, whose retention removed it. Kept plain, it is keyed under the file's key by
+        that start, as a record nothing wrote; in this process it matches as before, both sides keyed in memory. Only
+        a stand-in the store holds plain, and only while the write keeps that call: one asked for in this process is
+        kept under its key.
+        """
+        if not self._keyed_by_this_process_alone:
+            return approval
+        try:
+            stored = await self._primary.get(approval.id)
+        except KeyError:
+            return approval
+        keyed = self._keyed(stored.action)
+        if keyed is stored.action or keyed != approval.action:
+            return approval
+        return approval.model_copy(update={"action": stored.action})
 
     async def _put_the_file_back(self, approval_id: str, before: ApprovalRecord | None) -> None:
         try:

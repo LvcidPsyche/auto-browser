@@ -698,14 +698,17 @@ last of them logs the warning once more. With `APPROVAL_RETENTION_DAYS=0` nothin
 warning repeats until the key file is restored. A key file restored after the retention has removed a
 rejection does not bring it back: reject the call again when it is asked for. When the file cannot be
 used at a start (it holds no key, cannot be read, or cannot be written
-where there is none), the start logs it and keys with a key of its own: its tool call approvals work
-until that process ends, and are refused the same way after a restart. To that process every tool call
+where there is none), the start logs it and keys with a key of its own: the tool call approvals asked for
+in that process work until it ends, and are refused the same way after a restart. To that process every tool call
 approval stored under a key before reads as kept under another key, the file's own among them, so its
 retention removes no operator's rejection on that ground: one in controller scope or in an open session
 stays whatever its age, and the next start that can use the file matches it again. A record that still
-holds the plain SHA-256 is not rewritten by such a start, which logs how many it left: under that
-process's key it would match no call at any later start. It matches its call in that process as before,
-and the next start that can use the file rewrites it under the file's key. A file that holds no key
+holds the plain SHA-256 is not rewritten by such a start, which logs how many it left, nor by a decision,
+a claim or a give-back of it in that process: under that process's key it would match no call at any
+later start. It matches its call in that process as before, and the next start that can use the file
+rewrites it under the file's key with what was decided of it there: an operator's rejection made there
+still stops the agent's own approval of the call, and an approval made there can still be run until it
+expires. A file that holds no key
 is left as it is, and has to be removed before a start writes a new one. A start that dies between creating the
 file and writing the key leaves one, empty or cut short of its 64 hex characters: no approval was ever
 kept under it, so it is safe to remove. One that held a key and was changed since (edited, or saved in
