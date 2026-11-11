@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hmac
 import logging
 import math
@@ -51,6 +52,7 @@ from ._utils import (
     persona_file_errors,
     require_safe_segment,
     typed_route_errors,
+    unknown_id_is_404,
 )
 
 logger = logging.getLogger(__name__)
@@ -417,18 +419,28 @@ def create_sessions_router(*, manager: Any, refusal_windows: TakeoverRefusalWind
         with typed_route_errors(logger, "scroll failed for session %s", session_id):
             return await manager.scroll(session_id, payload.delta_x, payload.delta_y)
 
+    # The two actions that take an approval's id answer one no record answers to (and another operator's, which
+    # the store answers so) with their own 404, as the approval routes do: through the app's handler for a KeyError
+    # nothing maps, each wrote a WARNING. An action that takes none has no such id to answer for.
+    def approval_id_errors(approval_id: str | None) -> contextlib.AbstractContextManager[None]:
+        return unknown_id_is_404(approval_id) if approval_id else contextlib.nullcontext()
+
     @router.post("/sessions/{session_id}/actions/execute")
     async def execute_action(session_id: str, payload: ExecuteActionRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "execute action failed for session %s", session_id):
-            return await manager.execute_decision(
-                session_id,
-                payload.action,
-                approval_id=payload.approval_id,
-            )
+            with approval_id_errors(payload.approval_id):
+                return await manager.execute_decision(
+                    session_id,
+                    payload.action,
+                    approval_id=payload.approval_id,
+                )
 
     @router.post("/sessions/{session_id}/actions/upload")
     async def upload(session_id: str, payload: UploadRequest) -> dict[str, Any]:
-        with typed_route_errors(logger, "upload failed for session %s", session_id):
+        with (
+            typed_route_errors(logger, "upload failed for session %s", session_id),
+            approval_id_errors(payload.approval_id),
+        ):
             return await manager.upload(
                 session_id,
                 selector=payload.selector,
