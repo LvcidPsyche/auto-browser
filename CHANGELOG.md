@@ -111,7 +111,8 @@ All notable changes to auto-browser are documented here.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one for its first
   refusal in a minute, and the rest of that minute's are only counted until an event reports them in its
   `details.count`: the refusals it reports beside its own. An alert that counts these events must add that field:
-  events and counts add up to the refusals. How many events a minute sees is not fixed: a read with the right
+  events and counts add up to the refusals, or to more where a shutdown cut a write short: what that event reports
+  can be reported twice, never lost. How many events a minute sees is not fixed: a read with the right
   token writes what is held and the minute goes on, so refusals between such reads write an event after each. An
   event that reports others can come late (with the source's next call, at a maintenance sweep or at a clean
   shutdown: see Fixed), so an alert on a rate should read `details.count` when it arrives, and a controller that is
@@ -649,7 +650,10 @@ All notable changes to auto-browser are documented here.
   the others as its `details.count`, written when the source next reads the link with the right token (before that
   read's own event), at the first maintenance sweep after the 60 seconds (`CLEANUP_INTERVAL_SECONDS`, an hour by
   default; with `0` no sweep runs) and at a clean shutdown. Either way each refusal is one event or one of an
-  event's count, so the two add up to the refusals. An event written late names the operator who was refused, and
+  event's count, so the two add up to the refusals. They can add up to more: a write that a shutdown cuts short,
+  or that the audit store reports as failed, can have landed all the same, and what it reported (its own refusal
+  and its whole count) is then written again by the next event, so a refusal can be reported twice and is never
+  lost. An event written late names the operator who was refused, and
   its time is when it was written. `details.counted_other_sessions` is `true` when some of the refusals an event
   counts named another session than the event does. An event that cannot be written opens no window: the next
   refusal, read, sweep or shutdown writes one, carrying what it lost. A refusal still answers `403` (`500`, as

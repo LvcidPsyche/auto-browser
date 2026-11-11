@@ -203,8 +203,9 @@ async def _write_refusal_event(
                 details=details,
             )
     except BaseException:
-        # Cancelled too: the window opens only once its event is written. A store that wrote it and then
-        # failed (or a cancelled append that lands behind this) counts one refusal twice, not one lost.
+        # Cancelled too: the window opens only once its event is written. A store that wrote it and then failed, or a
+        # cancelled append that lands behind this (the store writes in a worker thread), has the event's refusals
+        # reported twice, its own and every one of its count, where the other way would lose them.
         windows.event_not_written(source, call, held)
         raise
 
