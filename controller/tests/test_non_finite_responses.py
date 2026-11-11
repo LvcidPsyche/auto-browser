@@ -7,6 +7,7 @@ after the handler has run. A page hands such numbers over (a rect of a zero-size
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import unittest
@@ -14,11 +15,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 import app.main as main_module
+from app import events
 from app.action_errors import BrowserActionError
 from app.safe_json_response import SafeJSONResponse
 
@@ -39,6 +42,25 @@ async def a_model() -> Measured:
 
 async def a_dict_holding_a_model() -> dict[str, Any]:
     return {"measured": Measured(ratio=-INFINITY), "others": [Measured(ratio=0.5)]}
+
+
+async def a_refusal_that_quotes_a_measurement() -> dict[str, Any]:
+    raise HTTPException(status_code=409, detail={"ratio": NAN, "limits": [INFINITY, -INFINITY, 1.5], "page": "p"})
+
+
+async def a_refusal_that_quotes_a_measurement_and_a_title() -> dict[str, Any]:
+    raise HTTPException(
+        status_code=401, detail={"ratio": NAN, "title": f"a{LONE}b"}, headers={"WWW-Authenticate": "Bearer"}
+    )
+
+
+def _strict(payload: str) -> Any:
+    """``payload`` read as a strict JSON parser reads it: NaN and the infinities are no JSON."""
+
+    def refuse(token: str) -> None:
+        raise ValueError(f"{token} is not JSON")
+
+    return json.loads(payload, parse_constant=refuse)
 
 
 class SafeJSONResponseNonFiniteTests(unittest.TestCase):
@@ -154,6 +176,76 @@ class RestRouteNonFiniteTests(unittest.TestCase):
         self.assertEqual(
             (response.json()["code"], response.json()["x"], response.json()["y"]), ("element_moved", None, 2.0)
         )
+
+    def test_a_refusal_whose_detail_holds_one_keeps_its_status(self) -> None:
+        # An HTTPException's detail went out by FastAPI's own handler, whose JSONResponse raised on it: a 500.
+        self.mount("/test-only/refused", a_refusal_that_quotes_a_measurement)
+
+        response = self.client.get("/test-only/refused")
+
+        self.assertEqual(response.status_code, 409, response.text[:200])
+        self.assertEqual(_strict(response.text), {"detail": {"ratio": None, "limits": [None, None, 1.5], "page": "p"}})
+
+    def test_a_refusal_whose_detail_holds_one_and_a_lone_surrogate_keeps_its_status_and_its_headers(self) -> None:
+        self.mount("/test-only/refused-both", a_refusal_that_quotes_a_measurement_and_a_title)
+
+        response = self.client.get("/test-only/refused-both")
+
+        self.assertEqual(response.status_code, 401, response.text[:200])
+        self.assertEqual(_strict(response.text), {"detail": {"ratio": None, "title": f"a{REPLACEMENT}b"}})
+        self.assertEqual(response.headers["www-authenticate"], "Bearer")
+
+    def test_a_refusal_with_an_ordinary_detail_is_exactly_fastapis_own_answer(self) -> None:
+        async def refused() -> dict[str, Any]:
+            raise HTTPException(status_code=409, detail={"ratio": 0.25, "page": "p"})
+
+        self.mount("/test-only/refused-plainly", refused)
+
+        response = self.client.get("/test-only/refused-plainly")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.content, JSONResponse({"detail": {"ratio": 0.25, "page": "p"}}).body)
+
+
+class EventStreamNonFiniteTests(unittest.IsolatedAsyncioTestCase):
+    """The session event stream writes its own JSON: an action's details carry what was read from the page."""
+
+    def subscribed(self) -> tuple[asyncio.Queue, asyncio.Queue]:
+        queue = events.subscribe("s1")
+        self.addCleanup(events.unsubscribe, "s1", queue)
+        everything = events.subscribe_all()
+        self.addCleanup(events.unsubscribe_all, everything)
+        return queue, everything
+
+    async def test_an_actions_details_holding_one_are_sent_as_null(self) -> None:
+        # The bare NaN and Infinity tokens went out, which a strict parser (a browser's JSON.parse) refuses.
+        queue, everything = self.subscribed()
+
+        events.emit_action("s1", "click", "ok", {"ratio": NAN, "box": [INFINITY, -INFINITY, 1.5], "depth": {"z": NAN}})
+
+        for payload in (queue.get_nowait(), everything.get_nowait()):
+            self.assertEqual(
+                _strict(payload)["details"], {"ratio": None, "box": [None, None, 1.5], "depth": {"z": None}}
+            )
+
+    async def test_details_holding_one_and_a_lone_surrogate_lose_neither(self) -> None:
+        queue, _everything = self.subscribed()
+
+        events.emit_action("s1", "click", "ok", {"ratio": NAN, "title": f"a{LONE}b"})
+
+        payload = queue.get_nowait()
+        payload.encode("utf-8")
+        self.assertEqual(_strict(payload)["details"], {"ratio": None, "title": f"a{REPLACEMENT}b"})
+
+    async def test_an_ordinary_event_is_written_as_it_was(self) -> None:
+        queue, _everything = self.subscribed()
+        details = {"ratio": 0.25, "big": 1e308, "box": [1.0, {"x": 2.5}], "none": None, "ok": True}
+
+        events.emit_action("s1", "click", "ok", details)
+
+        payload = queue.get_nowait()
+        self.assertEqual(payload, json.dumps(json.loads(payload)))
+        self.assertEqual(json.loads(payload)["details"], details)
 
 
 if __name__ == "__main__":

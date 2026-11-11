@@ -409,7 +409,10 @@ All notable changes to auto-browser are documented here.
 - **A REST answer holding a NaN or an infinity now carries `null` in its place.** Neither is JSON, and the answer
   raised after its handler had run: a route with no declared return type (`GET /sessions/{id}/network/requests` is
   one) and a `BrowserActionError` whose details held one answered `500`. A tool result already sent `null` for one,
-  and a REST answer now goes through the same walk.
+  and a REST answer now goes through the same walk. So does an `HTTPException` whose detail holds one, which
+  answered `500` in place of its own status. The writer of `GET /sessions/{id}/events` wrote the bare `NaN` or
+  `Infinity`, which a strict parser (a browser's `JSON.parse`) refuses with the whole event, and writes `null` too:
+  no event the controller sends today carries a number read from a page, so this one is a guard.
 - **A NaN or an infinity in a request body is refused naming its field.** The controller's JSON reader takes the bare
   words `NaN`, `Infinity` and `-Infinity`, and a number too large for a float (`1e999`), as numbers. The `422` that
   refuses a body quotes each value it refused, and with such a number in one the answer itself failed: a `500`, for

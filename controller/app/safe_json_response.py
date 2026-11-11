@@ -41,12 +41,18 @@ class SafeJSONResponse(JSONResponse):
 
 
 async def safe_http_exception_handler(request: Request, exc: HTTPException) -> Response:
-    """FastAPI's own answer, unless the detail holds a lone surrogate: a route's ``str(exc)`` can quote a page."""
+    """FastAPI's own answer, unless the detail holds a lone surrogate or a non-finite number: a route's
+    ``str(exc)`` can quote a page, and a detail can carry what was measured on one."""
     try:
         return await http_exception_handler(request, exc)
     except UnicodeEncodeError:
         clean = HTTPException(exc.status_code, without_lone_surrogates(exc.detail), exc.headers)
         return await http_exception_handler(request, clean)
+    except ValueError:
+        # json.dumps refused a NaN or an infinity, after the route had refused: the refusal became a 500. Only an
+        # answer with a body is rendered at all, so this is FastAPI's body, written as any answer holding one is
+        # (null in its place, and U+FFFD for a lone surrogate beside it).
+        return SafeJSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
 
 
 async def safe_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:

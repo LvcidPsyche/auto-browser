@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from .approval_display import shown_code_points
-from .utils import UTC, without_lone_surrogates
+from .utils import UTC, json_safe, without_lone_surrogates
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,14 @@ def is_session_closed_event(payload: str, session_id: str) -> bool:
 def _dispatch(session_id: str, event: dict[str, Any]) -> None:
     # A page's title can hold a lone surrogate: sent as U+FFFD, as the responses send it, not as its escape, which a
     # strict JSON parser refuses.
-    payload = json.dumps(without_lone_surrogates(event))
+    clean = without_lone_surrogates(event)
+    try:
+        payload = json.dumps(clean, allow_nan=False)
+    except ValueError:
+        # A NaN or an infinity among an action's details, which carry what was read from the page: null, as the
+        # responses send it. The bare token went out, and a strict parser then refused the whole event. Only an
+        # event that holds one is walked.
+        payload = json.dumps(json_safe(clean), allow_nan=False)
     # Push to session-scoped subscribers
     for q in list(_SESSION_QUEUES.get(session_id, [])):
         try:
