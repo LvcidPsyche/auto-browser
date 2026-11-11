@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from logging import Logger
 
 from fastapi import HTTPException, Request
+from pydantic import ValidationError
 
 from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserActionError, BrowserUnreachableError
 from ..approvals import CONTROLLER_SCOPE
@@ -20,6 +21,7 @@ from ..proxy_personas import (
     ProxyPersonaDuplicateError,
     ProxyPersonaFileError,
 )
+from ..utils import MAX_LOGGED_PATH_CHARS, capped_for_log
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -82,6 +84,9 @@ OFF_LIST_PAGE_DETAIL = (
 OFF_LIST_TAB_DETAIL = REFUSED_TAB_MESSAGE
 OFF_LIST_OTHER_TAB_DETAIL = REFUSED_BY_ANOTHER_TAB_MESSAGE
 UNJUDGED_TAB_DETAIL = UNJUDGED_TAB_MESSAGE
+# What a route that reads the page, or activates a tab, passes typed_route_errors as its ``refusal``.
+REFUSED_PAGE = (403, OFF_LIST_PAGE_DETAIL)
+REFUSED_TAB = (403, OFF_LIST_TAB_DETAIL)
 
 
 @contextmanager
@@ -120,24 +125,63 @@ def queue_full(logger: Logger, refused: str, subject: str) -> HTTPException:
     return HTTPException(status_code=503, detail="Service unavailable")
 
 
-def _log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str, args: tuple[object, ...]) -> None:
-    """Log what a fixed 4xx text hides: the route's message, the error, and where it was raised.
+# Of a hidden cause's traceback, the frames nearest the raise: they say where, and the route's message says which call.
+HIDDEN_CAUSE_FRAMES = 3
+
+
+def _on_one_line(value: object) -> str:
+    """``value`` as a log line carries it: quoted, a line break in it escaped, and cut (capped_for_log).
+
+    A str is quoted as it is. Anything else prints itself as it likes, and a str subclass answers repr() as it
+    likes, so what repr() gave is quoted in turn, by str's own repr.
+    """
+    try:
+        text = value if type(value) is str else repr(value)
+        return str.__repr__(capped_for_log(text))
+    except Exception:
+        return f"<a {type(value).__name__} that could not be printed>"
+
+
+def _cause_text(cause: Exception) -> str:
+    """The error's own text for the log: on one line, cut, and never the values a model was given."""
+    try:
+        if isinstance(cause, ValidationError):
+            # pydantic prints the value of each field it refused, and a body holds a webhook key or a password:
+            # which field and what kind of refusal, no more.
+            refused = cause.errors(include_url=False, include_context=False, include_input=False)
+            fields = "; ".join(f"{'.'.join(str(part) for part in error['loc'])}: {error['type']}" for error in refused)
+            text = f"{cause.error_count()} refused by {cause.title}: {fields}"
+        else:
+            text = str(cause)
+        cut = "" if len(text) <= MAX_LOGGED_PATH_CHARS else f" (cut from {len(text)} characters)"
+        return _on_one_line(text) + cut
+    except Exception as failed:
+        return f"<its text could not be made: {type(failed).__name__}>"
+
+
+def log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str, *args: object) -> None:
+    """Log what a fixed answer hides: the route's message, the error, and where it was raised.
 
     A server-side fault raises the same three errors as a caller's mistake (a state file that no longer decodes is
     a ValueError, one the process may not read a PermissionError), and the fixed text told the operator nothing of
     it. A warning and not an error, since most of them are the caller's.
 
     The route's arguments and the error's text are the caller's as often as not (an id from the path, which the
-    error then quotes), so each is written as its repr: a line break in one starts no line of its own in the log.
-    That is why the traceback is written here and not by exc_info, which prints the error's text as it is.
+    error then quotes), so each is written quoted and cut (_on_one_line; a number stays a number, for a %d): a
+    line break in one starts no line of its own in the log, and a megabyte of path is not a megabyte of log. That
+    is why the traceback is written here and not by exc_info, which prints the error's text as it is; of its
+    frames only the last HIDDEN_CAUSE_FRAMES are kept.
     """
-    shown = tuple(repr(arg) if isinstance(arg, str) else arg for arg in args)
-    where = "".join(traceback.format_tb(cause.__traceback__)).rstrip()
-    logger.warning(message + ": answered %d for %s: %r\n%s", *shown, status, type(cause).__name__, str(cause), where)
+    shown = tuple(arg if isinstance(arg, (int, float)) else _on_one_line(arg) for arg in args)
+    where = "".join(traceback.format_tb(cause.__traceback__, limit=-HIDDEN_CAUSE_FRAMES)).rstrip()
+    text = _cause_text(cause)
+    logger.warning(message + ": answered %d for %s: %s\n%s", *shown, status, type(cause).__name__, text, where)
 
 
 @contextmanager
-def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[None]:
+def typed_route_errors(
+    logger: Logger, message: str, *args: object, refusal: tuple[int, str] | None = None
+) -> Iterator[None]:
     """Answer a manager call's typed errors as themselves; log and hide the rest.
 
     A route that ends in ``except Exception: raise internal_error(...)`` catches
@@ -151,25 +195,31 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
       app handlers, which keep their status, ``code`` and payload.
     - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404,
       ``BrowserUnreachableError`` -> 503. The texts are fixed: the exceptions' own messages can carry hosts and paths.
-      The first three are logged with *message* before they are answered (_log_hidden_cause).
+      The first three are logged with *message* before they are answered (log_hidden_cause).
     - Anything else is logged with *message* and answers 500 "Internal error".
 
-    A route that maps an error differently on purpose (a 409 for a refused
-    approval, the host-specific 403) catches it inside the ``with``: the
-    HTTPException it raises passes through here untouched.
+    A route that answers the manager's refusals in words of its own (a 409 for a refused approval, the 403 of a
+    refused page) passes them as ``refusal``, a status and a detail: every PermissionError the controller raised
+    is answered so, and logged like the rest. One the operating system raised carries an errno (a file the
+    process may not write) and is never that refusal: it keeps the generic 403, so a full or read-only disk is
+    not answered as a conflict or as a page ALLOWED_HOSTS refuses.
+
+    A route that maps one error's own class differently on purpose (a tab another tab refused, a busy session)
+    catches it inside the ``with``: the HTTPException it raises passes through here untouched, and unlogged.
     """
     try:
         yield
     except (HTTPException, BrowserActionError, KeyError):
         raise
     except PermissionError as cause:
-        _log_hidden_cause(logger, 403, cause, message, args)
-        raise HTTPException(status_code=403, detail="Not permitted") from None
+        status, detail = refusal if refusal is not None and cause.errno is None else (403, "Not permitted")
+        log_hidden_cause(logger, status, cause, message, *args)
+        raise HTTPException(status_code=status, detail=detail) from None
     except ValueError as cause:
-        _log_hidden_cause(logger, 400, cause, message, args)
+        log_hidden_cause(logger, 400, cause, message, *args)
         raise HTTPException(status_code=400, detail="Invalid request") from None
     except FileNotFoundError as cause:
-        _log_hidden_cause(logger, 404, cause, message, args)
+        log_hidden_cause(logger, 404, cause, message, *args)
         raise HTTPException(status_code=404, detail="Not found") from None
     except BrowserUnreachableError:
         raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None

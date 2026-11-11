@@ -15,7 +15,14 @@ from .. import events as _events
 from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError
 from ..playwright_export import export_session_script
-from ._utils import OFF_LIST_PAGE_DETAIL, bounded_limit, is_http_link, require_safe_segment, typed_route_errors
+from ._utils import (
+    OFF_LIST_PAGE_DETAIL,
+    REFUSED_PAGE,
+    bounded_limit,
+    is_http_link,
+    require_safe_segment,
+    typed_route_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +73,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.post("/sessions/{session_id}/screenshot/compare")
     async def screenshot_compare(session_id: str) -> dict[str, Any]:
-        with typed_route_errors(logger, "screenshot diff failed for session %s", session_id):
-            try:
-                return await manager.screenshot_diff(session_id)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
+        with typed_route_errors(logger, "screenshot diff failed for session %s", session_id, refusal=REFUSED_PAGE):
+            return await manager.screenshot_diff(session_id)
 
     @router.get("/sessions/{session_id}/replay", response_class=HTMLResponse)
     async def session_replay(session_id: str) -> HTMLResponse:
@@ -195,11 +199,9 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         method: str | None = None,
         url_contains: str | None = None,
     ) -> dict[str, Any]:
-        with typed_route_errors(logger, "network log failed for session %s", session_id):
+        with typed_route_errors(logger, "network log failed for session %s", session_id, refusal=REFUSED_PAGE):
             try:
                 return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
             except SessionBusyError:
                 raise HTTPException(status_code=409, detail=SESSION_BUSY_DETAIL) from None
 

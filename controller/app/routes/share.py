@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
 from ..session_ownership import as_system
-from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, require_safe_segment
+from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, log_hidden_cause, require_safe_segment
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,8 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         ttl_minutes = payload.ttl_minutes if payload is not None else 60
         try:
             return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
-        except ValueError:
+        except ValueError as cause:
+            log_hidden_cause(logger, 400, cause, "share failed for session %s", session_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
     # The /share/{token}/... routes are exempt from the bearer token
@@ -57,9 +58,14 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
                 observation = await manager.share_snapshot(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
-        except PermissionError:
+        except PermissionError as cause:
+            # One the operating system raised carries an errno (a frame the disk refuses) and is no refused
+            # page: the server's fault, logged.
+            if cause.errno is not None:
+                raise internal_error(logger, "shared observe failed") from None
             # A refused page, or one that moved while the frame was taken: refused as observe
-            # refuses it, not a 500 whose log line names the host.
+            # refuses it, not a 500 whose log line names the host. Not logged as observe's is: the
+            # shared page asks again every few seconds for as long as it is open.
             raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
         except Exception:
             raise internal_error(logger, "shared observe failed") from None

@@ -549,9 +549,28 @@ All notable changes to auto-browser are documented here.
   fault raises the same errors: an audit file whose last line a kill cut short no longer decodes, which is a
   `ValueError`, so `GET /audit/events` (one of the routes the entry above adds to those) would have answered
   `Invalid request` with nothing in the log. Each is now logged at WARNING before it is answered: the route's
-  message, the error's class and text, and the frames it was raised through. A caller's own mistake is logged the
-  same way. The error's text and the route's arguments can be the caller's, so both are written escaped, and the
-  frames are part of the message.
+  message, the error's class and text, and the last three frames it was raised through. So is a route's own fixed
+  answer for one of the three: the `409` `Conflict` of an approval's approve, reject or execute and of
+  `POST /proxy-personas`, the `403` of a page or a tab `ALLOWED_HOSTS` refuses (observe, screenshot, screenshot
+  compare, the network log, tab activation), and the `400` and `403` of the cron routes and of
+  `POST /sessions/{id}/share`. Not logged: a refusal a route answers in that refusal's own words (a tab another tab
+  refused, a busy session), and a refused page at `GET /share/{token}/observe`, which the shared page asks for
+  every five seconds. A caller's own mistake is logged the same way: an ordinary bad request, a refused navigation
+  or a webhook trigger with a wrong key writes one WARNING of at most ten lines, as often as the request rate
+  limit lets it be sent, which is worth knowing before alerting on WARNING. The error's text and the route's
+  arguments can be the caller's, so each is written escaped and cut at 200 characters (the line says when the text
+  was cut); a request model's refusal is written as its fields and the kind of each refusal, never the values
+  (the trigger's body holds the webhook key); and the frames are part of the message.
+- **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
+  reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
+  screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host
+  `ALLOWED_HOSTS` does not allow, for every `PermissionError`: one the operating system raised too (an approval or
+  artifact directory the process may not write), with nothing logged. Such an error now answers the generic `403`
+  `Not permitted` there, as on every other route, and is logged; at `GET /share/{token}/observe` it answers a
+  logged `500`. The controller's own refusals are answered as before. `POST /approvals/{id}/approve` and
+  `.../reject` and `POST /proxy-personas` now answer every other error as the rest of the routes do, where they
+  let it reach the client as a bare `500`: a bad value `400`, a missing file `404`, anything else a logged `500`
+  `Internal error`.
 - **Repeated refused calls to `GET /sessions/{id}/takeover-link` no longer write an audit event each.** The first
   refusal from a source (the verified operator, else the client host) audits as before; later ones in the next 60
   seconds are only counted, until an event reports them. It is the source's first refusal after that, whose

@@ -15,9 +15,20 @@ from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
-from ._utils import bounded_limit, cron_store_errors, persona_file_errors, queue_full, typed_route_errors
+from ._utils import (
+    bounded_limit,
+    cron_store_errors,
+    log_hidden_cause,
+    persona_file_errors,
+    queue_full,
+    typed_route_errors,
+)
 
 logger = logging.getLogger(__name__)
+
+# What a route passes typed_route_errors as its ``refusal`` when the manager's refusal is a state conflict: an
+# approval that is not approved, a proxy persona another operator owns.
+CONFLICT = (409, "Conflict")
 
 
 # The cap's own text names the job owner's live session ids (check_limit runs as the owner), and the trigger checks
@@ -86,32 +97,27 @@ def create_operations_router(
 
     # A decision refused for what the server knows (an approval its action holds, or one whose
     # arguments or text are gone) answers with why: ServerStateRefusal names nothing an agent
-    # wrote. Any other refusal keeps the fixed text.
+    # wrote. Any other refusal keeps the fixed text, and its cause goes to the log (typed_route_errors).
     @router.post("/approvals/{approval_id}/approve")
     async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
-        try:
-            return await manager.approve(approval_id, comment=payload.comment)
-        except ServerStateRefusal as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-        except PermissionError:
-            raise HTTPException(status_code=409, detail="Conflict") from None
+        with typed_route_errors(logger, "approve failed for approval %s", approval_id, refusal=CONFLICT):
+            try:
+                return await manager.approve(approval_id, comment=payload.comment)
+            except ServerStateRefusal as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
 
     @router.post("/approvals/{approval_id}/reject")
     async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
-        try:
-            return await manager.reject(approval_id, comment=payload.comment)
-        except ServerStateRefusal as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-        except PermissionError:
-            raise HTTPException(status_code=409, detail="Conflict") from None
+        with typed_route_errors(logger, "reject failed for approval %s", approval_id, refusal=CONFLICT):
+            try:
+                return await manager.reject(approval_id, comment=payload.comment)
+            except ServerStateRefusal as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
 
     @router.post("/approvals/{approval_id}/execute")
     async def execute_approval(approval_id: str) -> dict[str, Any]:
-        with typed_route_errors(logger, "approval execution failed for approval %s", approval_id):
-            try:
-                return await manager.execute_approval(approval_id)
-            except PermissionError:
-                raise HTTPException(status_code=409, detail="Conflict") from None
+        with typed_route_errors(logger, "approval execution failed for approval %s", approval_id, refusal=CONFLICT):
+            return await manager.execute_approval(approval_id)
 
     @router.get("/pii-scrubber")
     async def get_pii_scrubber() -> dict[str, Any]:
@@ -125,19 +131,21 @@ def create_operations_router(
 
     @router.post("/proxy-personas")
     async def set_proxy_persona(payload: CreateProxyPersonaInput) -> dict[str, Any]:
-        try:
-            with persona_file_errors():
-                return proxy_store.set_persona(
-                    payload.name,
-                    server=payload.server,
-                    username=payload.username,
-                    password=payload.password,
-                    description=payload.description,
-                )
-        except PermissionError:
-            raise HTTPException(status_code=409, detail="Conflict") from None
-        except (ValueError, RuntimeError):
-            raise HTTPException(status_code=400, detail="Invalid request") from None
+        # Another operator's persona is the conflict; a ValueError is typed_route_errors' own 400.
+        message = "set proxy persona failed for persona %s"
+        with typed_route_errors(logger, message, payload.name, refusal=CONFLICT):
+            try:
+                with persona_file_errors():
+                    return proxy_store.set_persona(
+                        payload.name,
+                        server=payload.server,
+                        username=payload.username,
+                        password=payload.password,
+                        description=payload.description,
+                    )
+            except RuntimeError as cause:  # no PROXY_PERSONA_FILE to save to
+                log_hidden_cause(logger, 400, cause, message, payload.name)
+                raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/proxy-personas/{name}")
     async def get_proxy_persona(name: str) -> dict[str, Any]:
@@ -183,8 +191,10 @@ def create_operations_router(
             # a read answers "missing". One the OS raises carries an errno: the store's fault, not the caller's.
             if exc.errno is not None:
                 raise
+            log_hidden_cause(logger, 403, exc, "create cron job refused")
             raise HTTPException(status_code=403, detail="Not permitted") from None
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            log_hidden_cause(logger, 400, exc, "create cron job failed")
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/crons/{job_id}")
@@ -208,7 +218,8 @@ def create_operations_router(
                 return await cron_service.rotate_webhook_key(payload.job_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Not found") from None
-        except ValidationError:
+        except ValidationError as exc:
+            log_hidden_cause(logger, 400, exc, "rotate webhook key failed for cron job %s", job_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.delete("/crons/{job_id}/webhook-key")
@@ -219,7 +230,8 @@ def create_operations_router(
                 return await cron_service.revoke_webhook_key(payload.job_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Not found") from None
-        except ValidationError:
+        except ValidationError as exc:
+            log_hidden_cause(logger, 400, exc, "revoke webhook key failed for cron job %s", job_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.post("/crons/{job_id}/trigger")
@@ -245,6 +257,7 @@ def create_operations_router(
             # the answer for a wrong key, would hide. As the create's, and the FileNotFoundError below.
             if exc.errno is not None:
                 raise
+            log_hidden_cause(logger, 403, exc, "cron trigger refused for job %s", job_id)
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except AgentJobQueueFull:  # and only that: any other RuntimeError is a fault. The run's session is released.
             raise queue_full(logger, "a run of cron job", payload.job_id) from None
@@ -263,7 +276,9 @@ def create_operations_router(
         except AuthStateDecryptError as exc:
             # A fixed text that says what to check; it names no path.
             raise HTTPException(status_code=422, detail=str(exc)) from None
-        except (ValidationError, ValueError):
+        except (ValidationError, ValueError) as exc:
+            # The body's webhook key is never in the line: a model's refusal is logged by field and kind.
+            log_hidden_cause(logger, 400, exc, "cron trigger failed for job %s", job_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
     return router

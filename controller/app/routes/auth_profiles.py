@@ -29,12 +29,7 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
     @router.get("/auth-profiles/{profile_name}")
     async def get_auth_profile(profile_name: str) -> dict[str, Any]:
         with typed_route_errors(logger, "get auth profile failed for profile %s", profile_name):
-            try:
-                return await manager.get_auth_profile(profile_name)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid request") from None
-            except PermissionError:
-                raise HTTPException(status_code=403, detail="Not permitted") from None
+            return await manager.get_auth_profile(profile_name)
 
     @router.post("/sessions/{session_id}/storage-state")
     async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) -> dict[str, Any]:
@@ -44,12 +39,7 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
     @router.post("/sessions/{session_id}/auth-profiles")
     async def save_auth_profile(session_id: str, payload: SaveAuthProfileRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "save auth profile failed for session %s", session_id):
-            try:
-                return await manager.save_auth_profile(session_id, payload.profile_name)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid request") from None
-            except PermissionError:
-                raise HTTPException(status_code=403, detail="Not permitted") from None
+            return await manager.save_auth_profile(session_id, payload.profile_name)
 
     @router.get(AUTH_PROFILE_EXPORT_ROUTE)
     async def export_auth_profile(profile_name: str):
