@@ -9,6 +9,7 @@ target read as the click will find it (app/browser/click_target.py). Same harnes
 from __future__ import annotations
 
 import asyncio
+import html
 import random
 from pathlib import Path
 from typing import Any
@@ -260,6 +261,16 @@ FRAMED_WIDE = FRAMED.replace(
     "iframe { position: absolute; left: calc(50vw - 150px); top: 0 }",
 )
 FRAMED_NO_BOX = FRAMED.replace(_FRAMED_STYLE, "#wrap { display: contents }")
+# The same button in a document of the page's own that an object or an embed holds, served beside the page.
+_HELD_STYLE = (
+    "<title>start</title><style>body { margin: 0 } #wrap { width: 300px; padding: 20px } "
+    "object, embed { display: block; width: 300px; height: 120px; border: 0 }</style>"
+)
+HELD_BY = {
+    "object": _HELD_STYLE + '<div id="wrap"><object id="frame" type="text/html" data="/held"></object></div>',
+    "embed": _HELD_STYLE + '<div id="wrap"><embed id="frame" type="text/html" src="/held"></div>',
+}
+HELD = html.unescape(_FRAMED_BUTTON)
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -1032,6 +1043,33 @@ async def test_a_click_on_a_frame_or_its_wrapper_presses_nothing_in_the_frame_be
         # And once by the click route, which reads nothing: it pressed twice, the trial click and its own.
         await page.evaluate("document.title = 'start'; window.presses = 0")
         await env.manager.click(session_id, selector=selector)
+        assert await _title(env, session_id) == "DELETED x1"
+
+
+@pytest.mark.parametrize("holder", ["object", "embed"])
+@pytest.mark.parametrize("selector", ["#wrap", "#frame"])
+async def test_a_button_in_a_document_an_object_or_an_embed_holds_is_read_as_one_in_a_frame(
+    tmp_path: Path, holder: str, selector: str
+) -> None:
+    # The read at a point went into iframe and frame elements and no further: a page's own document in an
+    # object or an embed was that element, no button, and its "Delete account" was pressed by a click
+    # labelled read, by a type, and by a click on a point.
+    async with browser_env(tmp_path, {"/": HELD_BY[holder], "/held": HELD}) as env:
+        session_id = await env.create("/")
+        middle = await _centre(env.page(session_id).locator("#frame"))
+        for decision in (
+            _click("read", selector=selector),
+            _type("write", selector=selector),
+            _click("read", **middle),
+        ):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, decision)
+            assert asked.value.approval.kind == "destructive", decision
+            assert await _title(env, session_id) == "start", decision
+
+        # Approved, the button is pressed, once.
+        await env.manager.approve(asked.value.approval.id)
+        await env.manager.execute_decision(session_id, _click("read", **middle), approval_id=asked.value.approval.id)
         assert await _title(env, session_id) == "DELETED x1"
 
 
