@@ -146,8 +146,20 @@ def _locator(done: list[str], *, box: Any = BOX, place: dict[str, Any] = PLACE) 
     budgets: dict[str, Any] = {}
 
     async def hover(**given: Any) -> None:
+        if given.get("trial"):
+            budgets["trial hover"] = given.get("timeout")
+            done.append("trial hover")
+            return
         budgets["hover"] = given.get("timeout")
         done.append(f"hover at {given['position']}")
+
+    async def wait_for_element_state(state: str, **given: Any) -> None:
+        budgets[state] = given.get("timeout")
+        done.append(f"wait for {state}")
+
+    async def element_handle(**given: Any) -> SimpleNamespace:
+        budgets["attached"] = given.get("timeout")
+        return SimpleNamespace(wait_for_element_state=wait_for_element_state, dispose=AsyncMock())
 
     async def click(**given: Any) -> None:
         budgets["trial click" if given.get("trial") else "click"] = given.get("timeout")
@@ -162,7 +174,19 @@ def _locator(done: list[str], *, box: Any = BOX, place: dict[str, Any] = PLACE) 
         budgets["box"] = given.get("timeout")
         return box
 
-    return SimpleNamespace(hover=hover, click=click, evaluate=evaluate, bounding_box=bounding_box, budgets=budgets)
+    return SimpleNamespace(
+        hover=hover,
+        click=click,
+        element_handle=element_handle,
+        evaluate=evaluate,
+        bounding_box=bounding_box,
+        budgets=budgets,
+    )
+
+
+# Playwright's checks of a click with nothing pressed. Never a trial click: that one presses (the mouse goes down
+# and up for real, cancelled in the target's own frame only), which the real-browser tests show over a frame.
+CHECKS = ["wait for enabled", "trial hover"]
 
 
 async def test_the_mouse_does_not_go_down_on_a_button_nobody_was_asked_about() -> None:
@@ -181,14 +205,14 @@ async def test_the_mouse_does_not_go_down_on_a_button_nobody_was_asked_about() -
 
 async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_was_read() -> None:
     # Playwright's click picks its own point and presses in one step. For a read action only the placing is left
-    # to it: its checks, then its hover at a position the controller gave it. The pointer is put on that very
-    # point, and the press is press_mouse's: read there, then down.
+    # to it: its checks (with no click in them), then its hover at a position the controller gave it. The pointer
+    # is put on that very point, and the press is press_mouse's: read there, then down.
     placed = "hover at {'x': 12.0, 'y': 7.0}"
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
         service, session, done = _service(CLOSE)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, _locator(done), timeout_ms=1000)
-        assert done == ["trial click", placed, "mouse down", "mouse up"]
+        assert done == [*CHECKS, placed, "mouse down", "mouse up"]
         session.page.mouse.move.assert_awaited_once_with(*PLACED_AT)
         arg = service.manager.element_ids.evaluate.await_args.args[2]
         assert (arg["x"], arg["y"]) == PLACED_AT
@@ -196,7 +220,7 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
         service, session, done = _service(DELETE)
         with reading_presses("click", "read", None), pytest.raises(PressNeedsApproval):
             await service.click_as_playwright_places_it(session, _locator(done))
-        assert done == ["trial click", placed]
+        assert done == [*CHECKS, placed]
 
         # Not read: Playwright's click alone, as before.
         service, session, done = _service(DELETE)
@@ -210,7 +234,7 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
         with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as refused:
             await service.click_as_playwright_places_it(session, boxless)
         assert refused.value.code == "target_has_no_box"
-        assert done == ["trial click"]
+        assert done == CHECKS
 
 
 async def test_every_step_of_a_placed_click_takes_the_clicks_own_budget() -> None:
@@ -221,7 +245,27 @@ async def test_every_step_of_a_placed_click_takes_the_clicks_own_budget() -> Non
         locator = _locator(done)
         with reading_presses("click", "read", None):
             await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
-    assert locator.budgets == {"trial click": 250, "place": 250, "hover": 250, "box": 250}
+    assert locator.budgets == {
+        "attached": 250,
+        "enabled": 250,
+        "trial hover": 250,
+        "place": 250,
+        "hover": 250,
+        "box": 250,
+    }
+
+
+async def test_the_checks_before_a_human_like_press_are_no_click_either() -> None:
+    # The first step of every selector click: it was a trial click too.
+    service, session, done = _service(CLOSE)
+    locator = _locator(done)
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    service._receives_pointer_at = AsyncMock(return_value=True)
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
+    assert done == [*CHECKS, "mouse down", "mouse up"]
+    assert locator.budgets == {"attached": 250, "enabled": 250, "trial hover": 250}
 
 
 async def test_a_target_with_no_box_once_the_pointer_is_on_it_is_not_pressed() -> None:

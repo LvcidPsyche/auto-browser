@@ -202,6 +202,28 @@ COVERED = """<title>start</title>
 NO_BOX = """<title>start</title>
 <div id="wrap" style="display: contents"><button onclick="document.title='DELETED'">Delete account</button></div>
 """
+# A frame of the page's own origin in a wrapper. Its button fills it and counts its presses in the page's title.
+_FRAMED_BUTTON = (
+    "<body style='margin: 0'><button style='position: absolute; left: 0; top: 0; width: 100%; height: 100%' "
+    "onclick=&quot;top.document.title = 'DELETED x' + (top.presses = (top.presses || 0) + 1)&quot;>"
+    "Delete account</button>"
+)
+_FRAMED_STYLE = "#wrap { width: 300px; padding: 20px }"
+FRAMED = f"""<title>start</title>
+<style>
+  body {{ margin: 0 }}
+  iframe {{ display: block; width: 300px; height: 120px; border: 0 }}
+  {_FRAMED_STYLE}
+</style>
+<div id="wrap"><iframe id="frame" srcdoc="{_FRAMED_BUTTON}"></iframe></div>
+"""
+# The same under a wrapper wider than the viewport, the frame where Playwright places a click on the wrapper.
+FRAMED_WIDE = FRAMED.replace(
+    _FRAMED_STYLE,
+    "#wrap { position: relative; width: 4000px; height: 120px } "
+    "iframe { position: absolute; left: calc(50vw - 150px); top: 0 }",
+)
+FRAMED_NO_BOX = FRAMED.replace(_FRAMED_STYLE, "#wrap { display: contents }")
 # A page whose script can take its main thread for a while: nothing sent to it is answered until it is done.
 BUSY = """<title>start</title>
 <button id="close">Close</button>
@@ -825,6 +847,58 @@ async def test_a_wrapper_with_no_box_of_its_own_is_refused_by_name_and_not_press
         # The click route, which reads nothing, still clicks as Playwright places it.
         await env.manager.click(session_id, selector="#wrap")
         assert await _title(env, session_id) == "DELETED"
+
+
+@pytest.mark.parametrize("selector", ["#wrap", "#frame"])
+async def test_a_click_on_a_frame_or_its_wrapper_presses_nothing_in_the_frame_before_it_is_read(
+    tmp_path: Path, selector: str
+) -> None:
+    # The checks before a press were Playwright's trial click, and a trial click presses: the mouse goes down
+    # and up for real, and a listener in the target's own frame cancels the events. Over a frame the target
+    # holds they went to the frame's document, so its "Delete account" was pressed once, and only then did the
+    # read at the press ask for the approval.
+    async with browser_env(tmp_path, {"/": FRAMED}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        for decision in (_click("read", selector=selector), _type("write", selector=selector)):
+            with pytest.raises(ApprovalRequiredError) as asked:
+                await env.manager.execute_decision(session_id, decision)
+            assert asked.value.approval.kind == "destructive", decision
+            assert await _title(env, session_id) == "start", decision
+
+        # Approved, the button is pressed, once.
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, _click("read", selector=selector))
+        await env.manager.approve(asked.value.approval.id)
+        await env.manager.execute_decision(
+            session_id, _click("read", selector=selector), approval_id=asked.value.approval.id
+        )
+        assert await _title(env, session_id) == "DELETED x1"
+
+        # And once by the click route, which reads nothing: it pressed twice, the trial click and its own.
+        await page.evaluate("document.title = 'start'; window.presses = 0")
+        await env.manager.click(session_id, selector=selector)
+        assert await _title(env, session_id) == "DELETED x1"
+
+
+async def test_a_click_playwright_places_over_a_frame_presses_nothing_before_it_is_read(tmp_path: Path) -> None:
+    # The placed click had a trial click of its own, so on a wrapper wider than the viewport the frame's button
+    # was pressed twice before the approval was asked.
+    async with browser_env(tmp_path, {"/": FRAMED_WIDE}) as env:
+        session_id = await env.create("/")
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.execute_decision(session_id, _click("read", selector="#wrap"))
+        assert asked.value.approval.kind == "destructive"
+        assert await _title(env, session_id) == "start"
+
+    # And a wrapper with no box of its own was refused in the words "Nothing was pressed" with the frame's
+    # button pressed once.
+    async with browser_env(tmp_path, {"/": FRAMED_NO_BOX}) as env:
+        session_id = await env.create("/")
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector="#wrap"))
+        assert refused.value.code == "target_has_no_box"
+        assert await _title(env, session_id) == "start"
 
 
 async def test_a_button_the_page_shows_as_the_pointer_arrives_asks_at_the_press(tmp_path: Path) -> None:

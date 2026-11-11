@@ -398,6 +398,15 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **A click that names a frame, or an element around one, presses once inside the frame.** Before a selector
+  click the controller ran Playwright's checks as a trial click, and a trial click sends the mouse down and up for
+  real: Playwright cancels the events in the target's own frame, so over a frame the target holds they reached
+  the frame's document. A `click` on an `iframe` or on its wrapper pressed the button under the pointer in that
+  frame twice (a "Pay" in an embedded checkout, a "Delete"), and so did the click that puts the caret for a
+  `type`, since 1.9.0. A click listener a site keeps on `window` in the capture phase saw the trial click as one
+  more click too. The checks are now made with no click: a wait for the element to be enabled, then a trial
+  hover, which sends the pointer's move and nothing else. The approval read of a fast-profile click depends on
+  it: nothing is pressed before the target has been read.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)

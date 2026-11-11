@@ -81,7 +81,12 @@ class FakeLocator:
             return {"x": 5.0, "y": 5.0, "border": [0, 0], "boxless": False}
         return True  # focus checks: the field has focus; the pointer check: the target is under it
 
-    async def hover(self, **_: object) -> None:
+    async def element_handle(self, **_: object) -> SimpleNamespace:
+        return SimpleNamespace(wait_for_element_state=AsyncMock(), dispose=AsyncMock())
+
+    async def hover(self, *, trial: bool = False, **_: object) -> None:
+        if trial:
+            return None
         self.box = {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}
 
     async def click(self, *, trial: bool = False, **_: object) -> None:

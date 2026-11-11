@@ -27,9 +27,10 @@ arrives, another match of a selector resolved a second time. With the pointer in
 the isolated world, and a button of a kind the action has no approval for is not pressed (PressNeedsApproval): the
 action asks for that approval. A click Playwright has to place is taken apart for this: Playwright puts the pointer,
 at a point the controller gives it, and the press is the controller's (click_as_playwright_places_it in
-services/actions.py). Retried with the approval, the action takes its kind from the approval it presents, with no
-read of the target before the decision, so a read that fails on the retry cannot run the click unasked and leave
-the approval unspent.
+services/actions.py). Nothing before the read presses: Playwright's checks of a click are made without its trial
+click, which presses for real inside a frame the target holds (_checks_of_a_click). Retried with the approval, the
+action takes its kind from the approval it presents, with no read of the target before the decision, so a read
+that fails on the retry cannot run the click unasked and leave the approval unspent.
 
 Not caught: a label the table lacks (it is English); a frame of another origin; a control pressed by a key or a
 drag, and a select's option; a clickable element that is not a button (_BUTTON_ROLES: a menu item is one, an

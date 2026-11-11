@@ -94,7 +94,7 @@ _step_clock = time.perf_counter
 
 # Whether the element (or a label for it) is what the pointer at (x, y) hits.
 # Runs in the element's own frame; a target inside a child frame was already
-# checked, across frame boundaries, by Playwright's trial click. For selector
+# checked, across frame boundaries, by Playwright's own checks. For selector
 # targets only: an element named by element_id takes a stricter check in the
 # isolated world (element_target.py), where a label for it does not count.
 _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
@@ -1083,7 +1083,7 @@ class BrowserActionService:
         check fails the click goes to Playwright's `click()`, which clicks the
         element if it can and otherwise refuses — it never clicks what covers it.
         """
-        await locator.click(trial=True, timeout=timeout_ms)
+        await self._checks_of_a_click(locator, timeout_ms=timeout_ms)
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
@@ -1092,6 +1092,28 @@ class BrowserActionService:
             await self.press_mouse(session, x, y)
         else:
             await self.click_as_playwright_places_it(session, locator, timeout_ms=timeout_ms)
+
+    @staticmethod
+    async def _checks_of_a_click(locator: Any, *, timeout_ms: float | None = None) -> None:
+        """Playwright's checks of a click on ``locator``, with nothing pressed.
+
+        Visible, enabled, stable, and the element is what the pointer finds at its click point, frames
+        included. These were a trial click, and a trial click presses: Playwright sends the mouse down and up
+        for real and cancels the events with a listener in the target's own frame. Over a frame that the target
+        holds they go to the frame's document, which that listener never sees: a click that named a frame or
+        its wrapper pressed the frame's button once before its own press (a "Pay" pressed twice), and for an
+        action whose target is read, before the read. A click listener a site keeps on window, in the capture
+        phase, saw them as well.
+
+        A trial hover makes the same checks but one, and sends the pointer's move alone. That one, enabled, is
+        waited for first, as a click waits for it. Each step takes the click's budget.
+        """
+        handle = await locator.element_handle(timeout=timeout_ms)
+        try:
+            await handle.wait_for_element_state("enabled", timeout=timeout_ms)
+        finally:
+            await handle.dispose()
+        await locator.hover(trial=True, timeout=timeout_ms)
 
     async def click_as_playwright_places_it(
         self, session: "BrowserSession", locator: Any, *, timeout_ms: float | None = None
@@ -1105,7 +1127,7 @@ class BrowserActionService:
         touched, and the button under Playwright's point was pressed unread.
 
         So for an action whose target is read the step is taken apart, and only the placing is Playwright's. Its
-        checks run (a trial click), its hover puts the pointer at the point its click would have picked, given to
+        checks run (_checks_of_a_click), its hover puts the pointer at the point its click would have picked, given to
         it as a position so that the controller knows where that is, and the press is the controller's own: read
         where it goes down, as every other press is. Whether the target takes the pointer at that point is
         Playwright's check, made by its hover: it knows a label slotted into a component's button as that
@@ -1114,7 +1136,7 @@ class BrowserActionService:
         if not press_is_read():
             await locator.click(timeout=timeout_ms)
             return
-        await locator.click(trial=True, timeout=timeout_ms)
+        await self._checks_of_a_click(locator, timeout_ms=timeout_ms)
         place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=timeout_ms)
         if place["boxless"]:
             raise _target_has_no_box()
