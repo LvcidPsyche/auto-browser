@@ -471,7 +471,10 @@ All notable changes to auto-browser are documented here.
   had the attempt recorded as failed, and a live attempt's trace then held nothing of what it had done. The same call
   under `workflow_profile=governed` answered `utf-8`, before any approval was asked. The harness now writes U+FFFD in
   the surrogate's place before it hashes or writes the contract and the trace, and the digest that binds a governed
-  call to its approval takes a lone surrogate as it is, so the approval is asked and covers that call alone.
+  call to its approval takes a lone surrogate as it is, so the approval is asked and covers that call alone. One in
+  a key is refused, whichever the profile: a key of either value was already (the input types it), and a key of a
+  dict inside one now is too, with `contract.metadata must not hold a lone surrogate (half of a UTF-16 pair) in a
+  key`. The call with such a key ran under `fast`, and under `governed` was still answered `utf-8`.
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
   read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
   and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and

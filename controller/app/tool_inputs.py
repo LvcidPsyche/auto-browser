@@ -35,7 +35,7 @@ from .models import (
 from .regex_guard import catastrophic_repeat
 from .result_shaping import ResultDetail
 from .url_safety import refuse_ambiguous_host, refuse_another_navigation_host
-from .utils import holds_lone_surrogate
+from .utils import holds_lone_surrogate, holds_lone_surrogate_in_a_key
 
 __all__ = [
     "AgentJobIdInput",
@@ -119,14 +119,33 @@ class HarnessStartConvergenceInput(StrictInputModel):
     )
     max_attempts: int | None = Field(default=None, ge=1, le=20)
 
+    @field_validator("contract")
+    @classmethod
+    def validate_metadata_keys(cls, value: TaskContract) -> TaskContract:
+        _refuse_lone_surrogate_key(value.metadata, field_name="contract.metadata")
+        return value
+
     @field_validator("mock_final_observation")
     @classmethod
     def validate_mock_final_url(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        _refuse_lone_surrogate_key(value, field_name="mock_final_observation")
         # Its url is shown with its credentials left out, read as a browser reads it (previews.py), so
         # one a browser reads as another host is refused, as the other URLs a preview redacts are.
         if value is not None and isinstance(value.get("url"), str):
             refuse_ambiguous_host(value["url"], field_name="mock_final_observation.url")
         return value
+
+
+def _refuse_lone_surrogate_key(value: Any, *, field_name: str) -> None:
+    """Refuse a value the input does not type when a key of a dict inside it holds a lone surrogate.
+
+    The model refuses one in a key of the value's own (a dict[str, Any] types its keys), and nothing typed a key
+    below: the call ran under workflow_profile=fast, and under governed it was answered "utf-8", the first
+    argument of the error its arguments raised when they were written out for the approval. A lone surrogate in a
+    string that is no key is still taken: the harness replaces it, and the approval shows it by its escape.
+    """
+    if holds_lone_surrogate_in_a_key(value):
+        raise ValueError(f"{field_name} must not hold a lone surrogate (half of a UTF-16 pair) in a key")
 
 
 class HarnessGetStatusInput(StrictInputModel):

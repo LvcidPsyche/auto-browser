@@ -155,6 +155,23 @@ def holds_lone_surrogate(value: Any) -> bool:
     return False
 
 
+def holds_lone_surrogate_in_a_key(value: Any) -> bool:
+    """Whether a dict key anywhere in ``value`` holds a lone surrogate (its other strings are not looked at).
+
+    Walked with a list and not by recursion: it is run on a caller's value that nothing has bounded the depth of.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if any(isinstance(key, str) and _LONE_SURROGATE.search(key) is not None for key in item):
+                return True
+            pending.extend(item.values())
+        elif isinstance(item, list | tuple):
+            pending.extend(item)
+    return False
+
+
 # Types strict JSON has no form for that a result may still carry, sent as their text.
 _SENT_AS_TEXT = (date, time_of_day, PurePath, uuid.UUID, decimal.Decimal)
 
