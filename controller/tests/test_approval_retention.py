@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import sqlite3
 import tempfile
@@ -17,7 +18,7 @@ from pydantic import ValidationError
 
 from app import browser_manager
 from app.app_factory import build_controller_services
-from app.approval_backends import DIGEST_KEY_FILE
+from app.approval_backends import DIGEST_KEY_FILE, FileApprovalStore
 from app.approvals import CONTROLLER_SCOPE, ApprovalStore
 from app.audit import get_current_operator
 from app.browser_manager import BrowserManager, BrowserSession
@@ -316,6 +317,64 @@ class RetentionTests(RetentionBase):
         )
         with self.assertRaisesRegex(PermissionError, "an operator rejected this action"):
             await self.store.approve(asked_again.id, decided_via="agent")
+
+    async def _a_start_that_cannot_use_the_key_file_keeps_what_its_key_refuses(self, fault: Exception) -> None:
+        standing = await self._rejected_tool_call("a")
+        open_session = await self._rejected_tool_call("b", session_id="open00000001")
+        closed_session = await self._rejected_tool_call("c", session_id="closed000001")
+        for approval_id in (standing, open_session, closed_session):
+            await _age(self.store, approval_id, days=31)
+        with patch.object(FileApprovalStore, "digest_key", side_effect=fault):
+            with self.assertLogs("app.approvals", level="WARNING") as logged:
+                self.store = await self._store()
+            self.assertIn("tool call approvals are keyed by this process alone", "\n".join(logged.output))
+
+            # At the start and at every sweep of that process. One whose session has closed goes, as it always did.
+            self.assertEqual(await self.store.prune_decided(open_sessions={"open00000001"}), 1)
+            self.assertEqual(await self.store.prune_decided(open_sessions={"open00000001"}), 0)
+
+        self.assertEqual(await self._ids(), {standing, open_session})
+        self.assertEqual(self._in_sqlite(), {standing, open_session})
+        self.assertEqual(self._on_disk(), {standing, open_session})
+        # The next start can read the file: the rejection is under the key it holds, and refuses as before.
+        with self.assertNoLogs("app.approvals", level="WARNING"):
+            self.store = await self._store()
+        self.assertEqual(await self.store.prune_decided(open_sessions={"open00000001"}), 0)
+        asked_again = await self.store.create_or_reuse_pending(
+            session_id=CONTROLLER_SCOPE, kind="account_change", reason="r", action=_tool_call("a"), origin="tool_call"
+        )
+        with self.assertRaisesRegex(PermissionError, "an operator rejected this action"):
+            await self.store.approve(asked_again.id, decided_via="agent")
+
+    async def test_a_start_that_may_not_read_the_key_file_keeps_an_operators_rejection_made_under_it(self) -> None:
+        # Such a start keys with a key of its own, so every stored tool call reads as kept under another key. The
+        # file's key is not gone: one transient fault deleted standing rejections the next good start would match.
+        await self._a_start_that_cannot_use_the_key_file_keeps_what_its_key_refuses(
+            PermissionError(errno.EACCES, "Permission denied")
+        )
+
+    async def test_a_start_that_reads_no_key_in_the_file_keeps_an_operators_rejection_made_under_it(self) -> None:
+        # A file caught half restored, or saved in another encoding for a while: the same, by the other error.
+        await self._a_start_that_cannot_use_the_key_file_keeps_what_its_key_refuses(ValueError("holds no key"))
+
+    async def test_a_rejection_made_by_a_start_that_keyed_alone_goes_once_the_files_key_is_held_again(self) -> None:
+        # That start's own key ends with its process, so what it rejected matches no call at any later start.
+        with patch.object(FileApprovalStore, "digest_key", side_effect=PermissionError(errno.EACCES, "denied")):
+            with self.assertLogs("app.approvals", level="WARNING"):
+                self.store = await self._store()
+            made_alone = await self._rejected_tool_call("a")
+            await _age(self.store, made_alone, days=31)
+            # Under the key that process holds: kept, as any operator's rejection that still matches its call.
+            self.assertEqual(await self.store.prune_decided(), 0)
+        with self.assertLogs("app.approvals", level="WARNING") as logged:
+            self.store = await self._store()
+        self.assertIn("1 operator rejection(s) of tool calls are kept under another key", "\n".join(logged.output))
+
+        self.assertEqual(await self.store.prune_decided(), 1)
+
+        self.assertEqual(await self._ids(), set())
+        with self.assertNoLogs("app.approvals", level="WARNING"):
+            await self._store()
 
     async def test_a_record_whose_decision_time_cannot_be_read_is_kept_and_logged_once(self) -> None:
         undated = await self._decided("rejected", days=31, session_id="closed000001")

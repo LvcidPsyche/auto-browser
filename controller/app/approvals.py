@@ -182,6 +182,9 @@ class ApprovalStore:
         # The key a tool call's stand-in digest is kept under (_keyed): the file store's DIGEST_KEY_FILE, the same
         # at every start, read at startup or at first use (_digest_key).
         self._tool_call_key: bytes | None = None
+        # Whether that key is this process's own, the file's being unusable at this start (_digest_key): the file's
+        # key may then be the very one a record reads as kept under another key by.
+        self._keyed_by_this_process_alone = False
         # The text itself stays in memory only, so an approved sensitive action
         # can still be run through execute_approval by this process.
         # Entries are dropped when the approval executes or is rejected, and
@@ -415,8 +418,9 @@ class ApprovalStore:
         execution holds; an approved one that has not expired, which can still run its action; an operator's
         rejection in controller scope or in a session of ``open_sessions`` (those live in this process), where
         it still refuses an agent's approval of the same request (_operator_rejected), unless it is a tool
-        call's kept under a key this process does not hold, which matches no request; and a record whose
-        decision (or, approved, expiry) time cannot be read, named once in the log.
+        call's kept under a key that is gone, which matches no request (_kept_under_a_key_that_is_gone: never
+        in a process that could not use the key file); and a record whose decision (or, approved, expiry) time
+        cannot be read, named once in the log.
 
         Nothing goes while SQLite is configured and the file store stands in for it: SQLite is caught up from
         the file records at its next start, and a record removed meanwhile could not show that SQLite's copy of
@@ -481,7 +485,7 @@ class ApprovalStore:
             and record.decided_via != "agent"
             and (record.session_id == CONTROLLER_SCOPE or record.session_id in open_sessions)
             # Under a key that is gone it matches no call, so it refuses nothing: it goes as an agent's does.
-            and not self._kept_under_another_key(record.action)
+            and not self._kept_under_a_key_that_is_gone(record.action)
         ):
             return False
         try:
@@ -1074,6 +1078,18 @@ class ApprovalStore:
         keyed = _KEYED_STAND_IN.fullmatch(action.text or "")
         return keyed is not None and keyed.group(1) != _key_id(self._digest_key())
 
+    def _kept_under_a_key_that_is_gone(self, action: BrowserActionDecision) -> bool:
+        """Whether ``action`` is kept under another key (_kept_under_another_key) that no later start will hold.
+
+        Known only to a process that holds the key file's key: the other key is then one the file held before, or
+        one a start that could not use the file made for itself. A process keying alone cannot tell it from the
+        file's own key, under which the next start that reads the file matches the record again. The retention
+        asks this (_past_retention): while it asked _kept_under_another_key, one start that could not read the
+        file deleted every operator's rejection of a tool call past its days.
+        """
+        # In this order: the first reads the key, which is where a process learns that it keys alone.
+        return self._kept_under_another_key(action) and not self._keyed_by_this_process_alone
+
     def _digest_key(self) -> bytes:
         """The tool call digest key: the file store's, or this process's own, with a warning, when that is unusable."""
         if self._tool_call_key is None:
@@ -1088,6 +1104,7 @@ class ApprovalStore:
                     exc,
                 )
                 self._tool_call_key = secrets.token_bytes(32)
+                self._keyed_by_this_process_alone = True
         return self._tool_call_key
 
     def _prune_sensitive_texts(self) -> None:

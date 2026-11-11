@@ -685,14 +685,18 @@ warning is one of them): reject the call again when it is asked for, turn `AUTON
 restore the key file. That warning repeats while the rejections are stored. The retention removes each
 one once it is older than `APPROVAL_RETENTION_DAYS`, in controller scope and in an open session too,
 where it keeps an operator's rejection that still matches its call: one kept under a key that is gone
-refuses nothing. A start counts them before its own retention pass, so the start that removes the last
-of them logs the warning once more. With `APPROVAL_RETENTION_DAYS=0` nothing removes them, and the
+refuses nothing. Only a process that holds the file's key does so (a start that could not use the file
+is described below). A start counts them before its own retention pass, so the start that removes the
+last of them logs the warning once more. With `APPROVAL_RETENTION_DAYS=0` nothing removes them, and the
 warning repeats until the key file is restored. A key file restored after the retention has removed a
 rejection does not bring it back: reject the call again when it is asked for. When the file cannot be
 used at a start (it holds no key, cannot be read, or cannot be written
 where there is none), the start logs it and keys with a key of its own: its tool call approvals work
-until that process ends, and are refused the same way after a restart. A file that holds no key is left
-as it is, and has to be removed before a start writes a new one. A start that dies between creating the
+until that process ends, and are refused the same way after a restart. To that process every tool call
+approval stored before reads as kept under another key, the file's own among them, so its retention
+removes no operator's rejection on that ground: one in controller scope or in an open session stays
+whatever its age, and the next start that can use the file matches it again. A file that holds no key
+is left as it is, and has to be removed before a start writes a new one. A start that dies between creating the
 file and writing the key leaves one, empty or cut short of its 64 hex characters: no approval was ever
 kept under it, so it is safe to remove. One that held a key and was changed since (edited, or saved in
 another encoding) is better restored, since approvals are kept under the key it held.
