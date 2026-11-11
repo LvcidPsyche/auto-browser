@@ -1333,11 +1333,13 @@ class BrowserActionService:
             found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None], timeout=timeout_ms)
             if found != "framed":
                 return found is True
+            # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
+            # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
             node = await locator.element_handle(timeout=timeout_ms)
+            handles.append(node)
             # The element itself, before a human-like press, is asked as well that the pointer is over it.
             arrived = not placed
             for _ in range(POINTER_CHECK_FRAMES):
-                handles.append(node)
                 box = await node.bounding_box()
                 if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, box, arrived]) is not True:
                     return False
@@ -1346,6 +1348,7 @@ class BrowserActionService:
                 if frame is None or frame.parent_frame is None:
                     return True
                 node = await frame.frame_element()
+                handles.append(node)
             return placed
         except Exception:
             return False

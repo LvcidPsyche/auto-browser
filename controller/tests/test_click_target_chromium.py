@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from playwright.async_api import Locator
+from playwright.async_api import ElementHandle, Frame, Locator
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
@@ -1594,11 +1594,30 @@ def _frames_deep(depth: int) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("route", ["direct", "read"])
-async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed(tmp_path: Path, route: str) -> None:
+async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
     # The check that the pointer finds a target through its frames goes up POINTER_CHECK_FRAMES of them and then
     # gives the click to Playwright's placing. Asked once more where Playwright's hover had put the pointer, it
     # ran out the same way, and there a no ends the click: a read click on a button eight frames down failed
     # every time, where the click that is not read, Playwright's own, pressed it.
+    # Each walk that ran out also left one element handle behind, the last frame's, taken and never asked.
+    taken: list[Any] = []
+    disposed: list[Any] = []
+
+    def counting(owner: Any, name: str, into: list[Any], of_itself: bool = False) -> None:
+        real = getattr(owner, name)
+
+        async def counted(self: Any, *given: Any, **named: Any) -> Any:
+            got = await real(self, *given, **named)
+            into.append(self if of_itself else got)
+            return got
+
+        monkeypatch.setattr(owner, name, counted)
+
+    counting(Locator, "element_handle", taken)
+    counting(Frame, "frame_element", taken)
+    counting(ElementHandle, "dispose", disposed, of_itself=True)
     depth = actions_module.POINTER_CHECK_FRAMES
     async with browser_env(tmp_path, _frames_deep(depth)) as env:
         session_id = await env.create("/")
@@ -1608,6 +1627,7 @@ async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed
         else:
             await env.manager.execute_decision(session_id, _click("read", selector=selector))
         assert await _title(env, session_id) == "PRESSED"
+        assert len(taken) > depth and [handle for handle in taken if handle not in disposed] == []
 
 
 @pytest.mark.parametrize("route", ["direct", "read"])
