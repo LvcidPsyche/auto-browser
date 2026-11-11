@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ... import events as _events
 from ...action_errors import BrowserActionError, SessionNotFoundError
@@ -149,6 +150,32 @@ _PRESS_PLACE_SCRIPT = """(el) => {
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
 # longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
 # rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
+# How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
+# 20 to 500 ms between its looks.
+ENABLED_POLL_SECONDS = 0.1
+
+
+class _Budget:
+    """What is left of a click's budget, for each of its waits in turn.
+
+    Given the whole budget each, the waits of one click could hold its session for several budgets, on a target
+    that kept every one of them waiting to the end: Playwright's own click has one deadline for all its checks.
+    """
+
+    def __init__(self, timeout_ms: float) -> None:
+        self.timeout_ms = timeout_ms
+        self._ends = time.monotonic() + timeout_ms / 1000
+
+    @property
+    def spent(self) -> bool:
+        return time.monotonic() >= self._ends
+
+    def left_ms(self) -> int:
+        # Never 0, which Playwright reads as no limit at all: a wait begun with nothing left has a millisecond,
+        # and ends as the timeout it is.
+        return max(1, round((self._ends - time.monotonic()) * 1000))
+
+
 HUMAN_TYPING_BUDGET_SECONDS = 20.0
 # The least a keystroke or the final insert is given once the budget is spent, before it counts as hung. The worst
 # case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest
@@ -1094,7 +1121,7 @@ class BrowserActionService:
         controller's press where that put the pointer. Either clicks the element if
         it can and otherwise refuses: neither clicks what covers it.
         """
-        await self._checks_of_a_click(locator, timeout_ms=timeout_ms)
+        await self._checks_of_a_click(locator, self._budget(timeout_ms))
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
@@ -1104,8 +1131,12 @@ class BrowserActionService:
         else:
             await self.click_as_playwright_places_it(session, locator, timeout_ms=timeout_ms)
 
+    def _budget(self, timeout_ms: float | None) -> _Budget:
+        """A click's budget: the caller's, or the one Playwright gives an action of this session (ACTION_TIMEOUT_MS)."""
+        return _Budget(self.manager.settings.action_timeout_ms if timeout_ms is None else timeout_ms)
+
     @staticmethod
-    async def _checks_of_a_click(locator: Any, *, timeout_ms: float | None = None) -> None:
+    async def _checks_of_a_click(locator: Any, budget: _Budget) -> None:
         """Playwright's checks of a click on ``locator``, with nothing pressed.
 
         Visible, enabled, stable, and the element is what the pointer finds at its click point, frames
@@ -1117,14 +1148,18 @@ class BrowserActionService:
         phase, saw them as well.
 
         A trial hover makes the same checks but one, and sends the pointer's move alone. That one, enabled, is
-        waited for first, as a click waits for it. Each step takes the click's budget.
+        waited for first, as a click waits for it: by looking again, and each look finds the element the
+        selector names then. A wait on the one element found first ended at once when a page drew its disabled
+        button again ("Element is not attached to the DOM"), where a click had waited for the new one. The two
+        share the click's budget.
         """
-        handle = await locator.element_handle(timeout=timeout_ms)
-        try:
-            await handle.wait_for_element_state("enabled", timeout=timeout_ms)
-        finally:
-            await handle.dispose()
-        await locator.hover(trial=True, timeout=timeout_ms)
+        while not await locator.is_enabled(timeout=budget.left_ms()):
+            await asyncio.sleep(ENABLED_POLL_SECONDS)
+            if budget.spent:
+                raise PlaywrightTimeoutError(
+                    f"Timeout {budget.timeout_ms:g}ms exceeded: the click's target is there and is not enabled."
+                )
+        await locator.hover(trial=True, timeout=budget.left_ms())
 
     async def click_as_playwright_places_it(
         self, session: "BrowserSession", locator: Any, *, timeout_ms: float | None = None
@@ -1147,7 +1182,7 @@ class BrowserActionService:
         if not press_is_read():
             await locator.click(timeout=timeout_ms)
             return
-        await self._checks_of_a_click(locator, timeout_ms=timeout_ms)
+        await self._checks_of_a_click(locator, self._budget(timeout_ms))
         place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=timeout_ms)
         if place["boxless"]:
             # Shown when the checks passed a moment ago, or they had not: one with no box now, and not for its

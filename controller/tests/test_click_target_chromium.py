@@ -209,6 +209,21 @@ COVERED = """<title>start</title>
 # A card that is a link. An inline element around a block has three boxes, and the first is empty, at the corner
 # of the block, where this card keeps a star of its own. The card is wider than the viewport, so its middle is
 # off the screen and its click is one Playwright places.
+# A form that draws its button again once it is ready: a new element in the disabled one's place.
+RENDERED_AGAIN = """<title>start</title>
+<body style="margin: 0">
+<button id="go" disabled>Go</button>
+<script>
+function renderAgain() {
+  const fresh = document.createElement('button');
+  fresh.id = 'go';
+  fresh.textContent = 'Go';
+  fresh.onclick = () => { document.title = 'DONE'; };
+  document.getElementById('go').replaceWith(fresh);
+}
+</script>
+"""
+
 CARD = """<title>start</title>
 <style>
   body { margin: 0 }
@@ -880,6 +895,40 @@ async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_
         assert await _title(env, session_id) == "OPENED"
 
 
+@pytest.mark.parametrize("route", ["read", "direct"])
+async def test_a_disabled_target_the_page_renders_again_is_waited_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    # Playwright's click looks its target up again when the element it was waiting on is replaced. The wait for
+    # "enabled" that took the trial click's place held one element: a form that drew its disabled button again
+    # ended the click at once ("Element is not attached to the DOM"), where every release had waited for the new
+    # one. The page draws it again here once the checks are waiting, so no step before them meets the change.
+    real = actions_module.BrowserActionService._checks_of_a_click
+    waiting = asyncio.Event()
+
+    async def checks(*given: Any, **named: Any) -> None:
+        waiting.set()
+        await real(*given, **named)
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "_checks_of_a_click", staticmethod(checks))
+    async with browser_env(tmp_path, {"/": RENDERED_AGAIN}) as env:
+        session_id = await env.create("/")
+        if route == "read":
+            click = env.manager.execute_decision(session_id, _click("read", selector="#go"))
+        else:
+            click = env.manager.click(session_id, selector="#go")
+        clicking = asyncio.ensure_future(click)
+        try:
+            await asyncio.wait_for(waiting.wait(), 30)
+            await asyncio.sleep(0.3)
+            assert not clicking.done(), "the click did not wait for its disabled target"
+            await env.page(session_id).evaluate("renderAgain()")
+            await clicking
+        finally:
+            clicking.cancel()
+        assert await _title(env, session_id) == "DONE"
+
+
 async def test_a_target_the_page_hides_once_its_checks_have_passed_is_told_it_moved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -890,10 +939,10 @@ async def test_a_target_the_page_hides_once_its_checks_have_passed_is_told_it_mo
     real = actions_module.BrowserActionService._checks_of_a_click
     calls = 0
 
-    async def checks_then_the_page_hides_it(locator: Any, *, timeout_ms: float | None = None) -> None:
+    async def checks_then_the_page_hides_it(locator: Any, budget: Any) -> None:
         nonlocal calls
         calls += 1
-        await real(locator, timeout_ms=timeout_ms)
+        await real(locator, budget)
         if calls == 2:  # the placed click's own checks; the first are the human-like press's
             await locator.evaluate("(el) => { el.hidden = true }")
 
