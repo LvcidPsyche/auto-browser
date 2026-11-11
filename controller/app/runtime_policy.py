@@ -343,8 +343,9 @@ def _warn_listed_operators_no_credential_proves(settings: Settings, report: Runt
             counted = f"{kept_back} entries that are not printed here, because each holds"
         report.warnings.append(
             f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {counted} a bearer token of this deployment or a part of "
-            f"one ({MIN_TOKEN_RUN_NOT_PRINTED} characters in a row, or all but one of a token no longer than that), "
-            "where it takes operator ids: such an entry refuses nobody"
+            f"one ({MIN_TOKEN_RUN_NOT_PRINTED} characters in a row, all but one of a token of "
+            f"{MIN_SHORT_TOKEN_RUN_NOT_PRINTED + 1} to {MIN_TOKEN_RUN_NOT_PRINTED}, or a shorter token as a word of "
+            "its own), where it takes operator ids: such an entry refuses nobody"
         )
 
 

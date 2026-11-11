@@ -260,12 +260,15 @@ FI = "\N{LATIN SMALL LIGATURE FI}"
 
 def kept_back(entries: int) -> str:
     """How the warning of entries that are not printed begins. It counts entries: the tokens they hold it cannot
-    count, since tokens that begin alike are all held by an entry that holds one. The eight is written out: it is
-    what the CHANGELOG says, whatever MIN_TOKEN_RUN_NOT_PRINTED is changed to."""
+    count, since tokens that begin alike are all held by an entry that holds one. The numbers are written out: they
+    are what the CHANGELOG says, whatever MIN_TOKEN_RUN_NOT_PRINTED or MIN_SHORT_TOKEN_RUN_NOT_PRINTED is changed to."""
     counted = "1 entry that is not printed here, because it holds"
     if entries != 1:
         counted = f"{entries} entries that are not printed here, because each holds"
-    return f"lists {counted} a bearer token of this deployment or a part of one (8 characters in a row, or all but one"
+    return (
+        f"lists {counted} a bearer token of this deployment or a part of one (8 characters in a row, all but one of a "
+        "token of 5 to 8, or a shorter token as a word of its own), where it takes operator ids"
+    )
 
 
 class ListedOperatorTests(unittest.TestCase):
