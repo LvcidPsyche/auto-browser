@@ -10,8 +10,9 @@ client was refused. This keeps the same pattern language (exact names,
 
 from __future__ import annotations
 
+import ipaddress
 import re
-from typing import Sequence
+from typing import Callable, Sequence
 
 from fastapi import FastAPI
 from starlette.datastructures import Headers
@@ -72,6 +73,41 @@ def _normalize_pattern(pattern: str) -> str:
     return normalized
 
 
+def is_wildcard_pattern(pattern: str) -> bool:
+    """Whether a CONTROLLER_ALLOWED_HOSTS entry is a wildcard, read as the Host check reads it.
+
+    On the check's own normalization, so no spelling escapes it: case and brackets change nothing the match reads,
+    and a malformed wildcard is refused at start (_pattern_error), not read as an exact name.
+    """
+    return "*" in _normalize_pattern(pattern)
+
+
+def _pattern_error(pattern: str) -> str | None:
+    """Why the Host check refuses ``pattern`` at start, or None for a pattern it takes."""
+    stripped = pattern.strip()
+    if "[" in stripped or "]" in stripped:
+        # Brackets are how an IPv6 address is written in a Host. Round anything else they were stripped all the same,
+        # and "[*]" admitted every Host as "*" does.
+        if not (stripped.startswith("[") and stripped.endswith("]") and _is_ipv6_address(stripped[1:-1])):
+            return "brackets may only hold an IPv6 address"
+        return None
+    normalized = _normalize_pattern(pattern)
+    if "*" not in normalized or normalized == "*":
+        return None
+    # "*." matched every name written with its trailing dot.
+    if normalized.startswith("*.") and len(normalized) > 2 and "*" not in normalized[1:]:
+        return None
+    return "wildcards must look like '*.example.com'"
+
+
+def _is_ipv6_address(text: str) -> bool:
+    try:
+        ipaddress.IPv6Address(text)
+    except ValueError:
+        return False
+    return True
+
+
 def host_is_allowed(host_header: str, patterns: Sequence[str]) -> bool:
     host = host_from_header(host_header)
     if not host:
@@ -89,31 +125,42 @@ def host_is_allowed(host_header: str, patterns: Sequence[str]) -> bool:
 
 
 class ControllerHostMiddleware:
-    """Reject requests whose Host header is not in ``allowed_hosts``."""
+    """Reject requests whose Host header is not in ``allowed_hosts``.
 
-    def __init__(self, app: ASGIApp, allowed_hosts: Sequence[str]) -> None:
+    A wildcard admits a Host only while the controller requires a credential (``requires_credential``, asked per
+    request, HTTP and WebSocket alike): without one, a page that rebinds a name under the wildcard to 127.0.0.1 is no
+    different from a client, and drives the controller whole. Exact entries admit as they always did.
+    """
+
+    def __init__(self, app: ASGIApp, allowed_hosts: Sequence[str], *, requires_credential: Callable[[], bool]) -> None:
         for pattern in allowed_hosts:
-            normalized = _normalize_pattern(pattern)
-            wildcard_ok = normalized == "*" or (normalized.startswith("*.") and "*" not in normalized[1:])
-            if "*" in normalized and not wildcard_ok:
-                raise ValueError(f"invalid host pattern {pattern!r}; wildcards must look like '*.example.com'")
+            error = _pattern_error(pattern)
+            if error is not None:
+                raise ValueError(f"invalid host pattern {pattern!r}; {error}")
         self.app = app
         self.allowed_hosts = list(allowed_hosts)
+        self.exact_hosts = [pattern for pattern in self.allowed_hosts if not is_wildcard_pattern(pattern)]
+        self.requires_credential = requires_credential
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
         host = Headers(scope=scope).get("host", "")
-        if host_is_allowed(host, self.allowed_hosts):
+        patterns = self.allowed_hosts if self.requires_credential() else self.exact_hosts
+        if host_is_allowed(host, patterns):
             await self.app(scope, receive, send)
             return
         response = PlainTextResponse("Invalid host header", status_code=400)
         await response(scope, receive, send)
 
 
-def install_controller_host_middleware(application: FastAPI, allowed_hosts: Sequence[str]) -> None:
+def install_controller_host_middleware(
+    application: FastAPI, allowed_hosts: Sequence[str], *, requires_credential: Callable[[], bool]
+) -> None:
     # An empty list is not "allow everything" for an unauthenticated API: the
     # loopback-only Host rule in app/middleware/http.py covers that case.
     if allowed_hosts:
-        application.add_middleware(ControllerHostMiddleware, allowed_hosts=list(allowed_hosts))
+        application.add_middleware(
+            ControllerHostMiddleware, allowed_hosts=list(allowed_hosts), requires_credential=requires_credential
+        )

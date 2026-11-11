@@ -479,8 +479,9 @@ def install_controller_http_middleware(
                 "detail": (
                     "Invalid host header: this controller runs without an API credential "
                     "(API_ALLOW_TOKENLESS_LOOPBACK=true), so it only answers to loopback host names. "
-                    "Set CONTROLLER_ALLOWED_HOSTS to the names clients use, or remove "
-                    "API_ALLOW_TOKENLESS_LOOPBACK so the controller demands its token."
+                    "Set CONTROLLER_ALLOWED_HOSTS to the exact host names clients use (without a token, a "
+                    "wildcard there admits no name), or remove API_ALLOW_TOKENLESS_LOOPBACK so the controller "
+                    "demands its token."
                 )
             },
         )
@@ -488,8 +489,11 @@ def install_controller_http_middleware(
     # Installed after every layer above, so it runs before them: a request for a
     # name this controller does not answer to is refused as such, not as a 401 or
     # a missing operator id, and never spends rate-limit budget. Metrics stay
-    # outside it so the refusal is still counted.
-    install_controller_host_middleware(application, configured_hosts)
+    # outside it so the refusal is still counted. It asks the auth gate's own
+    # policy, per request, whether a wildcard may admit a Host.
+    install_controller_host_middleware(
+        application, configured_hosts, requires_credential=lambda: _auth_policy().required
+    )
 
     # Outside the Host check and the auth gate: a peer on a docker_ephemeral session
     # network is refused before anything else answers it (see SessionNetworkPeerMiddleware).

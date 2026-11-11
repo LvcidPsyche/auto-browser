@@ -15,7 +15,7 @@ from . import process_hardening
 from .action_errors import BrowserActionError, SessionNotFoundError
 from .api_token import ensure_api_credential, ensure_takeover_token
 from .app_factory import build_controller_services, create_controller_app
-from .auth_policy import has_named_credentials
+from .auth_policy import has_named_credentials, resolve_auth_policy
 from .compliance import apply_compliance_template, write_compliance_manifest
 from .config import get_settings
 from .middleware import install_controller_http_middleware
@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 
 
 def _install_controller_host_middleware(application: FastAPI, allowed_hosts: list[str]) -> None:
-    install_controller_host_middleware(application, allowed_hosts)
+    install_controller_host_middleware(
+        application, allowed_hosts, requires_credential=lambda: resolve_auth_policy(settings).required
+    )
 
 
 settings = get_settings()

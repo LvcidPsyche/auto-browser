@@ -247,6 +247,14 @@ All notable changes to auto-browser are documented here.
   or a log parser may look for. It now holds, in its message, the route's message, `answered 500 for` the error's
   class and text, and every frame the error was raised through, a line each (see Security): match on `answered 500
   for` instead.
+- **A controller with no token whose `CONTROLLER_ALLOWED_HOSTS` holds a wildcard no longer starts.** With
+  `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, an entry `*`, `*.example.com` or any other wildcard stops startup
+  with a message that names it (see Security). Set a token (`API_BEARER_TOKEN`, or remove
+  `API_ALLOW_TOKENLESS_LOOPBACK` and the controller uses the one in `API_TOKEN_FILE`), or list the exact host names
+  clients use, whose DNS you control. On any controller, an entry in brackets round anything but an IPv6 address
+  (`[localhost]`, `[127.0.0.1]`, `[*]`) or a bare `*.` now stops startup too: write a name without brackets. The
+  compose files' default no longer lists `testserver`: a client that sends `Host: testserver` to a controller
+  started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
 
 ### Security
 
@@ -457,6 +465,20 @@ All notable changes to auto-browser are documented here.
   call: an approve of it, and a call that presents one approved earlier, are refused with a message that says so,
   and the agent asks again. The key lies beside the records, so a reader of `APPROVAL_ROOT` itself can still guess:
   the change protects what the API, the MCP tools and a copy of the database alone show. See the upgrade note.
+- **A controller with no token no longer answers a DNS-rebound page through a wildcard in `CONTROLLER_ALLOWED_HOSTS`.**
+  With `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, `CONTROLLER_ALLOWED_HOSTS=*`, or a suffix such as
+  `*.example.com`, admitted a page whose name its owner points at 127.0.0.1: same-origin to the controller, it read
+  and drove the whole API, `/mcp` included. On a controller that requires no credential a wildcard now admits no
+  `Host`, for an HTTP request or a WebSocket, and such a controller does not start with one in the list (see the
+  upgrade note). Whether a credential is required is read for each request, from the policy the token gate reads:
+  with a token configured, the wildcard admits again. Exact names admit as before, and an empty list keeps its
+  loopback-only rule and its `/healthz` exception. An exact name is only as safe as its DNS: list only names whose DNS
+  you control, or run with a token. Every spelling of a wildcard counts, case and brackets included, and two the Host
+  check took are now refused at startup on any controller: brackets round anything but an IPv6 address (they were
+  stripped whatever they held, so `[*]` was a `*`), and a bare `*.`, which admitted every name written with its
+  trailing dot. The compose files no longer list `testserver`, a single-label name another host on the network can
+  answer for (mDNS, LLMNR, a DHCP search domain), and the `400` for a `Host` that is no loopback name now asks for
+  exact host names.
 
 ### Fixed
 

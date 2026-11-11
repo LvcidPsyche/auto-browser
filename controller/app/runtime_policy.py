@@ -16,6 +16,7 @@ from .auth_policy import (
     tokenless_loopback_allowed,
 )
 from .config import Settings
+from .middleware.hosts import is_wildcard_pattern
 from .providers.base import BaseProviderAdapter, auth_mode_shown
 from .url_safety import refuse_ambiguous_host
 
@@ -186,6 +187,20 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
             _warn_weak_loopback_tokens(credentials, report)
             return
         if tokenless_loopback_allowed(settings):
+            wildcards = [
+                pattern for pattern in settings.controller_allowed_host_patterns if is_wildcard_pattern(pattern)
+            ]
+            if wildcards:
+                # The Host check admits no name by a wildcard on such a controller (middleware/hosts.py); a page that
+                # rebinds a name under one to 127.0.0.1 would otherwise drive it whole, with no token to ask for.
+                report.errors.append(
+                    f"CONTROLLER_ALLOWED_HOSTS lists {', '.join(repr(pattern) for pattern in wildcards)}, and this "
+                    "controller has no API token (API_ALLOW_TOKENLESS_LOOPBACK=true): a wildcard admits a web page "
+                    "that rebinds a name under it to 127.0.0.1. Set API_BEARER_TOKEN (or remove "
+                    "API_ALLOW_TOKENLESS_LOOPBACK so the controller uses its token), or list exact host names, "
+                    "whose DNS you control."
+                )
+                return
             report.warnings.append(
                 "API_BEARER_TOKEN is unset and API_ALLOW_TOKENLESS_LOOPBACK=true, so the controller serves "
                 "every route unauthenticated. API_BIND_SCOPE=loopback keeps it off other machines, but any "

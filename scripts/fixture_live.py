@@ -59,7 +59,7 @@ def _run_live(base_url: str, fixture: str, expect: str) -> int:
     try:
         # A loopback base URL: TestClient's default Host, "testserver", is refused
         # by a tokenless controller's DNS-rebinding guard unless
-        # CONTROLLER_ALLOWED_HOSTS lists it, which only compose sets.
+        # CONTROLLER_ALLOWED_HOSTS lists it, which no shipped default does.
         with TestClient(app, base_url="http://127.0.0.1") as client:
             created = client.post("/sessions", json={"name": "fixture-live"})
             if created.status_code >= 500:

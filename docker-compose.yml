@@ -144,7 +144,7 @@ services:
       TAKEOVER_TOKEN_FILE: /data/takeover-token
       # true restores the old tokenless loopback API (see .env.example).
       API_ALLOW_TOKENLESS_LOOPBACK: ${API_ALLOW_TOKENLESS_LOOPBACK:-false}
-      CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver}
+      CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
       # Handed to every docker_ephemeral browser container, with the seccomp
