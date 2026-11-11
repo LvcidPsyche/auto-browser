@@ -14,6 +14,7 @@ from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
+from .utils import quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class BrowserOrchestrator:
             # A page still navigating from the last step's click (or crashed)
             # made observe raise, which escaped run(): /agent/run returned a
             # 500 and every completed step was lost with it.
-            logger.warning("agent step could not observe session %s: %s", session_id, exc)
+            logger.warning("agent step could not observe session %s: %s", session_id, quoted_for_log(str(exc)))
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,

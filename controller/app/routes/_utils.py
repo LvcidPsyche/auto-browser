@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
+import sys
 import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
-from logging import Logger
+from logging import ERROR, WARNING, Logger
 
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
@@ -21,7 +22,7 @@ from ..proxy_personas import (
     ProxyPersonaDuplicateError,
     ProxyPersonaFileError,
 )
-from ..utils import MAX_LOGGED_PATH_CHARS, capped_for_log
+from ..utils import MAX_LOGGED_PATH_CHARS, capped_for_log, quoted_for_log
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -132,7 +133,13 @@ def unknown_id_is_404(key: str) -> Iterator[None]:
 
 
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:
-    logger.exception(message, *args)
+    """The 500 for the error being handled, logged at ERROR as log_hidden_cause logs a cause, with every frame.
+
+    It was logged by exc_info, with the route's arguments as they came (a path the caller wrote) and a traceback
+    that prints the error's text as it is: the caller's text in either is quoted and cut now, and the error is
+    told by its class, its text and each frame it was raised through.
+    """
+    _log_cause(logger, ERROR, 500, sys.exception(), None, message, *args)
     return HTTPException(status_code=500, detail="Internal error")
 
 
@@ -150,19 +157,6 @@ def queue_full(logger: Logger, refused: str, subject: str) -> HTTPException:
 HIDDEN_CAUSE_FRAMES = 3
 
 
-def _on_one_line(value: object) -> str:
-    """``value`` as a log line carries it: quoted, a line break in it escaped, and cut (capped_for_log).
-
-    A str is quoted as it is. Anything else prints itself as it likes, and a str subclass answers repr() as it
-    likes, so what repr() gave is quoted in turn, by str's own repr.
-    """
-    try:
-        text = value if type(value) is str else repr(value)
-        return str.__repr__(capped_for_log(text))
-    except Exception:
-        return f"<a {type(value).__name__} that could not be printed>"
-
-
 def _cause_text(cause: Exception) -> str:
     """The error's own text for the log: on one line, cut, and never the values a model was given."""
     try:
@@ -175,7 +169,7 @@ def _cause_text(cause: Exception) -> str:
         else:
             text = str(cause)
         cut = "" if len(text) <= MAX_LOGGED_PATH_CHARS else f" (cut from {len(text)} characters)"
-        return _on_one_line(text) + cut
+        return quoted_for_log(text) + cut
     except Exception as failed:
         return f"<its text could not be made: {type(failed).__name__}>"
 
@@ -188,18 +182,25 @@ def log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str
     it. A warning and not an error, since most of them are the caller's.
 
     The route's arguments and the error's text are the caller's as often as not (an id from the path, which the
-    error then quotes), so each is written quoted and cut (_on_one_line; a number stays a number, for a %d): a
+    error then quotes), so each is written quoted and cut (quoted_for_log; a number stays a number, for a %d): a
     line break in one starts no line of its own in the log, and a megabyte of path is not a megabyte of log. That
     is why the traceback is written here and not by exc_info, which prints the error's text as it is; of its
     frames only the last HIDDEN_CAUSE_FRAMES are kept, a line each: the file, the line and the function. A frame
     as the interpreter prints it is two lines on Python 3.12 and, from 3.13, as many as its call is written over,
     so the record would be as long as the Python it ran on made it.
     """
-    shown = tuple(arg if isinstance(arg, (int, float)) else _on_one_line(arg) for arg in args)
-    frames = traceback.extract_tb(cause.__traceback__, limit=-HIDDEN_CAUSE_FRAMES)
+    _log_cause(logger, WARNING, status, cause, HIDDEN_CAUSE_FRAMES, message, *args)
+
+
+def _log_cause(
+    logger: Logger, level: int, status: int, cause: Exception, frames_kept: int | None, message: str, *args: object
+) -> None:
+    """The record of log_hidden_cause and of internal_error: the frames nearest the raise, or every one (None)."""
+    shown = tuple(arg if isinstance(arg, (int, float)) else quoted_for_log(arg) for arg in args)
+    frames = traceback.extract_tb(cause.__traceback__, limit=-frames_kept if frames_kept else None)
     where = "\n".join(f"  {frame.filename}:{frame.lineno} in {frame.name}" for frame in frames)
     text = _cause_text(cause)
-    logger.warning(message + ": answered %d for %s: %s\n%s", *shown, status, type(cause).__name__, text, where)
+    logger.log(level, message + ": answered %d for %s: %s\n%s", *shown, status, type(cause).__name__, text, where)
 
 
 @contextmanager

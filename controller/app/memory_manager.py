@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .session_ownership import may_use, verified_operator
-from .utils import atomic_write_text, run_to_completion, utc_now
+from .utils import atomic_write_text, quoted_for_log, run_to_completion, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ class MemoryManager:
             # Awaited to its end however often the save is cancelled, so the lock goes only once the write has landed:
             # let go at a cancel, a delete that took the lock next was undone by the write (reviews of c4 and c4b).
             await run_to_completion(asyncio.to_thread(atomic_write_text, path, profile.model_dump_json(indent=2)))
-            logger.info("memory profile saved: %s", name)
+            logger.info("memory profile saved: %s", quoted_for_log(name))
             return profile
 
     async def get(self, name: str) -> MemoryProfile | None:

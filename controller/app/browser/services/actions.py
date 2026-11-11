@@ -27,7 +27,7 @@ from ...approvals import (
     refused_before_effect,
 )
 from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
-from ...utils import spawn_background_task
+from ...utils import quoted_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
 from ..click_target import (
@@ -407,7 +407,7 @@ class BrowserActionService:
                     logger.warning(
                         "failed to request human takeover after bot challenge on session %s: %s",
                         session.id,
-                        exc,
+                        quoted_for_log(str(exc)),
                     )
 
         return await self.manager._run_action(session, "navigate", {"url": url}, operation)

@@ -23,7 +23,7 @@ from ...models import resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
-from ...utils import UTC, run_to_completion
+from ...utils import UTC, quoted_for_log, run_to_completion
 from ..request_gate import RequestGateUnavailable
 
 if TYPE_CHECKING:
@@ -248,7 +248,7 @@ class SessionCreation:
             if memory is not None:
                 session.metadata["memory_context"] = memory.to_system_prompt()
                 session.metadata["memory_profile"] = memory_profile
-                logger.info("memory profile loaded: %s", memory_profile)
+                logger.info("memory profile loaded: %s", quoted_for_log(memory_profile))
             await self.manager._persist_session(session, status="active")
             await self.manager.witness_bridge.record_session_receipt(
                 session,

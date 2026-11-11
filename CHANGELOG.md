@@ -242,6 +242,11 @@ All notable changes to auto-browser are documented here.
   running 5 seconds after a stop is now cancelled, where it ran on until it ended or Docker killed the controller.
   At such a stop uvicorn logs `Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR: that line is
   a normal stop (`docs/deployment.md`, "Stopping the controller").
+- **A REST route's `500 Internal error` is logged with no Python traceback under it.** Its ERROR record carried the
+  error by its traceback (`Traceback (most recent call last):` and the frames as Python prints them), which an alert
+  or a log parser may look for. It now holds, in its message, the route's message, `answered 500 for` the error's
+  class and text, and every frame the error was raised through, a line each (see Security): match on `answered 500
+  for` instead.
 
 ### Security
 
@@ -281,17 +286,17 @@ All notable changes to auto-browser are documented here.
   leaves an archive behind, for a name a page can guess. Host names compare case-insensitively, a port equal to the
   `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
   See the upgrade note. (AUTH-24)
-- **A web page can no longer write a line of its own into the controller's log, or fill it.** The refusal above
-  logged the request's path decoded, so a path holding `%0A` ended the line and what followed read as a log line of
-  its own. The path is now logged quoted, a control character as its escape, and so are the path of a request
-  refused from a session's browser network and the path in the `unmapped KeyError` warning. The refusal also wrote
-  one warning a request, ahead of the rate limiter, so a page left open could write them without end: a client
+- **A request's path or `Host` can no longer write a line of its own into the controller's log, or fill it.** The
+  refusal above logged the request's path decoded, so a path holding `%0A` ended the line and what followed read as a
+  log line of its own. The path is now logged quoted, a control character as its escape, and so are the path of a
+  request refused from a session's browser network and the path in the `unmapped KeyError` warning. The refusal also
+  wrote one warning a request, ahead of the rate limiter, so a page left open could write them without end: a client
   host's first refusal is logged, later ones in the next 60 seconds are only counted, and the first after that is
-  logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count. Two
-  more refusals are answered ahead of the rate limiter, and each now has such a window of its own: a request whose
-  `Host` is no loopback name, by client host, and a request from a session's browser network, by its address. A
-  path or a `Host` in any of these lines, and the path and the error's text in the `unmapped KeyError` warning, are
-  cut at 200 characters: one refused request could write a line as long as the server lets a request line be.
+  logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count. Two more
+  refusals are answered ahead of the rate limiter, and each now has such a window of its own: a request whose `Host`
+  is no loopback name, by client host, and a request from a session's browser network, by its address. A path or a
+  `Host` in any of these lines, and the path and the error's text in the `unmapped KeyError` warning, are cut at 200
+  characters: one refused request could write a line as long as the server lets a request line be.
 - **A mesh peer can no longer write a line of its own into the controller's log.** The capability a registered
   peer's signed request asks for, and the session id it names, were logged as sent: a line break in either ended the
   line. Both are logged quoted now, in the `mesh.policy.denied`, `mesh.policy: PERMIT`,
@@ -309,6 +314,20 @@ All notable changes to auto-browser are documented here.
   for session`), the id of a peer's request or of an MCP call; and with `REDIS_URL` set, while Redis failed, so was
   the id of every session a route or a tool looked up, at WARNING (`redis session read failed for`). Both are quoted
   now, and the session store refuses an id that is no plain name before Redis is asked, as without `REDIS_URL`.
+- **More lines that wrote a caller's or a page's text as it came now quote and cut it.** `memory profile saved` and
+  `memory profile loaded` wrote the profile's name, the caller's or that of an agent a page can steer: a line break in
+  it began a line of the log, and an ESC reached the terminal. The network inspector's lines that name a request wrote
+  the page's URL whole (its query scrubbed, as long as the page made it), and so did the line of a refused page that
+  closed while it was moved off. Several lines wrote a Playwright error's text, which can run over several lines and
+  quote the selector or the URL an agent gave: a post-action observation withheld or failed, a failure snapshot, a
+  step that failed after an action's change, a refused page not moved off, an agent step's observe, a bot challenge's
+  takeover, an upload's check. `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long
+  as the reply was. Each is now written quoted, a control character as its escape, and cut at 200 characters, as a
+  route's hidden cause is (see Fixed). A REST route's `500` wrote the route's arguments as they came, a path the
+  caller wrote among them, and the error by a traceback that prints its text as it is: it now writes, at ERROR, the
+  route's message with its arguments quoted and cut, the error's class and its text quoted and cut, and every frame
+  the error was raised through, a line each (see the upgrade note). An error's text in the controller's other lines (a
+  failed download, a CDP command, a drag, the network inspector's own errors) is still written as it is.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:

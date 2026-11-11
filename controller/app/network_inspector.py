@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page, Request, Response
 
     from .pii_scrub import PiiScrubber
-from .utils import UTC, spawn_background_task
+from .utils import UTC, quoted_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +295,7 @@ class NetworkInspector:
             try:
                 request._pii_entry_id = req_id  # type: ignore[attr-defined]
             except Exception as exc:
-                logger.debug("could not tag request object for %s: %s", url, exc)
+                logger.debug("could not tag request object for %s: %s", quoted_for_log(url), exc)
 
             untracked: list[dict[str, Any]] = []
             async with self._lock:
@@ -333,7 +333,7 @@ class NetworkInspector:
                 if raw and len(raw) <= self.body_max_bytes and _byte_length(raw) <= self.body_max_bytes:
                     req_body = raw
             except Exception as exc:
-                logger.debug("could not read request body for %s: %s", url, exc)
+                logger.debug("could not read request body for %s: %s", quoted_for_log(url), quoted_for_log(str(exc)))
 
         # Scrub request body
         if req_body and self.scrubber:
@@ -385,7 +385,11 @@ class NetworkInspector:
                         resp_body = raw_bytes.decode("utf-8", errors="replace")
                 except Exception as exc:
                     # Bodies are unavailable for redirects and torn-down contexts.
-                    logger.debug("could not read response body for %s: %s", entry.get("url", "?"), exc)
+                    logger.debug(
+                        "could not read response body for %s: %s",
+                        quoted_for_log(entry.get("url", "?")),
+                        quoted_for_log(str(exc)),
+                    )
                 if resp_body and self.scrubber:
                     resp_body, body_hit = _scrub_body(self.scrubber, resp_body, content_type, entry.get("url", "?"))
                     pii_hit = pii_hit or body_hit
@@ -575,7 +579,7 @@ def _scrub_body(scrubber: "PiiScrubber", body: str, content_type: str, url: str)
     try:
         scrubbed, hits = scrubber.network_body(body, content_type)
     except Exception as exc:
-        logger.warning("network inspector could not scrub a body for %s: %s", url, type(exc).__name__)
+        logger.warning("network inspector could not scrub a body for %s: %s", quoted_for_log(url), type(exc).__name__)
         return None, True
     # The value is checked before the hits: a scrubber that reports no hits has not vouched for a
     # value that is not text, and the raw body must not stand in for it.

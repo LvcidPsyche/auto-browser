@@ -316,7 +316,9 @@ class AgentHttpTests(unittest.TestCase):
                 response = self.client.post(path, json=body)
 
                 self.assertEqual((response.status_code, response.json()), (500, {"detail": "Internal error"}))
-                self.assertIs(logged.records[0].exc_info[0], RuntimeError)
+                self.assertIn(
+                    "answered 500 for RuntimeError: 'the audit store is closed'", logged.records[0].getMessage()
+                )
 
     def test_discard_agent_job_endpoint_marks_job_discarded(self) -> None:
         discard_job = AsyncMock(return_value={"id": "job-1", "status": "discarded", "resumable": False})

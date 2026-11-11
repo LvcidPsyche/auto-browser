@@ -468,9 +468,11 @@ def test_unexpected_error_is_logged_and_answers_generically(
     assert response.json() == {"detail": detail}
     if status == 500:
         # The log line is the only place the cause survives.
-        logged = [r for r in caplog.records if r.name.startswith("app.routes") and r.exc_info]
+        logged = [r for r in caplog.records if r.name.startswith("app.routes") and r.levelno == logging.ERROR]
         assert logged, "the route answered 500 without logging the exception"
-        assert logged[0].exc_info[0] is RuntimeError
+        # The error by its class and its text, quoted, in the record itself (internal_error): not by exc_info.
+        assert ": answered 500 for RuntimeError: 'boom at /srv/secret/path'" in logged[0].getMessage()
+        assert logged[0].exc_info is None
 
 
 # The three errors a route answers with a fixed text. A server-side fault raises them too (a state file that no longer
@@ -905,8 +907,9 @@ def test_a_shared_observe_the_os_refuses_is_a_logged_server_error_and_no_refused
         response = _shared_observe(client, denied)
 
     assert (response.status_code, response.json()) == (500, {"detail": "Internal error"})
-    logged = [r for r in caplog.records if r.name == "app.routes.share" and r.exc_info]
-    assert logged and logged[0].exc_info[1] is denied
+    logged = [r for r in caplog.records if r.name == "app.routes.share" and r.levelno == logging.ERROR]
+    assert logged and ": answered 500 for PermissionError: " in logged[0].getMessage()
+    assert "[Errno 13] Permission denied" in logged[0].getMessage()
 
 
 def test_a_shared_observe_of_a_refused_page_is_answered_as_before_and_writes_no_line(

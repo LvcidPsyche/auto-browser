@@ -19,7 +19,7 @@ from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
 from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
-from ...utils import UTC, spawn_background_task
+from ...utils import UTC, quoted_for_log, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
 from ..page_read import REFUSED_NETWORK_LOG_DETAIL, locked_read
 from ..window_births import BirthVerdict
@@ -552,7 +552,9 @@ class BrowserDiagnosticsService:
             except PlaywrightError:
                 self.manager.page_provenance.blank_failed(page)
                 if page.is_closed():
-                    logger.debug("page for session %s closed while it was moved off %s", session.id, url)
+                    logger.debug(
+                        "page for session %s closed while it was moved off %s", session.id, quoted_for_log(url)
+                    )
                     return
                 raise
             except BaseException:

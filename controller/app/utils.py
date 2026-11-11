@@ -67,6 +67,19 @@ def capped_for_log(text: str) -> str:
     return text if len(text) <= MAX_LOGGED_PATH_CHARS else text[:MAX_LOGGED_PATH_CHARS] + "..."
 
 
+def quoted_for_log(value: object) -> str:
+    """``value`` as a log line carries it: quoted, a line break in it escaped, and cut (capped_for_log).
+
+    A str is quoted as it is. Anything else prints itself as it likes, and a str subclass answers repr() as it
+    likes, so what repr() gave is quoted in turn, by str's own repr.
+    """
+    try:
+        text = value if type(value) is str else repr(value)
+        return str.__repr__(capped_for_log(text))
+    except Exception:
+        return f"<a {type(value).__name__} that could not be printed>"
+
+
 # A caller refused ahead of the rate limiter, or one that needs no credential to be refused, can be refused without
 # end, and a warning a refusal fills the log: one line a source a window, and the next says how many were only counted.
 REFUSAL_LOG_WINDOW_SECONDS = 60.0
