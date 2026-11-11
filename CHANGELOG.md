@@ -729,7 +729,9 @@ All notable changes to auto-browser are documented here.
   the warning for an id it does not know. Eight routes answer an id they do not know with a `404` in words of their
   own, and those words repeated it whole: `DELETE /proxy-personas/{name}`, `DELETE /crons/{id}`, the four
   `/sessions/{id}/network` routes and the two `/sessions/{id}/cdp` routes, for a session with no inspector or no CDP
-  session. Each says what it said, with the id cut at 200 characters.
+  session. Each says what it said, with the id cut at 200 characters. So do the MCP transport's `404`
+  `Unknown MCP session` (`-32001`), which repeated the `Mcp-Session-Id` header whole, and its `403`
+  `Forbidden Origin header` (`-32000`), the `Origin` header.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host

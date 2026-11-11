@@ -190,7 +190,10 @@ class McpHttpTransport:
             )
         session = self._sessions.get(session_id)
         if session is None or not may_use(session.owner):
-            return self._json_error_response(None, -32001, f"Unknown MCP session: {session_id}", status_code=404)
+            # The header as sent is as long as the server lets a header be: cut, as the routes' 404s cut an id.
+            return self._json_error_response(
+                None, -32001, f"Unknown MCP session: {capped_for_log(session_id)}", status_code=404
+            )
         protocol_error = self._validate_protocol_header(request, session)
         if protocol_error is not None:
             return protocol_error
@@ -709,7 +712,7 @@ class McpHttpTransport:
             return self._json_error_response(
                 request_id,
                 -32001,
-                f"Unknown MCP session: {session_id}",
+                f"Unknown MCP session: {capped_for_log(session_id)}",
                 status_code=404,
             )
         session.last_used_at = utc_now()
@@ -766,7 +769,7 @@ class McpHttpTransport:
             return self._json_error_response(
                 None,
                 -32000,
-                f"Forbidden Origin header: {origin}",
+                f"Forbidden Origin header: {capped_for_log(origin)}",
                 status_code=403,
             )
         return None

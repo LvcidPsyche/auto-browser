@@ -389,6 +389,29 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], -32000)
 
+    def test_an_unknown_session_and_a_forbidden_origin_repeat_no_long_header_whole(self) -> None:
+        # Each answer repeated the caller's header as it was sent, as long as the server lets a header be; the
+        # routes' 404s cut the id they repeat at 200 characters, and so do these now, in the same words.
+        long_id, long_origin = "s" * 8000, "https://" + "o" * 8000 + ".example"
+        tools_list = {"jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}}
+        unknown = {MCP_SESSION_HEADER: long_id, MCP_PROTOCOL_HEADER: "2025-11-25"}
+        for method, response in (
+            ("POST", self.client.post("/mcp", headers=unknown, json=tools_list)),
+            ("DELETE", self.client.delete("/mcp", headers=unknown)),
+        ):
+            with self.subTest(method):
+                self.assertEqual(response.status_code, 404, response.text[:200])
+                error = response.json()["error"]
+                self.assertEqual((error["code"], error["message"]), (-32001, f"Unknown MCP session: {'s' * 200}..."))
+
+        refused = self.client.post("/mcp", headers={"Origin": long_origin}, json={**tools_list, "method": "initialize"})
+
+        self.assertEqual(refused.status_code, 403, refused.text[:200])
+        error = refused.json()["error"]
+        self.assertEqual(
+            (error["code"], error["message"]), (-32000, f"Forbidden Origin header: {long_origin[:200]}...")
+        )
+
     def test_sessions_survive_transport_restart_when_store_path_is_configured(self) -> None:
         session_id, protocol_version = self._initialize()
         init_response = self.client.post(
