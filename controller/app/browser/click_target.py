@@ -326,6 +326,11 @@ SEND_DESTINATION_WORDS: tuple[str, ...] = (
     "telegram",
     "google",
     "microsoft",
+    "registration",
+    "2fa",
+    "mfa",
+    "alternate",
+    "alternative",
 )
 # A longer label is not a button's name but a sentence about one ("How to delete your account").
 MAX_LABEL_CHARS = 40

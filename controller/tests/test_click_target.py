@@ -258,6 +258,9 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code to phone/#work"),
         ("post", "Send code via SMS//everyone"),
         ("post", "Send code to create account for John"),
+        ("post", "Send code to Dana's alternate number"),
+        ("post", "Send code to the 2FA group"),
+        ("post", "Send code to the registration team"),
         # Past 40 characters a label is read line by line, and "Send code" alone is a sign-in button's name:
         # a next line that opens with "to", "via" and the like goes on with where the code is sent.
         ("post", "Send code\nto all users in the organization"),
@@ -383,6 +386,13 @@ class LabelRulesTests(unittest.TestCase):
         "Send code by automated call",
         "Send code to the address above",
         "Send code by push notification",
+        # A second factor by its short names, a sign-up by its long one, and the other address on file.
+        "Send code to complete registration",
+        "Send code to my 2FA app",
+        "Send code to the 2FA number",
+        "Send code to my MFA device",
+        "Send code to an alternate number",
+        "Send code to an alternative email",
         # The same over two lines, and a name over a sentence about it.
         "Send code\nto the phone number ending in 1234 to continue",
         "Send code\nWe will text a code to the number we have on file",
