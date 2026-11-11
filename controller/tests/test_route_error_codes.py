@@ -34,7 +34,7 @@ from app.browser.services.session_creation import SessionLimitError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
-from app.routes._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
+from app.routes._utils import HIDDEN_CAUSE_FRAMES, OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
 from app.routes.operations import CRON_TRIGGER_RUN_REFUSED_DETAIL, create_operations_router
 
 SID = "s-missing"
@@ -1199,7 +1199,11 @@ def test_a_session_id_with_a_line_break_starts_no_line_of_the_log(
     assert first.startswith(begins) and "forged by a caller" in first, first[:200]
     assert [line for line in where if "forged" in line] == [], where
     assert "\r" not in written and "\x1b" not in written
-    assert len(written) < 1000, len(written)
+    # The caller's text is cut, so the first line is bounded; the lines under it are the frames a hidden cause keeps,
+    # each a file's absolute path, as long as the checkout's: their number is bounded, not their length.
+    assert len(first) < 1000 and "A" * 201 not in written, len(first)
+    assert len(where) <= HIDDEN_CAUSE_FRAMES, where
+    assert [line for line in where if not re.fullmatch(r"  .+:\d+ in \S+", line)] == [], where
 
 
 def test_unknown_session_is_not_logged_as_an_unmapped_key_error(
