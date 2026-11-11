@@ -279,7 +279,9 @@ All notable changes to auto-browser are documented here.
   one with the count of those between, and its error text is cut at 200 characters. The `mesh.policy.denied` line
   also quoted a URL a grant's `url_allowlist` refused, as the peer sent it: a URL with userinfo is refused for
   having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
-  quoted, and says when the URL carried userinfo; what the peer is answered is the fixed text it was.
+  quoted, and says when the URL carried userinfo; what the peer is answered is the fixed text it was. One line was
+  left: under `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent (`no readable
+  record for session`), the id of a peer's request or of an MCP call. It is quoted now too.
 - **A refused start no longer quotes a long `*_AUTH_MODE` value.** With `APP_ENV=production`, an `OPENAI_AUTH_MODE`,
   `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the start with an error that quoted the value,
   and `.env.example` has each a few lines under its provider's API key: a key set on the wrong line was written to

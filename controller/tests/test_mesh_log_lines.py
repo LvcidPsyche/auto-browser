@@ -11,14 +11,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from app.action_errors import SessionNotFoundError
+from app.browser.services.sessions import BrowserSessionService
 from app.mesh.delegation import DelegationManager
 from app.mesh.identity import NodeIdentity
 from app.mesh.models import CapabilityGrant, PeerRecord
 from app.mesh.peers import PeerRegistryFile
 from app.mesh.transport import make_envelope
+from app.session_store import FileSessionStore
 from tests import test_mesh_peer_registration as _registration
 from tests.test_mesh_peer_registration import add_legit_peer, reply_status, sign_as
 
@@ -202,3 +206,23 @@ def test_the_two_approval_lines_are_one_line_each(tmp_path: Path, caplog: pytest
     assert response.status == "rejected"
     _the_line(caplog, "app.mesh.delegation", "mesh.delegation.approval_required")
     _the_line(caplog, "app.mesh.delegation", "mesh.delegation.approval_denied")
+
+
+def test_a_session_id_that_names_no_record_is_logged_on_one_line_at_debug(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A tool that looks a session up hands the service the id it was sent: a mesh peer's under a grant for such a
+    # tool, or an MCP caller's. With LOG_LEVEL=DEBUG, which .env.example offers, the lookup that finds no record it
+    # can read logs the id. The file store refuses an id that is no plain name.
+    manager = SimpleNamespace(sessions={}, session_store=FileSessionStore(tmp_path))
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(SessionNotFoundError):
+        asyncio.run(BrowserSessionService(manager).get("s1" + FORGED))
+
+    message = _the_line(caplog, "app.browser.services.sessions", "no readable record for session")
+    # As a handler writes it, with the traceback the call asks for under the message: no line of it is the peer's.
+    (record,) = [record for record in caplog.records if record.getMessage() == message]
+    written = logging.Formatter().format(record).splitlines()
+    assert written[0] == message
+    assert [line for line in written if line.startswith("WARNING:")] == [], ascii(written)

@@ -193,7 +193,8 @@ class BrowserSessionService(SessionCreation):
         try:
             record = await self.manager.session_store.get(session_id)
         except Exception:  # message enrichment only; any store failure means "unknown"
-            logger.debug("no readable record for session %s", session_id, exc_info=True)
+            # %r: the id is the caller's own text (a mesh peer's, an MCP caller's), and a line break in it began a line.
+            logger.debug("no readable record for session %r", session_id, exc_info=True)
             return None, None
         return (record.status, record.close_reason) if may_use(record.owner) else (None, None)
 
