@@ -691,6 +691,12 @@ All notable changes to auto-browser are documented here.
   It is an error as before (`isError`), nothing runs and nothing is recorded, an approval the caller may not use
   and a record that no longer validates read the same as one that does not exist, and the REST routes answer `404`
   as they did.
+- **A network hook whose `url_pattern` is not a string is refused.** `POST /sessions/{id}/network/hooks` stored a
+  number or a boolean as the pattern. Matching then raised for every request of the session that finished or
+  failed (one DEBUG line each), so no hook registered after it was called again, and
+  `DELETE /sessions/{id}/network/hooks/{pattern}`, whose pattern is text, could not remove it. A list or an object
+  answered `500`. Each now answers `422` and nothing is stored; a missing or an empty pattern answers
+  `422` `url_pattern required` as before.
 
 ### Changed
 

@@ -147,6 +147,39 @@ class RoutesExtensionsTests(unittest.TestCase):
                 self.assertTrue(removed.json()["removed"])
                 self.assertNotIn(pattern, client.get("/sessions/session-1/network/hooks").json()["hooks"])
 
+    def test_a_hook_pattern_that_is_no_string_is_refused_and_nothing_is_stored(self) -> None:
+        # A number was stored as the pattern, and fnmatch raised on it for every finished request of the session: no
+        # hook registered after it fired again, and DELETE, whose pattern is text, could not take it out. A list or
+        # an object, which the inspector's dict cannot key, answered 500.
+        client = self.make_client()
+        for pattern in (5, True, 1.5, ["*.json"], {"glob": "*.json"}, None):
+            with self.subTest(pattern=pattern):
+                answer = client.post("/sessions/session-1/network/hooks", json={"url_pattern": pattern})
+
+                self.assertEqual(answer.status_code, 422, answer.text)
+        self.assertEqual(client.get("/sessions/session-1/network/hooks").json()["hooks"], [])
+
+    def test_a_missing_or_an_empty_hook_pattern_is_answered_as_it_was(self) -> None:
+        client = self.make_client()
+        for body in ({}, {"url_pattern": ""}, {"other": "*.json"}):
+            with self.subTest(body=body):
+                answer = client.post("/sessions/session-1/network/hooks", json=body)
+
+                self.assertEqual((answer.status_code, answer.json()), (422, {"detail": "url_pattern required"}))
+        self.assertEqual(client.get("/sessions/session-1/network/hooks").json()["hooks"], [])
+
+    def test_the_real_inspector_keeps_no_pattern_the_route_refused(self) -> None:
+        from app.network_inspector import NetworkInspector
+
+        client = self.make_client()
+        inspector = client.app.state.network_inspectors["session-1"] = NetworkInspector("session-1")
+
+        refused = client.post("/sessions/session-1/network/hooks", json={"url_pattern": ["*.json"]})
+        stored = client.post("/sessions/session-1/network/hooks", json={"url_pattern": "*.json"})
+
+        self.assertEqual((refused.status_code, stored.status_code), (422, 200))
+        self.assertEqual(inspector.list_hooks(), ["*.json"])
+
     def test_mesh_cdp_and_dashboard_routes(self) -> None:
         client = self.make_client()
 

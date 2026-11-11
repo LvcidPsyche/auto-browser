@@ -5,9 +5,9 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from ...browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError, locked_read
 from .._utils import OFF_LIST_PAGE_DETAIL
@@ -15,6 +15,18 @@ from .._utils import OFF_LIST_PAGE_DETAIL
 logger = logging.getLogger(__name__)
 
 network_router = APIRouter(prefix="/sessions/{session_id}/network", tags=["network"])
+
+
+class NetworkHookRequest(BaseModel):
+    """The body of a hook registration. Its pattern is typed, so one that is no string answers 422.
+
+    The body was any object, and a number was stored as the pattern: fnmatch raised on it for every finished
+    request, so no hook registered after it fired again, and the DELETE route, whose pattern is text, could not
+    remove it. A list or an object, which the inspector's dict cannot key, answered 500. The default keeps a
+    missing pattern answered by the route, with the text an empty one gets.
+    """
+
+    url_pattern: str = ""
 
 
 @network_router.get("/requests")
@@ -59,11 +71,11 @@ async def _reading_an_allowed_page(app, session_id: str) -> AsyncIterator[None]:
 
 
 @network_router.post("/hooks")
-async def network_register_hook(session_id: str, body: dict[str, Any], request: Request):
+async def network_register_hook(session_id: str, body: NetworkHookRequest, request: Request):
     inspector = _get_inspector(request.app, session_id)
     if inspector is None:
         raise HTTPException(404, f"No network inspector for session {session_id!r}")
-    pattern = body.get("url_pattern", "")
+    pattern = body.url_pattern
     if not pattern:
         raise HTTPException(422, "url_pattern required")
     # Hooks via API are logged-only (no external callback for security)
