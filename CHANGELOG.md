@@ -680,9 +680,10 @@ All notable changes to auto-browser are documented here.
   a path cut at 200 characters, and the `404` repeated the key: an id of 60,000 characters wrote a record of 63,000
   and came back in a body of 60,000. The warning now holds the method, the path, the error's class and text and the
   last three frames it was raised through, the caller's texts escaped and cut at 200 characters as in the entry
-  above, and the `404` cuts the key at 200 characters, on the approval routes as well. `GET /agent/jobs/{id}`,
-  `GET /auth-profiles/{name}`, `GET /crons/{id}` and `GET /sessions/{id}/auth-state` still write the warning for an
-  id they do not know.
+  above, and the `404` cuts the key at 200 characters, on the approval routes as well. `GET /auth-profiles/{name}`,
+  `GET /crons/{id}` and `GET /sessions/{id}/auth-state` reached that handler the same way for an id they do not
+  know: each answers the `404` it answered and writes nothing now. `GET /agent/jobs/{id}` still writes the warning
+  for an id it does not know.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host

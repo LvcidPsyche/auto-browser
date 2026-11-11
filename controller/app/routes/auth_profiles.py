@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from ..auth_policy import AUTH_PROFILE_EXPORT_ROUTE
 from ..models import ImportAuthProfileRequest, SaveAuthProfileRequest, SaveStorageStateRequest
-from ._utils import require_safe_segment, typed_route_errors
+from ._utils import require_safe_segment, typed_route_errors, unknown_id_is_404
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,8 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
     @router.get("/sessions/{session_id}/auth-state")
     async def get_session_auth_state(session_id: str) -> dict[str, Any]:
         with typed_route_errors(logger, "auth state failed for session %s", session_id):
-            return await manager.get_auth_state_info(session_id)
+            with unknown_id_is_404(session_id):
+                return await manager.get_auth_state_info(session_id)
 
     @router.get("/auth-profiles")
     async def list_auth_profiles() -> list[dict[str, Any]]:
@@ -29,7 +30,9 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
     @router.get("/auth-profiles/{profile_name}")
     async def get_auth_profile(profile_name: str) -> dict[str, Any]:
         with typed_route_errors(logger, "get auth profile failed for profile %s", profile_name):
-            return await manager.get_auth_profile(profile_name)
+            # Stripped, as the service looks the name up and as its KeyError carries it.
+            with unknown_id_is_404(profile_name.strip()):
+                return await manager.get_auth_profile(profile_name)
 
     @router.post("/sessions/{session_id}/storage-state")
     async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) -> dict[str, Any]:

@@ -127,6 +127,11 @@ CRON_STORE_UNREADABLE = (
 )
 
 
+def job_not_found_text(job_id: str) -> str:
+    """What the KeyError carries for a job that is not there, or is another operator's: a route knows it by this."""
+    return f"Cron job not found: {job_id}"
+
+
 class CronStoreUnreadableError(RuntimeError):
     """The cron store could not be used; the text is the fixed CRON_STORE_UNREADABLE (REST answers it as 503)."""
 
@@ -299,7 +304,7 @@ class CronService:
         """Another operator's job answers as if it did not exist."""
         job = jobs.get(job_id)
         if job is None or not may_use(job.get("owner")):
-            raise KeyError(f"Cron job not found: {job_id}")
+            raise KeyError(job_not_found_text(job_id))
         return job
 
     def _require_profile_access(self, auth_profile: str | None, *, owner: str | None) -> None:

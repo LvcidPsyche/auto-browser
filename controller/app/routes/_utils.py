@@ -110,6 +110,27 @@ def cron_store_errors() -> Iterator[None]:
         raise HTTPException(status_code=503, detail=CRON_STORE_UNREADABLE) from None
 
 
+@contextmanager
+def unknown_id_is_404(key: str) -> Iterator[None]:
+    """Answer the KeyError a service raises for an id it does not hold as the 404 it is, with no line in the log.
+
+    ``key`` is what that KeyError carries: the id asked for (an approval's, a session record's, an auth profile's
+    name as the service strips it) or the service's sentence about it (a cron job's). An id no record answers to
+    raises it, and so does another operator's record where the service hides that one, and an approval's record
+    that no longer validates. Nothing mapped it, so it reached the app's handler for a KeyError nothing maps
+    (app/main.py), which answers this 404 and writes a WARNING with where the error was raised: for a caller's typo.
+    Any other KeyError still goes there (a bug's, or a session that has gone, which keeps its own answer). The key
+    holds the caller's id, as long as the server lets a request line be: the answer carries it cut, as that
+    handler's does.
+    """
+    try:
+        yield
+    except KeyError as exc:
+        if exc.args != (key,):
+            raise
+        raise HTTPException(status_code=404, detail=f"Not found: {capped_for_log(key)}") from None
+
+
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:
     logger.exception(message, *args)
     return HTTPException(status_code=500, detail="Internal error")

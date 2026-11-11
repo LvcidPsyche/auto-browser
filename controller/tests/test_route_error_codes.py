@@ -17,7 +17,7 @@ import logging
 import re
 from collections.abc import Iterator
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -929,8 +929,8 @@ APPROVAL_ID_ROUTES = [
 ]
 
 
-def _with_id(route: Route, approval_id: str) -> Route:
-    return Route(route.verb, route.path.format(approval_id), route.body, route.method)
+def _with_id(route: Route, record_id: str) -> Route:
+    return replace(route, path=route.path.format(record_id))
 
 
 @pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
@@ -962,6 +962,75 @@ def test_an_approval_routes_other_key_errors_are_not_an_unknown_approval(
     client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
 ) -> None:
     # Only the KeyError that names the id asked for is the store's "no such approval". Any other still reaches the
+    # app's handler: a bug's is logged there, and a session that has gone keeps its own answer.
+    route = _with_id(route, "a-1")
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: internal_dict_key"})
+    assert ["unmapped KeyError" in r.getMessage() for r in caplog.records if r.name == "app.main"] == [True]
+
+    with _raising(route, SessionNotFoundError("a-1", status="closed")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()["code"]) == (404, "session_closed")
+
+
+# Three more routes whose service raises a plain KeyError for an id it does not hold, and what their 404 says.
+UNKNOWN_ID_ROUTES = [
+    (Route("get", "/auth-profiles/{}", None, "get_auth_profile"), "Not found: {}"),
+    (Route("get", "/crons/{}", None, "get_job", owner="cron_service"), "Not found: Cron job not found: {}"),
+    (Route("get", "/sessions/{}/auth-state", None, "get_auth_state_info"), "Not found: {}"),
+]
+_UNKNOWN_ID_ROUTE_IDS = [route.id for route, _ in UNKNOWN_ID_ROUTES]
+
+
+def _app_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name.startswith("app") and r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(("route", "detail"), UNKNOWN_ID_ROUTES, ids=_UNKNOWN_ID_ROUTE_IDS)
+def test_an_unknown_id_is_an_ordinary_404_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route, detail: str
+) -> None:
+    # No patching: the real service is asked for an id it does not hold. Each raised a plain KeyError that nothing
+    # mapped, so the app's handler answered it and wrote its WARNING, with where it was raised, for a caller's typo.
+    with caplog.at_level(logging.WARNING):
+        response = _call(client, _with_id(route, "nope-1"))
+
+    assert (response.status_code, response.json()) == (404, {"detail": detail.format("nope-1")})
+    assert _app_warnings(caplog) == []
+
+
+def test_an_unknown_auth_profile_named_with_spaces_round_it_is_that_404_too(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The service looks a name up stripped, and its KeyError carries the name so.
+    with caplog.at_level(logging.WARNING):
+        response = client.get("/auth-profiles/%20nope-1%20")
+
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: nope-1"})
+    assert _app_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(("route", "detail"), UNKNOWN_ID_ROUTES[1:], ids=_UNKNOWN_ID_ROUTE_IDS[1:])
+def test_an_unknown_id_of_any_length_is_cut_in_its_404_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route, detail: str
+) -> None:
+    # A profile's name is 120 characters at most, and a longer one is a 400. These two ids are as long as the path:
+    # the session store raises the same KeyError for an id that could name no record.
+    long_id = "x" + "y" * 3000
+    with caplog.at_level(logging.WARNING):
+        response = _call(client, _with_id(route, long_id))
+
+    key = detail.format(long_id).removeprefix("Not found: ")
+    assert (response.status_code, response.json()) == (404, {"detail": f"Not found: {key[:200]}..."})
+    assert _app_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("route", [route for route, _ in UNKNOWN_ID_ROUTES], ids=_UNKNOWN_ID_ROUTE_IDS)
+def test_these_routes_other_key_errors_are_not_an_unknown_id(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # Only the KeyError the service raises for the id asked for is its "no such record". Any other still reaches the
     # app's handler: a bug's is logged there, and a session that has gone keeps its own answer.
     route = _with_id(route, "a-1")
     with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
