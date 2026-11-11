@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import socket
 import stat
 from abc import ABC, abstractmethod
@@ -46,18 +47,23 @@ DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
 # no mistyped mode, and may be the provider's API key set on the wrong line (.env.example has each mode a few
 # lines under its key).
 MAX_AUTH_MODE_QUOTED = 16
+# What a mistyped mode is written in, as the adapters read the value (stripped, in lower case): the modes are
+# letters and an underscore. A digit, a hyphen or a dot makes a value no slip of one, and a key for a local server
+# or an OpenAI-compatible gateway can be shorter than MAX_AUTH_MODE_QUOTED.
+_COULD_BE_A_MISTYPED_MODE = re.compile(rf"[a-z_]{{1,{MAX_AUTH_MODE_QUOTED}}}")
 
 
 def auth_mode_shown(value: str) -> str:
-    """A provider's auth mode as anything shows it: the value, or past MAX_AUTH_MODE_QUOTED its length alone.
+    """A provider's auth mode as anything shows it: the value where it could be a mode or a mistyped one, and its
+    length alone where it could not (longer than MAX_AUTH_MODE_QUOTED, or not letters and underscores alone).
 
     For every place the value leaves the controller: a refused start's error (the log), the provider's readiness
     detail and its auth_mode in GET /agent/providers and browser.list_providers, and the error of a step that
-    names the provider. A mode and a mistyped short one are named, an empty one is empty.
+    names the provider. A mode and a mistyped one are named, an empty one is empty.
     """
-    if len(value) > MAX_AUTH_MODE_QUOTED:
-        return f"<a value of {len(value)} characters, not printed>"
-    return value
+    if not value or _COULD_BE_A_MISTYPED_MODE.fullmatch(value):
+        return value
+    return f"<a value of {len(value)} characters, not printed>"
 
 
 # What a provider CLI child may inherit from the controller: what any program needs to run, and to reach

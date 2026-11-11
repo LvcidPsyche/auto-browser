@@ -6,8 +6,9 @@ APP_ENV=production alone: on the default APP_ENV the start said nothing, and the
 provider's readiness detail and returned as its auth_mode. GET /agent/providers hands both to any holder of a
 bearer token, browser.list_providers hands them to the agent, and a step with that provider raises the detail.
 
-One rule, in one place (auth_mode_shown): a value of at most MAX_AUTH_MODE_QUOTED characters is a mode or a mistyped
-one and is named; a longer one is described by its length. The values below are synthetic stand-ins, not keys.
+One rule, in one place (auth_mode_shown): a value that could be a mistyped mode, at most MAX_AUTH_MODE_QUOTED
+characters and letters and underscores alone, is named; any other is described by its length. The values below are
+synthetic stand-ins, not keys.
 """
 
 from __future__ import annotations
@@ -26,6 +27,9 @@ PROVIDERS = (("OPENAI_AUTH_MODE", "openai"), ("CLAUDE_AUTH_MODE", "claude"), ("G
 # numbers and not from MAX_AUTH_MODE_QUOTED: these are what hold that number where it is.
 AT_THE_BOUND = "q" * 16
 PAST_THE_BOUND = "q" * 17
+# No longer than that, and no mistyped mode: a mode is letters and an underscore, and a key for a local server or
+# an OpenAI-compatible gateway is often this short. A digit and hyphens, 16 hexadecimal digits, one digit.
+SHORT_AND_NO_MODE = ("sk-canaryo-1234", "9f8a7b6c5d4e3f2a", "tok3n")
 PRODUCTION = {
     "APP_ENV": "production",
     "API_BEARER_TOKEN": "p" * 40,
@@ -84,6 +88,30 @@ class AuthModeShownTests(unittest.TestCase):
                     self.assertNotIn("not printed", named[place])
                     self.assertNotIn(AT_THE_BOUND, described[place])
                     self.assertIn("17 characters, not printed", described[place])
+
+    def test_a_short_value_that_no_mistyped_mode_could_be_is_shown_nowhere(self) -> None:
+        # Sixteen characters or fewer were quoted whatever they were.
+        for value in SHORT_AND_NO_MODE:
+            for setting, provider in PROVIDERS:
+                for place, text in _surfaces(setting, provider, value).items():
+                    with self.subTest(value=value, setting=setting, place=place):
+                        for start in range(len(value) - 3):
+                            self.assertNotIn(value[start : start + 4], text.lower())
+                        self.assertIn(f"{len(value)} characters, not printed", text)
+
+    def test_only_letters_and_underscores_are_quoted(self) -> None:
+        # Each side of what a mistyped mode can be written in, one character apart.
+        shown = {value: auth_mode_shown(value) for value in ("host_bridg", "hostbridge", "host-bridge", "host_bridge1")}
+
+        self.assertEqual(
+            shown,
+            {
+                "host_bridg": "host_bridg",
+                "hostbridge": "hostbridge",
+                "host-bridge": "<a value of 11 characters, not printed>",
+                "host_bridge1": "<a value of 12 characters, not printed>",
+            },
+        )
 
     def test_a_mode_and_a_mistyped_one_are_named_as_they_were(self) -> None:
         self.assertEqual(

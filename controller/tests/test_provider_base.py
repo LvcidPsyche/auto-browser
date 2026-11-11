@@ -72,9 +72,10 @@ class ProviderReadinessHelperTests(unittest.TestCase):
         self.assertEqual(BaseProviderAdapter.normalize_auth_mode(None), "")
         self.assertIn("api", self.adapter.supported_auth_modes)
         self.assertTrue(self.adapter.auth_mode_supported("api"))
-        self.assertFalse(self.adapter.auth_mode_supported("carrier-pigeon"))
-        detail = self.adapter.invalid_auth_mode_detail("carrier-pigeon")
-        self.assertIn("carrier-pigeon", detail)
+        self.assertFalse(self.adapter.auth_mode_supported("carrier_pigeon"))
+        # Letters and an underscore, as a mode is: with a hyphen it is described and not quoted (auth_mode_shown).
+        detail = self.adapter.invalid_auth_mode_detail("carrier_pigeon")
+        self.assertIn("carrier_pigeon", detail)
         self.assertIn("expected one of", detail)
 
 

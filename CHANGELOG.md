@@ -301,14 +301,16 @@ All notable changes to auto-browser are documented here.
   quoted, and says when the URL carried userinfo; what the peer is answered is the fixed text it was. One line was
   left: under `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent (`no readable
   record for session`), the id of a peer's request or of an MCP call. It is quoted now too.
-- **A refused start no longer quotes a long `*_AUTH_MODE` value.** With `APP_ENV=production`, an `OPENAI_AUTH_MODE`,
-  `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the start with an error that quoted the value,
-  and `.env.example` has each a few lines under its provider's API key: a key set on the wrong line was written to
-  the log. A value longer than 16 characters is now described by its length; a shorter one, a mistyped mode, is
-  quoted as before. On any other `APP_ENV` the start says nothing of such a value, and it was handed out whole in
-  three more places: as the provider's `auth_mode` and in its `detail`, both in `GET /agent/providers` (to any
-  holder of a bearer token) and in `browser.list_providers` (to the agent), and in the error of an agent step that
-  names the provider. Each now reads `<a value of 43 characters, not printed>` where the value stood.
+- **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
+  `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
+  start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:
+  a key set on the wrong line was written to the log. A value is now quoted, as before, only where it is 16
+  characters or fewer and letters and underscores alone, as a mistyped mode is; any other that is not empty is
+  described by its length, a short key with a digit or a hyphen in it included. On any other `APP_ENV` the start
+  says nothing of such a value, and it was handed out whole in three more places: as the provider's `auth_mode` and
+  in its `detail`, both in `GET /agent/providers` (to any holder of a bearer token) and in `browser.list_providers`
+  (to the agent), and in the error of an agent step that names the provider. Each now reads
+  `<a value of 43 characters, not printed>` where the value stood.
 - **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
   `GET /auth-profiles/{name}`, `GET /auth-profiles/{name}/export` and `POST /sessions` with `auth_profile` or a
   `storage_state_path` under `profiles/` answered `403` for a foreign profile and `404` for a missing one, and
