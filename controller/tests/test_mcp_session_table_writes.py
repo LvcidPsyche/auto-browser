@@ -28,13 +28,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app import mcp_transport
-from app.mcp_transport import (
-    MAX_CLIENT_OBJECT_DEPTH,
-    MAX_CLIENT_OBJECT_JSON_BYTES,
-    MCP_PROTOCOL_HEADER,
-    MCP_SESSION_HEADER,
-    McpHttpTransport,
-)
+from app.mcp_transport import MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER, McpHttpTransport
 from app.utils import without_lone_surrogates
 
 PROTOCOL = "2025-11-25"
@@ -43,6 +37,10 @@ LONE = "\ud800"
 CLIENT_INFO = {"name": "client" + LONE, "version": "1", "build" + LONE: {"tags": ["a" + LONE]}}
 CAPABILITIES = {"roots": {"listChanged": True}, "experimental": {"x" + LONE: "y" + LONE}}
 REPLACEMENT = chr(0xFFFD)  # U+FFFD, by its number: the character itself in this file would read as a mistake
+# The bounds the CHANGELOG and docs/mcp-clients.md promise, written out: rows built from the module's two constants
+# held that each bound is exact at whatever the constant is, and passed with it at 33 or at 65,537.
+DEPTH_BOUND = 32
+BYTES_BOUND = 65536
 
 
 def _with(value: object, old: str, new: str) -> object:
@@ -97,24 +95,24 @@ def _padded(value: dict, size: int, *, as_kept: bool) -> dict:
     return padded
 
 
-TOO_DEEP = f"is nested deeper than {MAX_CLIENT_OBJECT_DEPTH} levels"
-TOO_LARGE = f"is larger than {MAX_CLIENT_OBJECT_JSON_BYTES} bytes as JSON"
+TOO_DEEP = f"is nested deeper than {DEPTH_BOUND} levels"
+TOO_LARGE = f"is larger than {BYTES_BOUND} bytes as JSON"
 # What is kept at each bound, what is refused one past it, and the words of the refusal.
 AT_AND_PAST_A_BOUND = {
-    "objects in one another": (_objects(MAX_CLIENT_OBJECT_DEPTH), _objects(MAX_CLIENT_OBJECT_DEPTH + 1), TOO_DEEP),
+    "objects in one another": (_objects(DEPTH_BOUND), _objects(DEPTH_BOUND + 1), TOO_DEEP),
     "lists in one another": (
-        _lists_in_an_object(MAX_CLIENT_OBJECT_DEPTH),
-        _lists_in_an_object(MAX_CLIENT_OBJECT_DEPTH + 1),
+        _lists_in_an_object(DEPTH_BOUND),
+        _lists_in_an_object(DEPTH_BOUND + 1),
         TOO_DEEP,
     ),
     "bytes of JSON": (
-        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES),
-        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES + 1),
+        _of_bytes(BYTES_BOUND),
+        _of_bytes(BYTES_BOUND + 1),
         TOO_LARGE,
     ),
     "bytes of JSON, of text that takes two bytes a letter": (
-        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES, letter=chr(0xE9)),
-        _of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES + 1, letter=chr(0xE9)),
+        _of_bytes(BYTES_BOUND, letter=chr(0xE9)),
+        _of_bytes(BYTES_BOUND + 1, letter=chr(0xE9)),
         TOO_LARGE,
     ),
 }
@@ -289,9 +287,7 @@ class McpClientObjectBoundsTests(_Transport):
         # The 500 was of every DELETE by anybody, while one session nested 486 to 490 deep (Python 3.12) was in the
         # table: its initialize had written it, and a DELETE writes the same table from fewer frames up.
         at_the_bounds = self.assert_an_ordinary_answer(
-            self.initialize_as_written(
-                client_info=_of_bytes(MAX_CLIENT_OBJECT_JSON_BYTES), capabilities=_objects(MAX_CLIENT_OBJECT_DEPTH)
-            )
+            self.initialize_as_written(client_info=_of_bytes(BYTES_BOUND), capabilities=_objects(DEPTH_BOUND))
         )
         another = self.assert_an_ordinary_answer(self.initialize())
 
@@ -307,7 +303,7 @@ class McpClientObjectBoundsTests(_Transport):
         # An older build kept whatever its writer could go down (488 objects on Python 3.11) and any size.
         marker = "VALUE-OF-THE-CLIENT"
         deep = json.loads(_objects(200).replace("{}", json.dumps({"k": marker})))
-        large = {"name": marker + "x" * MAX_CLIENT_OBJECT_JSON_BYTES}
+        large = {"name": marker + "x" * BYTES_BOUND}
 
         def record(session_id: str, client_info: dict, capabilities: dict) -> dict:
             return {
@@ -328,7 +324,7 @@ class McpClientObjectBoundsTests(_Transport):
             record("deep-capabilities", {"name": "pytest"}, deep),
             record("large-info", large, {}),
             record("large-capabilities", {}, large),
-            record("at-the-bounds", json.loads(_objects(MAX_CLIENT_OBJECT_DEPTH)), {}),
+            record("at-the-bounds", json.loads(_objects(DEPTH_BOUND)), {}),
         ]
         self.store.write_text(json.dumps(written), encoding="utf-8")
 
@@ -350,8 +346,8 @@ class McpClientObjectBoundsTests(_Transport):
         # Keys that meet once their lone surrogates are replaced are numbered (" (2)", " (3)", ...), so what is kept
         # is longer than what was sent: a value at the bound as sent was kept past it, written at every write of the
         # table, and dropped by the next start, which measures what was kept.
-        at_the_bound_as_sent = _padded(MEETING_KEYS, MAX_CLIENT_OBJECT_JSON_BYTES, as_kept=False)
-        self.assertGreater(_compact_size(without_lone_surrogates(at_the_bound_as_sent)), MAX_CLIENT_OBJECT_JSON_BYTES)
+        at_the_bound_as_sent = _padded(MEETING_KEYS, BYTES_BOUND, as_kept=False)
+        self.assertGreater(_compact_size(without_lone_surrogates(at_the_bound_as_sent)), BYTES_BOUND)
         kept = self.assert_an_ordinary_answer(self.initialize())
         table = self.store.read_bytes()
 
@@ -367,7 +363,7 @@ class McpClientObjectBoundsTests(_Transport):
                 self.assertEqual(self.store.read_bytes(), table)
 
     def test_a_value_at_the_bound_as_kept_is_kept_and_read_back_at_the_next_start(self) -> None:
-        at_the_bound_as_kept = _padded(MEETING_KEYS, MAX_CLIENT_OBJECT_JSON_BYTES, as_kept=True)
+        at_the_bound_as_kept = _padded(MEETING_KEYS, BYTES_BOUND, as_kept=True)
         made = {
             argument: self.assert_an_ordinary_answer(self.initialize(**{argument: at_the_bound_as_kept}))
             for argument in self.SENT_AS.values()
@@ -400,8 +396,8 @@ class McpClientObjectBoundsTests(_Transport):
 
     def test_a_value_of_small_integers_is_still_measured_and_kept_at_the_bound(self) -> None:
         integers = {"a": [99999, -12345, 0, 7] * 3500}
-        at = _padded(integers, MAX_CLIENT_OBJECT_JSON_BYTES, as_kept=False)
-        past = _padded(integers, MAX_CLIENT_OBJECT_JSON_BYTES + 1, as_kept=False)
+        at = _padded(integers, BYTES_BOUND, as_kept=False)
+        past = _padded(integers, BYTES_BOUND + 1, as_kept=False)
 
         for value, verdict in ((at, None), (past, TOO_LARGE)):
             with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
