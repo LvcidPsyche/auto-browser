@@ -1177,20 +1177,22 @@ class BrowserActionService:
         it as a position so that the controller knows where that is, and the press is the controller's own: read
         where it goes down, as every other press is. Whether the target takes the pointer at that point is
         Playwright's check, made by its hover: it knows a label slotted into a component's button as that
-        button's, which the check before a human-like press does not (_RECEIVES_POINTER_SCRIPT).
+        button's, which the check before a human-like press does not (_RECEIVES_POINTER_SCRIPT). The steps share
+        the click's budget (_Budget), as the steps of Playwright's own click share its timeout.
         """
         if not press_is_read():
             await locator.click(timeout=timeout_ms)
             return
-        await self._checks_of_a_click(locator, self._budget(timeout_ms))
-        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=timeout_ms)
+        budget = self._budget(timeout_ms)
+        await self._checks_of_a_click(locator, budget)
+        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, timeout=budget.left_ms())
         if place["boxless"]:
             # Shown when the checks passed a moment ago, or they had not: one with no box now, and not for its
             # children's sake, was hidden since. It has nothing inside it to name.
             raise _target_has_no_box() if place["contents"] else _target_left_the_pointer()
         position = {"x": float(place["x"]), "y": float(place["y"])}
-        await locator.hover(position=position, timeout=timeout_ms)
-        box = await locator.bounding_box(timeout=timeout_ms)
+        await locator.hover(position=position, timeout=budget.left_ms())
+        box = await locator.bounding_box(timeout=budget.left_ms())
         if not box:
             raise _target_left_the_pointer()
         # Where Playwright puts a position: the corner of the element's box, its border, the offset.

@@ -259,19 +259,35 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
         assert done == CHECKS
 
 
-async def test_every_step_of_a_placed_click_takes_the_clicks_own_budget() -> None:
+async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
     # The read of the place and the read of the box had no bound of their own: under a short budget (a focus
-    # click's) a target that went away between two steps waited out Playwright's default instead.
+    # click's) a target that went away between two steps waited out Playwright's default instead. Then each step
+    # had the whole budget, and a target that kept every one of them waiting held its session for five budgets:
+    # a click has no other bound. Each step is given what the steps before it left.
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, done = _service(CLOSE)
+        locator = _locator(done, each_step_takes=0.02)
+        with reading_presses("click", "read", None):
+            await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
+        assert list(locator.budgets) == ["enabled", "trial hover", "place", "hover", "box"]
+        given = list(locator.budgets.values())
+        # Never more than the step before had (a clock may not move in 20 ms), and the last has less than the first.
+        assert given == sorted(given, reverse=True) and 0 < given[-1] < given[0] <= 250, given
+
+        # With nothing left a step has a millisecond, never 0: Playwright reads 0 as no limit at all.
+        service, session, done = _service(CLOSE)
+        locator = _locator(done, each_step_takes=0.02)
+        with reading_presses("click", "read", None):
+            await service.click_as_playwright_places_it(session, locator, timeout_ms=30)
+        assert locator.budgets["box"] == 1, locator.budgets
+
+        # No budget named: the session's own (ACTION_TIMEOUT_MS), which is what Playwright gives a step left to
+        # itself, and one deadline for the steps as well.
         service, session, done = _service(CLOSE)
         locator = _locator(done)
         with reading_presses("click", "read", None):
-            await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
-    budgets = locator.budgets
-    assert list(budgets) == ["enabled", "trial hover", "place", "hover", "box"]
-    # The checks share one budget: the trial hover is given what the look at the target left of it.
-    assert 200 < budgets["trial hover"] <= budgets["enabled"] <= 250, budgets
-    assert (budgets["place"], budgets["hover"], budgets["box"]) == (250, 250, 250)
+            await service.click_as_playwright_places_it(session, locator)
+        assert 14000 < locator.budgets["box"] <= locator.budgets["enabled"] <= 15000, locator.budgets
 
 
 async def test_the_checks_before_a_human_like_press_are_no_click_either() -> None:
