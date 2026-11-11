@@ -171,13 +171,16 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
       "***@gmail.com"), or a number as a page masks one, made of digits, asterisks, bullets, the letter x and a
       phone number's marks and nothing else, each group of it with a digit, an asterisk, a bullet or two x in it
       ("+1 (***) ***-1234", "(XXX) XXX-1234"); a count of seconds ("30s") too. A mark that is no letter and no
-      digit (an arrow, a tick) says nothing, here and anywhere in a label that Send opens ("Send code →" runs;
-      "Send code → John" asks). A word behind an at sign names somebody, whatever the word and whatever mark
-      stands before the sign ("@backup", "@1234", "-@backup"), and a word behind a hash names a channel unless it
-      is such a number ("#work" asks, "phone #1234" runs). So "Send code to my phone" and "Send code to reset your
-      password" run, and "Send code to all users", "Send verification email to John", "Send code to team2", "Send
-      code to #work" and "Send code to verify payment" ask. An address written out in full ("Send code to
-      pat@example.com") runs, whoever's it is.
+      digit and stands by itself (an arrow, a tick) says nothing, here and anywhere in a label that Send opens
+      ("Send code →" runs; "Send code → John" asks). Written onto the word for what is sent, a mark makes it
+      another word, and the label asks: "Send code…" and "Send code." do, where "Send code …" and "Send code
+      via SMS." run. A word behind an at sign names somebody, whatever the word and whatever mark stands before
+      the sign ("@backup", "@1234", "-@backup"), except where the mark is an asterisk or a bullet and the word
+      has a dot in it, which reads as a masked address ("*@backup.io" runs). A word behind a hash names a
+      channel unless it is such a number ("#work" asks, "phone #1234" runs). So "Send code to my phone" and
+      "Send code to reset your password" run, and "Send code to all users", "Send verification email to John",
+      "Send code to team2", "Send code to #work" and "Send code to verify payment" ask. An address written out
+      in full ("Send code to pat@example.com") runs, whoever's it is.
     - A line of the label that stops on one of these words is not its end: `to`, `via`, `by`, `through`, `using`,
       `in`, `on`, `the`, `a`, `an`, `my`, `your`, `this`, `and`, `or`, `at`, `with`, `of`, `for`, `into`. The line
       after it is read with it, whatever that line opens with, so "Send code to" over "all users in the
@@ -232,19 +235,31 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     middle), the click is one Playwright places, at a point it picks itself. For an action that is read,
     Playwright then only puts the pointer, at that point, which the controller gives it, and the press is the
     controller's own, read where it lands as any other. With the pointer placed, the target is asked once more
-    that the pointer finds it there, and so is each frame it is in: a target the page has taken out of its layout
-    by then (`hidden`, `display: none`), made invisible, or put something over is not pressed (`target_moved`,
-    retryable; one that has left the page, or was made invisible before the pointer was placed, is waited for, as
-    a click waits, and ends the click when its time does), and neither is one with no box of its own, whose
-    children are laid out in its place (`display: contents`): where a press on it would land cannot be read, so
-    the action answers `target_has_no_box`, and the agent names an element inside it. A target inside a frame is
-    placed on what the screen shows of it, also where its frame runs off the screen or CSS draws the frame at
-    another size. Playwright does not look through a frame that CSS transforms, so there the question above is
-    the only one asked: where the page has put something of its own over such a frame, or the frame holds another
-    frame that lies over the target, the action ends as `target_moved` with nothing pressed. A click that is not
-    read is Playwright's own click there, which presses what covers the frame, or the page beside the frame when
-    the element is larger than the frame shows, and calls it done. This read has half a second to set up and half
-    a second to run; when it fails or runs past either, the press goes on, and an info-level log line says so.
+    that the pointer finds it there, and so is each frame it is in (the seven nearest the target; one further up
+    is Playwright's alone to check): a target the page has taken out of its layout by then (`hidden`,
+    `display: none`), made invisible, or put something over is not pressed (`target_moved`, retryable; one that
+    has left the page, or was made invisible before the pointer was placed, is waited for, as a click waits, and
+    ends the click when its time does), and neither is one with no box of its own, whose children are laid out
+    in its place (`display: contents`): where a press on it would land cannot be read, so the action answers
+    `target_has_no_box`, and the agent names an element inside it. A target inside a frame is placed on what the
+    screen shows of it, also where its frame runs off the screen or CSS draws the frame at another size.
+    Playwright does not look through a frame that CSS transforms, or that stands inside anything
+    CSS transforms (a dialog the page centres with a transform is one), so there the question above is the only
+    one asked: where the page has put something of its own over such a frame, or the frame holds another frame
+    that lies over the target, the action ends as `target_moved` with nothing pressed. In a frame that CSS turns
+    or mirrors, a click that has to be placed can end so with nothing over the target, or when its time runs out:
+    the point is carried into the frame by the target's two boxes, which holds for a frame that is moved or
+    scaled and not for one that is turned. A click that is not read is Playwright's own click there, which
+    presses what is at the point it picks and calls it done: what covers the frame, or the page beside the frame
+    when the element is larger than the frame shows or the frame is another site's and scaled. In a frame that
+    runs in a process of its own (another site's, or a sandboxed one) Playwright counts an element's box from the
+    corner of the frame's border, so with a border or padding on the frame every press there, Playwright's own
+    included, goes down up and left of the element's middle by that much. The element is asked whether the
+    pointer is over it before the controller presses. One less than twice as wide or as high as the border and
+    padding together is not pressed: Playwright's checks before a click do not find it at the point they take,
+    and the click ends when its time does (Playwright's own click fails the same way from a pixel smaller). This
+    read has half a second to set up and half a second to run; when it fails or runs past either, the press goes
+    on, and an info-level log line says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as

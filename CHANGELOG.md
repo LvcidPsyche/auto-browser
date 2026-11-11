@@ -460,10 +460,17 @@ All notable changes to auto-browser are documented here.
   much, the pointer was looked for by that box, and a press near the edge of a small element went down on what
   stands beside it. For an action that is read, whose placed click the controller presses itself, the point is
   taken on what the screen shows of the element (also through a frame that runs off the screen, or one CSS draws
-  at another size), and the element and its frames are asked again where the press goes down. One limit is
-  Playwright's: it does not look through a frame that CSS transforms, so its own click, which a click that is not
-  read still is, presses what the page has put over such a frame, or has beside it where the element is larger
-  than the frame shows, and ends as done. Older than this release.
+  at another size), and the element and its frames are asked again where the press goes down. Three limits
+  stay. Playwright does not look through a frame that CSS transforms, or that stands inside anything CSS
+  transforms (a dialog centred with a transform is one), so its own click, which a click that is not read still
+  is, presses what is at the point it picks and ends as done: what the page has put over such a frame, or has
+  beside it where the element is larger than the frame shows or the frame is another site's and scaled. In a
+  frame of another process that has a border or padding, an element less than twice as wide or as high as the
+  two together is not pressed: the click ends when its time does, as Playwright's own does from a pixel smaller.
+  Both are older than this release. And a read click that has to be placed in a frame CSS turns or mirrors can
+  end as `target_moved`, or when its time runs out, with nothing over its target: the point is carried into the
+  frame by the element's boxes, which holds for a frame that is moved or scaled. Before, that press went down
+  unchecked at the middle of the box.
 - **A selector click has one time limit for all its waits.** The scroll into view, the read of the element's box,
   the checks, the question what the pointer finds and the click Playwright places each waited up to
   `ACTION_TIMEOUT_MS` of their own. A target that left the page once the checks had passed held its session for

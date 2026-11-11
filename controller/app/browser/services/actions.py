@@ -115,7 +115,8 @@ _step_clock = time.perf_counter
 # box, where the press goes. So there it answers 'framed' until it is given ``box``, the element's box in the
 # main frame's viewport (Playwright's bounding_box): the point is carried into the document by the two boxes,
 # in proportion, which is exact where the frames on the way are moved or scaled, and at the middle of the box
-# where one is turned. _receives_pointer_at asks it of the element, then of each frame element on the way up.
+# where one is turned; not where a frame on the way runs in a process of its own and has a border or padding
+# (``arrived``, below). _receives_pointer_at asks it of the element, then of each frame element on the way up.
 # The way up from what the pointer hits goes by the slot a node is given to, as a click's event does: a label
 # slotted into a component's button is that button's. By its parents alone it was not, which only sent the
 # click to Playwright's placing while nothing asked the target after that; the same question is asked there now.
@@ -211,8 +212,10 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
 ENABLED_POLL_SECONDS = 0.1
 # What Playwright says of an element the page took out of the document while a step was waiting on it.
 _NOT_ATTACHED = "Element is not attached to the DOM"
-# The check that the pointer finds a target inside frames (_receives_pointer_at): how many frames up it goes
-# before it gives the click to Playwright's own placing, and how long it waits for the element it asks about.
+# The check that the pointer finds a target inside frames (_receives_pointer_at): how many documents it asks, the
+# target's own first, and how long it waits for the element it asks about. A target seven frames down is asked
+# all the way up. Deeper, the check before a human-like press cannot tell and gives the click to Playwright's own
+# placing; asked again where Playwright has placed the pointer, it goes by what the documents it asked have said.
 POINTER_CHECK_FRAMES = 8
 POINTER_CHECK_TIMEOUT_MS = 1000
 
@@ -1183,7 +1186,8 @@ class BrowserActionService:
         on top there: a transparent element over a "Save draft" button took the
         click, while the approval and the audit trail named the button. Playwright's
         own checks run first (visible, stable, enabled, receiving events at its
-        click point, frames included), and the point is checked again once the
+        click point, frames included, but a frame CSS transforms, which Playwright
+        does not look through), and the point is checked again once the
         pointer has arrived and the pause before the press is over, so a cover
         put up during the move or the pause is caught as well. Enabled is asked
         again with it: the move and the pause take about half a second, and a
@@ -1192,8 +1196,10 @@ class BrowserActionService:
         check fails the click is one Playwright places (click_as_playwright_places_it):
         its own `click()`, or for an action whose target is read its hover and the
         controller's press where that put the pointer. Either clicks the element if
-        it can and otherwise refuses: neither clicks what covers it, and both wait
-        for a target that is not enabled.
+        it can and otherwise refuses, and both wait for a target that is not
+        enabled. The controller's press does not click what covers the element;
+        Playwright's own `click()` does where the cover is over a frame CSS
+        transforms (docs/production-hardening.md has that limit).
 
         The click has one budget for all its waits, as Playwright's own click has
         one timeout: ``budget`` where the caller began it (a step of the same
@@ -1348,7 +1354,7 @@ class BrowserActionService:
         be told is a no, and the click is then one Playwright places.
 
         ``placed``: (x, y) is where Playwright's hover has put the pointer, and a no ends the click. There a
-        target more than POINTER_CHECK_FRAMES frames down is a yes: the frames asked said so, the ones above
+        target POINTER_CHECK_FRAMES frames down or deeper is a yes: the documents asked said so, the ones above
         them are Playwright's hover's to check, and a no would end a click that Playwright's own makes.
 
         ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the

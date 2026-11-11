@@ -269,6 +269,10 @@ class LabelRulesTests(unittest.TestCase):
         ("post", "Send code \u2013 all users"),
         ("post", "Send code \u2192\nto all users in the organization"),
         ("post", "Send code\n\u2192 to all users in the organization"),
+        # Written onto the word for what is sent, a mark makes it another word: the safe side, which the docs say.
+        ("post", "Send code\u2026"),
+        ("post", "Send code."),
+        ("post", "Send code\u2192"),
         # The everyday words name no one: beside a word that does, the label still asks.
         ("post", "Send code to all trusted users"),
         ("post", "Send code to the same people \u2192"),
@@ -419,6 +423,13 @@ class LabelRulesTests(unittest.TestCase):
         "Send code \u2713",
         "Send me a login link \u2192",
         "Send \u2192 code",
+        # A mark that stands by itself, and one written onto a word that says where the code goes.
+        "Send code \u2026",
+        "Send code via SMS.",
+        "Send code to my phone\u2026",
+        # Behind an asterisk or a bullet a name with a dot in it reads as a masked address, as the docs say.
+        "Send code to *@backup.io",
+        "Send code to \u2022@backup.team",
         "Send code to log into your account",
         "Send code to access your account",
         "Send code to proceed",
