@@ -304,9 +304,11 @@ All notable changes to auto-browser are documented here.
   having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
   quoted and cut at 200 characters, and says when the URL carried userinfo or a port that cannot be read, for which
   it is refused whatever its host, and, of a host a pattern allows, which of the URL's scheme, port (as written) and
-  path no pattern allows with that host; what the peer is answered is the fixed text it was. One line was
-  left: under `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent (`no readable
-  record for session`), the id of a peer's request or of an MCP call. It is quoted now too.
+  path no pattern allows with that host; what the peer is answered is the fixed text it was. Under
+  `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent too (`no readable record
+  for session`), the id of a peer's request or of an MCP call; and with `REDIS_URL` set, while Redis failed, so was
+  the id of every session a route or a tool looked up, at WARNING (`redis session read failed for`). Both are quoted
+  now, and the session store refuses an id that is no plain name before Redis is asked, as without `REDIS_URL`.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:

@@ -12,6 +12,7 @@ import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -22,7 +23,7 @@ from app.mesh.identity import NodeIdentity
 from app.mesh.models import CapabilityGrant, PeerRecord
 from app.mesh.peers import PeerRegistryFile
 from app.mesh.transport import make_envelope
-from app.session_store import FileSessionStore
+from app.session_store import DurableSessionStore, FileSessionStore
 from tests import test_mesh_peer_registration as _registration
 from tests.test_mesh_peer_registration import add_legit_peer, reply_status, sign_as
 
@@ -340,3 +341,37 @@ def test_a_session_id_that_names_no_record_is_logged_on_one_line_at_debug(
     written = logging.Formatter().format(record).splitlines()
     assert written[0] == message
     assert [line for line in written if line.startswith("WARNING:")] == [], ascii(written)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ConnectionError("Error 10061 connecting to 127.0.0.1:6379"), RuntimeError("MASTERDOWN Link with MASTER is down")],
+    ids=["redis gone", "redis answering an error"],
+)
+def test_a_session_id_that_is_no_plain_name_is_refused_before_redis_is_asked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, failure: Exception
+) -> None:
+    # With REDIS_URL set, the lookup asked Redis first, which takes any text as its key, and while its read failed
+    # the store's WARNING wrote the id as it came, whatever LOG_LEVEL is: from every route and tool that looks a
+    # session up. The file store refuses such an id before it touches the disk.
+    store = DurableSessionStore(file_root=tmp_path, redis_url=None, redis_prefix="auto-browser:test")
+    asyncio.run(store.startup())
+    redis = Mock()
+    redis.get = AsyncMock(side_effect=failure)
+    store.redis_store = redis
+    store._primary = redis  # what startup() does when Redis answers
+    manager = SimpleNamespace(sessions={}, session_store=store)
+    caplog.set_level(logging.DEBUG)
+
+    # Refused as without REDIS_URL, before Redis is asked.
+    with pytest.raises(SessionNotFoundError):
+        asyncio.run(BrowserSessionService(manager).get("s1" + FORGED))
+    redis.get.assert_not_awaited()
+    # A plain name is still asked of Redis first, and the line that says its read failed quotes it.
+    with pytest.raises(SessionNotFoundError):
+        asyncio.run(BrowserSessionService(manager).get("s1"))
+    redis.get.assert_awaited_once_with("s1")
+
+    assert "redis session read failed for 's1', using file record" in caplog.text
+    written = [line for record in caplog.records for line in logging.Formatter().format(record).splitlines()]
+    assert [line for line in written if line.startswith("WARNING:app.auth")] == [], ascii(written)

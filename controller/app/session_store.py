@@ -231,6 +231,10 @@ class DurableSessionStore:
     async def get(self, session_id: str) -> SessionRecord:
         if self._primary is self.file_store:
             return await self.file_store.get(session_id)
+        # An id that is no plain name names no file record (record_path), and it is refused here as the file store
+        # refuses it, before Redis is asked: Redis takes any text as its key, and the id is often a caller's, which
+        # the warning below wrote as it came while Redis failed.
+        record_path(self.file_store.root, session_id, ".json")
         # upsert() writes the file record first, so it is the durable copy. A
         # Redis restart without persistence, an evicted key or a dropped
         # connection must not make a closed session look unowned to another
@@ -240,7 +244,7 @@ class DurableSessionStore:
         except KeyError:
             return await self.file_store.get(session_id)
         except Exception as exc:
-            logger.warning("redis session read failed for %s, using file record: %s", session_id, exc)
+            logger.warning("redis session read failed for %r, using file record: %s", session_id, exc)
             return await self.file_store.get(session_id)
         # The file copy is written first, so a closed one is the session's newest record. A write whose Redis half
         # failed, with Redis down for the drop of its copy too, left an older copy in Redis (R5C-5): the record from
@@ -255,7 +259,7 @@ class DurableSessionStore:
         except (KeyError, ValueError):
             return None
         except OSError as exc:
-            logger.warning("could not read the file copy of session %s to check for a close: %s", session_id, exc)
+            logger.warning("could not read the file copy of session %r to check for a close: %s", session_id, exc)
             return None
         return record if record.status == "closed" else None
 
