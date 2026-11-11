@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -252,6 +253,11 @@ class RefuseSelfApprovalTests(StoreBase):
             self.assertEqual((await store.approve(approval.id)).decided_by, "alice")
 
 
+# Two letters whose case fold is longer than they are, by their names: sharp s folds to "ss", the ligature to "fi".
+SHARP_S = "\N{LATIN SMALL LETTER SHARP S}"
+FI = "\N{LATIN SMALL LIGATURE FI}"
+
+
 def kept_back(entries: int) -> str:
     """How the warning of entries that are not printed begins. It counts entries: the tokens they hold it cannot
     count, since tokens that begin alike are all held by an entry that holds one. The eight is written out: it is
@@ -458,7 +464,42 @@ class ListedOperatorTests(unittest.TestCase):
         # Both sides of MIN_SHORT_TOKEN_RUN_NOT_PRINTED, written out: four in a row keep an entry back, three do not.
         "a token of five cut short by one": ("q7Zk", "alice:q7Zk2", None, [kept_back(1)]),
         "a token of four cut short by one": ("q7Z", "alice:q7Zk", None, ["lists 'q7Z', which no credential"]),
+        # A token whose case fold is longer than it is: the run was counted from the fold, a character longer, so all
+        # but one of a token of five to eight was named. It is counted from the token as it is configured.
+        **{
+            f"a token of {length} that begins with {name}, without it": (
+                "1234567"[: length - 1],
+                f"alice:{letter}{'1234567'[: length - 1]}",
+                None,
+                [kept_back(1)],
+            )
+            for name, letter in (("sharp s", SHARP_S), ("the ligature fi", FI))
+            for length in range(5, 9)
+        },
+        # And whether a token is short is decided on its own length: of four with sharp s, all but one is an id's.
+        "a token of four with sharp s, cut short by one": (
+            f"{SHARP_S}12",
+            f"alice:{SHARP_S}123",
+            None,
+            [f"lists '{SHARP_S}12', which no credential"],
+        ),
+        "such a token after Bearer, in upper case": ("Bearer SS123", f"alice:{SHARP_S}123", None, [kept_back(1)]),
     }
+
+    def test_a_case_fold_makes_no_text_shorter(self) -> None:
+        # What a token's run is counted from rests on this. Its length is taken from the token as it is configured
+        # and its parts from the token's fold, which holds the fold of each run of k of the token's characters, of
+        # k characters or more: so whatever holds such a run, in any case, holds one of those parts.
+        shorter = [point for point in range(sys.maxunicode + 1) if not chr(point).casefold()]
+        self.assertEqual(shorter, [])
+        for token in (f"{SHARP_S}1234567", f"{FI}1234567", f"ab{SHARP_S}c{FI}d{SHARP_S}"):
+            folded = token.casefold()
+            self.assertGreater(len(folded), len(token))
+            for length in range(1, len(token) + 1):
+                for start in range(len(token) - length + 1):
+                    part = token[start : start + length].casefold()
+                    self.assertGreaterEqual(len(part), length, (token, start, length))
+                    self.assertIn(part, folded, (token, start, length))
 
     def test_no_warning_holds_eight_characters_in_a_row_of_a_token(self) -> None:
         for shape, (listed, named, shared, expected) in self.SHAPES.items():

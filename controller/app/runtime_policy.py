@@ -257,7 +257,10 @@ def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_
             if len(token) >= MIN_TOKEN_RUN_NOT_PRINTED and token in folded:
                 return True
             continue
-        run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(token) - 1)
+        # From the token as it is configured: its fold can be longer (a sharp s folds to 'ss'), and counted from the
+        # fold, all but one of a token of five to eight was printed. A fold makes no text shorter, so the fold of a
+        # run of that many of its characters holds a run of the fold that long, which is what is looked for.
+        run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(credential.token) - 1)
         if run < MIN_SHORT_TOKEN_RUN_NOT_PRINTED:
             if _holds_as_a_word(folded, token):
                 return True
