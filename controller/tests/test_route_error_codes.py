@@ -1043,6 +1043,44 @@ def test_an_unmapped_key_errors_text_starts_no_line_of_the_record(
     assert [line for line in where if "forged" in line] == [], where
 
 
+# A session id as a caller can write one in a path: a line break, a carriage return and an ESC.
+FORGED_ID = "x%0AWARNING:app.main:forged by a caller%0D%1B[2J"
+# Two lines beside the routes' fixed answers, which quote and cut what the caller wrote. Shadow browsing is off by
+# default and is refused before the session is looked up, so its line held the id as it came; no record answers to
+# the id the second route is asked for, and the KeyError the app's handler logs quotes it.
+LINES_THAT_NAME_THE_SESSION = [
+    ("post", "/sessions/{id}/shadow-browse", 400, "app.routes.session_diagnostics", "shadow browse refused for "),
+    ("get", "/sessions/{id}/witness/verify", 404, "app.main", "unmapped KeyError on 'GET' "),
+]
+
+
+@pytest.mark.parametrize("more", ["", "A" * 3000], ids=["a short id", "a long one"])
+@pytest.mark.parametrize(
+    ("verb", "path", "status", "logger", "begins"), LINES_THAT_NAME_THE_SESSION, ids=["shadow browse", "unmapped"]
+)
+def test_a_session_id_with_a_line_break_starts_no_line_of_the_log(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    verb: str,
+    path: str,
+    status: int,
+    logger: str,
+    begins: str,
+    more: str,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        response = getattr(client, verb)(path.replace("{id}", FORGED_ID + more))
+
+    assert response.status_code == status, response.text[:200]
+    (record,) = _warnings_of(caplog, logger)
+    written = _as_a_handler_writes(record)
+    first, *where = written.splitlines()
+    assert first.startswith(begins) and "forged by a caller" in first, first[:200]
+    assert [line for line in where if "forged" in line] == [], where
+    assert "\r" not in written and "\x1b" not in written
+    assert len(written) < 1000, len(written)
+
+
 def test_unknown_session_is_not_logged_as_an_unmapped_key_error(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:

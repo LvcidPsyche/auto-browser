@@ -20,6 +20,7 @@ from ._utils import (
     REFUSED_PAGE,
     bounded_limit,
     is_http_link,
+    log_hidden_cause,
     require_safe_segment,
     typed_route_errors,
 )
@@ -219,8 +220,10 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                 # with a traceback, before.
                 raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
             except RuntimeError as exc:
-                # The caller gets the generic answer; why (disabled, a root controller, no sandbox) is logged.
-                logger.warning("shadow browse refused for session %s: %s", session_id, exc)
+                # The caller gets the generic answer; why (disabled, a root controller, no sandbox) is logged, as
+                # a hidden cause is: with shadow browsing off the refusal comes before the session is looked up,
+                # so the id is whatever the caller wrote, and it is quoted and cut.
+                log_hidden_cause(logger, 400, exc, "shadow browse refused for session %s", session_id)
                 raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/sessions/{session_id}/audit")
