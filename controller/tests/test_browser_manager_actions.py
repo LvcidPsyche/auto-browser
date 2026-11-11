@@ -58,6 +58,9 @@ class FakeLocator:
         self.fill = AsyncMock()
         self.count = AsyncMock(return_value=1)
         self.is_visible = AsyncMock(return_value=True)
+        # A click looks whether its target is enabled before it hovers (_checks_of_a_click); the pages where it is
+        # not yet are tests/test_click_target_chromium.py's.
+        self.is_enabled = AsyncMock(return_value=True)
         self.bounding_box = AsyncMock(return_value={"x": 10, "y": 20, "width": 100, "height": 40})
         self.get_attribute = AsyncMock(side_effect=lambda name: self.attributes.get(name))
         # The element is what the pointer hits and keeps focus once clicked;
