@@ -59,6 +59,8 @@ MAX_MCP_SESSIONS_PER_OWNER = 100
 # defines for the two needs three or four levels and well under a kilobyte.
 MAX_CLIENT_OBJECT_DEPTH = 32
 MAX_CLIENT_OBJECT_JSON_BYTES = 64 * 1024
+# How many decimal digits a bit of an integer is counted for (_json_length_at_least): 0.30102, just under log10(2).
+_DIGITS_PER_BIT, _DIGITS_PER_BIT_SCALE = 30_102, 100_000
 logger = logging.getLogger(__name__)
 
 
@@ -946,15 +948,16 @@ def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
 
     The walk is a loop over one iterator a level, where a function that calls itself would run out of frames on the
     depth it is to refuse. It ends at the first thing past a bound, so a value of a million keys is not gone through
-    to be refused: it counts a byte for each key and each value and one for each character of text, which is no more
-    than the JSON takes. Only a value that is under both by that count is written out to be measured.
+    to be refused: it counts a byte for each key and each value, and one for each character of text and each digit
+    of an integer it can count at no cost (_json_length_at_least), which is no more than the JSON takes. Only a value
+    that is under both by that count is written out to be measured.
     """
     too_large = f"is larger than {MAX_CLIENT_OBJECT_JSON_BYTES} bytes as JSON"
     at_least = 0
     levels = [iter((value,))]
     while levels:
         for part in levels[-1]:
-            at_least += 1 + (len(part) if isinstance(part, str) else 0)
+            at_least += 1 + _json_length_at_least(part)
             if at_least > MAX_CLIENT_OBJECT_JSON_BYTES:
                 return too_large
             if isinstance(part, dict | list):
@@ -967,6 +970,22 @@ def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
     # A lone surrogate, which UTF-8 does not carry, takes the three bytes that U+FFFD takes in its place.
     written = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
     return too_large if len(written) > MAX_CLIENT_OBJECT_JSON_BYTES else None
+
+
+def _json_length_at_least(part: object) -> int:
+    """At most the bytes ``part`` takes as JSON, as far as the walk can count them at no cost: a text's length, and
+    an integer's digits counted from its bits.
+
+    An integer of n bits is at least 2 ** (n - 1), so it has at least 1 + (n - 1) * log10(2) digits, the fraction
+    dropped, and _DIGITS_PER_BIT is just under log10(2): no more are counted than it has. str() of it would cost
+    what writing it out does, and counted as one byte, 2,000 integers of 4,000 digits passed the walk and were
+    written out whole to be refused. A bool, which is an int, counts nothing here, as anything else does.
+    """
+    if isinstance(part, str):
+        return len(part)
+    if isinstance(part, int) and not isinstance(part, bool):
+        return (max(part.bit_length(), 1) - 1) * _DIGITS_PER_BIT // _DIGITS_PER_BIT_SCALE + 1
+    return 0
 
 
 async def _next_stream_event(queue: asyncio.Queue, stop: asyncio.Event) -> str | None:

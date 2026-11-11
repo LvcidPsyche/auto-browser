@@ -383,6 +383,48 @@ class McpClientObjectBoundsTests(_Transport):
 
         self.assertEqual(sorted(self.transport._sessions), sorted(made.values()))
 
+    def test_a_value_of_large_integers_is_refused_by_the_walk_without_being_written_out(self) -> None:
+        # The walk counted an integer as one byte, so a value of a few large ones passed it and was written out whole
+        # to be refused: 2,000 integers of 4,000 digits wrote 8 MB, on the event loop.
+        large = {"a": [int("9" * 4000)] * 20}
+
+        with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
+            verdict = mcp_transport._past_a_client_object_bound(large)
+
+        self.assertEqual(verdict, TOO_LARGE)
+        self.assertEqual(dumps.call_count, 0)
+        refused = self.initialize_as_written(capabilities=json.dumps(large))
+        error = {"code": -32602, "message": f"initialize: capabilities {TOO_LARGE}"}
+        self.assertEqual(refused.json(), {"jsonrpc": "2.0", "id": 1, "error": error})
+        self.assertEqual(self.transport._sessions, {})
+
+    def test_a_value_of_small_integers_is_still_measured_and_kept_at_the_bound(self) -> None:
+        integers = {"a": [99999, -12345, 0, 7] * 3500}
+        at = _padded(integers, MAX_CLIENT_OBJECT_JSON_BYTES, as_kept=False)
+        past = _padded(integers, MAX_CLIENT_OBJECT_JSON_BYTES + 1, as_kept=False)
+
+        for value, verdict in ((at, None), (past, TOO_LARGE)):
+            with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
+                self.assertEqual(mcp_transport._past_a_client_object_bound(value), verdict)
+            # Written out to be measured: the walk counted no more than the JSON takes.
+            self.assertEqual(dumps.call_count, 1)
+        self.assert_an_ordinary_answer(self.initialize_as_written(capabilities=json.dumps(at)))
+        self.assertEqual(self.stored()[-1]["client_capabilities"], at)
+
+    def test_an_integer_is_counted_at_no_more_than_its_json_takes(self) -> None:
+        # From its bits, which costs nothing: str() of it costs what writing it out does. A bool is an int. Each
+        # length, near the ends, and a sample between them: what is counted falls behind as the integer grows.
+        numbers = [0, True, False]
+        for digits in [*range(1, 100), *range(100, 3950, 37), *range(3950, 4001)]:
+            numbers += [10 ** (digits - 1), 10**digits - 1, -(10**digits - 1)]
+        for bits in [*range(1, 400), *range(400, 13_100, 101), *range(13_100, 13_280)]:
+            numbers += [2**bits, 2**bits - 1, -(2**bits)]
+        for number in numbers:
+            written = len(json.dumps(number))
+            counted = mcp_transport._json_length_at_least(number)
+            if counted > written or (not isinstance(number, bool) and counted < written - 2):
+                self.fail(f"an integer of {written} characters as JSON is counted {counted}")
+
     def test_a_body_the_json_reader_cannot_go_down_is_answered_as_one_that_cannot_be_read(self) -> None:
         # How deep Python's JSON reader goes before it gives up (RecursionError, which is no ValueError) is the
         # interpreter's own, so the reader is stood in for: such a body was an unhandled 500.
