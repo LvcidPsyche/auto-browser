@@ -235,6 +235,15 @@ CARD = """<title>start</title>
 <div id="place"><a id="card" href="#opened" onclick="document.title = 'OPENED'"><div><span id="star"
   onclick="event.preventDefault(); event.stopPropagation(); document.title = 'STARRED'">*</span>Card</div></a></div>
 """
+# A fixed card wider than the viewport, with under a pixel of its height on the screen, at the top edge.
+SLIVER = """<title>start</title>
+<style>
+  body { margin: 0 }
+  #place { position: fixed; left: 0; top: -59.1px }
+  #card { display: block; width: 4000px; height: 60px }
+</style>
+<div id="place"><a id="card" href="#opened" onclick="document.title = 'OPENED'">Card</a></div>
+"""
 # A wrapper with no box of its own: its children are laid out in its place.
 NO_BOX = """<title>start</title>
 <div id="wrap" style="display: contents"><button onclick="document.title='DELETED'">Delete account</button></div>
@@ -897,6 +906,27 @@ async def test_a_click_playwright_places_on_a_card_link_lands_where_playwrights_
         )
         # The shape the fixture stands for: an empty box, the block's, an empty box.
         assert len(areas) == 3 and areas[0] == 0 and areas[1] > 0, areas
+
+        await env.manager.execute_decision(session_id, _click("read", selector="#card"))
+        assert await _title(env, session_id) == "OPENED"
+
+        await page.evaluate("document.title = 'start'")
+        await env.manager.click(session_id, selector="#card")
+        assert await _title(env, session_id) == "OPENED"
+
+
+async def test_a_click_playwright_places_on_a_sliver_of_its_target_lands_where_playwrights_own_does(
+    tmp_path: Path,
+) -> None:
+    # The point was taken inside the viewport only along an axis that shows a whole pixel of the box, and
+    # otherwise at the middle of the whole box. Playwright asks for an area, over 0.99 of a pixel: a wide card
+    # with 0.9 px of its height on the screen is pressed there by its click, and the labelled click aimed at
+    # the middle of the card, above the screen, and failed when its time was up.
+    async with browser_env(tmp_path, {"/": SLIVER}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        box = await page.locator("#card").bounding_box()
+        assert 0 < box["y"] + box["height"] < 1, box
 
         await env.manager.execute_decision(session_id, _click("read", selector="#card"))
         assert await _title(env, session_id) == "OPENED"

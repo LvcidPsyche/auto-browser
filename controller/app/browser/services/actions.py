@@ -120,7 +120,10 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
 # has a box a line, and one around a block an empty box before and after the block: the first box whatever its
 # size was the corner pixel of such a card), counted from the corner of its padding box, with the widths of the
 # border at that corner. Playwright presses a position where it is given, so the controller knows the point; the
-# point Playwright picks itself it cannot ask for.
+# point Playwright picks itself it cannot ask for. The middle is of what is shown along each axis, however
+# thin: taken so only where an axis showed a whole pixel, a wide card with 0.9 px of its height on the screen
+# (area enough for Playwright to pick it) was aimed at above the screen. Of a box the viewport shows nothing
+# of, it is the middle of the box, which Playwright's hover scrolls to.
 # ``boxless``: el has no box at all, so there is no corner to count from; ``contents``: because its children are
 # laid out in its place (display: contents), and not because it is not shown.
 _PRESS_PLACE_SCRIPT = """(el) => {
@@ -133,11 +136,9 @@ _PRESS_PLACE_SCRIPT = """(el) => {
   const shown = (box) =>
     Math.max(0, Math.min(box.right, view.innerWidth) - Math.max(box.left, 0)) *
     Math.max(0, Math.min(box.bottom, view.innerHeight) - Math.max(box.top, 0));
-  const first = boxes.find((box) => shown(box) > 0.99) || boxes[0] || whole;
-  const middle = (low, high, limit) => {
-    const from = Math.max(low, 0), to = Math.min(high, limit);
-    return to - from >= 1 ? (from + to) / 2 : (low + high) / 2;
-  };
+  const picked = boxes.find((box) => shown(box) > 0.99);
+  const first = picked || boxes[0] || whole;
+  const middle = (low, high, limit) => (picked ? (Math.max(low, 0) + Math.min(high, limit)) / 2 : (low + high) / 2);
   return {
     x: middle(first.left, first.right, view.innerWidth) - whole.left - border[0],
     y: middle(first.top, first.bottom, view.innerHeight) - whole.top - border[1],
