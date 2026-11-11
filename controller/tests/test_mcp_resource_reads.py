@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import app.mcp_transport as mcp_transport
 from app.action_errors import SessionNotFoundError
 from app.mcp_transport import McpHttpTransport, McpSession
+from app.utils import capped_for_log
 from tests.test_mcp_resource_ownership import PROTOCOL, mcp_request
 
 SECRET = "tok-s3cr3t-value"
@@ -150,6 +151,23 @@ class McpResourceReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(repr(uri), logged.output[0])
         self.assertNotIn("\nforged line", logged.records[0].getMessage())
+
+    async def test_a_long_uri_is_logged_cut_as_the_other_lines_cut_a_callers_text(self) -> None:
+        # The caller's text, of any length: a URI of 60,000 characters was written whole.
+        head = "browser://s1\nforged line "
+        uri = head + "s" * (60_000 - len(head) - len("/console")) + "/console"
+        self.assertEqual(len(uri), 60_000)
+        self.manager.get_console_messages.side_effect = RuntimeError("no")
+
+        with self.assertLogs("app.mcp_transport", "WARNING") as logged:
+            answer = await self.read(uri)
+
+        (record,) = logged.records
+        line = record.getMessage()
+        self.assertEqual(line, f"MCP resource read of {capped_for_log(uri)!r} failed: RuntimeError")
+        self.assertNotIn("\n", line)
+        # The answer is not a log line: it is as it was.
+        self.assert_internal_error(answer, uri)
 
     async def test_an_unknown_resource_or_session_is_still_not_found_and_not_logged(self) -> None:
         self.manager.get_console_messages.side_effect = SessionNotFoundError("bob-session")

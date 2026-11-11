@@ -23,7 +23,7 @@ from .models import McpToolCallRequest, OperatorIdentity
 from .safe_json_response import SafeJSONResponse
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .tool_inputs import MAX_TOOL_RESULT_CHARS
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, json_safe, utc_now, without_lone_surrogates
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, capped_for_log, json_safe, utc_now, without_lone_surrogates
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -377,9 +377,9 @@ class McpHttpTransport:
         except SessionNotFoundError:
             content = None
         except Exception as exc:
-            # The class only, and the URI quoted, as it is caller input: an exception's text can carry a page URL
-            # with a token in it, so the client's message is fixed text and the log keeps the class.
-            logger.warning("MCP resource read of %r failed: %s", uri, type(exc).__name__)
+            # The class only, and the URI quoted and cut, as it is caller input of any length: an exception's text can
+            # carry a page URL with a token in it, so the client's message is fixed text and the log keeps the class.
+            logger.warning("MCP resource read of %r failed: %s", capped_for_log(uri), type(exc).__name__)
             return self._json_error_response(request_id, -32603, f"Could not read resource: {uri}", headers=headers)
         if content is None:
             return self._json_error_response(request_id, -32002, f"Resource not found: {uri}", headers=headers)
