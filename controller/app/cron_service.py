@@ -45,6 +45,7 @@ import hmac
 import json
 import logging
 import secrets
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -156,11 +157,13 @@ class CronService:
         # cron job id -> session id currently hosting its run. Guards against
         # overlapping fires and records what _release_run must close.
         self._active_runs: dict[str, str] = {}
-        # Held while a refusal reads its job's mark, writes its audit event and sets the mark, and while an allowed
-        # fire clears it (_refuse_run, _end_refusal): one at a time, so two refusals at once write one event, and a
-        # mark never lands after the allowed fire that was to end its refusal. Taken before the store lock, never
-        # inside it, and not held by anything else: the store is not kept from its other writers by an audit append.
-        self._refusal_lock = asyncio.Lock()
+        # cron job id -> the lock held while a refusal reads its job's mark, writes its audit event and sets the mark,
+        # and while an allowed fire clears it (_refuse_run, _end_refusal): one at a time, so two refusals at once
+        # write one event, and a mark never lands after the allowed fire that was to end its refusal. Taken before
+        # the store lock, never inside it, and not held by anything else: the store is not kept from its other
+        # writers by an audit append. A lock a job, as one job's refusal in its append must not hold another job's
+        # fire; held weakly, as a fire that holds or awaits a lock keeps it, and a deleted job then leaves none.
+        self._refusal_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     async def startup(self) -> None:
         """Start the scheduler and register all enabled cron jobs."""
@@ -604,7 +607,7 @@ class CronService:
         not find it, so it reads refused while the latest fire was.
         """
         refused = {"triggered": False, "job_id": job_id, "reason": OWNER_CREDENTIAL_REMOVED}
-        async with self._refusal_lock:
+        async with self._refusal_lock(job_id):
             audited = False
             try:
                 async with self._lock:
@@ -641,11 +644,18 @@ class CronService:
         """A fire the credential allows ends the refusal before it: the next refusal is a new one, with its own event.
 
         Whether or not the fire goes on to start a run (a previous run still active, a session that cannot be
-        created, both of which write no status). Behind a refusal whose event is still being written
+        created, both of which write no status). Behind a refusal of the job whose event is still being written
         (_refusal_lock), whose mark would otherwise land after this and be taken for the next refusal's.
         """
-        async with self._refusal_lock:
+        async with self._refusal_lock(job_id):
             await self._set_refusal_audited(job_id, False)
+
+    def _refusal_lock(self, job_id: str) -> asyncio.Lock:
+        """The job's own lock of _refusal_locks: the one a fire of the job holds or awaits, or else a new one."""
+        lock = self._refusal_locks.get(job_id)
+        if lock is None:
+            lock = self._refusal_locks[job_id] = asyncio.Lock()
+        return lock
 
     async def _set_refusal_audited(self, job_id: str, audited: bool) -> None:
         """Set or clear the job's mark that its refusal's event is written; a store that cannot take it is logged.

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import tempfile
 import unittest
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -896,11 +898,13 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
         with acting_as(ALICE):
             self.assertTrue(await self.service.delete_job(job_id))
 
-        # The ids of deleted jobs stayed in a set for the life of the process.
+        # The ids of deleted jobs stayed in a set for the life of the process. A Mapping, not a dict alone: the
+        # refusal locks are in a WeakValueDictionary, which holds a job's lock only while a fire of the job uses it.
+        gc.collect()
         kept = {
             name: held
             for name, held in vars(self.service).items()
-            if isinstance(held, set | dict | list) and job_id in held
+            if isinstance(held, set | Mapping | list) and job_id in held
         }
         self.assertEqual(kept, {})
         with acting_as(ALICE), patch("app.cron_service.uuid4", return_value=SimpleNamespace(hex=job_id)):
@@ -1051,6 +1055,32 @@ class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((await second)["reason"], "owner_credential_removed")
         self.manager.audit.append.assert_awaited_once()
+
+    async def test_a_refusal_in_its_audit_append_holds_no_other_jobs_fire(self) -> None:
+        # One lock for every job was held across the append: bob's fire waited for the event of alice's job.
+        with acting_as(BOB):
+            bobs = await self.service.create_job(name="bob's", goal="g", webhook_enabled=True)
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        writing, written = asyncio.Event(), asyncio.Event()
+        self.addCleanup(written.set)
+
+        async def append(**_kwargs) -> None:
+            writing.set()
+            await written.wait()
+
+        self.manager.audit.append = AsyncMock(side_effect=append)
+        refused = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.wait_for(writing.wait(), timeout=5)
+
+        allowed = await asyncio.wait_for(self.service.trigger_via_webhook(bobs["id"], bobs["webhook_key"]), timeout=5)
+
+        self.assertTrue(allowed["triggered"])
+        self.manager.create_session.assert_awaited_once()
+        self.assertFalse(refused.done(), "the refusal's event was to be still in its append")
+        written.set()
+        await refused
+        self.manager.audit.append.assert_awaited_once()
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
 
     async def test_an_allowed_fire_during_a_refusals_audit_still_ends_that_refusal(self) -> None:
         # The allowed fire waits for the event being written, so the mark of that event cannot land after it.
