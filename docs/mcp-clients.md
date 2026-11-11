@@ -790,7 +790,9 @@ caller cannot be used to run writes without approval. Likewise, a run or step qu
 `browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.
 These three tools refuse a `workflow_profile` (or `policy_profile`) other than `fast` or `governed`, as
 every governed tool does, and create or queue nothing: read as `fast`, a mistyped value stored or queued
-`fast`. The two queue tools are not governed: their `tools/list` schema shows `workflow_profile`, with
+`fast`. `policy_profile` is a second name for the same argument, for these tools and for every governed
+one: a call that gives both is `governed` when either says `governed`, and is refused when either holds
+another value. The two queue tools are not governed: their `tools/list` schema shows `workflow_profile`, with
 what it does there, and no `approval_id`, since queuing a run or step asks for no approval.
 A job created through REST (`POST /crons`) stores the `workflow_profile` the request body names, `fast`
 by default. A job created before this release stores `fast`: it keeps running as `fast` unless

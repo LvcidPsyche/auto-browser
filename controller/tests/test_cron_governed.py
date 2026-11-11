@@ -156,6 +156,25 @@ class CronGovernedTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(created.isError, created.structuredContent)
         self.assertEqual(created.structuredContent["workflow_profile"], "governed")
 
+    async def test_a_job_is_governed_when_either_profile_of_its_creating_call_says_so(self) -> None:
+        # policy_profile was read first: with it fast, the job was created without an approval and stored fast,
+        # though the call's workflow_profile said governed.
+        for policy_profile, workflow_profile in (("fast", "governed"), ("governed", "fast")):
+            with self.subTest(policy_profile=policy_profile, workflow_profile=workflow_profile):
+                arguments = {
+                    "name": f"j-{policy_profile}",
+                    "goal": "g",
+                    "webhook_enabled": True,
+                    "policy_profile": policy_profile,
+                    "workflow_profile": workflow_profile,
+                }
+
+                self._assert_approval_required(await self._call("browser.create_cron_job", arguments))
+                created = await self._call_approved("browser.create_cron_job", arguments)
+
+                self.assertFalse(created.isError, created.structuredContent)
+                self.assertEqual(created.structuredContent["workflow_profile"], "governed")
+
     async def test_scheduled_run_uses_the_stored_profile(self) -> None:
         created = await self._call_approved(
             "browser.create_cron_job",
@@ -288,6 +307,25 @@ class QueuedAgentJobGovernedTests(unittest.IsolatedAsyncioTestCase):
         for requested in ("fast", "governed"):
             profile = await self._queued_profile("browser.queue_agent_run", self.queue.enqueue_run, "fast", requested)
             self.assertEqual(profile, requested)
+
+    async def test_a_run_queued_under_two_profiles_that_disagree_runs_governed(self) -> None:
+        # The caller is governed when either argument says so, whichever of the two it is.
+        for policy_profile, workflow_profile in (("fast", "governed"), ("governed", "fast")):
+            with self.subTest(policy_profile=policy_profile, workflow_profile=workflow_profile):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(
+                        name="browser.queue_agent_run",
+                        arguments={
+                            "session_id": "s1",
+                            "policy_profile": policy_profile,
+                            "workflow_profile": workflow_profile,
+                            "request": {"provider": "openai", "goal": "delete the account", "workflow_profile": "fast"},
+                        },
+                    )
+                )
+
+                self.assertFalse(response.isError, response.content)
+                self.assertEqual(self.queue.enqueue_run.await_args.args[1].workflow_profile, "governed")
 
     async def _assert_a_mistyped_profile_queues_nothing(self, tool: str, enqueue: AsyncMock) -> None:
         # Read as fast, a mistyped top-level profile queued the run as fast: every write of that run went without

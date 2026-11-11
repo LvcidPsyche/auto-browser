@@ -711,6 +711,12 @@ All notable changes to auto-browser are documented here.
   with `surrogateescape` sends one by accident. Capabilities nested 600 objects deep did the same. A lone surrogate
   is now stored as U+FFFD, and that `initialize` is answered as any other. A session whose first write fails, for
   such a depth or for a full disk, is dropped before the error is answered: `500`, for that request alone.
+- **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
+  `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
+  `fast`. A governed tool then ran without the approval one of the two arguments asked for,
+  `browser.create_cron_job` created its job at once and stored it `fast`, and a run queued by
+  `browser.queue_agent_run` kept the profile its request named. A call is now `governed` when either argument
+  says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before.
 
 ### Changed
 

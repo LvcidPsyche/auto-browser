@@ -649,7 +649,11 @@ class McpToolGateway:
 
     @staticmethod
     def _pop_policy_profile(spec: ToolSpec, raw_arguments: dict[str, Any]) -> str:
-        """The call's profile, from policy_profile or workflow_profile: fast when neither names one (None is unset).
+        """The call's profile, from policy_profile and workflow_profile: governed when either says governed.
+
+        Fast when neither names one (None is unset). The two are one argument under two names, and a call that
+        gives both need not agree with itself: read in order, policy_profile=fast hid workflow_profile=governed, and
+        the call went without the approval one of its two arguments asked for.
 
         A tool the profile changes something for refuses anything else, in words that do not repeat what was sent:
         read as fast, a typo silently dropped the approval it asked for. Those are the governed tools (the cron job a
@@ -662,7 +666,10 @@ class McpToolGateway:
             for value in (policy_profile, workflow_profile):
                 if value is not None and value not in _WORKFLOW_PROFILES:
                     raise ValueError(f"workflow_profile must be one of: {', '.join(_WORKFLOW_PROFILES)}")
-        profile = str(policy_profile or workflow_profile or "fast")
+        if "governed" in (policy_profile, workflow_profile):
+            profile = "governed"
+        else:
+            profile = str(policy_profile or workflow_profile or "fast")
         if "workflow_profile" not in spec.input_model.model_fields:
             raw_arguments.pop("workflow_profile", None)
         return profile

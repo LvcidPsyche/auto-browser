@@ -227,6 +227,51 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError, response.content[0].text)
         self.manager.execute_decision.assert_awaited_once()
 
+    async def test_a_call_is_governed_when_either_of_its_two_profiles_says_so(self) -> None:
+        # policy_profile was read first and the other only without it: {"workflow_profile": "governed",
+        # "policy_profile": "fast"} ran as fast, without the approval one of its two arguments asked for.
+        cases = (
+            ("fast", "governed", True),
+            ("governed", "fast", True),
+            ("governed", "governed", True),
+            (None, "governed", True),
+            ("governed", None, True),
+            ("fast", "fast", False),
+            ("fast", None, False),
+            (None, "fast", False),
+        )
+        for policy_profile, workflow_profile, governed in cases:
+            with self.subTest(policy_profile=policy_profile, workflow_profile=workflow_profile):
+                self.manager.require_governed_approval.reset_mock()
+                arguments = {
+                    **self.GOVERNED_CALL,
+                    "policy_profile": policy_profile,
+                    "workflow_profile": workflow_profile,
+                }
+
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(name="browser.execute_action", arguments=arguments)
+                )
+
+                self.assertFalse(response.isError, response.content[0].text)
+                self.assertEqual(self.manager.require_governed_approval.await_count, 1 if governed else 0)
+
+    async def test_two_profiles_that_disagree_are_still_refused_when_one_is_unknown(self) -> None:
+        # Governed in one argument does not excuse the other: a mistyped value is refused wherever it is.
+        for arguments in (
+            {"policy_profile": "governed", "workflow_profile": "strict"},
+            {"policy_profile": "strict", "workflow_profile": "governed"},
+        ):
+            with self.subTest(arguments=arguments):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(name="browser.execute_action", arguments={**self.GOVERNED_CALL, **arguments})
+                )
+
+                self.assertTrue(response.isError, response.content[0].text)
+                self.assertEqual(response.structuredContent["error"], "workflow_profile must be one of: fast, governed")
+        self.manager.execute_decision.assert_not_awaited()
+        self.manager.require_governed_approval.assert_not_awaited()
+
     async def test_a_tool_that_is_not_governed_still_ignores_an_unknown_profile(self) -> None:
         for profile in self.UNKNOWN_PROFILES:
             with self.subTest(profile=repr(profile)):
