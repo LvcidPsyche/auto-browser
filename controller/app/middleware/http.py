@@ -67,8 +67,9 @@ _CANCEL_CHAIN_MAX = 16
 # cancels what is left, with no message. A client that reads takes the chunk at once. One whose buffer is still full
 # gets this second more, so its task and its connection do not stay for the whole cleanup (up to the stop's grace);
 # a cleanup shorter than that ends the loop inside the wait, and that cancel is ended quietly as well. Either way the
-# body is left unfinished and the layer returns: uvicorn closes the connection, with one ERROR line and no traceback
-# ("ASGI callable returned without completing response.").
+# body is left unfinished and the layer returns: uvicorn writes one ERROR line, with no traceback ("ASGI callable
+# returned without completing response."), and asks the transport to close, which a transport still holding bytes
+# its client has not taken does once they are gone, or the process ends.
 STREAM_CLOSING_SEND_SECONDS = 1.0
 
 
@@ -105,10 +106,13 @@ class EventStreamShutdownMiddleware:
     That order rests on a send that waits before it writes, as uvicorn's does: a server whose send wrote the last
     chunk and then waited, cancelled in that wait, would be sent a second.
 
-    A client that has gone when the closing chunk is sent (an OSError from the server's send) has nobody to end the
-    body for: that is said in the one line and raised no further, or the quiet stop is a traceback again. Any other
-    error of that send is the server's refusal of the chunk, and is raised. A client that is there and does not read
-    is waited for STREAM_CLOSING_SEND_SECONDS and no longer, and the line says "ended" only once the chunk is out.
+    A client that has gone when the closing chunk is sent has nobody to end the body for. uvicorn's send writes
+    nothing to a connection that is lost and raises nothing, so there the line says "ended" (the controller's own
+    streams end by themselves when their client goes, and come to no line at all). The OSError branch is for a
+    server whose send does raise: that is said in the one line and raised no further, or the quiet stop is a
+    traceback again. Any other error of that send is the server's refusal of the chunk, and is raised. A client
+    that is there and does not read is waited for STREAM_CLOSING_SEND_SECONDS and no longer, and for it the line
+    says "ended" only once the send has returned.
     """
 
     def __init__(self, app: ASGIApp) -> None:

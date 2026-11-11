@@ -168,6 +168,17 @@ class RoutesExtensionsTests(unittest.TestCase):
                 self.assertEqual((answer.status_code, answer.json()), (422, {"detail": "url_pattern required"}))
         self.assertEqual(client.get("/sessions/session-1/network/hooks").json()["hooks"], [])
 
+    def test_a_hook_pattern_of_the_wrong_type_is_refused_before_its_session_is_looked_for(self) -> None:
+        # The body is a model, and a model is judged before the route runs: with a session the controller does not
+        # know, a pattern that is no string answers 422 where it answered 404. Any other body meets the session first.
+        client = self.make_client()
+
+        refused = client.post("/sessions/missing/network/hooks", json={"url_pattern": 5})
+        others = [client.post("/sessions/missing/network/hooks", json=body) for body in ({"url_pattern": "*.json"}, {})]
+
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertEqual([answer.status_code for answer in others], [404, 404])
+
     def test_the_real_inspector_keeps_no_pattern_the_route_refused(self) -> None:
         from app.network_inspector import NetworkInspector
 

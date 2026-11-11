@@ -488,10 +488,12 @@ All notable changes to auto-browser are documented here.
   Glama inspection image for parity only: a stop there signals the stdio bridge and never uvicorn, so the flag
   changes nothing in it). At the limit uvicorn cancels an open stream, and the controller finishes the stream's
   body and logs one INFO line for it, where uvicorn would log `Exception in ASGI application` with a traceback for
-  each. A stream whose body had already ended is sent nothing more, and one whose client had gone by then is no
-  error: the line says which. A client that is connected and no longer reads is waited for one second more: its
-  stream is left unfinished and uvicorn closes the connection with
-  `ASGI callable returned without completing response.` at ERROR, with no traceback. See the upgrade note.
+  each. A stream whose body had already ended is sent nothing more, and its line says so. One whose client had gone
+  by then is no error either: the controller's own streams end by themselves when their client goes and leave no
+  line, and uvicorn's `send` writes nothing to a connection that is lost and raises nothing, so a stream still open
+  there is logged as ended. A client that is connected and no longer reads is waited for one second more: its
+  stream is left unfinished, and uvicorn logs `ASGI callable returned without completing response.` at ERROR, with
+  no traceback, and asks the transport to close. See the upgrade note.
 - **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
   after the change the event records had been made: `browser.set_cookies` with one in a cookie's name set the
   cookies, then failed with no audit event, no receipt and no log line. The audit store now writes U+FFFD in its
@@ -784,8 +786,9 @@ All notable changes to auto-browser are documented here.
   number or a boolean as the pattern. Matching then raised for every request of the session that finished or
   failed (one DEBUG line each), so no hook registered after it was called again, and
   `DELETE /sessions/{id}/network/hooks/{pattern}`, whose pattern is text, could not remove it. A list or an object
-  answered `500`. Each now answers `422` and nothing is stored; a missing or an empty pattern answers
-  `422` `url_pattern required` as before.
+  answered `500`. Each now answers `422` and nothing is stored, and is refused before the session is looked for:
+  with a session the controller does not know it answers `422` where it answered `404`. A missing or an empty
+  pattern answers `422` `url_pattern required` as before.
 - **One MCP `initialize` can no longer stop every later one.** The transport keeps the `clientInfo` and the
   `capabilities` of each MCP session, and writes all its sessions to one file at every `initialize`. A lone
   surrogate in either (JSON's `"\ud800"` reads as one) could not be written as UTF-8: the caller was answered
