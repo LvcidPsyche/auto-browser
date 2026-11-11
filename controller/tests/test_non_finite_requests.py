@@ -93,6 +93,9 @@ class RestBodyTests(unittest.TestCase):
             ("/sessions/s1/observe", b'{"nope": -Infinity}', ("nope",)),
             ("/sessions/s1/observe", b'{"limit": "x", "preset": {"deep": [1e999]}}', ("limit",)),
             ("/mcp/tools/call", b'{"name": "browser.observe", "arguments": NaN}', ("arguments",)),
+            # Refused by a validator of the model's own: that error carries the exception itself (its ctx), which
+            # the handler's answer has to encode before it is written.
+            ("/sessions/s1/actions/navigate", b'{"url": "javascript:1", "extra": NaN}', ("url",)),
         ):
             with self.subTest(body=body):
                 self.assert_refused(path, body, *field)
