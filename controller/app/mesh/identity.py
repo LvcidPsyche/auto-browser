@@ -139,8 +139,8 @@ def _is_a_publishs_temp_file(entry: Path) -> bool:
         return True
 
 
-def _read_while_another_start_writes(read: Callable[[], _T]) -> _T:
-    """``read``, retried for a short bound: another start may be writing the file it reads.
+def _retried_while_another_start_writes(step: Callable[[], _T]) -> _T:
+    """``step``, retried for a short bound: another start may be writing the file it reads or publishes.
 
     A start can find the private key empty or part-written (_write_private_file creates it, then fills it), by either
     way in (the file was already there, or the exclusive create lost), and on Windows a file another start is replacing
@@ -150,11 +150,27 @@ def _read_while_another_start_writes(read: Callable[[], _T]) -> _T:
     deadline = time.monotonic() + _FILE_BEING_WRITTEN_WAIT_SECONDS
     while True:
         try:
-            return read()
+            return step()
         except (ValueError, OSError):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(_FILE_BEING_WRITTEN_POLL_SECONDS)
+
+
+def _publish_unless_there(path: Path, text: str) -> None:
+    """Publish ``text`` at ``path`` whole (atomic_write_text), unless the file is there; with a read's patience.
+
+    On Windows a file another start has open, to read it or to put its own copy in place, refuses this start's rename
+    for longer than replace_retrying waits: with eight starts at once a start failed there. Each try looks again
+    first, as what refused the rename may be the start that has published the file since (the same file: every start
+    derives it from the one key).
+    """
+
+    def publish() -> None:
+        if not path.exists():
+            atomic_write_text(path, text)
+
+    _retried_while_another_start_writes(publish)
 
 
 class NodeIdentity:
@@ -189,20 +205,18 @@ class NodeIdentity:
         pub_raw = self._public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # 32 bytes
 
         # Write/verify public key file. Published whole, as is the meta below: another start can be reading them.
-        if not pub_path.exists():
-            pub_pem = self._public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-            atomic_write_text(pub_path, pub_pem.decode("ascii"))
+        pub_pem = self._public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+        _publish_unless_there(pub_path, pub_pem.decode("ascii"))
 
         self._node_id = hashlib.sha256(pub_raw).hexdigest()
         self._pubkey_b64 = base64.b64encode(pub_raw).decode()
 
         # Write/verify meta
-        if not meta_path.exists():
-            atomic_write_text(meta_path, json.dumps({"node_id": self._node_id, "pubkey_b64": self._pubkey_b64}))
+        _publish_unless_there(meta_path, json.dumps({"node_id": self._node_id, "pubkey_b64": self._pubkey_b64}))
 
         # A consistency check, not tamper detection: meta.json sits in the same directory as the key, so whoever
         # can replace the key can replace it too. It catches a corrupt file or keys mixed from two identities.
-        stored = _read_while_another_start_writes(lambda: json.loads(meta_path.read_text()))
+        stored = _retried_while_another_start_writes(lambda: json.loads(meta_path.read_text()))
         if stored.get("node_id") != self._node_id:
             raise RuntimeError(
                 "mesh.identity: stored node_id does not match the key (corrupt or mixed identity directory): "
@@ -216,7 +230,7 @@ class NodeIdentity:
         # file: a key that cannot be tightened would otherwise write its warning at every try.
         if _POSIX:
             _tighten_a_loose_key(priv_path)
-        return _read_while_another_start_writes(
+        return _retried_while_another_start_writes(
             lambda: Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes()))
         )
 

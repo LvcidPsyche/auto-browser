@@ -588,12 +588,14 @@ All notable changes to auto-browser are documented here.
 - **A start that races another for the mesh or Witness key no longer trips over the other's files.** The loser of
   the race raised `FileExistsError`, which failed that start; it now loads the key the other start made, retrying
   for up to 2 seconds while the file is still being written, and the public key and `node_meta.json` are published
-  whole, so a reader never sees part of one. A key still unreadable when the wait ends is treated as before. Only
-  the read is retried: a loose key's mode is put right, or its warning written, once. The temp file a publish
-  keeps beside a file until it is whole (`.node_public.pem.<random>.tmp`), another start's or one a killed start
-  left, is one of the identity's own files: it no longer makes a group- or world-accessible identity directory
-  read as holding other files, which left its mode as it was. Only a regular file is such a temp file: a directory
-  or a link under that name is still another's entry. (R5C-8)
+  whole, so a reader never sees part of one. A key still unreadable when the wait ends is treated as before. The
+  publish of those two files has the same 2 seconds: on Windows a rename onto a file another start has open is
+  refused, and with eight starts at once one of them failed there. A try that finds the file published by then
+  leaves it. A loose key's mode is put right, or its warning written, once, however often its read is retried.
+  The temp file a publish keeps beside a file until it is whole (`.node_public.pem.<random>.tmp`), another start's
+  or one a killed start left, is one of the identity's own files: it no longer makes a group- or world-accessible
+  identity directory read as holding other files, which left its mode as it was. Only a regular file is such a
+  temp file: a directory or a link under that name is still another's entry. (R5C-8)
 - **The session replay page's URL line now shows, and links only an http(s) URL.** The page read a key a session
   summary and a stored record do not have (`url`, not `current_url`), so its URL line never rendered. It now shows
   the session's URL, as a link with no opener or referrer when it is http(s), and as plain text otherwise. (AUTH-37)

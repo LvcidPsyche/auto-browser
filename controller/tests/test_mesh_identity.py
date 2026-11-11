@@ -275,6 +275,78 @@ class NodeIdentityPublishedFilesTests(unittest.TestCase):
 
         self.assertEqual(meta.read_text(encoding="utf-8"), before)
 
+    def _refusing(self, refusals: dict[str, int], *, when_first_refused=None):
+        """os.replace, refusing the first ``refusals[name]`` renames onto each published file, and counting the rest.
+
+        As Windows refuses a rename while another process has the destination open, to read it or to replace it.
+        """
+        real_replace = os.replace
+        landed: dict[str, int] = {}
+        first = dict.fromkeys(refusals, True)
+
+        def replace(source, destination):
+            name = Path(destination).name
+            if refusals.get(name, 0) > 0:
+                refusals[name] -= 1
+                if first[name] and when_first_refused is not None:
+                    when_first_refused(Path(source), Path(destination))
+                first[name] = False
+                raise PermissionError(13, "Access is denied")
+            landed[name] = landed.get(name, 0) + 1
+            real_replace(source, destination)
+
+        return patch.object(os, "replace", replace), landed
+
+    def _temp_files_left(self) -> list[str]:
+        return sorted(entry.name for entry in self.dir.iterdir() if entry.name.endswith(".tmp"))
+
+    def test_a_publish_refused_for_longer_than_one_rename_is_retried_still_goes_through(self):
+        # With eight starts at once on Windows, a start's rename onto node_meta.json was refused for longer than the
+        # tenth of a second replace_retrying gives it, and that start failed: the publish was outside the reads' wait.
+        longer = utils_module.RENAME_ATTEMPTS + 2
+        replacing, landed = self._refusing({"node_public.pem": longer, "node_meta.json": longer})
+
+        with replacing:
+            identity = NodeIdentity(self.dir)
+
+        self.assertEqual(landed, {"node_public.pem": 1, "node_meta.json": 1})
+        self.assertEqual(json.loads((self.dir / "node_meta.json").read_text())["node_id"], identity.node_id)
+        self.assertIn("-----END PUBLIC KEY-----", (self.dir / "node_public.pem").read_text())
+        self.assertEqual(self._temp_files_left(), [], "a try that was refused left its temp file")
+
+    def test_a_file_another_start_published_while_this_one_was_refused_is_left_as_it_is(self):
+        # What refused the rename may be the start that has published the file since: each try looks again.
+        def another_start_publishes(source: Path, destination: Path) -> None:
+            destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+        never = 10**6
+        replacing, landed = self._refusing(
+            {"node_public.pem": never, "node_meta.json": never}, when_first_refused=another_start_publishes
+        )
+
+        with replacing:
+            identity = NodeIdentity(self.dir)
+
+        self.assertEqual(landed, {})
+        self.assertEqual(json.loads((self.dir / "node_meta.json").read_text())["node_id"], identity.node_id)
+        self.assertEqual(self._temp_files_left(), [])
+
+    def test_a_publish_that_stays_refused_raises_by_the_bound(self):
+        never = 10**6
+        replacing, landed = self._refusing({"node_public.pem": never})
+
+        with (
+            patch.object(identity_module, "_FILE_BEING_WRITTEN_WAIT_SECONDS", 0.3),
+            patch.object(identity_module, "_FILE_BEING_WRITTEN_POLL_SECONDS", 0.01),
+            replacing,
+            self.assertRaises(PermissionError),
+        ):
+            NodeIdentity(self.dir)
+
+        self.assertEqual(landed, {})
+        self.assertFalse((self.dir / "node_public.pem").exists())
+        self.assertEqual(self._temp_files_left(), [])
+
     @_POSIX_ONLY
     def test_the_published_files_keep_the_mode_an_ordinary_write_gave_them(self):
         NodeIdentity(self.dir)
