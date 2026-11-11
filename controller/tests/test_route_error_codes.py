@@ -878,26 +878,88 @@ def test_a_shared_observe_of_a_refused_page_is_answered_as_before_and_writes_no_
     assert [r for r in caplog.records if r.name.startswith("app.routes")] == []
 
 
-def test_unknown_approval_is_404(client: TestClient) -> None:
-    # execute_approval raises a plain KeyError(approval_id); GET /approvals/{id}
-    # already answers that 404 through the app handler.
-    response = client.post("/approvals/nope/execute")
-    assert response.status_code == 404, response.text
-    assert response.json() == {"detail": "Not found: nope"}
+APPROVAL_ID_ROUTES = [
+    Route("get", "/approvals/{}", None, "get_approval"),
+    Route("get", "/approvals/{}/arguments", None, "approval_arguments"),
+    Route("post", "/approvals/{}/approve", {}, "approve"),
+    Route("post", "/approvals/{}/reject", {}, "reject"),
+    Route("post", "/approvals/{}/execute", None, "execute_approval"),
+]
+
+
+def _with_id(route: Route, approval_id: str) -> Route:
+    return Route(route.verb, route.path.format(approval_id), route.body, route.method)
+
+
+@pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
+def test_an_unknown_approval_id_is_an_ordinary_404_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # The store raises a plain KeyError(approval_id) and nothing mapped it, so the app's handler answered it: with
+    # its warning for a KeyError nothing maps, forty lines of traceback at WARNING for a caller's typo.
+    with caplog.at_level(logging.WARNING):
+        response = _call(client, _with_id(route, "nope"))
+
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: nope"})
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("app")] == []
+
+
+@pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
+def test_an_unknown_approval_id_of_any_length_is_cut_in_the_answer(client: TestClient, route: Route) -> None:
+    # The 404 repeated the id whole: a path of 60,000 characters was answered with a body of 60,025.
+    response = _call(client, _with_id(route, "x" + "y" * 60_000))
+
+    assert response.status_code == 404, response.text[:200]
+    detail = response.json()["detail"]
+    assert detail.startswith("Not found: xyyyy") and detail.endswith("y..."), detail[-40:]
+    assert len(response.text) < 300
+
+
+@pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
+def test_an_approval_routes_other_key_errors_are_not_an_unknown_approval(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # Only the KeyError that names the id asked for is the store's "no such approval". Any other still reaches the
+    # app's handler: a bug's is logged there, and a session that has gone keeps its own answer.
+    route = _with_id(route, "a-1")
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: internal_dict_key"})
+    assert ["unmapped KeyError" in r.getMessage() for r in caplog.records if r.name == "app.main"] == [True]
+
+    with _raising(route, SessionNotFoundError("a-1", status="closed")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()["code"]) == (404, "session_closed")
+
+
+def _unmapped(client: TestClient, caplog: pytest.LogCaptureFixture, error: KeyError, route: Route = SESSION_ROUTES[0]):
+    """The answer to a KeyError nothing maps, and the one record the app's handler writes for it."""
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, error):
+        response = _call(client, route)
+    assert response.status_code == 404, response.text[:200]
+    logged = [r for r in caplog.records if r.name == "app.main" and r.levelno == logging.WARNING]
+    assert logged, "an unmapped KeyError was answered 404 without a log line"
+    (record,) = logged
+    assert "unmapped KeyError" in record.getMessage()
+    return response, record
+
+
+def _as_a_handler_writes(record: logging.LogRecord) -> str:
+    """The record's message and whatever a handler writes under it: the traceback of exc_info, a stack."""
+    return logging.Formatter().format(record)
 
 
 def test_unmapped_key_error_is_404_and_logged(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
     # A plain KeyError from a bug looks the same to the client as an unknown id,
     # so the handler is the only place it can be told apart.
-    route = SESSION_ROUTES[0]
-    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
-        response = _call(client, route)
-    assert response.status_code == 404, response.text
+    response, record = _unmapped(client, caplog, KeyError("internal_dict_key"))
     assert response.json() == {"detail": "Not found: internal_dict_key"}
-    logged = [r for r in caplog.records if r.name == "app.main" and r.levelno == logging.WARNING]
-    assert logged, "an unmapped KeyError was answered 404 without a log line"
-    assert "unmapped KeyError" in logged[0].getMessage()
-    assert logged[0].exc_info and logged[0].exc_info[0] is KeyError
+    first, *where = record.getMessage().splitlines()
+    assert first.startswith(f"unmapped KeyError on 'GET' '/sessions/{SID}/observe': answered 404 for KeyError: ")
+    assert "internal_dict_key" in first
+    # Where it was raised is in the message (log_hidden_cause), and not a traceback a handler prints under it.
+    assert [line for line in where if line.lstrip().startswith('File "')], where
+    assert record.exc_info is None and _as_a_handler_writes(record) == record.getMessage()
 
 
 def test_an_unmapped_key_errors_log_line_shows_a_control_character_of_the_path_escaped(
@@ -905,12 +967,9 @@ def test_an_unmapped_key_errors_log_line_shows_a_control_character_of_the_path_e
 ) -> None:
     # request.url.path drops a line feed and a carriage return and nothing else: an ESC or a vertical tab the caller
     # put in the path reached the log as itself.
-    with caplog.at_level(logging.WARNING, logger="app.main"):
-        response = client.post("/approvals/no%1B[2Jpe%0B/execute")
-    assert response.status_code == 404, response.text
-    logged = [r for r in caplog.records if r.name == "app.main" and "unmapped KeyError" in r.getMessage()]
-    assert logged, "an unmapped KeyError was answered 404 without a log line"
-    message = logged[0].getMessage()
+    route = Route("get", "/sessions/no%1B[2Jpe%0B", None, "get_session_record")
+    _response, record = _unmapped(client, caplog, KeyError("internal_dict_key"), route)
+    message = record.getMessage()
     assert "\x1b" not in message and "\x0b" not in message
     assert "\\x1b[2Jpe" in message
 
@@ -920,14 +979,43 @@ def test_an_unmapped_key_errors_log_line_cuts_a_path_of_any_length(
 ) -> None:
     # The path is the caller's, as long as the server lets a request line be.
     route = Route("get", "/sessions/" + "s" * 5000, None, "get_session_record")
-    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
-        response = _call(client, route)
-    assert response.status_code == 404, response.text
-    logged = [r for r in caplog.records if r.name == "app.main" and "unmapped KeyError" in r.getMessage()]
-    assert logged, "an unmapped KeyError was answered 404 without a log line"
-    message = logged[0].getMessage()
-    assert "/sessions/ssss" in message
-    assert len(message) < 400
+    _response, record = _unmapped(client, caplog, KeyError("internal_dict_key"), route)
+    first = record.getMessage().splitlines()[0]
+    assert "/sessions/ssss" in first
+    assert len(first) < 400
+
+
+def test_an_unmapped_key_errors_whole_record_is_cut_whatever_the_key_holds(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A KeyError quotes its key, an id as often as not, and the record carried the error whole (exc_info) under a
+    # path cut at 200 characters: an id of 60,000 wrote a record of 63,000, and the 404 repeated it as well.
+    response, record = _unmapped(client, caplog, KeyError("k" * 60_000))
+
+    first = record.getMessage().splitlines()[0]
+    assert "kkkk" in first and "(cut from 60" in first and first.endswith(" characters)"), first[-80:]
+    assert len(first) < 600
+    assert "k" * 300 not in _as_a_handler_writes(record)
+    detail = response.json()["detail"]
+    assert detail.startswith("Not found: kkkk") and detail.endswith("k..."), detail[-40:]
+    assert len(response.text) < 300
+
+
+class _TextAsItIs(KeyError):
+    """A KeyError that prints its text unquoted, as SessionNotFoundError does: a plain one prints its key's repr."""
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+def test_an_unmapped_key_errors_text_starts_no_line_of_the_record(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    _response, record = _unmapped(client, caplog, _TextAsItIs("id\nWARNING:app.main:forged by a caller\r\x85end"))
+
+    first, *where = _as_a_handler_writes(record).splitlines()
+    assert "forged by a caller" in first
+    assert [line for line in where if "forged" in line] == [], where
 
 
 def test_unknown_session_is_not_logged_as_an_unmapped_key_error(

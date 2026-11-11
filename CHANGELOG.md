@@ -280,8 +280,8 @@ All notable changes to auto-browser are documented here.
   logged with the count. At most 1024 client hosts are remembered, the oldest forgotten first with its count. Two
   more refusals are answered ahead of the rate limiter, and each now has such a window of its own: a request whose
   `Host` is no loopback name, by client host, and a request from a session's browser network, by its address. A
-  path or a `Host` in any of these lines, and the path in the `unmapped KeyError` warning, is cut at 200 characters:
-  one refused request could write a line as long as the server lets a request line be.
+  path or a `Host` in any of these lines, and the path and the error's text in the `unmapped KeyError` warning, are
+  cut at 200 characters: one refused request could write a line as long as the server lets a request line be.
 - **A mesh peer can no longer write a line of its own into the controller's log.** The capability a registered
   peer's signed request asks for, and the session id it names, were logged as sent: a line break in either ended the
   line. Both are logged quoted now, in the `mesh.policy.denied`, `mesh.policy: PERMIT`,
@@ -633,6 +633,18 @@ All notable changes to auto-browser are documented here.
   (the trigger's body holds the webhook key); and the frames are part of the message. One refusal's text held the
   caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
   name. It now says `The https URL has no host name`, to a tool's caller too.
+- **An unknown approval id no longer writes a traceback to the log, and no `404` repeats a long id whole.** A REST
+  route that maps no answer of its own for a `KeyError` gets the app's `404` `Not found: <key>` and its
+  `unmapped KeyError` warning, which is there to tell a bug from an unknown id. The five approval routes by id
+  (`GET /approvals/{id}` and its `/arguments`, `POST` `/approve`, `/reject` and `/execute`) mapped none for an id no
+  approval answers to, so a caller's typo wrote that warning with a traceback of some forty lines. They answer the
+  same `404` now and write nothing. The warning carried the error by its traceback, which quotes the key whole under
+  a path cut at 200 characters, and the `404` repeated the key: an id of 60,000 characters wrote a record of 63,000
+  and came back in a body of 60,000. The warning now holds the method, the path, the error's class and text and the
+  last three frames it was raised through, the caller's texts escaped and cut at 200 characters as in the entry
+  above, and the `404` cuts the key at 200 characters, on the approval routes as well. `GET /agent/jobs/{id}`,
+  `GET /auth-profiles/{name}`, `GET /crons/{id}` and `GET /sessions/{id}/auth-state` still write the warning for an
+  id they do not know.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host

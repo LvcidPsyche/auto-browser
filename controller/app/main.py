@@ -21,6 +21,7 @@ from .config import get_settings
 from .middleware import install_controller_http_middleware
 from .middleware.hosts import install_controller_host_middleware
 from .proxy_personas import warn_about_ownerless_personas
+from .routes._utils import log_hidden_cause
 from .routes.agent import create_agent_router
 from .routes.auth_profiles import create_auth_profiles_router
 from .routes.mcp import create_mcp_router
@@ -164,11 +165,13 @@ async def handle_key_not_found(request: Request, exc: KeyError) -> SafeJSONRespo
         return SafeJSONResponse(status_code=404, content=content)
     # A plain KeyError is either an unknown id a service chose to raise as one or a bug
     # reaching the client as a 404; the log line is the only way to tell them apart.
-    # %r: the path is the caller's, decoded, and a control character in it must not reach the log as itself. Cut, as
-    # in the refusals' lines: it is as long as the server lets a request line be.
-    logger.warning("unmapped KeyError on %s %r", request.method, capped_for_log(request.url.path), exc_info=exc)
+    # The path is the caller's, decoded, and so is the key the error quotes as often as not (an id from the path):
+    # a control character in either must not reach the log as itself, and each is as long as the server lets a
+    # request line be. So the error is written as a route's hidden cause is (log_hidden_cause: quoted, cut, with the
+    # frames nearest the raise) and not by exc_info, which prints its text whole; the answer cuts the key as well.
+    log_hidden_cause(logger, 404, exc, "unmapped KeyError on %s %s", request.method, request.url.path)
     key = exc.args[0] if exc.args else "unknown"
-    return SafeJSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
+    return SafeJSONResponse(status_code=404, content={"detail": f"Not found: {capped_for_log(str(key))}"})
 
 
 @app.exception_handler(BrowserActionError)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,6 +17,7 @@ from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError, WebhookKeyRefusedError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
+from ..utils import capped_for_log
 from ._utils import (
     bounded_limit,
     cron_store_errors,
@@ -50,6 +53,24 @@ CRON_TRIGGER_RUN_REFUSED_DETAIL = (
     "The job's run could not start: the controller refused its session, or the job as it is stored. The webhook "
     "key was accepted; the server log names the cause."
 )
+
+
+@contextmanager
+def _unknown_approval_is_404(approval_id: str) -> Iterator[None]:
+    """Answer the KeyError the approval stores raise for this id as the 404 it is, with no line in the log.
+
+    An id no record answers to, a record that no longer validates and another operator's approval all raise
+    KeyError(approval_id). Nothing mapped it, so it reached the app's handler for a KeyError nothing maps
+    (app/main.py), which answers this 404 and writes a WARNING with where the error was raised: for a caller's typo.
+    Any other KeyError still goes there (a bug's, or a session that has gone, which keeps its own answer). The id is
+    the caller's, as long as the server lets a request line be: the answer carries it cut, as that handler's does.
+    """
+    try:
+        yield
+    except KeyError as exc:
+        if exc.args != (approval_id,):
+            raise
+        raise HTTPException(status_code=404, detail=f"Not found: {capped_for_log(approval_id)}") from None
 
 
 def create_operations_router(
@@ -94,13 +115,15 @@ def create_operations_router(
     @router.get("/approvals/{approval_id}")
     async def get_approval(approval_id: str) -> dict[str, Any]:
         with typed_route_errors(logger, "get approval failed for approval %s", approval_id):
-            return await manager.get_approval(approval_id)
+            with _unknown_approval_is_404(approval_id):
+                return await manager.get_approval(approval_id)
 
     # A tool call's whole arguments, which the approval's reason previews; the record's access rule.
     @router.get("/approvals/{approval_id}/arguments")
     async def get_approval_arguments(approval_id: str) -> dict[str, Any]:
         with typed_route_errors(logger, "approval arguments failed for approval %s", approval_id):
-            return await manager.approval_arguments(approval_id)
+            with _unknown_approval_is_404(approval_id):
+                return await manager.approval_arguments(approval_id)
 
     # A decision refused for what the server knows (an approval its action holds, or one whose
     # arguments or text are gone) answers with why: ServerStateRefusal names nothing an agent
@@ -109,7 +132,8 @@ def create_operations_router(
     async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "approve failed for approval %s", approval_id, refusal=CONFLICT):
             try:
-                return await manager.approve(approval_id, comment=payload.comment)
+                with _unknown_approval_is_404(approval_id):
+                    return await manager.approve(approval_id, comment=payload.comment)
             except ServerStateRefusal as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
 
@@ -117,14 +141,16 @@ def create_operations_router(
     async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "reject failed for approval %s", approval_id, refusal=CONFLICT):
             try:
-                return await manager.reject(approval_id, comment=payload.comment)
+                with _unknown_approval_is_404(approval_id):
+                    return await manager.reject(approval_id, comment=payload.comment)
             except ServerStateRefusal as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
 
     @router.post("/approvals/{approval_id}/execute")
     async def execute_approval(approval_id: str) -> dict[str, Any]:
         with typed_route_errors(logger, "approval execution failed for approval %s", approval_id, refusal=CONFLICT):
-            return await manager.execute_approval(approval_id)
+            with _unknown_approval_is_404(approval_id):
+                return await manager.execute_approval(approval_id)
 
     @router.get("/pii-scrubber")
     async def get_pii_scrubber() -> dict[str, Any]:
