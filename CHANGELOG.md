@@ -584,7 +584,10 @@ All notable changes to auto-browser are documented here.
   naming another operator's auth profile now answers `403` `Not permitted` and creates nothing. With the right key,
   `POST /crons/{id}/trigger` now answers `409` when the job's auth profile does not exist or has become another
   operator's since the job was made, in one fixed text for both that names no profile, path or owner; 1.17.0
-  answered `403` for a profile that had become another operator's, and `500` for a missing one.
+  answered `403` for a profile that had become another operator's, and `500` for a missing one. A profile whose
+  `profile.json` no longer parses answers that `409` too: it answered `403`, which the upgrade note reads as a
+  refused key. A file the operating system will not let the controller read answered that `403` as well, and is now
+  a `500`, the server's fault, as it is at `POST /crons`.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
@@ -628,7 +631,9 @@ All notable changes to auto-browser are documented here.
   Only the full queue is answered so. The resume route answered every `RuntimeError` as `503` with nothing logged, so
   a fault after the job was queued read as "try again later" with the job left queued: on all three routes any other
   error now answers `500` `Internal error` and is logged. A full queue's `503` is logged as well, on all three: one
-  warning that names the session, or the job for a resume, with no traceback.
+  warning that names the session, or the job for a resume, with no traceback. `POST /crons/{id}/trigger` answered
+  `500` when the queue refused its run, and now answers the same `503` with the same warning, naming the cron job;
+  the session the run was given is closed, as it was.
 - **One approval record with a time that cannot be read no longer stops the others.** A rejected tool call keeps its
   arguments until the rejection is older than the approval TTL, and the pass that removes them runs at every start
   and inside every request for an approval. It read the record's `decided_at` with nothing caught, so one record whose

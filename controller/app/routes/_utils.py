@@ -110,6 +110,16 @@ def internal_error(logger: Logger, message: str, *args: object) -> HTTPException
     return HTTPException(status_code=500, detail="Internal error")
 
 
+def queue_full(logger: Logger, refused: str, subject: str) -> HTTPException:
+    """The 503 a full job queue is answered with, after one line in the log that says so.
+
+    The HTTPException passes through typed_route_errors as it is, so nothing else logs the refusal. A warning with
+    no traceback: nothing is broken, and the caller is told to try again.
+    """
+    logger.warning("the agent job queue is full: refused %s %s", refused, subject)
+    return HTTPException(status_code=503, detail="Service unavailable")
+
+
 def _log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str, args: tuple[object, ...]) -> None:
     """Log what a fixed 4xx text hides: the route's message, the error, and where it was raised.
 

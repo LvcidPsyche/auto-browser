@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI
 
+from app.agent_jobs import AgentJobQueueFull
 from app.browser.services.auth_profiles import BrowserAuthProfileService
 from app.cron_service import CronService
 from app.models import OperatorIdentity
@@ -149,3 +150,84 @@ class CronAuthProfileRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 500)
         self.assertNotIn("chromium", response.text)
+
+    async def test_a_file_the_os_will_not_let_it_read_is_a_server_error_at_the_trigger_too(self) -> None:
+        # It answered 403 "Not permitted", which a caller is told to read as a wrong key: the key was right.
+        job_id, key = await self._job_with_profile("typo-profile")
+        self.create_session_error = PermissionError(errno.EACCES, "Permission denied", "/data/auth/state.json.enc")
+
+        with acting_as(ALICE):
+            response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": key})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("state.json", response.text)
+
+    async def test_a_trigger_whose_profiles_metadata_no_longer_parses_answers_the_same_409(self) -> None:
+        # Its owner cannot be checked, so nobody may open it: with the key proved, that is the profile's state too.
+        self.save_profile("damaged-since", owner="alice")
+        job_id, key = await self._job_with_profile("damaged-since")
+        (self.auth_root / "profiles" / "damaged-since" / "profile.json").write_text("{not json", encoding="utf-8")
+
+        with acting_as(ALICE):
+            response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": key})
+
+        self.assertEqual((response.status_code, response.json()), (409, {"detail": CRON_TRIGGER_AUTH_PROFILE_DETAIL}))
+        self.assert_names_nothing(response, "damaged-since")
+
+    async def test_a_wrong_key_for_a_job_whose_profile_is_damaged_is_still_only_a_wrong_key(self) -> None:
+        self.save_profile("damaged-since", owner="alice")
+        job_id, _key = await self._job_with_profile("damaged-since")
+        (self.auth_root / "profiles" / "damaged-since" / "profile.json").write_text("{not json", encoding="utf-8")
+
+        with acting_as(ALICE):
+            response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": "not-the-key"})
+
+        self.assertEqual((response.status_code, response.json()), (403, {"detail": "Not permitted"}))
+
+    async def _trigger_at_a_queue_that_raises(self, error: Exception) -> tuple[httpx.Response, str, list[str]]:
+        """A trigger with the right key, of a job whose run gets its session and is then refused by the queue."""
+        closed: list[str] = []
+
+        async def create_session(**_kwargs: Any) -> dict[str, Any]:
+            return {"id": "session-1"}
+
+        async def close_session(session_id: str) -> None:
+            closed.append(session_id)
+
+        async def enqueue_run(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise error
+
+        self.manager.create_session = create_session
+        self.manager.close_session = close_session
+        self.cron.job_queue = SimpleNamespace(enqueue_run=enqueue_run)
+        with acting_as(ALICE):
+            created = await self.cron.create_job(name="t", goal="g", webhook_enabled=True)
+            response = await self.client.post(
+                f"/crons/{created['id']}/trigger", json={"webhook_key": created["webhook_key"]}
+            )
+        return response, created["id"], closed
+
+    async def test_a_trigger_at_a_full_job_queue_answers_503_and_leaves_a_line_in_the_log(self) -> None:
+        # The queue's own refusal, which the three routes that queue a job answer 503: it answered 500 here, and a
+        # webhook's caller is the one that tries again later.
+        with self.assertLogs("app.routes.operations", level="WARNING") as logged:
+            response, job_id, closed = await self._trigger_at_a_queue_that_raises(
+                AgentJobQueueFull("Job queue is at capacity. Try again later.")
+            )
+
+        self.assertEqual((response.status_code, response.json()), (503, {"detail": "Service unavailable"}))
+        (record,) = logged.records
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertIn("queue is full", record.getMessage())
+        self.assertIn(job_id, record.getMessage())
+        self.assertIsNone(record.exc_info)
+        # The run's session is given back, and the job is free to fire again.
+        self.assertEqual(closed, ["session-1"])
+        self.assertEqual(self.cron._active_runs, {})
+
+    async def test_any_other_fault_of_the_queue_is_still_a_server_error_at_the_trigger(self) -> None:
+        response, _job_id, closed = await self._trigger_at_a_queue_that_raises(RuntimeError("the store is gone"))
+
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("the store is gone", response.text)
+        self.assertEqual(closed, ["session-1"])

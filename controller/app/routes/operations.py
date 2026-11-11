@@ -7,13 +7,15 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
 from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserUnreachableError
+from ..agent_jobs import AgentJobQueueFull
 from ..approvals import ServerStateRefusal
 from ..auth_state import AuthStateDecryptError
+from ..browser.services.auth_profiles import UncheckedAuthProfileError
 from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
-from ._utils import bounded_limit, cron_store_errors, persona_file_errors, typed_route_errors
+from ._utils import bounded_limit, cron_store_errors, persona_file_errors, queue_full, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ CRON_TRIGGER_SESSION_LIMIT_DETAIL = (
 )
 # The job's auth profile is gone, or is another operator's since the job was made: a read answers both as missing
 # (FileNotFoundError), and the trigger had no case for it. One text for both, which names no profile, path or owner.
+# And for a profile whose profile.json no longer parses (UncheckedAuthProfileError): nobody may open that one.
 CRON_TRIGGER_AUTH_PROFILE_DETAIL = (
     "The job's run could not start: its auth profile does not exist, or the job's owner may not open it. Save the "
     "profile as the job's owner, or delete the job and create it again with another profile."
@@ -233,8 +236,18 @@ def create_operations_router(
                 return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="Not found") from None
-        except PermissionError:
+        except UncheckedAuthProfileError:
+            # Raised where the run's session opens the job's profile, so the key is proved: not the 403 below.
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_AUTH_PROFILE_DETAIL) from None
+        except PermissionError as exc:
+            # The refusal of a key (an unknown id, no key, a wrong one), or of the run's session. One the OS raises
+            # carries an errno (a state file the process may not read): the server's fault, which "Not permitted",
+            # the answer for a wrong key, would hide. As the create's, and the FileNotFoundError below.
+            if exc.errno is not None:
+                raise
             raise HTTPException(status_code=403, detail="Not permitted") from None
+        except AgentJobQueueFull:  # and only that: any other RuntimeError is a fault. The run's session is released.
+            raise queue_full(logger, "a run of cron job", payload.job_id) from None
         except FileNotFoundError as exc:
             # A lookup's own (the job's auth profile) has no errno; one the OS raises names a server path and is not
             # a state the caller can change.

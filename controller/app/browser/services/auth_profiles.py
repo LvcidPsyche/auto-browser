@@ -60,6 +60,14 @@ class ForeignAuthProfileError(PermissionError):
     """require_access's refusal of a profile another operator owns: the only one that a read answers as missing."""
 
 
+class UncheckedAuthProfileError(PermissionError):
+    """read_metadata's strict refusal: the profile's profile.json does not parse, so its owner cannot be checked.
+
+    A class of its own for the caller that has to tell it from another refusal: the cron webhook trigger answers
+    403 for a wrong key and for nothing else it can name.
+    """
+
+
 def _no_saved_profile(profile_name: str) -> FileNotFoundError:
     # Named for the caller, not by the path under AUTH_ROOT: this is what an agent sees after a mistyped auth_profile.
     return FileNotFoundError(
@@ -895,7 +903,7 @@ class BrowserAuthProfileService:
         if isinstance(payload, dict):
             return payload
         if strict:
-            raise PermissionError(
+            raise UncheckedAuthProfileError(
                 f"auth profile '{profile_name}' has unreadable metadata, so its owner cannot be "
                 "checked; restore or delete its profile.json"
             )
