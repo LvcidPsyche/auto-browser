@@ -530,6 +530,46 @@ class RetentionTests(RetentionBase):
                     await _age(self.store, ids[name], days=31)
                 self.assertEqual(await self.store.prune_decided(), 0)
 
+    async def test_a_record_another_start_keys_between_a_decisions_read_and_its_write_keeps_the_files_key(
+        self,
+    ) -> None:
+        # Two processes over one APPROVAL_ROOT: this one keys alone, and a start that can read the key file rewrites a
+        # record stored before 1.18.0 under the file's key between this one's read of it and its write. The write
+        # compared with what the store held then, keyed, and put this process's own keyed text over the rewrite: no
+        # later start holds that key, so the operator's rejection made here no longer refused the agent's own
+        # approval of the call after the next good start. A record's action never changes once it is made, so the
+        # write takes the text the store holds, whatever it is.
+        for sqlite in (True, False):
+            with self.subTest(sqlite=sqlite):
+                self.root = Path(self.tmp.name) / f"approvals-race-{sqlite}"
+                self.db_path = Path(self.tmp.name) / f"state-race-{sqlite}.db"
+                self.store = await self._store(sqlite=sqlite)
+                rejected = await self._rejected_tool_call("a")
+                record = await self.store.get(rejected)
+                record.action = _tool_call("a")  # as 1.17.0 stored it
+                for backend in (self.store.file_store, self.store.sqlite_store):
+                    if backend is not None:
+                        await backend.upsert(record)
+                with patch.object(FileApprovalStore, "digest_key", side_effect=PermissionError(errno.EACCES, "denied")):
+                    with self.assertLogs("app.approvals", level="WARNING"):
+                        alone = await self._store(sqlite=sqlite)  # keys alone from here on: its key is its own
+                writes_back = alone._as_the_stores_hold_it
+                good_starts: list[ApprovalStore] = []
+
+                async def a_good_start_between(approval):
+                    good_starts.append(await self._store(sqlite=sqlite))  # rewrites the record under the file's key
+                    return await writes_back(approval)
+
+                with patch.object(alone, "_as_the_stores_hold_it", a_good_start_between):
+                    await alone.reject(rejected, "still no")
+
+                under_the_files_key = good_starts[0]._stored_action(_tool_call("a")).text
+                self.store = alone
+                self.assertEqual(await self._stored_texts(rejected), {under_the_files_key})
+                self.assertEqual((await alone.get(rejected)).decision_comment, "still no")
+                self.store = await self._store(sqlite=sqlite)
+                await self._asked_again_and_refused_the_agents_approval("a")
+
     async def test_a_record_whose_decision_time_cannot_be_read_is_kept_and_logged_once(self) -> None:
         undated = await self._decided("rejected", days=31, session_id="closed000001")
         garbled = await self._decided("executed", days=31)

@@ -1004,24 +1004,23 @@ class ApprovalStore:
             raise
 
     async def _as_the_stores_hold_it(self, approval: ApprovalRecord) -> ApprovalRecord:
-        """``approval`` to be written: in a process that keys alone, a copy with the plain stand-in its store holds.
+        """``approval`` to be written: in a process that keys alone, a copy with the action its store holds.
 
         Such a process rewrites no record stored before 1.18.0 (_key_stored_digests), but hands each out keyed under
         its own key (_handed_out), and a decision, a claim or a give-back wrote it back so. No later start holds that
         key: an operator's rejection made there, or made again, no longer stopped the agent's own approval of the
-        call after the next good start, whose retention removed it. Kept plain, it is keyed under the file's key by
-        that start, as a record nothing wrote; in this process it matches as before, both sides keyed in memory. Only
-        a stand-in the store holds plain, and only while the write keeps that call: one asked for in this process is
-        kept under its key.
+        call after the next good start, whose retention removed it. A record's action never changes once it is made
+        (a decision, a claim and a give-back change its status alone), so the action the store holds is written back,
+        whatever it is: plain, to be keyed under the file's key by the next good start, as a record nothing wrote; or
+        keyed under that key already, by a good process over the same store between this read and this write. In
+        this process it matches as before, both sides keyed in memory. A record the store does not hold yet (one
+        asked for in this process) is kept under this process's key.
         """
         if not self._keyed_by_this_process_alone:
             return approval
         try:
             stored = await self._primary.get(approval.id)
         except KeyError:
-            return approval
-        keyed = self._keyed(stored.action)
-        if keyed is stored.action or keyed != approval.action:
             return approval
         return approval.model_copy(update={"action": stored.action})
 
