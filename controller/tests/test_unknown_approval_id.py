@@ -200,6 +200,27 @@ class UnknownApprovalIdTests(SpendBase):
         self.assertTrue(answer.isError)
         self.assertEqual(answer.content[0].text, f"approval {approval_id} does not belong to session {ANOTHER_SESSION}")
 
+    async def test_another_operators_approval_in_a_session_nobody_owns_is_told_whose_it_is(self) -> None:
+        # Who may use an approval is the manager's rule, the session's owner, which the store asks (may_use): of a
+        # session nobody owns, anybody, and bob lists alice's approval there. The store's own rule, the operator the
+        # record names, would tell him an approval he can list is unknown. In the two-operator test above the two
+        # rules agree, as the session's owner is the record's.
+        self.session.owner = None
+        self._a_second_session("bob")
+        with acting_as(ALICE):
+            _decision, approval_id = await self.approved_click()
+
+        with acting_as(BOB):
+            listed = (await self.call("browser.list_approvals")).structuredContent
+            answer = await self.call(
+                "browser.execute_action", session_id=ANOTHER_SESSION, action=CLICK, approval_id=approval_id
+            )
+
+        self.assertEqual((await self.manager.approvals.get(approval_id)).owner, "alice")
+        self.assertIn(approval_id, [approval["id"] for approval in listed])
+        self.assertTrue(answer.isError)
+        self.assertEqual(answer.content[0].text, f"approval {approval_id} does not belong to session {ANOTHER_SESSION}")
+
     async def test_another_missing_thing_keeps_its_own_words(self) -> None:
         # Only a KeyError that names the presented id is the approval's.
         self.manager.execute_approval = AsyncMock(  # type: ignore[method-assign]
