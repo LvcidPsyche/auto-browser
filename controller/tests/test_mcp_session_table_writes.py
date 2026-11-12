@@ -549,10 +549,18 @@ class McpSessionTableStartTests(_Transport):
         self.assertEqual((walks.call_count, counted.call_count), (0, 0))
         self.assertEqual(dumps.call_count, 6)
 
+    def as_an_initialize_keeps(self, value: dict) -> str | None:
+        """The text an initialize keeps of ``value`` sent as its clientInfo, or None where it refuses it."""
+        answer = self.initialize(client_info=value)
+        self.assertEqual(answer.status_code, 200, answer.text[:300])
+        if "error" in answer.json():
+            return None
+        return self.transport._sessions[answer.headers[MCP_SESSION_HEADER]].client_json[0]
+
     def test_a_start_keeps_what_an_initialize_keeps_and_drops_what_it_refuses(self) -> None:
         cases = _start_cases()
-        # As the initialize's walk decides of each: None, or the text it measured.
-        walked = {name: mcp_transport._past_a_client_object_bound(value)[1] for name, value in cases.items()}
+        # As an initialize decides of each: None, or the text it keeps, its lone surrogates as U+FFFD.
+        walked = {name: self.as_an_initialize_keeps(value) for name, value in cases.items()}
         kept = {name for name, text in walked.items() if text is not None}
         self.assertTrue(0 < len(kept) < len(cases), kept)
         records = []
@@ -597,6 +605,48 @@ class McpSessionTableStartTests(_Transport):
         self.assertEqual(list(self.transport._sessions), ["plain"])
         (line,) = logs.output
         self.assertIn("1 MCP sessions", line)
+
+    def test_a_stored_field_holding_a_lone_surrogate_is_kept_as_an_initialize_keeps_it(self) -> None:
+        # Kept as it was read, it failed every later write of the table, which is written as UTF-8: each initialize
+        # by anybody answered 500. Only a table written by hand holds one, as every version has written it as UTF-8.
+        self.store.write_text(json.dumps([_record("by-hand", CLIENT_INFO, CAPABILITIES)]), encoding="utf-8")
+        self.assertIn('"client\\ud800"', self.store.read_text(encoding="utf-8"))
+
+        self.transport = self.transport_over_the_store()
+
+        session = self.transport._sessions["by-hand"]
+        kept = (_with(CLIENT_INFO, LONE, REPLACEMENT), _with(CAPABILITIES, LONE, REPLACEMENT))
+        self.assertEqual((session.client_info, session.client_capabilities), kept)
+        self.assertEqual(session.client_json, tuple(mcp_transport._compact_json(value) for value in kept))
+        headers = {MCP_SESSION_HEADER: "by-hand", MCP_PROTOCOL_HEADER: PROTOCOL}
+        listed = self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        self.assertEqual(listed.json(), {"jsonrpc": "2.0", "id": 2, "result": {"tools": []}})
+        made = self.assert_an_ordinary_answer(self.initialize())
+        self.assertEqual([record["id"] for record in self.stored()], ["by-hand", made])
+        (record, _) = self.stored()
+        self.assertEqual((record["client_info"], record["client_capabilities"]), kept)
+
+    def test_a_record_whose_other_fields_hold_a_lone_surrogate_is_passed_over(self) -> None:
+        # No version wrote one there, nor can an initialize make one: kept, it failed every later write of the table
+        # as a client field's did.
+        held = {
+            "id": "by-hand" + LONE,
+            "protocol_version": PROTOCOL + LONE,
+            "created_at": "2026-11-01" + LONE,
+            "last_used_at": "2026-11-01" + LONE,
+            "owner": "operator" + LONE,
+            "resource_subscriptions": ["browser://sessions" + LONE],
+        }
+        records = [{**_record(f"in {name}", {}, {}), name: value} for name, value in held.items()]
+        self.store.write_text(json.dumps([*records, _record("plain", {}, {})]), encoding="utf-8")
+
+        self.transport = self.transport_over_the_store()
+
+        self.assertEqual(list(self.transport._sessions), ["plain"])
+        made = self.assert_an_ordinary_answer(self.initialize())
+        self.assertEqual([record["id"] for record in self.stored()], ["plain", made])
 
 
 class McpSessionTableStartCollectorTests(_Transport):

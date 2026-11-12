@@ -879,15 +879,16 @@ class McpHttpTransport:
         for item in payload:
             if not isinstance(item, dict):
                 continue
-            client_info = self._coerce_dict(item.get("client_info"))
-            client_capabilities = self._coerce_dict(item.get("client_capabilities"))
-            # Measured before the session is made, by the text it keeps of each (McpSession.client_json).
-            info_json, capabilities_json = _stored_client_json(client_info), _stored_client_json(client_capabilities)
-            if info_json is None or capabilities_json is None:
+            # Measured before the session is made, by the text it keeps of each (McpSession.client_json), and kept as
+            # an initialize keeps it.
+            info = _stored_client_object(self._coerce_dict(item.get("client_info")))
+            capabilities = _stored_client_object(self._coerce_dict(item.get("client_capabilities")))
+            if info is None or capabilities is None:
                 # Written by a version that kept whatever a client sent. Its client is answered 404 "Unknown MCP
                 # session" and initializes again, as for a session that was evicted.
                 past_a_bound += 1
                 continue
+            (client_info, info_json), (client_capabilities, capabilities_json) = info, capabilities
             try:
                 session = McpSession(
                     id=str(item["id"]),
@@ -904,6 +905,11 @@ class McpHttpTransport:
                     measured_json=(info_json, capabilities_json),
                 )
             except Exception:
+                continue
+            # A lone surrogate in its other text, which no version wrote and no initialize makes, is a malformed record:
+            # kept, it failed every later write of the table, as one in a client field did.
+            others = (session.id, session.protocol_version, session.created_at, session.last_used_at, session.owner)
+            if holds_lone_surrogate((*others, session.resource_subscriptions)):
                 continue
             restored[session.id] = session
         if past_a_bound:
@@ -1117,6 +1123,21 @@ def _stored_client_json(value: dict[str, Any]) -> str | None:
     if len(written.encode("utf-8", "surrogatepass")) > MAX_CLIENT_OBJECT_JSON_BYTES:
         return None
     return None if _nested_deeper_than(written, MAX_CLIENT_OBJECT_DEPTH) else written
+
+
+def _stored_client_object(value: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """A clientInfo or capabilities a start read from the table, as an initialize keeps it (a lone surrogate as
+    U+FFFD), and its text as _compact_json writes it; or None where it is past a bound, as an initialize decides.
+
+    Measured as it was read and then, if it holds a lone surrogate, as it is kept, as the initialize measures what it
+    was sent and then what it keeps (see _handle_initialize). Only a table written by hand holds one, as every version
+    has written it as UTF-8: kept as it was read, it failed every later write of the table.
+    """
+    written = _stored_client_json(value)
+    if written is not None and holds_lone_surrogate(written):
+        value = without_lone_surrogates(value)
+        written = _stored_client_json(value)
+    return None if written is None else (value, written)
 
 
 def _nested_deeper_than(written: str, levels: int) -> bool:
