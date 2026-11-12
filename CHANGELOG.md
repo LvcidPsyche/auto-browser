@@ -278,7 +278,10 @@ All notable changes to auto-browser are documented here.
   secret, or could not be read", as its webhook's and SSE event's summary do (see Security). A client that retries
   the action from the `action` an approval answers, not from its own, now sends that text, which the approval does
   not match: retry with the action you asked with. The `text_preview` of a type whose text submits its form and
-  leaves the page (a search that ends in a newline) is now withheld, and that type's receipt is `restricted`.
+  leaves the page (a search that ends in a newline) is now withheld, and that type's receipt is `restricted`; so
+  is that of any type whose field does not have focus once the text is in, or lost it on the way (a text whose
+  Enter moves on to the next field, a field that blurs itself on Enter), and of one typed by a selector that
+  names a frame.
 
 ### Security
 
@@ -608,22 +611,32 @@ All notable changes to auto-browser are documented here.
   blocked record, no field read and nothing typed; the field was read before the scroll, the focus click and the
   clear, so a login form that makes its field a password field once it is focused (an honest pattern), or as the
   text goes in, had the text typed into a password field with its preview kept, by selector and by `element_id`;
+  the field read was the one the type named, not the one its text went to, so a text whose Enter sends focus on
+  to a password field (a login in two steps: a user name, Enter, the password) had the rest typed there with its
+  preview kept, as had a type by a selector that names a `label` around a password field, a frame whose document
+  holds one, or a component with one in its open shadow root;
   and an approval, which a type asks for before it runs (one labelled `post`, `payment`, `account_change` or
   `destructive`, say, and any type in a governed run), showed the text whole whenever the caller had
   not marked it `sensitive`, its webhook included. The preview is now withheld (`text_redacted: true`) when the
-  type's target is made, and given back only where the field, read after the focus and the clear just before the
-  first keystroke, and again once the text is in, reads as not secret both times; what is typed does not change.
-  A read that fails or is cancelled withholds it, and once the text is in that includes a field gone from the page:
-  a text whose Enter submits its form and leaves the page now keeps no preview (by selector, each attribute's read
-  then waits a second at most for the field). A type whose preview is withheld has a `restricted` receipt with a
+  type's target is made, and given back only where the node the text goes to reads as not secret and keeps focus:
+  the innermost focused element in the field the type names (through open shadow roots), which the type holds from
+  just before the first keystroke, after the focus and the clear, until the text is in, and reads through that
+  hold at both ends; what is typed does not change. A read that fails or is cancelled withholds it, and so does a
+  held node that is not the focused one once the text is in, or that lost focus on the way though it has it back:
+  a text whose Enter moves focus to another field keeps no preview, nor does one whose field the page replaced
+  or took away, one typed by a selector that names a frame (its text goes to a node of the frame's
+  document, which is not held), or one whose Enter submits its form and leaves the page. No read waits for a field
+  once the text is in, so that last type takes about as long as it did in 1.17.0 (by selector, the medians of
+  eight runs in Chromium: 2.5 s, 2.6 s in 1.17.0, and 3.1 s with the field found anew for each read, which waited
+  for one that was gone). A type whose preview is withheld has a `restricted` receipt with a
   `sensitive_input` concern, as the caller's `sensitive` flag gives it, without the page's observations before and
   after the type (no observation carries a field's value, but they hold its text excerpt, its interactable elements'
   labels and its URLs, for whoever reads the session's receipts). The policy was asked once, before the action ran,
   when only that flag could say the text was secret, and such a receipt was `standard` with no `sensitive_input`
   concern, though 1.17.0's entry says "a field an action finds sensitive only as it runs restricts that action's
   own receipt": that now holds. What the run was decided by (a block, an approval) is still the policy's answer
-  before it. An approval asked for a type now reads the field first, as the type reads it (by selector or
-  `element_id`, with the same bound): where it reads as secret or cannot be read, the approval says
+  before it. An approval asked for a type now reads the field first (the one its selector or `element_id` names:
+  no node has focus for the text yet): where it reads as secret or cannot be read, the approval says
   `text_hidden: true`, and its text reads "text hidden: its field reads as secret, or could not be read" in its
   summary, the queue and the dialog, and in every answer that hands the approval out (`GET /approvals` and
   `GET /approvals/{id}`, the approval tools, an approve's, a reject's and an execution's answer, and the
@@ -633,7 +646,9 @@ All notable changes to auto-browser are documented here.
   only a digest of it), and its field is not read for its approval. A typed text still shows: as the preview of a
   field read as not secret, and in the approval of one (a post's or a message's text is what its approver must
   see), which includes a field whose attributes do not say it is secret (a PIN field with no such type, name or
-  label) and one that turns secret and back again while the text goes in; in an approval's reason, the agent's own
+  label), one that turns secret and back again while the text goes in, one in a component's closed shadow root
+  (the component is read: the page shows no node past it), and a text whose focus goes to another field and back
+  on a page that stops focus events before its nodes hear them; in an approval's reason, the agent's own
   words, which can quote it; and in an agent step's own `decision` (in its answer, `agent_steps.jsonl` and
   `agent_runs.jsonl`), which is what the model wrote. The case of attributes that could not be read by selector is
   in every release from 0.1.0 (the function was `BrowserManager._locator_is_sensitive_input` before 1.1.0); the

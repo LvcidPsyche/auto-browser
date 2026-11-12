@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from app.action_errors import BrowserActionError
+from app.browser.element_world import READ
 from tests._chromium import requires_chromium
 from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromium: that module's autouse browser
     _shared_chromium,
@@ -194,3 +195,159 @@ async def test_a_type_by_element_id_whose_field_left_the_page_records_no_preview
         for kept in (line["target"], event["details"]["target"], receipt.target):
             assert "text_preview" not in kept and kept.get("text_redacted") is True, kept
         assert receipt.evidence_mode == "restricted"
+
+
+async def _typed_into(env: Any, path: str, by: str, label: str, selector: str, text: str) -> tuple[Any, list[Any]]:
+    """Type ``text`` into the field ``selector`` names, or the element_id of the one observe labels ``label``; the
+    session, and every record of the type's target (its answer, actions.jsonl line, audit entry and receipt) with the
+    receipt last."""
+    env.manager.settings.witness_enabled = True
+    session_id = await env.create(path)
+    session = env.manager.sessions[session_id]
+    spy = audit_spy(env)
+    if by == "selector":
+        target = {"selector": selector}
+    else:
+        items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+        (field,) = [item for item in items if item.get("label") == label]
+        target = {"element_id": field["element_id"]}
+    result = await env.manager.type(session_id, text=text, **target)
+    (line,) = _type_lines(session)
+    (event,) = _type_events(spy)
+    receipt = await _type_receipt(env, session_id)
+    return session, [result["target"], line["target"], event["details"]["target"], receipt.target, receipt]
+
+
+def _assert_withheld(records: list[Any]) -> None:
+    *targets, receipt = records
+    for kept in targets:
+        assert "text_preview" not in kept and kept.get("text_redacted") is True, kept
+    assert receipt.evidence_mode == "restricted"
+    assert "sensitive_input" in [concern.code for concern in receipt.concerns]
+
+
+# A user field whose Enter sends focus on to the password field, which takes the rest of the text (a login in two
+# steps); one whose password field's own Enter sends focus back, so the user field has focus again once the text is
+# in; and one whose page stops every focus event before it reaches a node, so nothing on the user field hears that
+# focus left it.
+TO_PASSWORD = "document.getElementById(`pw`).focus()"
+TO_USER = "document.getElementById(`user`).focus()"
+NO_FOCUS_EVENTS = (
+    "<script>for (const type of [`blur`, `focus`, `focusin`, `focusout`]) "
+    "window.addEventListener(type, (event) => event.stopImmediatePropagation(), true);</script>"
+)
+MOVES_FOCUS = {
+    "and-stays": (
+        f'<title>login</title><input id="user" aria-label="User" onkeydown="if (event.key === `Enter`) {TO_PASSWORD}">'
+        '<input id="pw" type="password">'
+    ),
+    "and-comes-back": (
+        f'<title>login</title><input id="user" aria-label="User" onkeydown="if (event.key === `Enter`) {TO_PASSWORD}">'
+        f'<input id="pw" type="password" onkeydown="if (event.key === `Enter`) {TO_USER}">'
+    ),
+    "and-no-event-says-so": (
+        f"<title>login</title>{NO_FOCUS_EVENTS}"
+        f'<input id="user" aria-label="User" onkeydown="if (event.key === `Enter`) {TO_PASSWORD}">'
+        '<input id="pw" type="password">'
+    ),
+}
+
+
+@pytest.mark.parametrize("moves", list(MOVES_FOCUS))
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_text_whose_enter_moves_focus_to_a_password_field_keeps_no_preview(
+    tmp_path: Path, by: str, moves: str
+) -> None:
+    # Both reads were of the field the type named, and the password went into another: the named field read plain
+    # before and after, so the preview kept "alice" and the password, under a standard receipt. The type holds the
+    # node that has focus at the first keystroke, and its preview comes back only if that node kept focus throughout.
+    text = f"alice\n{TEXT}" + ("\n" if moves == "and-comes-back" else "")
+    async with browser_env(tmp_path, {"/login": MOVES_FOCUS[moves]}) as env:
+        session, records = await _typed_into(env, "/login", by, "User", "#user", text)
+
+        assert await session.page.input_value("#user") == "alice"
+        assert await session.page.input_value("#pw") == TEXT
+        focused = await session.page.evaluate("() => document.activeElement.id")
+        assert focused == ("user" if moves == "and-comes-back" else "pw")
+        _assert_withheld(records)
+        if by == "element_id":
+            assert await _holds_kept(env, session, records[0]["element_id"]) == 0
+
+
+# A field the page makes a password field as the text goes in, and replaces with a plain input of the same id once
+# the whole text is in.
+REPLACED = (
+    '<title>login</title><input id="login" aria-label="Login" oninput="this.type = `password`; '
+    f"if (this.value.length === {len(TEXT)}) {{ const plain = document.createElement(`input`); plain.id = `login`; "
+    'this.replaceWith(plain); }">'
+)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_turned_secret_then_replaced_by_a_plain_one_keeps_no_preview(tmp_path: Path, by: str) -> None:
+    # By selector the read once the text was in found the selector's field anew: the plain replacement. By element_id
+    # the id's element was gone by then, which already said secret.
+    async with browser_env(tmp_path, {"/login": REPLACED}) as env:
+        session, records = await _typed_into(env, "/login", by, "Login", "#login", TEXT)
+
+        assert await session.page.get_attribute("#login", "type") is None
+        assert await session.page.input_value("#login") == ""
+        _assert_withheld(records)
+
+
+# What a selector can name that takes focus for a password field and is not it: a component whose open shadow root
+# holds the field, a label around it, and a frame whose document holds it. Each with how to read the field's value.
+AROUND_THE_FIELD = {
+    "component": (
+        '<title>login</title><div id="named"></div><script>document.getElementById("named")'
+        '.attachShadow({mode: "open", delegatesFocus: true}).innerHTML = "<input type=password>";</script>',
+        "() => document.getElementById('named').shadowRoot.firstChild.value",
+    ),
+    "label": (
+        '<title>login</title><label id="named">Secret <input type="password"></label>',
+        "() => document.querySelector('input').value",
+    ),
+    "frame": (
+        '<title>login</title><iframe id="named" srcdoc="<input type=password '
+        "style='position: fixed; left: 0; top: 0; width: 100%; height: 100%'>\"></iframe>",
+        "() => document.getElementById('named').contentDocument.querySelector('input').value",
+    ),
+}
+
+
+@pytest.mark.parametrize("named", list(AROUND_THE_FIELD))
+async def test_a_type_by_a_selector_that_names_what_is_around_a_password_field_keeps_no_preview(
+    tmp_path: Path, named: str
+) -> None:
+    # The read was of what the selector names, whose own attributes say nothing, and the text went to the password
+    # field. The node the type holds and reads is the innermost focused element in what it names: the field in the
+    # shadow root, or in the label. In a frame that node is the frame's document's, which the type cannot hold from
+    # the page: nothing read, so nothing shown.
+    page, value = AROUND_THE_FIELD[named]
+    async with browser_env(tmp_path, {"/login": page}) as env:
+        session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
+
+        assert await session.page.evaluate(value) == TEXT
+        _assert_withheld(records)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_text_with_an_enter_that_moves_nothing_shows_its_preview(tmp_path: Path, by: str) -> None:
+    # The control: an Enter in the text withholds nothing by itself. The textarea keeps focus and reads not secret.
+    page = '<title>note</title><textarea id="note" aria-label="Note"></textarea>'
+    async with browser_env(tmp_path, {"/note": page}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#note", "two\nlines")
+
+        assert await session.page.input_value("#note") == "two\nlines"
+        *targets, receipt = records
+        for kept in targets:
+            assert kept.get("text_preview") == "two\nlines" and "text_redacted" not in kept, kept
+        assert receipt.evidence_mode == "standard"
+        if by == "element_id":
+            assert await _holds_kept(env, session, targets[0]["element_id"]) == 0
+
+
+async def _holds_kept(env: Any, session: Any, element_id: str) -> int:
+    """How many holds on a typed field the element ids' world still keeps: a type gives its own back."""
+    element = env.manager.element_ids.element(session.page, element_id)
+    return await element.evaluate("(el, arg, registry) => registry.fieldHolds.size", effect=READ)

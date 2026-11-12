@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -102,16 +101,10 @@ async def test_type_stores_the_scrubbed_preview_in_the_action_target(tmp_path: P
 async def test_a_field_whose_attributes_could_not_be_read_keeps_no_preview(tmp_path: Path) -> None:
     # Attributes that could not be read were taken to say "not secret": a password field that came in after the read
     # had timed out (ACTION_TIMEOUT_MS) and before the scroll had took the text, and its first 80 characters were
-    # kept in the result, actions.jsonl, the audit log and the receipt.
+    # kept in the result, actions.jsonl, the audit log and the receipt. What is read now is the node the type holds
+    # as the text begins (_TypedField), and a hold that cannot be taken says as little of it.
     field = FakeLocator("#pw", attributes={"type": "password"})
-    late = [PlaywrightTimeoutError("Timeout 15000ms exceeded.")]
-
-    async def get_attribute(name: str, **_given: Any) -> str | None:
-        if late:
-            raise late.pop()
-        return field.attributes.get(name)
-
-    field.get_attribute = AsyncMock(side_effect=get_attribute)
+    field.evaluate_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
     manager, page = _typing_manager(tmp_path, field)
 
     with patch("asyncio.sleep", new=AsyncMock()):

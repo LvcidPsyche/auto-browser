@@ -447,6 +447,90 @@ ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
   return dom.within(active, el);
 }}"""
 
+# A type's hold on the node its text goes to. Defines `held`.
+# take(el): the node keys go to while focus is in the element: the innermost focused element from the element's
+# root, through open shadow roots, where it is the element or inside it. Not a frame: keys sent then go to its
+# document's own focused node, which this document cannot hold. A blur or a focus on the node from then on says
+# focus left it, though it came back (a field whose key sent focus to a password field, whose own key sent it back).
+# read(hold): the node's own attributes, as is_sensitive_field reads them, while it is still the innermost focused
+# element of its root and focus never left it; else null. One the page took out of its document is no root's
+# focused element. Run in the main world too, on a locator, for a selector target (see _DOM_JS).
+_HELD_FIELD_JS = f"""{_DOM_JS}
+const held = {{
+  focused(from) {{
+    let active = dom.root(from).activeElement;
+    for (let root = active && dom.shadowRoot(active); root && root.activeElement; root = dom.shadowRoot(active)) {{
+      active = root.activeElement;
+    }}
+    return active || null;
+  }},
+  take(el) {{
+    const hold = {{ node: null, target: el, left: false, listener: null }};
+    const active = held.focused(el);
+    if (!active || !dom.within(active, el) || ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) {{
+      return hold;
+    }}
+    hold.node = active;
+    hold.listener = () => {{ hold.left = true; }};
+    for (const type of ['blur', 'focus']) active.addEventListener(type, hold.listener, true);
+    return hold;
+  }},
+  read(hold) {{
+    const node = hold.node;
+    if (!node || hold.left || held.focused(node) !== node) return null;
+    const read = (name) => dom.attr(node, name) || '';
+    return {{
+      type: read('type'),
+      name: read('name'),
+      id: read('id'),
+      placeholder: read('placeholder'),
+      'aria-label': read('aria-label'),
+      autocomplete: read('autocomplete'),
+    }};
+  }},
+  release(hold) {{
+    if (!hold.node) return;
+    for (const type of ['blur', 'focus']) hold.node.removeEventListener(type, hold.listener, true);
+  }},
+}};"""
+
+# By selector the hold is a handle of the page's, taken on the locator's element: read, then read once more as it
+# is released (the handle is then given back).
+FIELD_HOLD_TAKE_SCRIPT = f"""(el) => {{
+  {_HELD_FIELD_JS}
+  return held.take(el);
+}}"""
+FIELD_HOLD_READ_SCRIPT = f"""(hold) => {{
+  {_HELD_FIELD_JS}
+  return held.read(hold);
+}}"""
+FIELD_HOLD_RELEASE_SCRIPT = f"""(hold) => {{
+  {_HELD_FIELD_JS}
+  const attributes = held.read(hold);
+  held.release(hold);
+  return attributes;
+}}"""
+# By element_id the hold is the world's, kept under a nonce (the registry's fieldHolds, made here: a registry an
+# earlier version made has none). Taking it answers its first read. Both are reads, which the world sends again
+# when an answer is lost: a second take under the nonce reads the hold the first took, and a second release finds
+# none and answers null, as for a node that lost focus. The hold keeps the element, so the release finds it by its
+# id though the page has taken it out of the document.
+ELEMENT_FIELD_HOLD_SCRIPT = f"""(el, nonce, registry) => {{
+  {_HELD_FIELD_JS}
+  if (!registry.fieldHolds) registry.fieldHolds = new Map();
+  if (!registry.fieldHolds.has(nonce)) registry.fieldHolds.set(nonce, held.take(el));
+  return held.read(registry.fieldHolds.get(nonce));
+}}"""
+ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
+  {_HELD_FIELD_JS}
+  const hold = registry.fieldHolds && registry.fieldHolds.get(nonce);
+  if (!hold) return null;
+  registry.fieldHolds.delete(nonce);
+  const attributes = held.read(hold);
+  held.release(hold);
+  return attributes;
+}}"""
+
 # Playwright's selectOptions, on the element: scrolls an enabled, visible
 # <select> into view, waits for its box to settle and for options matching every
 # one wanted (one for a single select), selects them and dispatches input then

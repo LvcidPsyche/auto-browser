@@ -50,10 +50,31 @@ class FakeKeyboard:
         self.type = AsyncMock()
 
 
+class FakeFieldHold:
+    """A type's hold on the node its text goes to (BrowserActionService.hold_typed_field), taken on a FakeLocator:
+    the field the locator named then, whose attributes it reads as they are now, for as long as the node has kept
+    focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away)."""
+
+    def __init__(self, attributes: dict[str, str]) -> None:
+        self.attributes = attributes
+        self.focused = True
+        self.evaluate = AsyncMock(side_effect=self._read)
+        self.dispose = AsyncMock()
+
+    def _read(self, _script: str) -> dict[str, str] | None:
+        if not self.focused:
+            return None
+        names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
+        return {name: self.attributes.get(name) or "" for name in names}
+
+
 class FakeLocator:
     def __init__(self, selector: str, *, attributes: dict[str, str] | None = None) -> None:
         self.selector = selector
         self.attributes = attributes or {}
+        # Focus is in the field once it is clicked (evaluate, below), so the node a type takes hold of is the field.
+        self.holds: list[FakeFieldHold] = []
+        self.evaluate_handle = AsyncMock(side_effect=self._hold)
         self.scroll_into_view_if_needed = AsyncMock()
         self.click = AsyncMock()
         self.hover = AsyncMock()
@@ -71,6 +92,10 @@ class FakeLocator:
         # tests/test_targeting.py covers the pages where it is not and does not.
         self.evaluate = AsyncMock(return_value=True)
         self.focus = AsyncMock()
+
+    def _hold(self, _script: str, **_given: object) -> FakeFieldHold:
+        self.holds.append(FakeFieldHold(self.attributes))
+        return self.holds[-1]
 
     @property
     def first(self) -> "FakeLocator":

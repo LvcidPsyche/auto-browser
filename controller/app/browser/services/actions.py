@@ -5,6 +5,7 @@ import contextlib
 import logging
 import random
 import re
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
@@ -44,7 +45,12 @@ from ..click_target import (
     same_element_at,
 )
 from ..element_ids import selector_hint, target_element_id
-from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from ..element_scripts import (
+    ELEMENT_HAS_FOCUS_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+)
 from ..element_world import READ
 from ..page_read import title_or_blank
 from .element_actions import FOCUS_CLICK_TIMEOUT_MS, JITTER_PX, ElementActions
@@ -392,9 +398,10 @@ _NOT_A_ONE_TIME_CODE = re.compile(
 # What a type's target says of its text where the text is shown (text_target_payload), and is withheld until the
 # field is known not to be secret (withhold_text_preview, give_back_text_preview).
 _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
-# How long the read of a type's field by selector once the text is in waits for the field, which was there for the
-# first keystroke (field_reads_not_secret): one gone by then (the text's Enter submitted its form) says secret
-# without waiting out ACTION_TIMEOUT_MS.
+# How long a type's hold on the node its text goes to waits (_TypedField): by selector for the field as the hold is
+# taken, which had focus a moment before, and from then on for the page's answer to each read and give-back. No read
+# waits for a field once the text is in: a hold on a node the page took away (the text's Enter submitted its form)
+# fails at once, where a read by selector waited this long for each attribute of a field that was gone.
 FIELD_RECHECK_TIMEOUT_MS = 1000
 _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   type: el.getAttribute('type') || '',
@@ -452,6 +459,72 @@ def _tab_count(snapshot: dict[str, Any]) -> int | None:
         return count
     tabs = snapshot.get("tabs")
     return len(tabs) if isinstance(tabs, list) else None
+
+
+def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
+    """Whether a read through a type's hold says its node is not secret; None is no read (no node held, or one that
+    did not keep focus)."""
+    return attributes is not None and not BrowserActionService.is_sensitive_field(attributes)
+
+
+async def _answered_soon(call: Awaitable[Any]) -> Any:
+    """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own, and
+    a page that stops answering would hold the type, and its session, with it."""
+    return await asyncio.wait_for(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
+
+
+class _TypedField:
+    """A type's hold on the node its text goes to, taken just before the first keystroke and given back once the text
+    is in: the innermost focused element in the field the type names (element_scripts._HELD_FIELD_JS).
+
+    ``not_secret`` says whether the text's preview may be shown: the node read as not secret through the hold when it
+    was taken and again as it was given back, and kept focus in between. Read by the type's selector or element_id
+    instead, the field was found anew each time: a key of the text that sent focus on to a password field left the
+    rest of the text there unread, and by selector a field turned secret and then replaced read as its replacement.
+
+    By element_id the hold is the element ids' world's, under a nonce, and a take that fails raises, as the element's
+    other steps do. By selector it is a handle of the page's, and one that cannot be taken or read says secret, the
+    text typed all the same, as when the field's attributes could not be read. That take, and on either path every
+    call after the take, answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
+    """
+
+    def __init__(self, element: Any, locator: Any) -> None:
+        self._element = element
+        self._locator = locator
+        self._nonce = secrets.token_hex(16)
+        self._handle: Any = None
+        self.not_secret = False
+
+    async def take(self) -> None:
+        if self._element is not None:
+            self.not_secret = _reads_not_secret(await self._element.hold_field(self._nonce))
+            return
+        try:
+            self._handle = await self._locator.evaluate_handle(FIELD_HOLD_TAKE_SCRIPT, timeout=FIELD_RECHECK_TIMEOUT_MS)
+            self.not_secret = _reads_not_secret(await _answered_soon(self._handle.evaluate(FIELD_HOLD_READ_SCRIPT)))
+        except Exception:
+            self.not_secret = False
+
+    async def release(self) -> None:
+        """Read the node once more and give the hold back, whatever ended the type: each step on its own, and a
+        cancellation raised once all have run (_each_on_its_own). A step that fails says secret."""
+        still_not_secret = False
+
+        async def read_again() -> None:
+            nonlocal still_not_secret
+            if self._element is not None:
+                attributes = await self._element.release_field(self._nonce, within_ms=FIELD_RECHECK_TIMEOUT_MS)
+            else:
+                attributes = await _answered_soon(self._handle.evaluate(FIELD_HOLD_RELEASE_SCRIPT))
+            still_not_secret = _reads_not_secret(attributes)
+
+        steps: list[Any] = []
+        if self._element is not None or self._handle is not None:
+            steps.append(read_again)
+        if self._handle is not None:
+            steps.append(lambda: _answered_soon(self._handle.dispose()))
+        await _each_on_its_own(steps)
+        self.not_secret = self.not_secret and still_not_secret
 
 
 class BrowserActionService:
@@ -631,10 +704,16 @@ class BrowserActionService:
                     await self.elements.require_focus(element, during=" through the clear")
             # Read just before the first keystroke, and again once the text is in: a page can make the field a
             # password field as it is focused or cleared (a login form that does so as it is focused), or as the text
-            # goes in. Read before the focus, a field turned so kept the preview of the text typed into it.
-            not_secret = await self.field_reads_not_secret(element, locator)
-            await self.type_text_human_like(session.page, text)
-            if not_secret and await self.field_reads_not_secret(element, locator, typed=True):
+            # goes in. Read before the focus, a field turned so kept the preview of the text typed into it. Both
+            # reads are of the node that has focus as the text begins, held from then until the text is in
+            # (_TypedField): a key of the text can send focus on to another field, which takes the rest.
+            field = _TypedField(element, locator)
+            try:
+                await field.take()
+                await self.type_text_human_like(session.page, text)
+            finally:
+                await field.release()
+            if field.not_secret:
                 self.give_back_text_preview(payload, preview)
             await self.manager._settle(session.page)
 
@@ -1208,21 +1287,14 @@ class BrowserActionService:
         payload.pop("text_redacted", None)
         payload.update(preview)
 
-    async def field_reads_not_secret(self, element: Any, locator: Any, *, typed: bool = False) -> bool:
-        """Whether a read of a type's field's attributes says it is not secret: by its ElementTarget (``element``),
-        else by its ``locator``, where a read that fails says secret (locator_is_sensitive_input). Before the text
-        is typed a read by element_id that fails raises, as the element's other steps do; once it is in (``typed``)
-        one that fails says secret, and by locator it waits FIELD_RECHECK_TIMEOUT_MS at most for the field."""
+    async def field_reads_not_secret(self, element: Any, locator: Any) -> bool:
+        """Whether a read of a type's field's attributes says it is not secret, for the type's approval, asked for
+        before the type runs (the type reads the node it holds: _TypedField): by its ElementTarget (``element``),
+        where a read that fails raises, else by its ``locator``, where one that fails says secret
+        (locator_is_sensitive_input)."""
         if element is None:
-            return not await self.locator_is_sensitive_input(
-                locator, timeout_ms=FIELD_RECHECK_TIMEOUT_MS if typed else None
-            )
-        try:
-            return not self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ))
-        except Exception:
-            if not typed:
-                raise
-            return False
+            return not await self.locator_is_sensitive_input(locator)
+        return not self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ))
 
     async def locator_is_sensitive_input(self, locator: Any, *, timeout_ms: float | None = None) -> bool:
         """Whether the field ``locator`` names is to be taken as secret: by its own attributes, and so where they

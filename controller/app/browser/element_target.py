@@ -42,6 +42,8 @@ from ..utils import error_text, error_text_for_log
 from .element_scripts import (
     ELEMENT_ACTIONABLE_SCRIPT,
     ELEMENT_COVER_SCRIPT,
+    ELEMENT_FIELD_HOLD_SCRIPT,
+    ELEMENT_FIELD_RELEASE_SCRIPT,
     ELEMENT_FOCUS_SCRIPT,
     ELEMENT_HAS_FOCUS_SCRIPT,
     ELEMENT_POINTER_RECT_SCRIPT,
@@ -130,17 +132,34 @@ class ElementTarget:
         self._tag: str | None = None
 
     async def evaluate(
-        self, script: str, arg: Any = None, *, effect: str, attached: bool = True, wait_ms: int = 0
+        self,
+        script: str,
+        arg: Any = None,
+        *,
+        effect: str,
+        attached: bool = True,
+        wait_ms: int = 0,
+        within_ms: int | None = None,
     ) -> Any:
-        """Run ``(el, arg, elementIds) => ...`` on the element in the world; ``effect`` as for ``PageWorld.call``."""
+        """Run ``(el, arg, elementIds) => ...`` on the element in the world; ``effect`` as for ``PageWorld.call``.
+
+        ``within_ms`` is for a read whose only cost of failing is that nothing was read: it bounds the script's
+        message and, together, those that set it up, and leaves the page's session as it was past the bound
+        (``PageWorld.call``'s ``keep_session``)."""
+        if within_ms is None:
+            bounds: dict[str, Any] = {
+                "timeout_ms": self._world.timeout_ms + wait_ms + (_ANSWER_MARGIN_MS if wait_ms else 0)
+            }
+        else:
+            bounds = {"timeout_ms": within_ms, "setup_timeout_ms": within_ms, "keep_session": True}
         reply = await self._world.call(
             self._page,
             element_declaration(script, attached=attached),
             self.element_id,
             self._tag,
             arg,
-            timeout_ms=self._world.timeout_ms + wait_ms + (_ANSWER_MARGIN_MS if wait_ms else 0),
             effect=effect,
+            **bounds,
         )
         if reply["status"] != "ok":
             raise self._world.lookup_error(self.element_id, reply["status"], reply["tag"])
@@ -207,6 +226,18 @@ class ElementTarget:
 
     async def has_focus(self) -> bool:
         return bool(await self.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, True, effect=READ))
+
+    async def hold_field(self, nonce: str) -> dict[str, str] | None:
+        """Take hold, under ``nonce``, of the node keys go to while focus is in the element, and read it: its own
+        attributes, or None where no node in the element has focus (see _HELD_FIELD_JS). To be released."""
+        return await self.evaluate(ELEMENT_FIELD_HOLD_SCRIPT, nonce, effect=READ)
+
+    async def release_field(self, nonce: str, *, within_ms: int) -> dict[str, str] | None:
+        """Give back the hold taken under ``nonce``, read once more: the held node's attributes if it kept focus
+        from the take until now, else None, as for no hold. The element need not be in the document any more."""
+        return await self.evaluate(
+            ELEMENT_FIELD_RELEASE_SCRIPT, nonce, effect=READ, attached=False, within_ms=within_ms
+        )
 
     async def select_option(
         self, *, value: str | None = None, label: str | None = None, index: int | None = None

@@ -36,6 +36,7 @@ from app.providers.base import ProviderDecision
 from app.tool_gateway.gateway import McpToolGateway
 from app.utils import UTC
 from app.witness import WitnessPolicyOutcome
+from tests.test_browser_manager_actions import FakeFieldHold
 
 SESSION = "session-1"
 START_URL = "https://example.com"
@@ -75,6 +76,9 @@ class FakeLocator:
 
     async def get_attribute(self, _name: str, **_given: Any) -> None:
         return None
+
+    async def evaluate_handle(self, _script: str, **_given: Any) -> FakeFieldHold:
+        return FakeFieldHold({})  # a type's hold of the field its text goes to: a plain one that keeps focus
 
     async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:
         if script == _PRESS_PLACE_SCRIPT:
