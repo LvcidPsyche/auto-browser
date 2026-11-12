@@ -650,11 +650,12 @@ All notable changes to auto-browser are documented here.
   and `secret` stays whatever a later read says (a password field whose "show password" is on reads as plain). A
   pending approval for a type that an earlier release stored does not say how its field read, so it is `unread`,
   its text hidden until such a request reads the field as plain. The approval's stored record keeps the text, as
-  before: the action retried with the approval's id is
-  matched against it. A text the caller marked `sensitive` is withheld everywhere, as before (its approval stores
-  only a digest of it), and its field is not read for its approval. A typed text still shows: as the preview of a
-  field read as not secret, and in the approval of one (a post's or a message's text is what its approver must
-  see), which includes a field whose attributes do not say it is secret (a PIN field with no such type, name or
+  before: the action retried with the approval's id is matched against it. A text the caller marked `sensitive`
+  is withheld everywhere, as before (its approval stores only a digest of it), and its field is not read for its
+  approval. A typed text still shows: as the preview of a field read as not secret, and in the approval of one (a
+  post's or a message's text is what its approver must see; the approval reads the field its selector or
+  `element_id` names when it is asked for, whatever that field is by the time the type runs),
+  which includes a field whose attributes do not say it is secret (a PIN field with no such type, name or
   label), one that turns secret and back again while the text goes in, one in a component's closed shadow root
   (the component is read: the page shows no node past it), and a text whose focus goes to another field and back
   on a page that stops focus events before its nodes hear them; in an approval's reason, the agent's own

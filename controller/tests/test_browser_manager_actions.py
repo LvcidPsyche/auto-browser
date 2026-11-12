@@ -51,7 +51,7 @@ class FakeKeyboard:
 
 
 class FakeFieldHold:
-    """A type's hold on the node its text goes to (BrowserActionService.hold_typed_field), taken on a FakeLocator:
+    """A type's hold on the node its text goes to (app.browser.services.actions._TypedField), taken on a FakeLocator:
     the field the locator named then, whose attributes it reads as they are now, for as long as the node has kept
     focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away)."""
 

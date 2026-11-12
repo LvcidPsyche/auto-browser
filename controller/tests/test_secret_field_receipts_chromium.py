@@ -4,7 +4,9 @@ witness store.
 A type decides whether its field is secret from the field's attributes as it runs. Attributes it could not read were
 taken to say "not secret", so a password field that came in after the read had timed out kept the typed text as the
 action's preview: in the result, actions.jsonl, the audit log and the receipt; and a type into a field that never
-came kept the text it was to type in its failure record. Only the page server is local
+came kept the text it was to type in its failure record. The field read was the one the type named, where the text
+can go to another node (an Enter that moves focus on, a label or a component around the field). And what an
+approval asked for a type shows of its text, by how its field read. Only the page server is local
 (test_allowed_hosts_navigation's harness).
 """
 
