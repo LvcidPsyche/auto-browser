@@ -341,7 +341,8 @@ class McpClientObjectBoundsTests(_Transport):
         for name in ("deep-info", "deep-capabilities", "large-info", "large-capabilities"):
             self.assertNotIn(name, line)
             self.assertEqual(self.delete(name).status_code, 404)
-        # The sessions that are kept go on, and the next write of the table leaves the others out of the file too.
+        # The sessions that are kept go on, and the start has left the others out of the file too.
+        self.assertEqual([item["id"] for item in self.stored()], ["plain", "at-the-bounds"])
         self.assertEqual(self.delete("plain").status_code, 204)
         self.assertEqual([item["id"] for item in self.stored()], ["at-the-bounds"])
 
@@ -647,6 +648,55 @@ class McpSessionTableStartTests(_Transport):
         self.assertEqual(list(self.transport._sessions), ["plain"])
         made = self.assert_an_ordinary_answer(self.initialize())
         self.assertEqual([record["id"] for record in self.stored()], ["plain", made])
+
+    PAST_AND_WITHIN = [_record("past", json.loads(_objects(DEPTH_BOUND + 1)), {}), _record("within", {"name": "a"}, {})]
+
+    def test_a_start_that_drops_a_session_writes_the_table_without_it_once(self) -> None:
+        # Dropped from memory only, it was read and measured again at every start, and one larger than the bound was
+        # written out whole each time to be refused.
+        self.store.write_text(json.dumps(self.PAST_AND_WITHIN), encoding="utf-8")
+
+        with self.assertLogs("app.mcp_transport", level="WARNING") as logs:
+            self.transport = self.transport_over_the_store()
+
+        (line,) = logs.output
+        self.assertIn("1 MCP sessions", line)
+        self.assertEqual(self.stored(), [json.loads(json.dumps(asdict(self.transport._sessions["within"])))])
+        # A start that drops none writes nothing.
+        with (
+            patch.object(mcp_transport, "atomic_write_text", wraps=mcp_transport.atomic_write_text) as writes,
+            self.assertNoLogs("app.mcp_transport", level="WARNING"),
+        ):
+            self.transport = self.transport_over_the_store()
+        self.assertEqual((writes.call_count, list(self.transport._sessions)), (0, ["within"]))
+
+    def test_a_start_whose_write_back_fails_goes_on_and_serves_what_it_kept(self) -> None:
+        self.store.write_text(json.dumps(self.PAST_AND_WITHIN), encoding="utf-8")
+        table = self.store.read_bytes()
+
+        with (
+            patch.object(mcp_transport, "atomic_write_text", side_effect=OSError(28, "No space left on device")),
+            self.assertLogs("app.mcp_transport", level="WARNING") as logs,
+        ):
+            self.transport = self.transport_over_the_store()
+
+        dropped, failed = logs.output
+        self.assertIn("1 MCP sessions", dropped)
+        # One line, the error's own text: the table stays as it was, and the next start drops it again.
+        self.assertIn("No space left on device", failed)
+        self.assertNotIn("\n", failed)
+        self.assertEqual(self.store.read_bytes(), table)
+        self.assertEqual(list(self.transport._sessions), ["within"])
+        headers = {MCP_SESSION_HEADER: "within", MCP_PROTOCOL_HEADER: PROTOCOL}
+        listed = self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        self.assertEqual(listed.json(), {"jsonrpc": "2.0", "id": 2, "result": {"tools": []}})
+        with self.assertLogs("app.mcp_transport", level="WARNING") as logs:
+            self.transport = self.transport_over_the_store()
+        (line,) = logs.output
+        self.assertIn("1 MCP sessions", line)
+        self.assertEqual([record["id"] for record in self.stored()], ["within"])
 
 
 class McpSessionTableStartCollectorTests(_Transport):

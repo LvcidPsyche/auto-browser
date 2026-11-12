@@ -29,6 +29,7 @@ from .utils import (
     PRIVATE_FILE_MODE,
     atomic_write_text,
     capped_for_log,
+    error_text_for_log,
     holds_lone_surrogate,
     json_safe,
     quoted_for_log,
@@ -859,21 +860,35 @@ class McpHttpTransport:
         collecting = gc.isenabled()
         gc.disable()
         try:
-            self._read_sessions()
+            dropped = self._read_sessions()
         finally:
             if collecting:
                 gc.enable()
+        if not dropped:
+            return
+        # Written back once, as it now stands: left in the file, each session dropped was read and measured again at
+        # every start, and one larger than the bound written out whole to be refused. A write that fails leaves the
+        # file as it was, so the next start drops them again.
+        try:
+            self._persist_sessions()
+        except Exception as exc:
+            logger.warning(
+                "failed to write the MCP session table back to %s without the %d sessions dropped: %s",
+                self._session_store_path,
+                dropped,
+                error_text_for_log(exc),
+            )
 
-    def _read_sessions(self) -> None:
-        """Read the table back, but for the sessions stored past a bound (see _load_sessions)."""
+    def _read_sessions(self) -> int:
+        """Read the table back, but for the sessions stored past a bound (see _load_sessions): how many those are."""
         try:
             payload = json.loads(self._session_store_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("failed to load MCP sessions from %s: %s", self._session_store_path, exc)
-            return
+            return 0
         if not isinstance(payload, list):
             logger.warning("ignoring malformed MCP session store at %s", self._session_store_path)
-            return
+            return 0
         restored: dict[str, McpSession] = {}
         past_a_bound = 0
         for item in payload:
@@ -922,6 +937,7 @@ class McpHttpTransport:
                 MAX_CLIENT_OBJECT_JSON_BYTES,
             )
         self._sessions = restored
+        return past_a_bound
 
     def _sessions_past_the_caps(self, keep: str | None) -> list[McpSession]:
         # Sessions without a live stream go first, so a client that only listens outlasts a flood of initializations,
