@@ -852,13 +852,9 @@ class McpHttpTransport:
                 continue
             client_info = self._coerce_dict(item.get("client_info"))
             client_capabilities = self._coerce_dict(item.get("client_capabilities"))
-            # Measured before the session is made, which writes them once (McpSession.client_json): the text each is
-            # measured by is that text.
-            (info_past, info_json), (capabilities_past, capabilities_json) = (
-                _past_a_client_object_bound(client_info),
-                _past_a_client_object_bound(client_capabilities),
-            )
-            if info_past or capabilities_past:
+            # Measured before the session is made, by the text it keeps of each (McpSession.client_json).
+            info_json, capabilities_json = _stored_client_json(client_info), _stored_client_json(client_capabilities)
+            if info_json is None or capabilities_json is None:
                 # Written by a version that kept whatever a client sent. Its client is answered 404 "Unknown MCP
                 # session" and initializes again, as for a session that was evicted.
                 past_a_bound += 1
@@ -1062,6 +1058,47 @@ def _json_length_at_least(part: object) -> int:
     if isinstance(part, int) and not isinstance(part, bool):
         return (max(part.bit_length(), 1) - 1) * _DIGITS_PER_BIT // _DIGITS_PER_BIT_SCALE + 1
     return 0
+
+
+def _stored_client_json(value: dict[str, Any]) -> str | None:
+    """A clientInfo or capabilities a start read from the table, as _compact_json writes it; or None where it is past
+    a bound. Of any value, what _past_a_client_object_bound decides.
+
+    A start reads values its file bounds, so it needs no early stop. The initialize's walk counts each element in
+    Python, to stop early in a body of any size: run at a start, it held a table at its cap of 500 sessions, both
+    fields of each small numbers at the bound, for some 40 s. Here each is written out once, by the C encoder, as
+    each write of the table needs it, and that text is measured: its UTF-8 for the size, its brackets for the depth.
+    """
+    try:
+        written = _compact_json(value)
+    except RecursionError:
+        # Nested deeper than the writer goes from here, which is far deeper than the bound.
+        return None
+    # A lone surrogate, which UTF-8 does not carry, takes the three bytes that U+FFFD takes in its place.
+    if len(written.encode("utf-8", "surrogatepass")) > MAX_CLIENT_OBJECT_JSON_BYTES:
+        return None
+    return None if _nested_deeper_than(written, MAX_CLIENT_OBJECT_DEPTH) else written
+
+
+def _nested_deeper_than(written: str, levels: int) -> bool:
+    """Whether ``written``, a JSON text as _compact_json writes it, nests lists and objects more than ``levels``
+    deep, the outermost counted.
+
+    By str's own methods, each a pass in C over the text: a walk in Python over the value's lists and objects,
+    looking at each element only to find them, took twice as long as this on the shape slowest for both (lists
+    nested 30 deep, side by side) and six times as long on small numbers.
+    """
+    # Its escaped backslashes taken out and then its escaped quotes, each quote left opens or closes a string, so the
+    # pieces between quotes are in turn outside a string and in one.
+    unescaped = written.replace("\\\\", "").replace('\\"', "")
+    outside = "".join(unescaped.split('"')[::2])
+    # Its brackets alone, of one kind, which is all the depth goes by. Each pass takes out every pair with nothing
+    # between them, the lists and objects that hold none, so a bracket is left after ``levels`` passes only where
+    # they nest deeper.
+    brackets = outside.translate(str.maketrans("{}", "[]", "".join(set(outside) - set("[]{}"))))
+    for _ in range(levels):
+        brackets = brackets.replace("[]", "")
+    return bool(brackets)
 
 
 async def _next_stream_event(queue: asyncio.Queue, stop: asyncio.Event) -> str | None:

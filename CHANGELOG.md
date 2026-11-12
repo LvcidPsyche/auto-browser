@@ -1045,8 +1045,11 @@ All notable changes to auto-browser are documented here.
   a list, the worst shape measured, one write of the table at the cap now holds the event loop for about 0.3 s,
   where it held it for about 13 s (about 0.8 s for fields that each hold one long text); a small `initialize` and
   a `DELETE /mcp` at the cap take as long, as each writes the table. A `notifications/initialized` for a session
-  already initialized no longer writes it, where each one did. A start still reads such a table back slowly: 45 to
-  60 s on that host, most of it the bound's measure of each field, before the controller answers anything. A float
+  already initialized no longer writes it, where each one did. A start reads such a table back before the
+  controller answers anything, and measures each field by the text it writes out of it once: on that host, at the
+  cap and for the shapes measured, in 6 to 22 s with Python 3.12 and 7 to 64 s with 3.11, the image's (1 to 4 s
+  and 1.5 to 11 s with 100 sessions, the most one token-verified operator keeps). Most of the slowest is the JSON
+  reader's: 53 of the 64 s, for fields of lists nested 30 deep side by side. A float
   is now counted at the length it is written at, so a value of floats past the bound is refused without being
   written out to be measured.
   A session an older version stored past either bound is dropped when the file is read, with one WARNING that

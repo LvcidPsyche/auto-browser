@@ -96,6 +96,21 @@ def _padded(value: dict, size: int, *, as_kept: bool) -> dict:
     return padded
 
 
+def _record(session_id: str, client_info: dict, capabilities: dict) -> dict:
+    """A session's record as the table holds it."""
+    return {
+        "id": session_id,
+        "protocol_version": PROTOCOL,
+        "client_info": client_info,
+        "client_capabilities": capabilities,
+        "initialized": True,
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "last_used_at": "2026-11-01T00:00:00+00:00",
+        "resource_subscriptions": [],
+        "owner": None,
+    }
+
+
 TOO_DEEP = f"is nested deeper than {DEPTH_BOUND} levels"
 TOO_LARGE = f"is larger than {BYTES_BOUND} bytes as JSON"
 # What is kept at each bound, what is refused one past it, and the words of the refusal.
@@ -305,27 +320,13 @@ class McpClientObjectBoundsTests(_Transport):
         marker = "VALUE-OF-THE-CLIENT"
         deep = json.loads(_objects(200).replace("{}", json.dumps({"k": marker})))
         large = {"name": marker + "x" * BYTES_BOUND}
-
-        def record(session_id: str, client_info: dict, capabilities: dict) -> dict:
-            return {
-                "id": session_id,
-                "protocol_version": PROTOCOL,
-                "client_info": client_info,
-                "client_capabilities": capabilities,
-                "initialized": True,
-                "created_at": "2026-11-01T00:00:00+00:00",
-                "last_used_at": "2026-11-01T00:00:00+00:00",
-                "resource_subscriptions": [],
-                "owner": None,
-            }
-
         written = [
-            record("deep-info", deep, {}),
-            record("plain", {"name": "pytest", "version": "1"}, {"roots": {"listChanged": True}}),
-            record("deep-capabilities", {"name": "pytest"}, deep),
-            record("large-info", large, {}),
-            record("large-capabilities", {}, large),
-            record("at-the-bounds", json.loads(_objects(DEPTH_BOUND)), {}),
+            _record("deep-info", deep, {}),
+            _record("plain", {"name": "pytest", "version": "1"}, {"roots": {"listChanged": True}}),
+            _record("deep-capabilities", {"name": "pytest"}, deep),
+            _record("large-info", large, {}),
+            _record("large-capabilities", {}, large),
+            _record("at-the-bounds", json.loads(_objects(DEPTH_BOUND)), {}),
         ]
         self.store.write_text(json.dumps(written), encoding="utf-8")
 
@@ -478,6 +479,123 @@ class McpClientObjectBoundsTests(_Transport):
         self.assertEqual(refused.status_code, 400, refused.text[:300])
         self.assertEqual(refused.json()["error"], {"code": -32700, "message": "Invalid JSON payload"})
         self.assertEqual(self.transport._sessions, {})
+
+
+def _deep_and_wide(depth: int) -> dict:
+    """An object whose lists go ``depth`` levels down with it, each level holding numbers and text of brackets."""
+    value: list = [1, "]", "[{"]
+    for _ in range(depth - 2):
+        value = [value, 0, "}]", '\\"[', "\\"]
+    return {"a": value}
+
+
+def _start_cases() -> dict[str, dict]:
+    """Values a start reads, on each side of each bound, in the shapes the two ways of measuring could tell apart."""
+    integers = {"a": [99999, -12345, 0, 7] * 3500}
+    numbers = {"a": [0.25, float("nan"), float("-inf"), 1e300] * 2000}
+    surrogates = {"name" + LONE: LONE * 100, "b": ["x" + LONE]}
+    sent = _padded(MEETING_KEYS, BYTES_BOUND, as_kept=False)
+    cases = {"empty": {}, "objects 200 deep": json.loads(_objects(200))}
+    for bound, (at, past, _) in AT_AND_PAST_A_BOUND.items():
+        cases |= {f"{bound}, at": json.loads(at), f"{bound}, past": json.loads(past)}
+    for side, size in (("at", BYTES_BOUND), ("past", BYTES_BOUND + 1)):
+        cases |= {
+            f"letters of four bytes, {side}": json.loads(_of_bytes(size, letter=chr(0x1F600))),
+            f"lone surrogates, {side}": _padded(surrogates, size, as_kept=False),
+            f"small numbers, {side}": _padded(integers, size, as_kept=False),
+            f"floats and non-finite numbers, {side}": _padded(numbers, size, as_kept=False),
+        }
+    return cases | {
+        "deep and wide, at": _deep_and_wide(DEPTH_BOUND),
+        "deep and wide, past": _deep_and_wide(DEPTH_BOUND + 1),
+        "text of brackets at the depth bound": json.loads(_objects(DEPTH_BOUND).replace("{}", '{"k":"[[{{\\\\"}')),
+        "text of brackets and escapes": {"[[[[": "{{{{" * 40, "a\\": ["\\", {"b": '"[{'}], '"{': "\\]"},
+        "empty lists, at": {"a": [[] for _ in range(21_843)]},
+        "empty lists, past": {"a": [[] for _ in range(21_844)]},
+        "large integers": {"a": [int("9" * 4000)] * 20},
+        "keys that meet once cleaned, as sent": sent,
+        "keys that meet once cleaned, as kept": without_lone_surrogates(sent),
+        "keys that met, at the bound as kept": without_lone_surrogates(
+            _padded(MEETING_KEYS, BYTES_BOUND, as_kept=True)
+        ),
+    }
+
+
+class McpSessionTableStartTests(_Transport):
+    """A start measures each stored clientInfo and capabilities by the text the table writes of it.
+
+    The initialize's walk goes through a value element by element, in Python, so that it stops at the first thing
+    past a bound in a body of any size. A start ran it on each stored field whole, before the controller answered
+    anything: a table of 500 sessions with both fields of small numbers at the bound took some 40 s to read back, at
+    every restart. What a start keeps and drops is still what an initialize keeps and refuses.
+    """
+
+    def test_a_start_goes_through_no_stored_field_element_by_element(self) -> None:
+        records = [_record(f"s{number}", {"a": [0] * 1000}, {"b": [1.5, "x"] * 500}) for number in range(3)]
+        self.store.write_text(json.dumps(records), encoding="utf-8")
+
+        with (
+            patch.object(
+                mcp_transport, "_past_a_client_object_bound", wraps=mcp_transport._past_a_client_object_bound
+            ) as walks,
+            patch.object(mcp_transport, "_json_length_at_least", wraps=mcp_transport._json_length_at_least) as counted,
+            patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps,
+        ):
+            self.transport = self.transport_over_the_store()
+
+        self.assertEqual(sorted(self.transport._sessions), ["s0", "s1", "s2"])
+        # No walk, so no element counted; each field written out once, which is the text each write of the table joins.
+        self.assertEqual((walks.call_count, counted.call_count), (0, 0))
+        self.assertEqual(dumps.call_count, 6)
+
+    def test_a_start_keeps_what_an_initialize_keeps_and_drops_what_it_refuses(self) -> None:
+        cases = _start_cases()
+        # As the initialize's walk decides of each: None, or the text it measured.
+        walked = {name: mcp_transport._past_a_client_object_bound(value)[1] for name, value in cases.items()}
+        kept = {name for name, text in walked.items() if text is not None}
+        self.assertTrue(0 < len(kept) < len(cases), kept)
+        records = []
+        for name, value in cases.items():
+            records += [_record(f"info: {name}", value, {}), _record(f"capabilities: {name}", {}, value)]
+        # ASCII JSON, so a lone surrogate is written as its escape, as only a file written by hand could hold one.
+        self.store.write_text(json.dumps(records), encoding="utf-8")
+
+        with self.assertLogs("app.mcp_transport", level="WARNING") as logs:
+            self.transport = self.transport_over_the_store()
+
+        restored = self.transport._sessions
+        expected = [f"{field}: {name}" for name in kept for field in ("info", "capabilities")]
+        self.assertEqual(sorted(restored), sorted(expected))
+        (line,) = logs.output
+        self.assertIn(f"{2 * (len(cases) - len(kept))} MCP sessions", line)
+        empty = mcp_transport._compact_json({})
+        for name in kept:
+            with self.subTest(name=name):
+                self.assertEqual(restored[f"info: {name}"].client_json, (walked[name], empty))
+                self.assertEqual(restored[f"capabilities: {name}"].client_json, (empty, walked[name]))
+
+    def test_a_stored_field_the_writer_cannot_go_down_is_dropped_and_counted(self) -> None:
+        # How deep the JSON writer goes is the interpreter's own, so it is stood in for: a field the reader went down
+        # can be one the writer, called from further up the stack, cannot.
+        encode = json.dumps
+
+        def writer(value, *args, **kwargs) -> str:
+            if isinstance(value, dict) and "past-the-writer" in value:
+                raise RecursionError("maximum recursion depth exceeded while encoding a JSON object")
+            return encode(value, *args, **kwargs)
+
+        records = [_record("deep", {"past-the-writer": 1}, {}), _record("plain", {"name": "pytest"}, {})]
+        self.store.write_text(json.dumps(records), encoding="utf-8")
+
+        with (
+            patch.object(mcp_transport.json, "dumps", side_effect=writer),
+            self.assertLogs("app.mcp_transport", level="WARNING") as logs,
+        ):
+            self.transport = self.transport_over_the_store()
+
+        self.assertEqual(list(self.transport._sessions), ["plain"])
+        (line,) = logs.output
+        self.assertIn("1 MCP sessions", line)
 
 
 NOTIFIED = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
