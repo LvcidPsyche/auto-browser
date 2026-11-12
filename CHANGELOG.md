@@ -874,8 +874,9 @@ All notable changes to auto-browser are documented here.
   `500` for the long `run_count`. Now the start goes on, and logs that the keys are still in plaintext; a route
   answers `503` with a fixed text, which says the store holds a value the controller cannot write back, and an MCP
   tool answers the same text; the refused fire is answered as refused; and the trigger answers `triggered: true`.
-  One ERROR line names the store's path and what the writer raised, and the store stays as it was until that value
-  is fixed in the file.
+  Each such save writes one ERROR line that names the store's path and what the writer raised, and leaves the store
+  as it was: a value nested too deep fails every save until it is fixed in the file, and a long `run_count` the save
+  of each run that adds one to it.
 - **A cron job's `last_status` now says how its last run ended.** It stayed `queued` after the run was over. The agent
   job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`) now replaces it, or `unknown`
   when the job's record cannot say, also for a run that finishes while its trigger is still answering. `completed`

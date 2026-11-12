@@ -182,8 +182,8 @@ def job_not_found_text(job_id: str) -> str:
 
 # As CRON_STORE_UNREADABLE is: fixed and path-free.
 CRON_STORE_UNWRITABLE = (
-    "the cron store (CRON_STORE_PATH) holds a value the controller cannot write back, so no change to it is saved "
-    "until it is fixed. The server log has the cause and where the file is."
+    "the cron store (CRON_STORE_PATH) holds a value the controller cannot write back, so this change to it was not "
+    "saved. The server log has the cause and where the file is."
 )
 
 
@@ -945,17 +945,18 @@ class CronService:
         """Write the store whole; one the JSON writer gives up on raises CronStoreUnwritableError, and stays as it was.
 
         The reader takes what the writer cannot write: a value nested deeper than the writer goes (the reader of
-        Python 3.12 and later goes deeper than the writer, which recurses: RecursionError), and a run_count as long as
-        Python prints an integer, one digit too long once a run adds one (ValueError). Each failed every save of the
-        store until it was fixed, out of callers that did not take it. Raised here as one error, every caller meets
-        an error it handles: the start goes on, a route answers 503, a run already queued is answered as queued.
+        Python 3.12 and later goes deeper than the writer, which recurses: RecursionError), which fails every save
+        until it is fixed in the file, and a run_count as long as Python prints an integer, which fails the save of
+        each run that adds one to it (ValueError). Each was raised out of callers that did not take it. Raised here as
+        one error, every caller meets an error it handles: the start goes on, a route answers 503, a run already
+        queued is answered as queued.
         """
         try:
             text = json.dumps(data, indent=2)
         except (RecursionError, ValueError) as exc:
             logger.error(
-                "cron store %s holds a value its JSON writer cannot write (%s: %s), so it was not saved; it is saved "
-                "again once that value is fixed in the file",
+                "cron store %s holds a value its JSON writer cannot write (%s: %s), so this change was not saved; fix "
+                "that value in the file",
                 self._store_path,
                 type(exc).__name__,
                 exc,
