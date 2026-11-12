@@ -853,10 +853,11 @@ class McpHttpTransport:
         # The read makes a list or an object for each one in the file, tens of millions at the table's cap, and no
         # cycle: each collection it set off went through all of them, and none could free one. On Python 3.11, the
         # image's, a table of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read
-        # in some 60 s with the cyclic collector on and in 3.4 s with it off. It is off for the read and the measuring
-        # after it, for every thread (what another thread makes meanwhile is collected once it is back), and given
-        # back as it was found on every way out. What the read made is freed before then, as _read_sessions returns,
-        # but for the client fields of the sessions kept.
+        # in 50 to 68 s with the cyclic collector on and in 3.4 s with it off. It is off for the read and the
+        # measuring after it, for every thread (what another thread makes meanwhile is collected once it is back), and
+        # given back as it was found on every way out. What the read made is freed before then, as _read_sessions
+        # returns, but for the client fields of the sessions kept: the collections that follow still go through
+        # those, some 30 s for that table on 3.11 and 3.12 alike, up to the first full collection.
         collecting = gc.isenabled()
         gc.disable()
         try:
@@ -1163,8 +1164,9 @@ def _nested_deeper_than(written: str, levels: int) -> bool:
     deep, the outermost counted.
 
     By str's own methods, each a pass in C over the text: a walk in Python over the value's lists and objects,
-    looking at each element only to find them, took twice as long as this on the shape slowest for both (lists
-    nested 30 deep, side by side) and six times as long on small numbers.
+    looking at each element only to find them, took 2.2 to 2.5 times as long as this on the shape slowest for both
+    (lists nested 30 deep, side by side) and 5.1 to 6.3 times as long on small numbers, in one list or in lists
+    nested 31 deep (fields of some 60 to 64 KiB, measured on Python 3.11 and 3.12).
     """
     # Its escaped backslashes taken out and then its escaped quotes, each quote left opens or closes a string, so the
     # pieces between quotes are in turn outside a string and in one.

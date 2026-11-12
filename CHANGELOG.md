@@ -18,8 +18,9 @@ All notable changes to auto-browser are documented here.
   32 levels and take at most 64 KiB as JSON; one past either answers JSON-RPC error `-32602` and makes no session.
   What MCP defines for the two takes a few levels and well under a kilobyte, so a client is refused only for
   something large of its own that it sends there (an icon as a data URI, for one). A session that an older version
-  stored past a bound is dropped at this version's start: its client is answered `404` on its next request, as
-  after an eviction, and the `initialize` it then sends is refused as above until it sends less.
+  stored past a bound is dropped at this version's start, which then writes the file of sessions once without it:
+  its client is answered `404` on its next request, as after an eviction, and the `initialize` it then sends is
+  refused as above until it sends less.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
   silent, as it always was, and `resources/unsubscribe` still removes it.
@@ -1117,18 +1118,26 @@ All notable changes to auto-browser are documented here.
   already initialized no longer writes it, where each one did: the last use it marks, which eviction goes by, is
   saved with the next write of the table, as any other request's is, so a restart before that write reads back the
   last use saved before it. One whose write fails (a full disk) is answered `500` and leaves the session not
-  initialized, so that a retry writes it. A start reads such a table back before the controller answers anything,
-  and measures each field by the text it writes out of it once: on that host, at the cap and for the shapes
-  measured, in 6 to 22 s with Python 3.12 and 7 to 64 s with 3.11, the image's (1 to 4 s and 1.5 to 11 s with 100
-  sessions, the most one token-verified operator keeps). Most of the slowest is the JSON reader's: 53 of the 64 s,
-  for fields of lists nested 30 deep side by side. A float is now counted at the length it is written at, so a
-  value of floats past the bound is refused without being written out to be measured.
-  A session an older version stored past either bound is dropped when the file is read, with one WARNING that
-  counts them and quotes none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down
-  answers `400` `-32700`, as a body that is no JSON does, where it was an unhandled `500`. A session whose first
-  write fails (a full disk) is dropped before the error is answered: `500`, for that request alone. With the table
-  at its cap, the session it would have put out stays, and its event stream with it: sessions past a cap now go
-  once the table is written without them, where they went before the write.
+  initialized, so that a retry writes it. A start reads such a table back before the controller answers anything, with
+  Python's cyclic garbage collector off, and measures each field by the text it writes out of it once: on that host,
+  at the cap, for fields of small numbers and of lists nested 30 deep side by side, in 8.7 to 15.7 s with Python 3.12
+  and 7.4 to 15.4 s with 3.11, the image's (1.7 to 3.2 s and 1.4 to 3.1 s with 100 sessions, the most one
+  token-verified operator keeps). With the collector on, 3.11 collected again and again during the read of the second
+  shape, each time through the tens of millions of lists the read had made, none of which it could free: its start
+  took 59 to 61 s. The lists the sessions keep are still gone through by the collections that follow, once the
+  controller makes objects again: some 30 s for that shape at the cap, on 3.11 and 3.12 alike, up to the first full
+  collection (6 s with 100 sessions). A float is now counted at the length it is written at, so a value of floats
+  past the bound is refused without being written out to be measured.
+  A session an older version stored past either bound is dropped when the file is read, with one WARNING that counts
+  them and quotes none, and the file is then written once without them, so that the next start does not read and
+  measure them again; a write that fails is a WARNING of its own, and the start goes on with the file as it was. A
+  field that holds a lone surrogate, which only a file edited by hand can, is kept as an `initialize` keeps it, with
+  U+FFFD, and measured as it is kept: kept as it was read, it failed every later write of the file. A record whose
+  other text holds one is passed over, as a malformed record is. See the upgrade note. A `POST /mcp` body nested past
+  what the JSON reader goes down answers `400` `-32700`, as a body that is no JSON does, where it was an unhandled
+  `500`. A session whose first write fails (a full disk) is dropped before the error is answered: `500`, for that
+  request alone. With the table at its cap, the session it would have put out stays, and its event stream with it:
+  sessions past a cap now go once the table is written without them, where they went before the write.
 - **A refused value nested more than 100 levels deep is answered without it, where some hundreds of levels answered
   `500`.** A REST route whose body is read into a request model (`POST /sessions`, `POST /crons` and the others)
   answers a field it refuses with `422` and each error's `input`, the value as it was sent, and MCP `tools/call`

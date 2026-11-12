@@ -206,7 +206,8 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
                 "API_BEARER_TOKEN is unset and API_ALLOW_TOKENLESS_LOOPBACK=true, so the controller serves "
                 "every route unauthenticated. API_BIND_SCOPE=loopback keeps it off other machines, but any "
                 "process that can reach port 8000, including containers on the compose network, can drive "
-                "the browser. Remove API_ALLOW_TOKENLESS_LOOPBACK to have the controller use its token."
+                "the browser. Remove API_ALLOW_TOKENLESS_LOOPBACK: the controller then uses the token in "
+                "API_TOKEN_FILE, and generates one there if the file holds none, and every client must send it."
             )
             return
         # ensure_api_credential runs first and loads or generates one; this is the

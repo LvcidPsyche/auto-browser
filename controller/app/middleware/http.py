@@ -480,8 +480,9 @@ def install_controller_http_middleware(
                     "Invalid host header: this controller runs without an API credential "
                     "(API_ALLOW_TOKENLESS_LOOPBACK=true), so it only answers to loopback host names. "
                     "Set CONTROLLER_ALLOWED_HOSTS to the exact host names clients use (without a token, a "
-                    "wildcard there admits no name), or remove API_ALLOW_TOKENLESS_LOOPBACK so the controller "
-                    "demands its token."
+                    "wildcard there admits no name), or remove API_ALLOW_TOKENLESS_LOOPBACK: the controller then "
+                    "uses the token in API_TOKEN_FILE, and generates one there if the file holds none, and every "
+                    "client must send it."
                 )
             },
         )
