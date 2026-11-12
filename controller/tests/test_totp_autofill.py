@@ -190,8 +190,11 @@ def test_a_page_that_leaves_the_named_host_as_its_field_is_pressed_gets_no_code(
     # press sent the page to another host, whose field the code was typed into and submitted, every time once the
     # browser was warm (10 of 10). A fresh browser's first click can run out of its time before the press and focus
     # the field without one, so the page never moves (and the code goes into the named host's field, as it should):
-    # the runs share one browser, and every one must hold.
-    for seen in _autofill_where_the_press_leaves(3):
+    # the runs share one browser, and every one must hold. Three runs that all focused so would pass with nothing
+    # tested: one at least must have reached the other host's page, its field there and empty.
+    outcomes = _autofill_where_the_press_leaves(3)
+    assert any(OTHER_HOST in seen["url"] and seen["other_host_field"] == "" for seen in outcomes), outcomes
+    for seen in outcomes:
         assert not seen["title"].startswith("RECEIVED:") and not seen["other_host_field"], seen
 
 

@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
+from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 
 from app.action_errors import BrowserActionError
@@ -70,18 +71,32 @@ class TotpAutofillTests(unittest.TestCase):
         refused: bool = False,
         shown: str | None = None,
         leaves_during: str | None = None,
+        fill_fails: bool = False,
     ) -> tuple[object, AsyncMock]:
-        """``leaves_during``: the step ("search" for the field, "focus" for its click) during which the page goes
-        to another host."""
+        """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
+        fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it)
+        during which the page goes to another host."""
         typed = AsyncMock()
-        locator = SimpleNamespace(fill=AsyncMock(), press=AsyncMock())
+
+        async def clear(_value: str) -> None:
+            leave_during("clear")
+            if fill_fails:
+                raise PlaywrightError("Element is not an <input>, <textarea> or [contenteditable] element")
+
+        async def press_key(_key: str) -> None:
+            leave_during("clear by keys")
+
+        locator = SimpleNamespace(fill=AsyncMock(side_effect=clear), press=AsyncMock())
         manager = SimpleNamespace(
             _settle=AsyncMock(),
             _page_refused=lambda page: refused,
             _shown_url=lambda page: shown if shown is not None else page.url,
         )
         service = BrowserActionService(manager)
-        session = SimpleNamespace(page=SimpleNamespace(url=url), totp_secret=SECRET, totp_hosts=hosts)
+        keyboard = SimpleNamespace(press=AsyncMock(side_effect=press_key))
+        session = SimpleNamespace(
+            page=SimpleNamespace(url=url, keyboard=keyboard), totp_secret=SECRET, totp_hosts=hosts
+        )
 
         def leave_during(step: str) -> None:
             if leaves_during == step:
@@ -98,7 +113,7 @@ class TotpAutofillTests(unittest.TestCase):
         service._find_one_time_code_field = find_the_field
         service.focus_verified = focus
         service.type_text_human_like = typed
-        self.pressed, self.focus_clicks = locator.press, 0
+        self.pressed, self.focus_clicks, self.keys = locator.press, 0, keyboard.press
         return asyncio.run(service.maybe_handle_totp(session)), typed
 
     def test_types_the_code_on_a_named_host(self) -> None:
@@ -146,6 +161,31 @@ class TotpAutofillTests(unittest.TestCase):
         self.assertIsNone(result)
         typed.assert_not_awaited()
         self.pressed.assert_not_awaited()
+
+    def test_a_page_that_leaves_the_named_host_as_its_field_is_cleared_gets_nothing(self) -> None:
+        # Emptying the field (its fill(""), or where that fails Control+A and Delete) awaits the page as well, after
+        # the last check: a field whose page sent it to another host as it was emptied (an input handler, a key
+        # handler) had the live code typed into that host's page, and Enter.
+        for step, fill_fails in (("clear", False), ("clear by keys", True)):
+            with self.subTest(step=step):
+                result, typed = self.run_autofill(
+                    "https://login.example.com/2fa",
+                    hosts=("login.example.com",),
+                    leaves_during=step,
+                    fill_fails=fill_fails,
+                )
+                self.assertIsNone(result)
+                typed.assert_not_awaited()
+                self.pressed.assert_not_awaited()
+
+    def test_a_field_emptied_by_keys_on_the_named_host_gets_the_code(self) -> None:
+        # Where its fill fails the field is emptied by keys, and on the named host the code is typed as before.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
+        )
+        self.assertEqual(result["code_length"], 6)
+        typed.assert_awaited_once()
+        self.assertEqual(self.keys.await_args_list, [call("Control+a"), call("Delete")])
 
     def test_totp_unavailable_names_the_page_as_it_is_shown(self) -> None:
         with patch("app.browser.services.actions.pyotp", None), self.assertRaises(BrowserActionError) as raised:

@@ -1775,6 +1775,9 @@ class BrowserActionService:
         except Exception:
             await session.page.keyboard.press("Control+a")
             await session.page.keyboard.press("Delete")
+        # And so did the clear: a field whose page an input or a key handler sends elsewhere as it is emptied.
+        if not self._may_fill_totp(session):
+            return None
         await self.type_text_human_like(session.page, code)
         # Enter submits the form the code went into. This used to click the
         # first submit button anywhere on the page — on a checkout page that

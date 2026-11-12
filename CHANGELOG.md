@@ -544,7 +544,8 @@ All notable changes to auto-browser are documented here.
   that sets `location`) handed the code to that host: a click waits for the navigation its press starts, so the
   other host's page was there by the time the code was typed, into its own field that the autofill's selector
   matched, and submitted, every time in a warm Chromium (10 of 10). The host is now checked once more after the
-  focus click, before the code is typed. A page that moves by itself while the six digits are typed is not caught.
+  focus click, and again once the field is emptied, before the code is typed. A page that moves by itself while
+  the six digits are typed is not caught.
   The order is the same in every release since the autofill was bound to the session's hosts, 1.8.1 to 1.17.0 (by
   their code; the probe ran on this release's).
 - **A type into a field whose attributes could not be read keeps no preview of its text.** A `type` decides from
