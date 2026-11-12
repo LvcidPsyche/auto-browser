@@ -260,9 +260,15 @@ class McpHttpTransport:
 
         method = payload["method"]
         # Once: each one wrote the whole table, so a client could send it again and again to have the table written.
+        # Marked for the write, which writes the mark, and put back if the write fails: left marked, the retry wrote
+        # nothing and was answered 202, and a restart read the session back as one to initialize.
         if method == "notifications/initialized" and not session.initialized:
             session.initialized = True
-            self._persist_sessions()
+            try:
+                self._persist_sessions()
+            except Exception:
+                session.initialized = False
+                raise
         return Response(status_code=202)
 
     async def _handle_request(self, request: Request, payload: dict[str, Any]) -> Response:

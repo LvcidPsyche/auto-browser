@@ -693,6 +693,23 @@ class McpSessionTableJoinTests(_Transport):
         self.assertEqual(writes.call_count, 1)
         self.assertEqual([record["initialized"] for record in self.stored()], [True])
 
+    def test_a_notifications_initialized_whose_write_fails_is_written_by_its_retry(self) -> None:
+        # The session was marked initialized before the write: one that failed left it so in memory, the retry wrote
+        # nothing and answered 202, and after a restart the client was told to initialize (-32005).
+        made = self.assert_an_ordinary_answer(self.initialize())
+
+        with patch.object(mcp_transport, "atomic_write_text", side_effect=OSError(28, "No space left on device")):
+            failed = self.client.post("/mcp", headers=self.headers(made), json=NOTIFIED)
+        retried = self.client.post("/mcp", headers=self.headers(made), json=NOTIFIED)
+
+        self.assertEqual((failed.status_code, retried.status_code), (500, 202))
+        self.assertEqual([record["initialized"] for record in self.stored()], [True])
+        self.transport = self.transport_over_the_store()
+        listed = self.client.post(
+            "/mcp", headers=self.headers(made), json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        self.assertEqual(listed.json(), {"jsonrpc": "2.0", "id": 2, "result": {"tools": []}})
+
 
 if __name__ == "__main__":
     unittest.main()
