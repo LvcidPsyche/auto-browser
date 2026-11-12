@@ -392,6 +392,42 @@ async def test_a_click_playwright_places_after_a_human_like_try_has_what_the_try
         assert 0 < locator.budgets["click"] <= 1000 - 50, locator.budgets
 
 
+@pytest.mark.parametrize("read", [False, True])
+async def test_a_click_whose_box_cannot_be_read_after_its_scroll_hands_the_placed_click_what_is_left(
+    read: bool,
+) -> None:
+    # The click's one budget begins before its scroll. Where the box then cannot be read (the target hidden or taken
+    # away between the two), the click is one Playwright places, and that began a whole budget of its own: such a
+    # click held its session for the scroll's wait and a whole limit more. Each step here takes about 50 ms.
+    service, session, done = _service(CLOSE)
+    service.manager.settings.action_timeout_ms = 1000
+    locator = _locator(done, box=None, each_step_takes=0.05)
+
+    async def scroll_into_view_if_needed(**given: Any) -> None:
+        locator.budgets.setdefault("scroll", given.get("timeout"))
+        time.sleep(0.05)
+
+    async def run_action(_session: Any, _action: str, _target: Any, operation: Any) -> dict[str, Any]:
+        await operation()
+        return {}
+
+    locator.scroll_into_view_if_needed = scroll_into_view_if_needed
+    session.page.locator = lambda _selector: SimpleNamespace(first=locator)
+    service.manager.get_session = AsyncMock(return_value=session)
+    service.manager._settle = AsyncMock()
+    service.manager._run_action = run_action
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        if read:
+            with reading_presses("click", "read", None), pytest.raises(BrowserActionError):
+                await service.click("session-7", selector="#t")
+        else:
+            await service.click("session-7", selector="#t")
+    # Its first step: the look whether the target is enabled for a read click, Playwright's own click otherwise. The
+    # scroll and the read of the box came before it, about 100 ms (the clock moves in steps of some 16 ms).
+    first = locator.budgets["enabled" if read else "click"]
+    assert 0 < first <= 1000 - 50, locator.budgets
+
+
 async def test_the_last_questions_before_a_human_like_press_are_bounded_by_the_clicks_budget() -> None:
     # What the pointer finds, and whether the target is enabled still: a second each at most, and never more than
     # the click has left.
