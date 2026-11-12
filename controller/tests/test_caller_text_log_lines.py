@@ -245,6 +245,18 @@ class OneLineTests(unittest.IsolatedAsyncioTestCase):
             self.assert_one_line_cut(first)
             self.assertTrue(where and all(re.fullmatch(r"  .+:\d+ in \S+", line) for line in where), where)
 
+    async def test_a_background_tasks_group_is_written_with_its_members(self) -> None:
+        async def fails() -> None:
+            raise ExceptionGroup("task failed", [ValueError("child detail")])
+
+        task = asyncio.get_running_loop().create_task(fails(), name="a background task")
+        with contextlib.suppress(ExceptionGroup):
+            await task
+        with self.assertLogs("app.utils", level="ERROR") as logged:
+            _log_background_task_exception(task)
+
+        self.assertIn("\n  holding ValueError: 'child detail'", logged.records[0].getMessage())
+
     async def test_an_agent_step_that_failed_is_written_quoted_cut_and_with_bounded_frames(self) -> None:
         # By exc_info, a traceback that prints the error's text as it is: a Playwright error's, a page's.
         manager = SimpleNamespace(
@@ -425,3 +437,67 @@ class InternalErrorTests(unittest.TestCase):
                 "  and 2 more before them",
             ],
         )
+
+    @staticmethod
+    def _members(written: str) -> list[str]:
+        return [line for line in written.splitlines() if line.lstrip().startswith(("holding ", "and "))]
+
+    def test_a_groups_members_are_named_as_its_chain_is(self) -> None:
+        # An ExceptionGroup (a TaskGroup's) says only how many it holds: exc_info's traceback named each member.
+        def raises_a_group() -> None:
+            raise ExceptionGroup("task failed", [ValueError("child " + FORGED), KeyError("k")])
+
+        written = self._record(raises_a_group)
+
+        first, second = self._members(written)
+        self.assertTrue(first.startswith("  holding ValueError: 'child p\\n"), first[:80])
+        self.assertIn(f"'... (cut from {len('child ' + FORGED)} characters)", first)
+        self.assertEqual(second, "  holding KeyError: \"'k'\"")
+        self.assertEqual([line for line in written.splitlines() if "forged by a caller" in line], [first])
+        self.assertNotIn("\x1b", written)
+
+    def test_a_groups_first_three_members_are_named_at_any_depth_with_the_count_of_the_rest(self) -> None:
+        inner = ExceptionGroup("inner", [KeyError("a"), KeyError("b")])
+
+        def raises_nested_groups() -> None:
+            raise ExceptionGroup("outer", [inner, OSError("c"), RuntimeError("d")])
+
+        members = self._members(self._record(raises_nested_groups))
+
+        # As a traceback prints them: a group's own members under it, one step further in.
+        self.assertTrue(members[0].startswith("  holding ExceptionGroup: 'inner"), members)
+        self.assertEqual(
+            members[1:], ["    holding KeyError: \"'a'\"", "    holding KeyError: \"'b'\"", "  and 2 more"]
+        )
+
+    def test_a_group_nested_however_deep_or_holding_one_error_twice_is_named_in_a_few_lines(self) -> None:
+        # Each level a group of one, and each a group of the one before it twice: walked member by member, the
+        # second held 2**40 of them.
+        deep: BaseException = ValueError("leaf")
+        for level in range(1000):
+            deep = ExceptionGroup(f"level {level}", [deep])
+        twice: BaseException = ValueError("leaf")
+        for level in range(40):
+            twice = ExceptionGroup(f"level {level}", [twice, twice])
+
+        for group, rest in ((deep, 997), (twice, 37)):
+
+            def raise_it(group: BaseException = group) -> None:
+                raise group
+
+            written = self._record(raise_it)
+            members = self._members(written)
+            self.assertEqual(len(members), 4, members)
+            self.assertEqual(members[-1], f"  and {rest} more")
+            self.assertLess(len(written), 3000)
+
+    def test_the_members_of_a_group_it_was_raised_from_are_named_under_it(self) -> None:
+        def raised_from_a_group() -> None:
+            try:
+                raise ExceptionGroup("several failed", [ValueError("one")])
+            except ExceptionGroup as exc:
+                raise RuntimeError("outer") from exc
+
+        lines = self._record(raised_from_a_group).splitlines()
+        (chained,) = [index for index, line in enumerate(lines) if line.startswith("  raised from ExceptionGroup: ")]
+        self.assertEqual(lines[chained + 1 :], ["    holding ValueError: 'one'"])

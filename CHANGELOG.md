@@ -376,14 +376,15 @@ All notable changes to auto-browser are documented here.
   error's class and its text quoted and cut, the three outermost frames and the ten nearest the raise, a line each,
   with the count of those between (a `RecursionError`'s record was a thousand lines, one a frame), and the first
   three errors it was raised from or while handling, by class and text, quoted and cut, with the count of the rest
-  (see the upgrade note). The record of a route's hidden cause names those errors too. So is written what
-  `POST /mesh/receive`, which takes no credential, did not expect, where it wrote a traceback (the error can quote
-  what the peer sent); and so are an agent job worker's crash, an agent step that failed and a background task
-  that failed, each a traceback, which prints a Playwright error's text as it is. The `RuntimeError` behind a
-  `409 Conflict` of `POST /sessions` and of a fork, written by its traceback too (a persona's name or a URL the
-  caller sent among it), is written as a route's hidden cause. An error's text under a traceback the controller
-  still writes elsewhere (an MCP tool's or an agent job's unexpected error, a readiness check that failed) is
-  written as it is.
+  (see the upgrade note), and of the error or of such an error that is a group (an `ExceptionGroup`, which a
+  `TaskGroup` raises) the first three errors it holds, at any depth, the same way, with the count of the rest. The
+  record of a route's hidden cause names those errors too. So is written what `POST /mesh/receive`, which takes no
+  credential, did not expect, where it wrote a traceback (the error can quote what the peer sent); and so are an
+  agent job worker's crash, an agent step that failed and a background task that failed, each a traceback, which
+  prints a Playwright error's text as it is. The `RuntimeError` behind a `409 Conflict` of `POST /sessions` and of
+  a fork, written by its traceback too (a persona's name or a URL the caller sent among it), is written as a
+  route's hidden cause. An error's text under a traceback the controller still writes elsewhere (an MCP tool's or
+  an agent job's unexpected error, a readiness check that failed) is written as it is.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:

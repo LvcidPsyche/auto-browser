@@ -94,6 +94,9 @@ LOGGED_NEAREST_FRAMES = 10
 # The errors one was raised from or while handling, each named on a line, nearest first, as a traceback names them;
 # past these, how many more there were.
 LOGGED_CHAINED_ERRORS = 3
+# The errors a group (an ExceptionGroup, a TaskGroup's) holds, named the same way, at any depth; past these, how many
+# more it held.
+LOGGED_GROUP_MEMBERS = 3
 
 
 def error_text_for_log(error: BaseException) -> str:
@@ -120,11 +123,13 @@ def error_lines_for_log(
 
     In place of the traceback exc_info writes, which prints each error's text as it is (a page's, a caller's): a
     frame a line (the file, the line and the function), the ``outermost`` and the ``nearest`` with the count of
-    those between, or with no outermost the nearest alone; then each error it was raised from or while handling.
+    those between, or with no outermost the nearest alone; then, of a group, the errors it holds; then each error it
+    was raised from or while handling, and of such a group the errors it holds.
     A frame as the interpreter prints it is two lines on Python 3.12 and, from 3.13, as many as its call is written
     over, so a record would be as long as the Python it ran on made it.
     """
-    return "\n".join([*_frame_lines(error.__traceback__, outermost, nearest), *_chained_errors(error)])
+    frames = _frame_lines(error.__traceback__, outermost, nearest)
+    return "\n".join([*frames, *_group_members(error, "  "), *_chained_errors(error)])
 
 
 def _frame_line(frame: traceback.FrameSummary) -> str:
@@ -147,7 +152,7 @@ def _chained_errors(error: BaseException) -> list[str]:
     suppressed it), as a traceback names them: the nearest LOGGED_CHAINED_ERRORS by class and text, quoted and cut,
     and how many more there were. A record that left them out told a wrapped error only by its wrapper."""
     lines: list[str] = []
-    seen, more = {id(error)}, 0
+    seen, named, more = {id(error)}, 0, 0
     while True:
         if error.__cause__ is not None:
             how, error = "from", error.__cause__
@@ -158,12 +163,41 @@ def _chained_errors(error: BaseException) -> list[str]:
         if id(error) in seen:  # a chain that comes back to an error it named, which a traceback stops at too
             break
         seen.add(id(error))
-        if len(lines) < LOGGED_CHAINED_ERRORS:
+        if named < LOGGED_CHAINED_ERRORS:
+            named += 1
             lines.append(f"  raised {how} {type(error).__name__}: {error_text_for_log(error)}")
+            lines += _group_members(error, "    ")
         else:
             more += 1
     if more:
         lines.append(f"  and {more} more before them")
+    return lines
+
+
+def _group_members(error: BaseException, indent: str) -> list[str]:
+    """A line for each error ``error`` holds, if it is a group (BaseExceptionGroup), in the order a traceback prints
+    them, a group's own members under it a step further in: the first LOGGED_GROUP_MEMBERS by class and text, quoted
+    and cut, and how many more it held at any depth. Walked with a list and not by recursion, and each error once (a
+    group can hold one twice, so forty levels of such groups hold the first error 2**40 times): a group nested however
+    deep is one pass over the errors it holds."""
+    if not isinstance(error, BaseExceptionGroup):
+        return []
+    lines: list[str] = []
+    seen, more = {id(error)}, 0
+    pending = [(member, 0) for member in reversed(error.exceptions)]
+    while pending:
+        member, depth = pending.pop()
+        if id(member) in seen:
+            continue
+        seen.add(id(member))
+        if len(lines) < LOGGED_GROUP_MEMBERS:
+            lines.append(f"{indent}{'  ' * depth}holding {type(member).__name__}: {error_text_for_log(member)}")
+        else:
+            more += 1
+        if isinstance(member, BaseExceptionGroup):
+            pending += [(inner, depth + 1) for inner in reversed(member.exceptions)]
+    if more:
+        lines.append(f"{indent}and {more} more")
     return lines
 
 
