@@ -95,10 +95,11 @@ async def test_a_type_into_a_password_field_not_marked_sensitive_restricts_its_r
         assert (receipt.evidence.before, receipt.evidence.after) == (None, None)
 
 
-async def test_a_password_field_that_appears_after_the_attribute_read_keeps_no_preview(tmp_path: Path) -> None:
+async def test_a_password_field_that_comes_in_late_keeps_no_preview(tmp_path: Path) -> None:
     async with browser_env(tmp_path, {"/late": LATE}) as env:
-        # 1.4 s in: after the attribute read's 1 s timeout, and within the scroll's.
-        session_id, session, spy = await _late_field_env(env, 1400)
+        # 0.4 s in: within the scroll's 1 s wait for it. The attributes were read first, and one that came in after
+        # that read had timed out kept the preview; they are now read once the field is focused, just before the text.
+        session_id, session, spy = await _late_field_env(env, 400)
 
         result = await env.manager.type(session_id, selector="#pw", text=TEXT)
 
@@ -124,6 +125,51 @@ async def test_a_type_into_a_field_that_never_comes_records_no_preview(tmp_path:
         assert line["status"] == "failed"
         for kept in (line["target"], event["details"]["target"], receipt.target):
             assert "text_preview" not in kept and kept.get("text_redacted") is True, kept
+
+
+# A login field that a page makes a password field once it is focused (an honest pattern), or once text is typed into
+# it; and, the control, one that stays a plain field.
+TURNS_SECRET = {
+    "on-focus": '<title>login</title><input id="login" aria-label="Login" onfocus="this.type = `password`">',
+    "as-it-is-typed-into": '<title>login</title><input id="login" aria-label="Login" oninput="this.type = `password`">',
+    "never": '<title>login</title><input id="login" aria-label="Login">',
+}
+
+
+@pytest.mark.parametrize("when", list(TURNS_SECRET))
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_that_turns_secret_after_it_was_first_read_keeps_no_preview(
+    tmp_path: Path, by: str, when: str
+) -> None:
+    # The preview came back at the first read of the field's attributes, before the scroll, the focus click and the
+    # clear, so the text typed into a field the page had made a password field kept its preview. The field is read
+    # just before the first keystroke and again once the text is in.
+    async with browser_env(tmp_path, {"/login": TURNS_SECRET[when]}) as env:
+        env.manager.settings.witness_enabled = True
+        session_id = await env.create("/login")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+        if by == "selector":
+            target = {"selector": "#login"}
+        else:
+            items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+            (field,) = [item for item in items if item.get("label") == "Login"]
+            target = {"element_id": field["element_id"]}
+
+        result = await env.manager.type(session_id, text=TEXT, **target)
+
+        assert await session.page.input_value("#login") == TEXT
+        secret = await session.page.get_attribute("#login", "type") == "password"
+        assert secret is (when != "never")
+        (line,) = _type_lines(session)
+        (event,) = _type_events(spy)
+        receipt = await _type_receipt(env, session_id)
+        for kept in (result["target"], line["target"], event["details"]["target"], receipt.target):
+            if secret:
+                assert "text_preview" not in kept and kept.get("text_redacted") is True, kept
+            else:
+                assert kept.get("text_preview") == TEXT and "text_redacted" not in kept, kept
+        assert receipt.evidence_mode == ("restricted" if secret else "standard")
 
 
 async def test_a_type_by_element_id_whose_field_left_the_page_records_no_preview(tmp_path: Path) -> None:

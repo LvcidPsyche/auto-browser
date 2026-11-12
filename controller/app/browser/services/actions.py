@@ -392,6 +392,10 @@ _NOT_A_ONE_TIME_CODE = re.compile(
 # What a type's target says of its text where the text is shown (text_target_payload), and is withheld until the
 # field is known not to be secret (withhold_text_preview, give_back_text_preview).
 _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
+# How long the read of a type's field by selector once the text is in waits for the field, which was there for the
+# first keystroke (field_reads_not_secret): one gone by then (the text's Enter submitted its form) says secret
+# without waiting out ACTION_TIMEOUT_MS.
+FIELD_RECHECK_TIMEOUT_MS = 1000
 _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   type: el.getAttribute('type') || '',
   name: el.getAttribute('name') || '',
@@ -606,16 +610,12 @@ class BrowserActionService:
         self.withhold_text_preview(payload)
 
         async def operation() -> None:
-            element = None
+            element = locator = None
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
-                if not self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
-                    self.give_back_text_preview(payload, preview)
                 await self.elements.focus(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
-                if not await self.locator_is_sensitive_input(locator):
-                    self.give_back_text_preview(payload, preview)
                 await locator.scroll_into_view_if_needed()
                 await self.focus_verified(session, locator, action="type")
             if clear_first:
@@ -629,7 +629,13 @@ class BrowserActionService:
                 if element is not None:
                     # A page can move focus once the clear has gone in, before the text does.
                     await self.elements.require_focus(element, during=" through the clear")
+            # Read just before the first keystroke, and again once the text is in: a page can make the field a
+            # password field as it is focused or cleared (a login form that does so as it is focused), or as the text
+            # goes in. Read before the focus, a field turned so kept the preview of the text typed into it.
+            not_secret = await self.field_reads_not_secret(element, locator)
             await self.type_text_human_like(session.page, text)
+            if not_secret and await self.field_reads_not_secret(element, locator, typed=True):
+                self.give_back_text_preview(payload, preview)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "type", payload, operation)
@@ -1182,17 +1188,34 @@ class BrowserActionService:
         payload.pop("text_redacted", None)
         payload.update(preview)
 
-    async def locator_is_sensitive_input(self, locator: Any) -> bool:
+    async def field_reads_not_secret(self, element: Any, locator: Any, *, typed: bool = False) -> bool:
+        """Whether a read of a type's field's attributes says it is not secret: by its ElementTarget (``element``),
+        else by its ``locator``, where a read that fails says secret (locator_is_sensitive_input). Before the text
+        is typed a read by element_id that fails raises, as the element's other steps do; once it is in (``typed``)
+        one that fails says secret, and by locator it waits FIELD_RECHECK_TIMEOUT_MS at most for the field."""
+        if element is None:
+            return not await self.locator_is_sensitive_input(
+                locator, timeout_ms=FIELD_RECHECK_TIMEOUT_MS if typed else None
+            )
+        try:
+            return not self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ))
+        except Exception:
+            if not typed:
+                raise
+            return False
+
+    async def locator_is_sensitive_input(self, locator: Any, *, timeout_ms: float | None = None) -> bool:
         """Whether the field ``locator`` names is to be taken as secret: by its own attributes, and so where they
-        cannot be read (a field not there yet when they are asked for can be a password field once it comes)."""
+        cannot be read (a field not there yet when they are asked for can be a password field once it comes).
+        ``timeout_ms`` bounds each read's wait for the field (None: Playwright's default, ACTION_TIMEOUT_MS)."""
         try:
             attributes = {
-                "type": await locator.get_attribute("type"),
-                "name": await locator.get_attribute("name"),
-                "id": await locator.get_attribute("id"),
-                "autocomplete": await locator.get_attribute("autocomplete"),
-                "placeholder": await locator.get_attribute("placeholder"),
-                "aria_label": await locator.get_attribute("aria-label"),
+                "type": await locator.get_attribute("type", timeout=timeout_ms),
+                "name": await locator.get_attribute("name", timeout=timeout_ms),
+                "id": await locator.get_attribute("id", timeout=timeout_ms),
+                "autocomplete": await locator.get_attribute("autocomplete", timeout=timeout_ms),
+                "placeholder": await locator.get_attribute("placeholder", timeout=timeout_ms),
+                "aria_label": await locator.get_attribute("aria-label", timeout=timeout_ms),
             }
         except Exception:
             # Attributes that could not be read say nothing of the field: its preview is withheld, as a secret's is.

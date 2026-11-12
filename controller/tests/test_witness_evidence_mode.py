@@ -10,11 +10,13 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.action_records import wait_for_pending_record
 from app.approvals import ApprovalRequiredError
 from app.audit import reset_current_operator, set_current_operator
+from app.browser.services.actions import FIELD_RECHECK_TIMEOUT_MS
 from app.browser.services.witness import BrowserWitnessService
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
@@ -616,7 +618,7 @@ async def test_a_type_cancelled_while_it_reads_its_fields_attributes_keeps_no_pr
     session = manager.sessions["s1"]
     reading = asyncio.Event()
 
-    async def never_answers(_name: str) -> str | None:
+    async def never_answers(_name: str, **_given: Any) -> str | None:
         reading.set()
         await asyncio.Event().wait()
         return None
@@ -633,6 +635,108 @@ async def test_a_type_cancelled_while_it_reads_its_fields_attributes_keeps_no_pr
     await wait_for_pending_record(session)
 
     _assert_withheld_and_restricted(*await _type_targets_and_receipt(manager))
+
+
+def _field_that_turns_secret(manager: BrowserManager, by: str, when: str) -> dict[str, str]:
+    """A plain login field on the fake page that becomes a password field ``when`` (on its focus, or at the first
+    keystroke typed into it), by selector or by element_id; the type's target naming it."""
+    page = manager.sessions["s1"].page
+    if by == "selector":
+        field = FakeLocator("#login", attributes={"type": "text", "name": "login"})
+        page.locators["#login"] = field
+
+        def turn_secret() -> None:
+            field.attributes["type"] = "password"
+
+        named = {"selector": "#login"}
+    else:
+        answer = AsyncMock(return_value=NOT_SECRET)
+        manager.element_ids.element = Mock(return_value=SimpleNamespace(evaluate=answer))
+        manager.actions.elements.require_focus = AsyncMock()
+
+        def turn_secret() -> None:
+            answer.return_value = {**NOT_SECRET, "type": "password"}
+
+        named = {"element_id": ELEMENT_ID}
+    if when == "on-focus" and by == "selector":
+        focus = manager.actions.focus_verified
+
+        async def focus_then_secret(*args: Any, **kwargs: Any) -> None:
+            await focus(*args, **kwargs)
+            turn_secret()
+
+        manager.actions.focus_verified = focus_then_secret  # type: ignore[method-assign]
+    elif when == "on-focus":
+        manager.actions.elements.focus = AsyncMock(side_effect=lambda *_: turn_secret())
+    else:
+        manager.actions.elements.focus = AsyncMock()
+        page.keyboard.type = AsyncMock(side_effect=lambda *_: turn_secret())
+    return named
+
+
+@pytest.mark.parametrize("when", ["on-focus", "as-it-is-typed-into"])
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_that_turns_secret_after_the_first_read_keeps_no_preview(
+    tmp_path: Path, by: str, when: str
+) -> None:
+    # The preview came back at the first read of the field, before the scroll, the focus click and the clear: a login
+    # form that makes its field a password field once it is focused had the text typed into a password field with its
+    # preview kept, under a standard receipt. The field is read just before the first keystroke and again once the
+    # text is in, and the preview comes back only if both say it is not secret.
+    manager = _typing_manager(tmp_path)
+    manager.settings.witness_enabled = True
+    named = _field_that_turns_secret(manager, by, when)
+    page = manager.sessions["s1"].page
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.type("s1", text="hunter2-secret", **named)
+
+    assert "".join(call.args[0] for call in page.keyboard.type.await_args_list) == "hunter2-secret"
+    targets, receipt = await _type_targets_and_receipt(manager)
+    _assert_withheld_and_restricted([result["target"], *targets], receipt)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_read_once_the_text_is_in_that_fails_keeps_no_preview(tmp_path: Path, by: str) -> None:
+    # The field read not secret before the first keystroke, and is gone once the text is in (the text's Enter
+    # submitted its form, or the page took it out): what it was as the text went in is not known, and the type ran.
+    manager = _typing_manager(tmp_path)
+    manager.settings.witness_enabled = True
+    page = manager.sessions["s1"].page
+    typed: list[str] = []
+    page.keyboard.type = AsyncMock(side_effect=typed.append)
+    if by == "selector":
+        field = FakeLocator("#login", attributes={"type": "text", "name": "login"})
+        gone = PlaywrightTimeoutError("Timeout 1000ms exceeded.")
+        read = field.get_attribute.side_effect
+        field.get_attribute = AsyncMock(
+            side_effect=lambda name, **given: _raise(gone) if typed else read(name, **given)
+        )
+        page.locators["#login"] = field
+        named = {"selector": "#login"}
+    else:
+        stale = BrowserActionError("named an element that is no longer on the page", code="stale_element_id")
+        answer = AsyncMock(side_effect=lambda *_, **__: _raise(stale) if typed else NOT_SECRET)
+        manager.element_ids.element = Mock(return_value=SimpleNamespace(evaluate=answer))
+        manager.actions.elements.focus = AsyncMock()
+        manager.actions.elements.require_focus = AsyncMock()
+        named = {"element_id": ELEMENT_ID}
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.type("s1", text="hunter2-secret", **named)
+
+    assert "".join(typed) == "hunter2-secret"
+    targets, receipt = await _type_targets_and_receipt(manager)
+    _assert_withheld_and_restricted([result["target"], *targets], receipt)
+    if by == "selector":
+        # Bounded: the field was there for the first keystroke, and a read that waits for one gone since would wait
+        # out ACTION_TIMEOUT_MS. The read before the text waits as long as Playwright's default lets it.
+        waits = [call.kwargs.get("timeout") for call in field.get_attribute.await_args_list]
+        assert set(waits[:6]) == {None} and waits[6] == FIELD_RECHECK_TIMEOUT_MS, waits
+
+
+def _raise(error: Exception) -> Any:
+    raise error
 
 
 @pytest.mark.parametrize("refusal", ["policy-block", "page-off-allowed-hosts"])

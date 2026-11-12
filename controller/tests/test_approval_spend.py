@@ -73,7 +73,7 @@ class FakeLocator:
     async def bounding_box(self, **_given: Any):
         return self.box
 
-    async def get_attribute(self, _name: str) -> None:
+    async def get_attribute(self, _name: str, **_given: Any) -> None:
         return None
 
     async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:

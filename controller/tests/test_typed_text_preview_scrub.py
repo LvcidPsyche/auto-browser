@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -105,7 +106,7 @@ async def test_a_field_whose_attributes_could_not_be_read_keeps_no_preview(tmp_p
     field = FakeLocator("#pw", attributes={"type": "password"})
     late = [PlaywrightTimeoutError("Timeout 15000ms exceeded.")]
 
-    async def get_attribute(name: str) -> str | None:
+    async def get_attribute(name: str, **_given: Any) -> str | None:
         if late:
             raise late.pop()
         return field.attributes.get(name)

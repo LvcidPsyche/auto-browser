@@ -66,7 +66,7 @@ class FakeLocator:
         # not yet are tests/test_click_target_chromium.py's.
         self.is_enabled = AsyncMock(return_value=True)
         self.bounding_box = AsyncMock(return_value={"x": 10, "y": 20, "width": 100, "height": 40})
-        self.get_attribute = AsyncMock(side_effect=lambda name: self.attributes.get(name))
+        self.get_attribute = AsyncMock(side_effect=lambda name, **_given: self.attributes.get(name))
         # The element is what the pointer hits and keeps focus once clicked;
         # tests/test_targeting.py covers the pages where it is not and does not.
         self.evaluate = AsyncMock(return_value=True)
