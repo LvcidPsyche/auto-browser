@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import InitVar, dataclass, field, fields
 from itertools import chain
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from .utils import (
     PRIVATE_FILE_MODE,
     atomic_write_text,
     capped_for_log,
+    holds_lone_surrogate,
     json_safe,
     quoted_for_log,
     utc_now,
@@ -89,12 +90,38 @@ class McpSession:
     # The token-verified operator who initialized it (None: unowned, open to all,
     # as sessions are). Another operator finds no such MCP session.
     owner: str | None = None
+    # client_info and client_capabilities as _compact_json wrote them to measure them (an initialize, a start): see
+    # client_json.
+    measured_json: InitVar[tuple[str, str] | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, measured_json: tuple[str, str] | None) -> None:
         if not self.created_at:
             self.created_at = utc_now()
         if not self.last_used_at:
             self.last_used_at = self.created_at
+        # client_info and client_capabilities as the table writes them, written once: by the bound that measured them,
+        # or here. Each is the client's and may take up to the bounds, and neither changes over the session's life,
+        # where the fields above do. It is no field, so it is neither written nor compared: table_record joins it into
+        # each write of the table.
+        self.client_json: tuple[str, str] = measured_json or (
+            _compact_json(self.client_info),
+            _compact_json(self.client_capabilities),
+        )
+
+    def table_record(self) -> str:
+        """The session's record in the table: what _compact_json(asdict(self)) writes, byte for byte, of its client
+        fields as they were written once (client_json) and of each other field written now, as they are small and
+        some change over the session's life.
+
+        asdict's deep copy of the client fields, and their encoding, at every write of the whole table took some 13 s
+        on the event loop for a table at its cap of 500 sessions with fields of small numbers at the bounds.
+        """
+        client_json = dict(zip(("client_info", "client_capabilities"), self.client_json, strict=True))
+        written = []
+        for item in fields(self):
+            value = client_json[item.name] if item.name in client_json else _compact_json(getattr(self, item.name))
+            written.append(f"{_compact_json(item.name)}:{value}")
+        return "{" + ",".join(written) + "}"
 
 
 class McpHttpTransport:
@@ -221,7 +248,8 @@ class McpHttpTransport:
             return protocol_error
 
         method = payload["method"]
-        if method == "notifications/initialized":
+        # Once: each one wrote the whole table, so a client could send it again and again to have the table written.
+        if method == "notifications/initialized" and not session.initialized:
             session.initialized = True
             self._persist_sessions()
         return Response(status_code=202)
@@ -654,17 +682,20 @@ class McpHttpTransport:
 
         # The client's own, kept in the session table, which is written as UTF-8: a lone surrogate in either (JSON's
         # "\ud800" reads as one) could not be written, so it is kept as U+FFFD, as the stores do. Each is measured as
-        # sent, before it is cleaned, and then as it is kept, which is what the next start measures: keys that meet
-        # once their lone surrogates are replaced are numbered, so what is kept can be longer than what was sent. The
-        # walk on what was sent stops at the first thing past a bound, so a million keys are not cleaned to be
-        # refused. The answer names the field and the bound, and nothing of the value.
+        # sent, before it is cleaned, and then, if it held one, as it is kept, which is what the next start measures:
+        # keys that meet once their lone surrogates are replaced are numbered, so what is kept can be longer than what
+        # was sent. The walk on what was sent stops at the first thing past a bound, so a million keys are not cleaned
+        # to be refused. The answer names the field and the bound, and nothing of the value. The text each is measured
+        # by is what the table writes of it (McpSession.client_json).
         kept: dict[str, dict[str, Any]] = {}
+        measured: dict[str, str | None] = {}
         for name, value in (("clientInfo", params.get("clientInfo")), ("capabilities", params.get("capabilities"))):
-            sent = self._coerce_dict(value)
-            past_a_bound = _past_a_client_object_bound(sent)
-            if past_a_bound is None:
-                kept[name] = without_lone_surrogates(sent)
-                past_a_bound = _past_a_client_object_bound(kept[name])
+            kept[name] = self._coerce_dict(value)
+            past_a_bound, measured[name] = _past_a_client_object_bound(kept[name])
+            # Its text holds a lone surrogate where the value does, keys included, and nothing else is cleaned.
+            if past_a_bound is None and holds_lone_surrogate(measured[name]):
+                kept[name] = without_lone_surrogates(kept[name])
+                past_a_bound, measured[name] = _past_a_client_object_bound(kept[name])
             if past_a_bound is not None:
                 return self._json_error_response(request_id, -32602, f"initialize: {name} {past_a_bound}")
 
@@ -674,6 +705,7 @@ class McpHttpTransport:
             client_info=kept["clientInfo"],
             client_capabilities=kept["capabilities"],
             owner=verified_operator(),
+            measured_json=(measured["clientInfo"], measured["capabilities"]),
         )
         self._sessions[session.id] = session
         try:
@@ -812,12 +844,25 @@ class McpHttpTransport:
         for item in payload:
             if not isinstance(item, dict):
                 continue
+            client_info = self._coerce_dict(item.get("client_info"))
+            client_capabilities = self._coerce_dict(item.get("client_capabilities"))
+            # Measured before the session is made, which writes them once (McpSession.client_json): the text each is
+            # measured by is that text.
+            (info_past, info_json), (capabilities_past, capabilities_json) = (
+                _past_a_client_object_bound(client_info),
+                _past_a_client_object_bound(client_capabilities),
+            )
+            if info_past or capabilities_past:
+                # Written by a version that kept whatever a client sent. Its client is answered 404 "Unknown MCP
+                # session" and initializes again, as for a session that was evicted.
+                past_a_bound += 1
+                continue
             try:
                 session = McpSession(
                     id=str(item["id"]),
                     protocol_version=str(item["protocol_version"]),
-                    client_info=self._coerce_dict(item.get("client_info")),
-                    client_capabilities=self._coerce_dict(item.get("client_capabilities")),
+                    client_info=client_info,
+                    client_capabilities=client_capabilities,
                     initialized=bool(item.get("initialized", False)),
                     created_at=str(item.get("created_at") or ""),
                     last_used_at=str(item.get("last_used_at") or ""),
@@ -825,15 +870,9 @@ class McpHttpTransport:
                     resource_subscriptions=[
                         str(uri) for uri in item.get("resource_subscriptions", []) if isinstance(uri, str)
                     ],
+                    measured_json=(info_json, capabilities_json),
                 )
             except Exception:
-                continue
-            if _past_a_client_object_bound(session.client_info) or _past_a_client_object_bound(
-                session.client_capabilities
-            ):
-                # Written by a version that kept whatever a client sent. Its client is answered 404 "Unknown MCP
-                # session" and initializes again, as for a session that was evicted.
-                past_a_bound += 1
                 continue
             restored[session.id] = session
         if past_a_bound:
@@ -890,14 +929,11 @@ class McpHttpTransport:
         if self._session_store_path is not None:
             gone = {session.id for session in going}
             self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = [asdict(session) for session in self._sessions.values() if session.id not in gone]
-            atomic_write_text(
-                self._session_store_path,
-                # Compact, as the bounds measure each field: indented, a session at the bounds took some 35 times
-                # what is bounded. Every controller reads the table the same, however it is laid out.
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                mode=PRIVATE_FILE_MODE,
-            )
+            # Compact, as the bounds measure each field: indented, a session at the bounds took some 35 times what is
+            # bounded. Joined from each session's record, it is what _compact_json of the table whole writes, so every
+            # controller reads it as before.
+            records = ",".join(session.table_record() for session in self._sessions.values() if session.id not in gone)
+            atomic_write_text(self._session_store_path, f"[{records}]", mode=PRIVATE_FILE_MODE)
         for session in going:
             self._forget_session(session.id)
 
@@ -959,8 +995,14 @@ class McpHttpTransport:
         return {MCP_PROTOCOL_HEADER: session.protocol_version}
 
 
-def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
-    """Which bound an initialize's clientInfo or capabilities is past, in the words of its refusal (None: neither).
+def _compact_json(value: Any) -> str:
+    """``value`` as the MCP session table is written: JSON, compactly, its text as it is (the file is UTF-8)."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _past_a_client_object_bound(value: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Which bound an initialize's clientInfo or capabilities is past, in the words of its refusal, and None; or None
+    and the value as _compact_json writes it, which is what it was measured by.
 
     The walk is a loop over one iterator a level, where a function that calls itself would run out of frames on the
     depth it is to refuse. It ends at the first thing past a bound, so a value of a million keys is not gone through
@@ -975,17 +1017,19 @@ def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
         for part in levels[-1]:
             at_least += 1 + _json_length_at_least(part)
             if at_least > MAX_CLIENT_OBJECT_JSON_BYTES:
-                return too_large
+                return too_large, None
             if isinstance(part, dict | list):
                 if len(levels) > MAX_CLIENT_OBJECT_DEPTH:
-                    return f"is nested deeper than {MAX_CLIENT_OBJECT_DEPTH} levels"
+                    return f"is nested deeper than {MAX_CLIENT_OBJECT_DEPTH} levels", None
                 levels.append(chain.from_iterable(part.items()) if isinstance(part, dict) else iter(part))
                 break
         else:
             levels.pop()
+    written = _compact_json(value)
     # A lone surrogate, which UTF-8 does not carry, takes the three bytes that U+FFFD takes in its place.
-    written = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
-    return too_large if len(written) > MAX_CLIENT_OBJECT_JSON_BYTES else None
+    if len(written.encode("utf-8", "surrogatepass")) > MAX_CLIENT_OBJECT_JSON_BYTES:
+        return too_large, None
+    return None, written
 
 
 def _json_length_at_least(part: object) -> int:

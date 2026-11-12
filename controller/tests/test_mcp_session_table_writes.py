@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -385,7 +386,7 @@ class McpClientObjectBoundsTests(_Transport):
         large = {"a": [int("9" * 4000)] * 20}
 
         with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
-            verdict = mcp_transport._past_a_client_object_bound(large)
+            verdict, _ = mcp_transport._past_a_client_object_bound(large)
 
         self.assertEqual(verdict, TOO_LARGE)
         self.assertEqual(dumps.call_count, 0)
@@ -401,7 +402,7 @@ class McpClientObjectBoundsTests(_Transport):
 
         for value, verdict in ((at, None), (past, TOO_LARGE)):
             with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
-                self.assertEqual(mcp_transport._past_a_client_object_bound(value), verdict)
+                self.assertEqual(mcp_transport._past_a_client_object_bound(value)[0], verdict)
             # Written out to be measured: the walk counted no more than the JSON takes.
             self.assertEqual(dumps.call_count, 1)
         self.assert_an_ordinary_answer(self.initialize_as_written(capabilities=json.dumps(at)))
@@ -441,7 +442,7 @@ class McpClientObjectBoundsTests(_Transport):
         floats = {"a": [-2.2250738585072014e-308] * 3000}
 
         with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
-            verdict = mcp_transport._past_a_client_object_bound(floats)
+            verdict, _ = mcp_transport._past_a_client_object_bound(floats)
 
         self.assertEqual(verdict, TOO_LARGE)
         self.assertEqual(dumps.call_count, 0)
@@ -465,7 +466,7 @@ class McpClientObjectBoundsTests(_Transport):
         at = _padded(numbers, BYTES_BOUND, as_kept=False)
 
         with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
-            self.assertIsNone(mcp_transport._past_a_client_object_bound(at))
+            self.assertIsNone(mcp_transport._past_a_client_object_bound(at)[0])
         self.assertEqual(dumps.call_count, 1)
 
     def test_a_body_the_json_reader_cannot_go_down_is_answered_as_one_that_cannot_be_read(self) -> None:
@@ -477,6 +478,102 @@ class McpClientObjectBoundsTests(_Transport):
         self.assertEqual(refused.status_code, 400, refused.text[:300])
         self.assertEqual(refused.json()["error"], {"code": -32700, "message": "Invalid JSON payload"})
         self.assertEqual(self.transport._sessions, {})
+
+
+NOTIFIED = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+SUBSCRIBED = {"jsonrpc": "2.0", "id": 3, "method": "resources/subscribe", "params": {"uri": "browser://sessions"}}
+
+
+class McpSessionTableJoinTests(_Transport):
+    """A write of the table copies and encodes no client's fields again.
+
+    The table is written whole, on the event loop, at each initialize, notifications/initialized and DELETE /mcp. Each
+    write copied every session (asdict) and encoded it whole: at the cap of 500 sessions, with both client fields of
+    each at the bounds, one write took some 13 s. Each field is now encoded once, when its session is made, and a write
+    joins that text with the session's other fields, encoded at the write.
+    """
+
+    INFO = {"name": "INFO-OF-THE-CLIENT", "version": "1"}
+    CAPABILITIES = {"experimental": {"x": ["CAPABILITIES-OF-THE-CLIENT", 1.5, None, chr(0xE9)]}}
+
+    def headers(self, session_id: str) -> dict[str, str]:
+        return {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: PROTOCOL}
+
+    def test_each_client_field_is_encoded_once_however_often_the_table_is_written(self) -> None:
+        info, capabilities = json.dumps(self.INFO), json.dumps(self.CAPABILITIES)
+        encode = json.dumps
+        encoded: list[str] = []
+
+        def counted(*args, **kwargs) -> str:
+            text = encode(*args, **kwargs)
+            encoded.append(text)
+            return text
+
+        with (
+            patch.object(mcp_transport.json, "dumps", side_effect=counted),
+            patch.object(mcp_transport, "atomic_write_text", wraps=mcp_transport.atomic_write_text) as writes,
+        ):
+            made = self.assert_an_ordinary_answer(
+                self.initialize_as_written(client_info=info, capabilities=capabilities)
+            )
+            ready = self.client.post("/mcp", headers=self.headers(made), json=NOTIFIED)
+            another = self.assert_an_ordinary_answer(self.initialize())
+            deleted = self.delete(another)
+
+        self.assertEqual((ready.status_code, deleted.status_code), (202, 204))
+        # Four writes of the whole table, each with that session in it, and each of its two fields encoded once: to be
+        # measured, when the session was made.
+        self.assertEqual(writes.call_count, 4)
+        markers = ("INFO-OF-THE-CLIENT", "CAPABILITIES-OF-THE-CLIENT")
+        self.assertEqual([sum(marker in text for text in encoded) for marker in markers], [1, 1])
+        (record,) = self.stored()
+        self.assertEqual((record["client_info"], record["client_capabilities"]), (self.INFO, self.CAPABILITIES))
+
+    def test_the_table_is_what_encoding_it_whole_gives_and_reads_back_the_same(self) -> None:
+        # Its shape is unchanged, so each controller, older ones included, reads it as before.
+        plain = self.assert_an_ordinary_answer(self.initialize(self.INFO, self.CAPABILITIES))
+        self.assert_an_ordinary_answer(self.initialize(CLIENT_INFO, CAPABILITIES))  # stored with U+FFFD
+        self.assert_an_ordinary_answer(
+            self.initialize_as_written(client_info=_objects(DEPTH_BOUND), capabilities=_of_bytes(BYTES_BOUND))
+        )
+        self.assertEqual(self.client.post("/mcp", headers=self.headers(plain), json=NOTIFIED).status_code, 202)
+        self.assertEqual(self.client.post("/mcp", headers=self.headers(plain), json=SUBSCRIBED).status_code, 200)
+
+        sessions = list(self.transport._sessions.values())
+        whole = json.dumps([asdict(session) for session in sessions], ensure_ascii=False, separators=(",", ":"))
+        self.assertEqual(self.store.read_text(encoding="utf-8"), whole)
+        self.assertEqual(list(self.transport_over_the_store()._sessions.values()), sessions)
+
+    def test_a_sessions_other_fields_are_written_as_they_are_at_each_write(self) -> None:
+        made = self.assert_an_ordinary_answer(self.initialize(self.INFO, self.CAPABILITIES))
+        self.assertEqual(
+            [(item["initialized"], item["resource_subscriptions"]) for item in self.stored()], [(False, [])]
+        )
+
+        self.assertEqual(self.client.post("/mcp", headers=self.headers(made), json=NOTIFIED).status_code, 202)
+        self.assertEqual(self.client.post("/mcp", headers=self.headers(made), json=SUBSCRIBED).status_code, 200)
+        session = self.transport._sessions[made]
+        # Each saved with the next write of the table, here another client's initialize. The owner is set by hand: a
+        # request of this test's client could no longer reach the session.
+        session.last_used_at = "2026-11-11T00:00:00Z"
+        session.owner = "operator-a"
+        self.assert_an_ordinary_answer(self.initialize())
+
+        record = self.stored()[0]
+        self.assertEqual(record, json.loads(json.dumps(asdict(session))))
+        written = (record["initialized"], record["resource_subscriptions"], record["last_used_at"], record["owner"])
+        self.assertEqual(written, (True, ["browser://sessions"], "2026-11-11T00:00:00Z", "operator-a"))
+
+    def test_a_repeated_notifications_initialized_writes_nothing(self) -> None:
+        # Each one wrote the whole table, so a client could send it again and again for an initialized session.
+        made = self.assert_an_ordinary_answer(self.initialize())
+
+        with patch.object(mcp_transport, "atomic_write_text", wraps=mcp_transport.atomic_write_text) as writes:
+            answers = [self.client.post("/mcp", headers=self.headers(made), json=NOTIFIED) for _ in range(3)]
+
+        self.assertEqual([answer.status_code for answer in answers], [202, 202, 202])
+        self.assertEqual(writes.call_count, 1)
+        self.assertEqual([record["initialized"] for record in self.stored()], [True])
 
 
 if __name__ == "__main__":
