@@ -229,15 +229,55 @@ class CronTriggerAnswerTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_a_stored_job_holding_an_empty_value_there_still_runs_as_one_that_holds_none(self) -> None:
-        # null, false, 0 and an empty list were no value to a run before the check, and are none to it.
+        # null, false, 0, 0.0, "" and an empty list or object were no value to a run before the check, and are none
+        # to it.
         for field in ("max_steps", "start_url", "auth_profile", "proxy_persona"):
-            for value in (None, False, 0, [], ""):
+            for value in (None, False, 0, 0.0, "", [], {}):
                 with self.subTest(field=field, value=value):
                     right, wrong, _lines = await self._a_stored_job_holding(field, value)
 
                     self.assertEqual((right.status_code, right.json()), (503, {"detail": BROWSER_UNREACHABLE_DETAIL}))
                     self.assertTrue(self.reached_the_browser)
                     self.assertEqual((wrong.status_code, wrong.json()), REFUSED_KEY)
+
+    async def test_a_stored_job_holding_an_empty_text_value_creates_its_session_with_none_there(self) -> None:
+        # The test above stops at the session's browser. Past it, a proxy_persona of false, 0, [] or {} reached the
+        # session's record, which refuses each, after the browser context had opened; every empty value reached the
+        # session's audit and receipt as it was stored. An empty value is none to the session too.
+        for field in ("start_url", "auth_profile", "proxy_persona"):
+            for value in (None, False, 0, 0.0, "", [], {}):
+                with self.subTest(field=field, value=value):
+                    job_id, key = await self._job()
+                    jobs = self._stored()
+                    jobs[job_id][field] = value
+                    self.store.write_text(json.dumps(jobs), encoding="utf-8")
+                    browser = FakeBrowser(FakeContext(FakePage()))
+                    self.addAsyncCleanup(self.manager.request_gates.release, browser)
+                    created = AsyncMock(wraps=self.manager.create_session)
+                    if main_module.rate_limiter is not None:
+                        main_module.rate_limiter._events.clear()
+
+                    with (
+                        patch.object(self.manager, "_acquire_session_browser", AsyncMock(return_value=(browser, None))),
+                        patch.object(self.manager, "create_session", created),
+                        patch.object(self.cron.job_queue, "enqueue_run", AsyncMock(return_value={"id": "agent-job-1"})),
+                    ):
+                        response = await self.client.post(f"/crons/{job_id}/trigger", json={"webhook_key": key})
+
+                    self.assertEqual(response.status_code, 200, response.text)
+                    session_id = response.json()["session_id"]
+                    # The record that refused it was written.
+                    session_persona = self.manager.sessions[session_id].proxy_persona
+                    # Closed before the next: the suite's MAX_SESSIONS is 1.
+                    await self.cron._release_run(job_id, session_id)
+                    self.assertEqual(
+                        {
+                            name: created.await_args.kwargs[name]
+                            for name in ("start_url", "auth_profile", "proxy_persona")
+                        },
+                        {"start_url": None, "auth_profile": None, "proxy_persona": None},
+                    )
+                    self.assertIsNone(session_persona)
 
 
 class CronRunRefusalAtTheOtherDoorsTests(unittest.IsolatedAsyncioTestCase):

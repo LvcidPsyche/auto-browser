@@ -116,7 +116,8 @@ def _refuse_what_a_run_cannot_take(job: dict[str, Any]) -> None:
     The store is JSON a hand can edit. Such a value raised whatever the first code to use it raised (a TypeError
     from min(), an AttributeError in the URL check), which no caller of a run maps: the webhook's route answered an
     unhandled 500, with the key proved. A ValueError, as a job the run's request model refuses is, that names the
-    field and nothing of what it holds. An empty value (null, false, 0, "", an empty list) is no value, as it was.
+    field and nothing of what it holds. An empty value (null, false, 0, 0.0, "", an empty list or object) is no
+    value, as it was, and the run reads it as None (_run_job_now).
     """
     for field in _TEXT_OF_A_RUN:
         if job.get(field) and not isinstance(job[field], str):
@@ -642,6 +643,9 @@ class CronService:
         # accepted max_steps up to 100) left the session open and the job
         # marked in flight, and every later fire was skipped until restart.
         _refuse_what_a_run_cannot_take(job)
+        # An empty value is no value (_refuse_what_a_run_cannot_take), to the session too: as it was stored, false, 0,
+        # [] or {} reached the session's record, which refuses each, after its browser context had opened.
+        start_url, auth_profile, proxy_persona = (job.get(field) or None for field in _TEXT_OF_A_RUN)
         run_request = AgentRunRequest(
             provider=job.get("provider") or "openai",
             goal=job["goal"],
@@ -661,9 +665,9 @@ class CronService:
             with acting_as(owner):
                 session_result = await self.manager.create_session(
                     name=f"cron-{job_id}",
-                    start_url=job.get("start_url"),
-                    auth_profile=job.get("auth_profile"),
-                    proxy_persona=job.get("proxy_persona"),
+                    start_url=start_url,
+                    auth_profile=auth_profile,
+                    proxy_persona=proxy_persona,
                 )
         except BaseException:
             self._active_runs.pop(job_id, None)

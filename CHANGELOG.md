@@ -850,10 +850,12 @@ All notable changes to auto-browser are documented here.
   `5xx` again and not a `4xx`, and the page may answer next time. A stored job that holds, where a run reads text
   or a number, a value that is neither (`max_steps` a string or a list, `start_url` or `auth_profile` a number or
   a list, `proxy_persona` a list: a store edited by hand), or whose `id` is a list or an object, was an unhandled
-  `500` and now answers that `409`; an empty value in one of the first four (`null`, `false`, `0`, `""`, an empty
-  list) is no value, as it was. Each writes its WARNING with the cause. For such a job `browser.trigger_cron_job` now
-  answers an error that names the field, where it answered `Tool execution failed`, and a scheduled fire logs the
-  same.
+  `500` and now answers that `409`. Each writes its WARNING with the cause. For such a job `browser.trigger_cron_job`
+  now answers an error that names the field, where it answered `Tool execution failed`, and a scheduled fire logs
+  the same. An empty value in one of the first four (`null`, `false`, `0`, `0.0`, `""`, an empty list or object) is
+  no value, as it was, and the run's session is now created with none there: a `proxy_persona` of `false`, `0`,
+  `0.0`, `[]` or `{}` reached the session's record, which refused it after the browser context had opened, and the
+  run failed.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
