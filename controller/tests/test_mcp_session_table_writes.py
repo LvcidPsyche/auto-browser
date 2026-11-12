@@ -738,8 +738,9 @@ class McpSessionTableStartCollectorTests(_Transport):
 
     The read makes a list or an object for each one in the file, tens of millions at the table's cap, and no cycle:
     each collection it set off went through all of them, which none could free. On Python 3.11, the image's, a table
-    of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read in 50 to 68 s with the
-    collector on and in 3.4 s with it off. A session keeps the text of its client fields alone, so the collections
+    of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read in 48 to 68 s with the
+    collector on (eleven runs) and in 3.4 to 3.5 s with it off (two), and the one start measured with it on took 59 s,
+    44 s of it in collections. A session keeps the text of its client fields alone, so the collections
     after the start have none of the read's lists to go through.
     """
 

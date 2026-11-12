@@ -20,7 +20,7 @@ All notable changes to auto-browser are documented here.
   something large of its own that it sends there (an icon as a data URI, for one). A session that an older version
   stored past a bound is dropped at this version's start, which then writes the file of sessions once without it:
   its client is answered `404` on its next request, as after an eviction, and the `initialize` it then sends is
-  refused as above until it sends less.
+  refused as above until it sends less. That write leaves out each record the start passed over as malformed too.
 - **`resources/subscribe` of `browser://audit/events` now answers `-32602`.** No event ever notified that resource, so
   a subscription to it heard nothing. Poll it with `resources/read`. A subscription an older version recorded stays
   silent, as it always was, and `resources/unsubscribe` still removes it.
@@ -373,9 +373,10 @@ All notable changes to auto-browser are documented here.
   and cut, a `ValidationError`'s as its fields and kinds of refusal alone
   (`'2 refused by SessionRecord: status: literal_error; title: string_type'`), and one that wrote the error by `%r`
   writes its class before it.
-  Each of these that writes an error's whole text makes it where it quotes it: an error whose text cannot be made
-  (a `KeyError` of a key whose `repr` raises) is named `<its text could not be made: RuntimeError>` and the line is
-  written all the same, and a text that was cut is followed by its length (`'xyyy'... (cut from 5041 characters)`).
+  Each of these makes the error's text inside a guard: an error whose text cannot be made (a `KeyError` of a key
+  whose `repr` raises) is named `<its text could not be made: RuntimeError>` and the line is written all the same;
+  and one that writes the error's whole text follows a text it cut with its length
+  (`'xyyy'... (cut from 5041 characters)`).
   So is every other text the controller takes from an error, for an answer, an exception's message or a check of
   the text, where `str()` of an error whose text cannot be made raised out of the `except` that took it, in place of
   the error it was about: the pre-request gate's detach of a session that went with its target (a close met that
@@ -424,10 +425,14 @@ All notable changes to auto-browser are documented here.
   agent job worker's crash, an agent step that failed and a background task that failed, each a traceback, which
   prints a Playwright error's text as it is. The `RuntimeError` behind a `409 Conflict` of `POST /sessions` and of
   a fork, written by its traceback too (a persona's name or a URL the caller sent among it), is written as a
-  route's hidden cause. Other lines still write an error by its traceback, which prints its text as it is: an MCP
-  tool's or an agent job's unexpected error and a readiness check that failed among them, and otherwise mostly the
-  failures of the controller's own work (a store's, an audit event's or a witness receipt's write, a maintenance
-  sweep).
+  route's hidden cause. Every other log line that writes an error's text now quotes and cuts it, made inside the
+  guard, and a source test refuses one that passes a caught error to logging itself, takes an error's text outside
+  the guard, or writes a caller's value by `%r`. Still written whole: an error's text in a traceback, which prints
+  it as it is (an MCP tool's or an agent job's unexpected error and a readiness check that failed among them, and
+  otherwise mostly the failures of the controller's own work: a store's, an audit event's or a witness receipt's
+  write, a maintenance sweep), and, where only the standard library is at hand, the stdio bridge's error texts (on
+  stderr and in its answers, its known secrets taken out) and the entrypoint's line of the capabilities it could
+  not drop.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:
@@ -1199,14 +1204,19 @@ All notable changes to auto-browser are documented here.
   with 3.11, the image's (1.8 to 3.5 s and 1.5 to 3.5 s with 100 sessions, the most one token-verified operator
   keeps), and the collections that follow it, up to the first full one, under 0.1 s more: that is the time the table
   adds before the controller answers. With the collector on, 3.11 collected again and again during the read of the
-  second shape, each time through the tens of millions of lists the read had made, none of which it could free: its
-  start took 59 to 61 s. Each session kept its fields as they were read, some 30 million lists for that shape at the
-  cap, and the collections that followed the read went through them all: 29 to 34 s more on 3.11 and 3.12 alike, up
-  to the first full collection (5.9 to 6.5 s with 100 sessions). A float is now counted at the length it is written
+  second shape, each time through the tens of millions of lists the read had made, none of which it could free: the
+  one start measured so took 59 s, 44 s of it in collections, beside 49 s for its read alone in that run; in eleven
+  runs that read alone took 48 to 68 s, and 3.4 to 3.5 s with the collector off. Each session kept its fields as
+  they were read, some 30 million lists for that shape at the cap, and the collections that followed the read went
+  through them all: 23 to 26 s more on 3.11 and 3.12 alike, up to the first full collection (4.7 to 5.2 s with 100
+  sessions). A float is now counted at the length it is written
   at, so a value of floats past the bound is refused without being written out to be measured.
   A session an older version stored past either bound is dropped when the file is read, with one WARNING that counts
   them and quotes none, and the file is then written once without them, so that the next start does not read and
-  measure them again; a write that fails is a WARNING of its own, and the start goes on with the file as it was. A
+  measure them again; a write that fails is a WARNING of its own, and the start goes on with the file as it was.
+  That write leaves out the records the start passed over as malformed too, as every write of the table does: a
+  start that drops no session past a bound writes nothing, and leaves them in the file until the table is next
+  written (by an `initialize`, for one). A
   field that holds a lone surrogate, which only a file edited by hand can, is kept as an `initialize` keeps it, with
   U+FFFD, and measured as it is kept: kept as it was read, it failed every later write of the file. A record whose
   other text holds one is passed over, as a malformed record is. See the upgrade note. A `POST /mcp` body nested past

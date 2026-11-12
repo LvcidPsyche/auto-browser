@@ -847,7 +847,8 @@ class McpHttpTransport:
         # The read makes a list or an object for each one in the file, tens of millions at the table's cap, and no
         # cycle: each collection it set off went through all of them, and none could free one. On Python 3.11, the
         # image's, a table of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read
-        # in 50 to 68 s with the cyclic collector on and in 3.4 s with it off. It is off for the read and the
+        # in 48 to 68 s with the cyclic collector on (eleven runs) and in 3.4 to 3.5 s with it off (two), and the one
+        # start measured with it on took 59 s, 44 s of it in collections. It is off for the read and the
         # measuring after it, for every thread (what another thread makes meanwhile is collected once it is back), and
         # given back as it was found on every way out. What the read made is freed before then, as _read_sessions
         # returns, the client fields of the sessions kept included: a session keeps their text alone (McpSession).
