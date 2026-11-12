@@ -531,7 +531,7 @@ class BrowserActionPipeline:
                 action_class=witness_state.action_class,
                 risk_category=witness_state.witness_context.get("risk_category"),
                 target=context.target,
-                outcome=witness_state.outcome,
+                outcome=self._receipt_outcome(context, witness_state),
                 before=witness_state.before,
                 after=after,
                 approval=approval,
@@ -539,6 +539,23 @@ class BrowserActionPipeline:
             )
 
         await self._write_record(session, witness_state, writes)
+
+    @staticmethod
+    def _receipt_outcome(context: ActionRunContext, witness_state: ActionWitnessState) -> Any:
+        """The policy outcome a receipt is written with: that of the action as it ran. A field the operation found
+        secret (text_redacted: BrowserActionService.withhold_text_preview) is sensitive input, and restricts the
+        receipt as the caller's sensitive flag does; what the run was decided by (_prepare's outcome) stays."""
+        if not context.target.get("text_redacted"):
+            return witness_state.outcome
+        manager = context.manager
+        return manager.witness_policy.evaluate_action(
+            session=manager._witness_session_context(context.session),
+            action=manager._build_witness_action_context(
+                action_name=context.action_name,
+                target=context.target,
+                witness_context=witness_state.witness_context,
+            ),
+        )
 
     @staticmethod
     async def _write_record(
@@ -618,7 +635,7 @@ class BrowserActionPipeline:
                 action_class=witness_state.action_class,
                 risk_category=witness_state.witness_context.get("risk_category"),
                 target=context.target,
-                outcome=witness_state.outcome,
+                outcome=self._receipt_outcome(context, witness_state),
                 before=witness_state.before,
                 after=after,
                 verification=verification,

@@ -555,6 +555,16 @@ All notable changes to auto-browser are documented here.
   now taken to say the field is secret: the preview is withheld (`text_redacted: true`), and what is typed does not
   change. Every release from 0.1.0 is affected (the function was `BrowserManager._locator_is_sensitive_input`
   before 1.1.0).
+- **A field a type finds secret as it runs now restricts the type's witness receipt.** The Witness policy was asked
+  once, before the action ran, when only the caller's `sensitive` flag could say the text was secret: a type into
+  a password field the caller did not mark withheld its preview, and its receipt was still `standard`, with no
+  `sensitive_input` concern, though its own target said `text_redacted: true`. Such a receipt kept the page's
+  observations before and after the type (its text excerpt, its interactable elements' labels, its URLs) for
+  whoever reads the session's receipts (`GET /sessions/{id}/witness` and its bundle, a hosted Witness service);
+  no observation carries a field's value, so the password itself was not in it. 1.17.0's entry says the opposite
+  ("a field an action finds sensitive only as it runs restricts that action's own receipt"): that now holds, by
+  selector and by `element_id`. What the run was decided by (a block, an approval) is still the policy's answer
+  before it. 1.16.0 and 1.17.0 wrote such a receipt so (by their code; the probes ran on this release's).
 
 ### Fixed
 

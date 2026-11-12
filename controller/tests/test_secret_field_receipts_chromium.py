@@ -27,6 +27,7 @@ from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromi
 pytestmark = [requires_chromium, pytest.mark.asyncio(loop_scope="module")]
 
 TEXT = "hunter2-secret"
+LOGIN = '<title>login</title><input id="user" name="user"><input id="pw" type="password" aria-label="Password">'
 # The password field is put in when the test says so (addPw), so its timing is the test's.
 LATE = (
     "<title>login</title><script>window.addPw = (ms) => setTimeout(() => document.body.insertAdjacentHTML("
@@ -68,6 +69,30 @@ async def _late_field_env(env: Any, appears_after_ms: int | None) -> tuple[str, 
 
     env.manager._ensure_witness_remote_ready = field_comes_later
     return session_id, env.manager.sessions[session_id], spy
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_type_into_a_password_field_not_marked_sensitive_restricts_its_receipt(tmp_path: Path, by: str) -> None:
+    # The type finds the field secret as it runs and withholds its preview; the policy was asked before it ran, when
+    # only the caller's mark could say so, and the receipt kept standard evidence with no sensitive_input concern.
+    async with browser_env(tmp_path, {"/login": LOGIN}) as env:
+        env.manager.settings.witness_enabled = True
+        session_id = await env.create("/login")
+        if by == "selector":
+            target = {"selector": "#pw"}
+        else:
+            items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+            (field,) = [item for item in items if item.get("label") == "Password"]
+            target = {"element_id": field["element_id"]}
+
+        result = await env.manager.type(session_id, text=TEXT, **target)
+
+        assert await env.manager.sessions[session_id].page.input_value("#pw") == TEXT
+        assert result["target"].get("text_redacted") is True and "text_preview" not in result["target"]
+        receipt = await _type_receipt(env, session_id)
+        assert receipt.evidence_mode == "restricted"
+        assert "sensitive_input" in [concern.code for concern in receipt.concerns]
+        assert (receipt.evidence.before, receipt.evidence.after) == (None, None)
 
 
 async def test_a_password_field_that_appears_after_the_attribute_read_keeps_no_preview(tmp_path: Path) -> None:

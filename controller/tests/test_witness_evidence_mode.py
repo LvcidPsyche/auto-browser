@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -25,6 +25,11 @@ from app.witness import (
     WitnessRecorder,
     WitnessSessionContext,
 )
+from tests.test_actions_verification import PAGE as VERIFIED_PAGE
+from tests.test_actions_verification import URL as VERIFIED_URL
+from tests.test_actions_verification import _session as _actions_session
+from tests.test_browser_manager_actions import FakeContext, FakeLocator, FakePage
+from tests.test_browser_manager_actions import _settings as _actions_settings
 
 NAMED_OPERATOR = {"id": "alice", "source": "header"}
 TYPED = {"selector": "#note", "clear_first": True, "text_preview": "ordinary note text"}
@@ -479,3 +484,41 @@ async def test_a_standard_receipt_keeps_its_urls_whole(tmp_path: Path) -> None:
     assert receipt.target["url"] == CODE_URL
     assert receipt.target["blocked_navigations"][0]["URL"] == TOKEN_FRAGMENT_URL
     assert receipt.metadata["error"]["url"] == TOKEN_QUERY_URL
+
+
+def _typing_manager(tmp_path: Path) -> BrowserManager:
+    """The real type through the real pipeline, on a fake page whose ``#pw`` is a password field."""
+    manager = BrowserManager(_actions_settings(tmp_path))
+    manager.audit.append = AsyncMock()
+    manager._append_jsonl = AsyncMock()
+    manager._persist_session = AsyncMock()
+    manager._settle = AsyncMock()
+    manager._ensure_witness_remote_ready = AsyncMock()
+    manager._check_bot_challenge = AsyncMock(return_value=None)
+    manager._light_snapshot = AsyncMock(return_value={**VERIFIED_PAGE, "tab_count": 1})
+    manager._observation_payload = AsyncMock(return_value=VERIFIED_PAGE)
+    page = FakePage(VERIFIED_URL)
+    page.locators["#pw"] = FakeLocator("#pw", attributes={"type": "password"})
+    manager.sessions["s1"] = _actions_session(tmp_path, page, FakeContext(page))
+    return manager
+
+
+@pytest.mark.parametrize("profile", ["normal", "confidential"])
+@pytest.mark.parametrize("marked", [False, True], ids=["found-secret-as-it-runs", "marked-sensitive-by-the-caller"])
+async def test_a_type_into_a_password_field_restricts_its_receipt(tmp_path: Path, marked: bool, profile: str) -> None:
+    # The policy was asked once, before the type ran, when only the caller's mark said the text was secret: a field
+    # the type found secret withheld its preview, and its receipt stayed standard, the full observations kept, with no
+    # sensitive_input concern, where 1.17.0's CHANGELOG says such a field restricts its action's own receipt. A
+    # confidential session's receipts are restricted whatever the action, so there the concern tells the two apart.
+    manager = _typing_manager(tmp_path)
+    manager.sessions["s1"].protection_mode = profile
+    manager.settings.witness_enabled = True
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.type("s1", selector="#pw", text="hunter2-secret", sensitive=marked)
+
+    assert result["target"]["text_redacted"] is True and "text_preview" not in result["target"]
+    (receipt,) = [r for r in await manager.witness.list("s1") if r.event_type == "browser_action"]
+    assert receipt.evidence_mode == "restricted"
+    assert "sensitive_input" in [concern.code for concern in receipt.concerns]
+    assert (receipt.evidence.before, receipt.evidence.after) == (None, None)
