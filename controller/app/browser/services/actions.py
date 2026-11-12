@@ -26,7 +26,7 @@ from ...approvals import (
     held_tool_call_approval,
     refused_before_effect,
 )
-from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
+from ...models import READ_ONLY_ACTIONS, ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
 from ...utils import error_text_for_log, quoted_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -1662,17 +1662,7 @@ class BrowserActionService:
 
     @staticmethod
     def action_class(action_name: str) -> str:
-        if action_name in {
-            "navigate",
-            "hover",
-            "scroll",
-            "wait",
-            "reload",
-            "go_back",
-            "go_forward",
-        }:
-            return "read"
-        return "write"
+        return "read" if action_name in READ_ONLY_ACTIONS else "write"
 
     @staticmethod
     def action_verification(

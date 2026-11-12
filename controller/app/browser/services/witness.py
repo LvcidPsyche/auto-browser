@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ...audit import get_current_operator
-from ...models import BrowserActionDecision, SessionRecord, WitnessRemoteState
+from ...models import READ_ONLY_ACTIONS, BrowserActionDecision, SessionRecord, WitnessRemoteState
 from ...utils import spawn_background_task, utc_now
 from ...witness import (
     WitnessActionContext,
@@ -429,7 +429,7 @@ class BrowserWitnessService:
             return "auth"
         if action_name in {"request_human_takeover", "close_session", "create_session"}:
             return "control"
-        if action_name in {"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward"}:
+        if action_name in READ_ONLY_ACTIONS:
             return "read"
         return "write"
 

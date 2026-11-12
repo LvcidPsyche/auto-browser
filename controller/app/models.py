@@ -368,6 +368,9 @@ ActionName = Literal[
     "request_human_takeover",
     "done",
 ]
+# The actions that cannot change anything a site keeps (a navigation is a GET): risk "read" unless labelled
+# otherwise, and class "read" in an action's result and in its receipt.
+READ_ONLY_ACTIONS = frozenset({"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward"})
 ProviderName = Literal[
     "openai",
     "claude",
@@ -445,7 +448,7 @@ class BrowserActionDecision(StrictInputModel):
     def validate_action_requirements(self) -> "BrowserActionDecision":
         validate_coordinate_pair(self.x, self.y, field_name=f"{self.action} coordinates")
         if self.risk_category is None:
-            if self.action in {"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward", "done"}:
+            if self.action in READ_ONLY_ACTIONS or self.action == "done":
                 self.risk_category = "read"
             elif self.action == "upload":
                 self.risk_category = "upload"
