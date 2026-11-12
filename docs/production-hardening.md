@@ -323,6 +323,19 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     the moved point. Otherwise, or when that cannot be told (half a second to set the comparison up, half a
     second to make it), it lands on the point itself. Two points inside a frame of another origin, or off the
     page, are never taken for one element.
+  - A press holds the mouse button down for 20 to 80 ms, as a hand does, and the browser sends no click where the
+    element the press went down on is gone by the release. A page that draws the element under the pointer again
+    within the hold (a list or a counter that a framework renders again on a timer, a button whose label it
+    replaces) gets the press on one element and the release on its replacement: the button's handler does not
+    run, and the action ends as done all the same. On a button the page replaced every 250 ms half the read
+    clicks ended so (10 of 20), and on one it replaced every second about one click in nine (9 of 80); one it
+    replaced every 50 ms no read click pressed at all, each ending as `target_moved` or when its time ran out,
+    and a click that was not read was split there too (2 of 10). The action's `verification` does not tell such
+    a press from one that worked: it says `verified: false` where nothing on the page changed, and
+    `verified: true` where the press moved the focus to a button whose label alone was drawn again. Such a press
+    is neither reported nor made again: a page that acts on the press itself (a menu that opens on the mouse down
+    and draws its button again) sends no click either, and works, and a second press would close what the first
+    opened. Read the page again before relying on what a click did.
   - It does not catch: a label the table lacks, the phrases left out above among them (the table is English, and
     has no `Place bid`, `Book now`, `Withdraw`, `Reply`, `Terminate`, `Complete payment`, `Make a payment` or
     `Apple Pay`); a label that leads up to its phrase with a word that is no icon's name ("Warning: Delete

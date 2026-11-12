@@ -583,7 +583,11 @@ All notable changes to auto-browser are documented here.
   and fails when it stays off. That gap is older than this release, and so is this one: a disabled button that
   a page draws again many times a second (a form that renders again while it validates) ended a click at once,
   at its scroll into view ("Element is not attached to the DOM"), where Playwright's own click waits for the
-  button to come on. The scroll is now made again while the click's time lasts.
+  button to come on. The scroll is now made again while the click's time lasts. An enabled button such a page
+  draws again can still have its press split, as before this release: the mouse is held down 20 to 80 ms, and
+  where the element under the pointer is drawn again within that time the browser sends no click, and the
+  action ends as done (10 of 20 read clicks on a button replaced every 250 ms). The docs say what the action's
+  `verification` shows of it.
 - **A click on an element inside a frame is pressed only where the pointer finds that element.** A selector that
   goes into a frame names an element there, and its click is pressed at the middle of the element's box once the
   pointer is found to be on it. For an element in a frame that was never asked: the check ran in the frame's own
