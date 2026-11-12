@@ -243,7 +243,6 @@ class PageWorld:
         read: past its bound the call is abandoned and the session left as it
         was, not dropped and detached under the other calls in flight on it.
         """
-        timeout_ms = self.timeout_ms if timeout_ms is None else timeout_ms
         setup = (
             None
             if setup_timeout_ms is None
@@ -272,7 +271,7 @@ class PageWorld:
         page: "Page",
         declaration: str,
         args: tuple[Any, ...],
-        timeout_ms: int,
+        timeout_ms: int | None,
         *,
         setup: _SetupBudget | None = None,
         keep_session: bool = False,
