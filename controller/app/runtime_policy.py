@@ -16,7 +16,7 @@ from .auth_policy import (
     tokenless_loopback_allowed,
 )
 from .config import Settings
-from .middleware.hosts import is_wildcard_pattern
+from .host_patterns import is_wildcard_pattern
 from .providers.base import BaseProviderAdapter, auth_mode_shown
 from .url_safety import refuse_ambiguous_host
 

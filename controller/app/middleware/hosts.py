@@ -10,7 +10,6 @@ client was refused. This keeps the same pattern language (exact names,
 
 from __future__ import annotations
 
-import ipaddress
 import re
 from typing import Callable, Sequence
 
@@ -18,6 +17,8 @@ from fastapi import FastAPI
 from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+from ..host_patterns import is_wildcard_pattern, normalize_pattern, pattern_error
 
 
 def host_from_header(value: str) -> str:
@@ -66,54 +67,12 @@ def origin_matches_host(origin: str, host_header: str) -> bool:
     return own == _origin_key(f"{scheme}://{host_header.strip(_HTTP_OPTIONAL_WHITESPACE)}")
 
 
-def _normalize_pattern(pattern: str) -> str:
-    normalized = pattern.strip().lower()
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
-    return normalized
-
-
-def is_wildcard_pattern(pattern: str) -> bool:
-    """Whether a CONTROLLER_ALLOWED_HOSTS entry is a wildcard, read as the Host check reads it.
-
-    On the check's own normalization, so no spelling escapes it: case and brackets change nothing the match reads,
-    and a malformed wildcard is refused at start (_pattern_error), not read as an exact name.
-    """
-    return "*" in _normalize_pattern(pattern)
-
-
-def _pattern_error(pattern: str) -> str | None:
-    """Why the Host check refuses ``pattern`` at start, or None for a pattern it takes."""
-    stripped = pattern.strip()
-    if "[" in stripped or "]" in stripped:
-        # Brackets are how an IPv6 address is written in a Host. Round anything else they were stripped all the same,
-        # and "[*]" admitted every Host as "*" does.
-        if not (stripped.startswith("[") and stripped.endswith("]") and _is_ipv6_address(stripped[1:-1])):
-            return "brackets may only hold an IPv6 address"
-        return None
-    normalized = _normalize_pattern(pattern)
-    if "*" not in normalized or normalized == "*":
-        return None
-    # "*." matched every name written with its trailing dot.
-    if normalized.startswith("*.") and len(normalized) > 2 and "*" not in normalized[1:]:
-        return None
-    return "wildcards must look like '*.example.com'"
-
-
-def _is_ipv6_address(text: str) -> bool:
-    try:
-        ipaddress.IPv6Address(text)
-    except ValueError:
-        return False
-    return True
-
-
 def host_is_allowed(host_header: str, patterns: Sequence[str]) -> bool:
     host = host_from_header(host_header)
     if not host:
         return False
     for raw in patterns:
-        pattern = _normalize_pattern(raw)
+        pattern = normalize_pattern(raw)
         if pattern == "*":
             return True
         if pattern.startswith("*."):
@@ -134,7 +93,7 @@ class ControllerHostMiddleware:
 
     def __init__(self, app: ASGIApp, allowed_hosts: Sequence[str], *, requires_credential: Callable[[], bool]) -> None:
         for pattern in allowed_hosts:
-            error = _pattern_error(pattern)
+            error = pattern_error(pattern)
             if error is not None:
                 raise ValueError(f"invalid host pattern {pattern!r}; {error}")
         self.app = app
