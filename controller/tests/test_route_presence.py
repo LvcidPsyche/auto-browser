@@ -33,6 +33,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import APIRouter, FastAPI, WebSocket
 from fastapi.testclient import TestClient
+from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import BaseRoute, Mount, Route, WebSocketRoute
 
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="auto-browser-route-presence-"))
@@ -52,6 +53,17 @@ for env_name, relative_path in {
     os.environ.setdefault(env_name, str(_TEST_ROOT / relative_path))
 
 import app.main as main_module  # noqa: E402
+from app.app_factory import SessionArtifactFiles  # noqa: E402
+from app.middleware.http import install_controller_http_middleware  # noqa: E402
+
+# A controller that has a token, as the token gate reads its settings.
+_WITH_A_TOKEN = SimpleNamespace(
+    api_bearer_token="secret",
+    request_rate_limit_exempt_path_list=[],
+    operator_id_header="X-Operator-Id",
+    operator_name_header="X-Operator-Name",
+    require_operator_id=False,
+)
 
 # One canary per include_router call site, mapped to the module that registers
 # it. If a router stops mounting, its canary is the failure message.
@@ -154,11 +166,18 @@ class RouteDispatchTests(unittest.TestCase):
                 )
 
 
+# Apps a mount may hold that the walk cannot see inside, each named by its type because it serves HTTP only: a
+# WebSocket scope fails StaticFiles' own check (scope["type"] == "http") before anything answers it.
+_SERVES_HTTP_ONLY = frozenset({SessionArtifactFiles})
+
+
 def _websocket_routes(routes: list[BaseRoute]) -> list[str]:
     """The path of every WebSocket route under ``routes``, however it is mounted, as its own router names it.
 
     Into include_router's wrappers (FastAPI 0.137 and later: ``original_router``) and into mounts. A route of a kind
-    this walk cannot see inside fails it, so a FastAPI that changes the wrapper cannot leave the walk blind.
+    this walk cannot see inside fails it, so a FastAPI that changes the wrapper cannot leave the walk blind. So does
+    a mount of an app that holds no routes the walk can read (a raw ASGI app, an app behind a middleware: the mount's
+    routes are then []), unless the app's type is one that serves HTTP only (_SERVES_HTTP_ONLY).
     """
     found: list[str] = []
     for route in routes:
@@ -167,6 +186,13 @@ def _websocket_routes(routes: list[BaseRoute]) -> list[str]:
         elif isinstance(route, Route):  # APIRoute among them: HTTP only
             continue
         elif isinstance(route, Mount):
+            if type(route.app) in _SERVES_HTTP_ONLY:
+                continue
+            if not route.routes and not hasattr(route.app, "routes"):
+                raise AssertionError(
+                    f"cannot see inside the app mounted at {route.path}, a {type(route.app).__name__}: teach "
+                    "_websocket_routes, or name its type in _SERVES_HTTP_ONLY if it serves no WebSocket"
+                )
             found.extend(f"{route.path}{path}" for path in _websocket_routes(route.routes))
         elif hasattr(route, "original_router"):
             found.extend(_websocket_routes(route.original_router.routes))
@@ -211,6 +237,41 @@ class WebSocketRouteTests(unittest.TestCase):
 
         # An included router's routes are named as that router names them, without its prefix.
         self.assertEqual(sorted(_websocket_routes(application.routes)), ["/direct", "/included", "/sub/mounted"])
+
+    def test_the_walk_fails_on_a_mount_it_cannot_see_inside(self) -> None:
+        # Such a mount's routes are [], so the walk found nothing in it: a raw ASGI app or an app behind a middleware
+        # that serves a WebSocket passed it, and answered without a credential on a controller that has one.
+        async def accepted(websocket: WebSocket) -> None:
+            await websocket.accept()
+            await websocket.close()
+
+        async def raw(scope, receive, send) -> None:
+            await accepted(WebSocket(scope, receive, send))
+
+        inner = FastAPI()
+        inner.add_api_websocket_route("/unguarded", accepted)
+        for prefix, mounted, url in (
+            ("/raw", raw, "/raw/any"),
+            ("/wrapped", CORSMiddleware(inner), "/wrapped/unguarded"),
+        ):
+            with self.subTest(mount=prefix):
+                application = FastAPI()
+
+                @application.get("/sessions")
+                async def protected() -> dict[str, bool]:
+                    return {"ok": True}
+
+                application.mount(prefix, mounted)
+                install_controller_http_middleware(
+                    application, settings=_WITH_A_TOKEN, rate_limiter=None, metrics=SimpleNamespace(enabled=False)
+                )
+                with TestClient(application) as client:
+                    self.assertEqual(client.get("/sessions").status_code, 401)
+                    with client.websocket_connect(url):
+                        pass  # accepted, with no credential
+
+                with self.assertRaisesRegex(AssertionError, f"cannot see inside the app mounted at {prefix}"):
+                    _websocket_routes(application.routes)
 
 
 if __name__ == "__main__":
