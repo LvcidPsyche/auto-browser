@@ -193,9 +193,11 @@ class BrowserSessionService(SessionCreation):
         """
         try:
             record = await self.manager.session_store.get(session_id)
-        except Exception:  # message enrichment only; any store failure means "unknown"
-            # %r: the id is the caller's own text (a mesh peer's, an MCP caller's), and a line break in it began a line.
-            logger.debug("no readable record for session %r", session_id, exc_info=True)
+        except Exception as exc:  # message enrichment only; any store failure means "unknown"
+            # The id is the caller's own text (a mesh peer's, an MCP caller's): quoted and cut. The error by its class
+            # alone, which tells no record (KeyError) from a store that failed: its text, and a traceback of it,
+            # repeat the id whole, and a ValidationError's the record's own fields.
+            logger.debug("no readable record for session %s: %s", quoted_for_log(session_id), type(exc).__name__)
             return None, None
         return (record.status, record.close_reason) if may_use(record.owner) else (None, None)
 

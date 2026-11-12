@@ -381,19 +381,21 @@ def test_a_session_id_that_names_no_record_is_logged_on_one_line_at_debug(
 ) -> None:
     # A tool that looks a session up hands the service the id it was sent: a mesh peer's under a grant for such a
     # tool, or an MCP caller's. With LOG_LEVEL=DEBUG, which .env.example offers, the lookup that finds no record it
-    # can read logs the id. The file store refuses an id that is no plain name.
+    # can read logs the id. The file store refuses an id that is no plain name. The id was written uncut (%r), and the
+    # traceback under it repeated it whole in the store's KeyError: a record held a 60,000-character id twice.
     manager = SimpleNamespace(sessions={}, session_store=FileSessionStore(tmp_path))
     caplog.set_level(logging.DEBUG)
+    long_id = "s1" + FORGED + "x" * 60_000
 
     with pytest.raises(SessionNotFoundError):
-        asyncio.run(BrowserSessionService(manager).get("s1" + FORGED))
+        asyncio.run(BrowserSessionService(manager).get(long_id))
 
     message = _the_line(caplog, "app.browser.services.sessions", "no readable record for session")
-    # As a handler writes it, with the traceback the call asks for under the message: no line of it is the peer's.
+    # As a handler writes it: the id quoted and cut, the error by its class alone, and nothing under it.
     (record,) = [record for record in caplog.records if record.getMessage() == message]
-    written = logging.Formatter().format(record).splitlines()
-    assert written[0] == message
-    assert [line for line in written if line.startswith("WARNING:")] == [], ascii(written)
+    assert record.exc_info is None
+    assert logging.Formatter().format(record) == message
+    assert message == f"no readable record for session {long_id[:200]!r}...: KeyError", ascii(message[-80:])
 
 
 @pytest.mark.parametrize(

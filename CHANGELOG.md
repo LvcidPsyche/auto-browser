@@ -337,7 +337,9 @@ All notable changes to auto-browser are documented here.
   `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent too (`no readable record
   for session`), the id of a peer's request or of an MCP call; and with `REDIS_URL` set, while Redis failed, so was
   the id of every session a route or a tool looked up, at WARNING (`redis session read failed for`). Both are quoted
-  now, and the session store refuses an id that is no plain name before Redis is asked, as without `REDIS_URL`.
+  now, and the session store refuses an id that is no plain name before Redis is asked, as without `REDIS_URL`. The
+  DEBUG line also cuts the id at 200 characters and names the error by its class alone, with no traceback under it:
+  the traceback repeated the id whole in the store's `KeyError`, so its record held the id twice, uncut.
 - **More lines that wrote a caller's or a page's text as it came now quote and cut it.** `memory profile saved` and
   `memory profile loaded` wrote the profile's name, the caller's or that of an agent a page can steer: a line break in
   it began a line of the log, and an ESC reached the terminal. The network inspector's lines that name a request wrote
