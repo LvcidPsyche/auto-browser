@@ -544,8 +544,11 @@ All notable changes to auto-browser are documented here.
   that sets `location`) handed the code to that host: a click waits for the navigation its press starts, so the
   other host's page was there by the time the code was typed, into its own field that the autofill's selector
   matched, and submitted, every time in a warm Chromium (10 of 10). The host is now checked once more after the
-  focus click, and again once the field is emptied, before the code is typed. A page that moves by itself while
-  the six digits are typed is not caught.
+  focus click, and again once the field is emptied, before the code is typed. A page that moves while the six
+  digits are typed is not caught, whether by itself or by a navigation its field starts as the autofill empties
+  it (an input handler): emptying the field does not wait for that navigation, so the check after it still finds
+  the named host, and the digits typed once it commits go to the other host's field (five of the six in each of
+  three runs in Chromium).
   The order is the same in every release since the autofill was bound to the session's hosts, 1.8.1 to 1.17.0 (by
   their code; the probe ran on this release's).
 - **A type into a field whose attributes could not be read keeps no preview of its text.** A `type` decides from
@@ -613,7 +616,8 @@ All notable changes to auto-browser are documented here.
   stays so), and a frame inside another at a point carried by its boxes. Where the element's box has moved or
   changed its size since the click was placed (a page that moves the frame once the pointer has arrived, or
   scales one that runs in the page's process), that point is no longer the pointer's, and the click ends as
-  `target_moved` with nothing pressed. Not caught: a page whose own script, or a style in motion, turns or
+  `target_moved` with nothing pressed; so does a scroll of the element's own document then, even where the element
+  is still under the pointer. Not caught: a page whose own script, or a style in motion, turns or
   reshapes the frame as the pointer arrives and leaves the element's box as Playwright counts it, which in a
   frame of another process is as if the frame were not turned or scaled and had no border or padding (a half
   turn, a scale about the frame's top-left corner, its padding grown inside the same border box): the click then

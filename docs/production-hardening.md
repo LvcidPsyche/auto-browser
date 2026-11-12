@@ -277,8 +277,10 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     while it stays so. That point is the pointer's only while the frame stays as it was: where the element's box
     has moved or changed its size since the click was placed (a page that moves the frame once the pointer has
     arrived, or scales one that runs in the page's process), the click ends as `target_moved` with nothing
-    pressed. The box is Playwright's, which in a frame of another process is counted from the corner of the box
-    round the frame as if the frame were not turned or scaled and had no border or padding. So a page whose own
+    pressed. So does a scroll of the element's own document then, even where the element is still under the
+    pointer (a card 60 px high scrolled 20 px). The box is Playwright's, which in a frame of another process is
+    counted from the corner of the box round the frame as if the frame were not turned or scaled and had no
+    border or padding. So a page whose own
     script, or a style in motion, turns or reshapes the frame as the pointer arrives and leaves that box as it
     was (a frame of another process given a half turn, or scaled about its top-left corner, or its padding grown
     inside the same border box) is a page that changes what is under the pointer, which is not caught (below):
