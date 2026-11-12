@@ -14,7 +14,7 @@ from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
-from .utils import error_lines_for_log, error_text_for_log
+from .utils import error_lines_for_log, error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class BrowserOrchestrator:
                 execution=None,
                 usage=None,
                 raw_text=None,
-                error=f"Could not observe the page: {exc}"[:300],
+                error=f"Could not observe the page: {error_text(exc)}"[:300],
                 error_code=None,
             )
             await self._append_agent_log(session_id, "agent_steps.jsonl", result.model_dump())
@@ -154,7 +154,9 @@ class BrowserOrchestrator:
             else:
                 error_code = None
             error_message = (
-                "Provider request failed" if error_code else f"Agent step failed: {type(exc).__name__}: {exc}"[:300]
+                "Provider request failed"
+                if error_code
+                else f"Agent step failed: {type(exc).__name__}: {error_text(exc)}"[:300]
             )
             result = AgentStepResult(
                 provider=provider_name,

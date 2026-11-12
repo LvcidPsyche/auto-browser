@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..session_ownership import may_use
-from ..utils import error_text_for_log
+from ..utils import error_text, error_text_for_log
 from .induce import SIGNED_SKILL_FILES, SkillCandidate
 from .trace import hash_payload
 
@@ -104,7 +104,9 @@ class SkillStagingRegistry:
         try:
             payload = self.verifier(envelope)
         except Exception as exc:
-            raise PermissionError(f"staged skill candidate {candidate.skill_id} failed signature check: {exc}") from exc
+            raise PermissionError(
+                f"staged skill candidate {candidate.skill_id} failed signature check: {error_text(exc)}"
+            ) from exc
         signed_claims = {
             "contract_hash": (payload.get("contract_hash"), candidate.contract_hash),
             "trace_hash": (payload.get("trace_hash"), candidate.trace_hash),

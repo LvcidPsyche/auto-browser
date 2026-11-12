@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .utils import error_text
+
 # The twin of redact_endpoints in scripts/assert_browser_sandbox.py and redactEndpoints in browser-node/sandbox.mjs:
 # the path of a Playwright websocket endpoint is that server's only secret, and controller logs end up in CI output.
 _ENDPOINT_PATH = re.compile(r"""(wss?://[^/\s"'<>]+)/[^\s"'<>]*""")
@@ -129,7 +131,7 @@ def read_sandbox_state(path: Path) -> dict[str, Any] | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        reason = "a symlink, which is refused" if exc.errno == errno.ELOOP else (exc.strerror or str(exc))
+        reason = "a symlink, which is refused" if exc.errno == errno.ELOOP else (exc.strerror or error_text(exc))
         return _unreadable(f"{path} could not be opened ({reason})")
     try:
         st = os.fstat(fd)

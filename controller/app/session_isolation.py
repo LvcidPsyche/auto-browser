@@ -31,7 +31,7 @@ from .browser_sandbox import (
     refusal,
     verified_on,
 )
-from .utils import error_text_for_log, spawn_background_task
+from .utils import error_text, error_text_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -550,8 +550,8 @@ class DockerBrowserNodeProvisioner:
         except (OSError, ValueError) as exc:
             if setting == "on":
                 raise RuntimeError(
-                    f"BROWSER_SANDBOX=on, but the seccomp profile {path} cannot be read ({exc}): the session's "
-                    "browser could not be sandboxed, so it was not started. Restore "
+                    f"BROWSER_SANDBOX=on, but the seccomp profile {path} cannot be read ({error_text(exc)}): the "
+                    "session's browser could not be sandboxed, so it was not started. Restore "
                     "app/browser/seccomp/chromium-sandbox.json or set ISOLATED_BROWSER_SECCOMP_PROFILE."
                 ) from exc
             logger.warning(
@@ -574,7 +574,8 @@ class DockerBrowserNodeProvisioner:
             try:
                 options = (self._ensure_context().info() or {}).get("SecurityOptions") or []
             except Exception as exc:  # the API is unreachable here; container creation will say so itself
-                self._seccomp_error = str(exc)[:300]
+                # Quoted and cut, as startup's WARNING writes it.
+                self._seccomp_error = error_text_for_log(exc)
                 logger.debug("docker info failed (%s); assuming seccomp support", error_text_for_log(exc))
                 return True
             self._seccomp_supported = any(str(option).startswith("name=seccomp") for option in options)
@@ -777,7 +778,7 @@ class DockerBrowserNodeProvisioner:
                 internal=False,
             )
         except Exception as exc:
-            if _ADDRESS_POOL_EXHAUSTED in str(exc).lower():
+            if _ADDRESS_POOL_EXHAUSTED in error_text(exc).lower():
                 raise RuntimeError(
                     f"Docker has no free address pool for the session network {network_name}: every isolated "
                     "session gets its own bridge network, and the daemon's default pools allow about 30. Close "
@@ -787,7 +788,7 @@ class DockerBrowserNodeProvisioner:
             # The daemon answers 409 Conflict ("network with name ... already exists"). A
             # leftover of this session id carrying our labels was already removed, so this
             # one belongs to someone else and is never removed here.
-            if getattr(exc, "status_code", None) == 409 or "already exists" in str(exc).lower():
+            if getattr(exc, "status_code", None) == 409 or "already exists" in error_text(exc).lower():
                 raise RuntimeError(
                     f"A Docker network named {network_name} already exists and is not a session network of this "
                     "controller (it lacks the auto-browser.managed and auto-browser.session_id labels), so it is "
@@ -1206,7 +1207,7 @@ class DockerBrowserNodeProvisioner:
         except Exception as exc:
             raise RuntimeError(
                 f"Could not find the controller container {self._controller_container_id!r} on the isolation "
-                f"Docker daemon ({exc}). {hint}"
+                f"Docker daemon ({error_text(exc)}). {hint}"
             ) from exc
         self._controller_container = container
         return container
@@ -1238,7 +1239,7 @@ class DockerBrowserNodeProvisioner:
             try:
                 endpoint = await asyncio.to_thread(read_endpoint_file, endpoint_file)
             except EndpointFileError as exc:
-                raise RuntimeError(f"Isolated browser container {container.name}: {exc}") from None
+                raise RuntimeError(f"Isolated browser container {container.name}: {error_text(exc)}") from None
             if endpoint:
                 return endpoint
             await asyncio.sleep(0.25)

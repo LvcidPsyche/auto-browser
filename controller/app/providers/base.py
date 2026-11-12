@@ -23,7 +23,7 @@ from pydantic import ValidationError
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
 from ..result_shaping import compact_session
-from ..utils import error_text_for_log
+from ..utils import error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -197,13 +197,18 @@ def _private_cli_home() -> str:
                     sentinel.parent.mkdir(mode=0o700, exist_ok=True)
                     sentinel.touch(mode=0o600, exist_ok=True)
             except (_Refused, OSError) as exc:
-                why = str(exc) if isinstance(exc, _Refused) else f"{type(exc).__name__}: {exc}"
+                # For the log: quoted and cut, made in error_text_for_log's guard.
+                why = (
+                    error_text_for_log(exc)
+                    if isinstance(exc, _Refused)
+                    else f"{type(exc).__name__}: {error_text_for_log(exc)}"
+                )
                 logger.warning("the private CLI home %s cannot be used: %s", path, why)
                 reasons.append(f"{path}: {why}")
                 continue
             return str(path)
     except (OSError, RuntimeError) as exc:  # Path.home() with no HOME and no passwd entry, for one
-        reasons.append(f"{type(exc).__name__}: {exc}")
+        reasons.append(f"{type(exc).__name__}: {error_text_for_log(exc)}")
     logger.error("no private CLI home can be used: %s", "; ".join(reasons) or "no candidate")
     raise RuntimeError(PRIVATE_CLI_HOME_ERROR)
 
@@ -652,7 +657,7 @@ class BaseProviderAdapter(ABC):
         try:
             mode = path.stat().st_mode
         except OSError as exc:
-            return False, f"{label} socket could not be inspected: {exc}"
+            return False, f"{label} socket could not be inspected: {error_text(exc)}"
         if not stat.S_ISSOCK(mode):
             return False, f"{label} socket path is not a Unix socket: {path}"
         try:
@@ -662,7 +667,7 @@ class BaseProviderAdapter(ABC):
                 client.sendall(b"GET /healthz HTTP/1.1\r\nHost: host-bridge\r\nConnection: close\r\n\r\n")
                 response = client.recv(4096)
         except OSError as exc:
-            return False, f"{label} socket is not accepting connections: {exc}"
+            return False, f"{label} socket is not accepting connections: {error_text(exc)}"
         status_line = response.splitlines()[0] if response else b""
         if b"200" not in status_line:
             return False, f"{label} socket health check failed: {status_line.decode('utf-8', errors='replace')}"

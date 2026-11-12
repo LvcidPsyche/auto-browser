@@ -339,7 +339,7 @@ class ApprovalStore:
                     try:
                         await self._write(record)
                     except Exception as exc:
-                        failed.append(f"{record.id} ({exc!r})")
+                        failed.append(f"{record.id} ({type(exc).__name__}: {error_text_for_log(exc)})")
                     else:
                         rewritten += 1
         except Exception:

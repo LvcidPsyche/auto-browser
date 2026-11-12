@@ -32,7 +32,7 @@ from typing import Any
 
 from .auth_policy import BIND_SCOPE_LOOPBACK, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
 from .runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +323,9 @@ def _read_token_file(path: Path) -> str | None:
     except (FileNotFoundError, NotADirectoryError):
         return None
     except (OSError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"Could not read API_TOKEN_FILE {path}: {exc}. Fix the file, or {_WAYS_OUT}.") from exc
+        raise RuntimeError(
+            f"Could not read API_TOKEN_FILE {path}: {error_text(exc)}. Fix the file, or {_WAYS_OUT}."
+        ) from exc
     if not token:
         return ""
     if len(token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH or not all("!" <= char <= "~" for char in token):
@@ -344,7 +346,7 @@ def _generate_token_file(path: Path) -> str:
     except OSError as exc:
         raise RuntimeError(
             f"No API credential was configured and the controller could not save a generated token "
-            f"to API_TOKEN_FILE {path}: {exc}. To start, {_WAYS_OUT}."
+            f"to API_TOKEN_FILE {path}: {error_text(exc)}. To start, {_WAYS_OUT}."
         ) from exc
     _match_parent_owner(path)
     return token

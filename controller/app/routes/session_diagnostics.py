@@ -15,6 +15,7 @@ from .. import events as _events
 from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError
 from ..playwright_export import export_session_script
+from ..utils import error_text
 from ._utils import (
     OFF_LIST_PAGE_DETAIL,
     REFUSED_PAGE,
@@ -213,7 +214,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                 return await manager.enable_shadow_browse(session_id)
             except ErrorPageSourceError as exc:
                 # Its fixed text says what to do instead, and names no host or path.
-                raise HTTPException(status_code=400, detail=str(exc)) from None
+                raise HTTPException(status_code=400, detail=error_text(exc)) from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes and fork answer it. Every other PermissionError
                 # (a data: or blob: page, a page another tab refused) is typed_route_errors' generic 403: a 500

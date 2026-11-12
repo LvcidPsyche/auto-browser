@@ -373,12 +373,27 @@ All notable changes to auto-browser are documented here.
   Each of these that writes an error's whole text makes it where it quotes it: an error whose text cannot be made
   (a `KeyError` of a key whose `repr` raises) is named `<its text could not be made: RuntimeError>` and the line is
   written all the same, and a text that was cut is followed by its length (`'xyyy'... (cut from 5041 characters)`).
+  So is every other text the controller takes from an error, for an answer, an exception's message or a check of
+  the text, where `str()` of an error whose text cannot be made raised out of the `except` that took it, in place of
+  the error it was about: the pre-request gate's detach of a session that went with its target (a close met that
+  error instead), a CDP connect that failed, an upload's check, a post-action observation, a tool's refusal, a
+  route's answer that repeats an error's text. The private CLI home's lines and `mesh.peers`' line of a peers file
+  it cannot use, which wrote such a text as it came, now quote and cut it.
   The lines that cut an error's text at 200 or 300 characters as it came, a line break and an ESC in it, now quote
   it too: the pre-request gate's (a detach of its session, a page's `targetId` read, and the bypass of a page's
   service workers, which wrote the text whole),
   the window-birth watcher's (a detach, a refused window's close, a re-attach), the prefetch preference's clean-up,
   an isolated browser that did not close, a session that could not be recorded as closed, and a shared browser
   that could not be disconnected.
+  The CDP connect failure (`could not connect to Chrome over CDP at`), which `/readyz`, deep health and the startup
+  log show, kept the error's first line with its URLs scrubbed and wrote it as it came, an ESC in it and as long as
+  Chrome made it: it now quotes and cuts that line, and the URL it names (scheme, host and port, a
+  `browser.cdp_attach` caller's own), as `... at 'ws://10.0.0.9:9222': 'BrowserType.connect_over_cdp: ...'`. So do
+  the line of a browser-node that could not be reached (its last connect error, which it wrote as the error's repr,
+  whole, and now as its class and its text), of a paused request whose frame the pre-request gate could not
+  classify, and of a Docker daemon whose `docker info` failed at startup. The `503` of a session whose window-birth
+  watcher could not read its new context, or whose pre-request gate could not attach or read the new context,
+  repeated the browser's error whole: each now cuts it at 300 characters, as a watcher that could not attach did.
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,

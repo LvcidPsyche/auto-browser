@@ -18,7 +18,10 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import Error as PlaywrightError
 
+from app.action_errors import BrowserUnreachableError
 from app.browser import prefetch
+from app.browser.request_gate import RequestGate
+from app.browser.services import runtime
 from app.browser.services.sessions import BrowserSessionService
 from app.session_store import FileSessionStore
 from app.startup import extensions
@@ -96,6 +99,42 @@ class AnErrorWithNoTextTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_a_gate_session_that_did_not_detach_so_is_logged_and_the_detach_returns(self) -> None:
+        # Whether the session went with its target was read from the error's text, made before the guarded line:
+        # the detach raised, and its callers (a close, a failed attach) met an error of the text instead.
+        gate = RequestGate(
+            object(), url_refused=lambda url: False, attach_mode=False, origin_switch_declared=False, on_lost=Mock()
+        )
+        gate._cdp = SimpleNamespace(detach=AsyncMock(side_effect=_error_with_no_text()))
+
+        with self.assertLogs("app.browser.request_gate", "WARNING") as logged:
+            await gate.detach()
+
+        self.assertEqual(
+            logged.output,
+            [
+                "WARNING:app.browser.request_gate:pre-request gate: could not detach its session: KeyError: "
+                "<its text could not be made: RuntimeError>"
+            ],
+        )
+
+    async def test_a_cdp_connect_that_failed_so_is_answered_as_a_browser_out_of_reach(self) -> None:
+        playwright = SimpleNamespace(
+            chromium=SimpleNamespace(connect_over_cdp=AsyncMock(side_effect=_error_with_no_text()))
+        )
+
+        with (
+            self.assertLogs("app.browser.services.runtime", "WARNING") as logged,
+            self.assertRaises(BrowserUnreachableError) as raised,
+        ):
+            await runtime._connect_over_cdp(playwright, "ws://10.0.0.9:9222/devtools/browser/abc")
+
+        message = (
+            "could not connect to Chrome over CDP at 'ws://10.0.0.9:9222': '<its text could not be made: RuntimeError>'"
+        )
+        self.assertEqual(str(raised.exception), message)
+        self.assertEqual(logged.output, [f"WARNING:app.browser.services.runtime:{message}"])
+
 
 def _makes_a_text(argument: ast.expr) -> bool:
     """Whether ``argument`` makes a text before the call it is passed to runs: str(x), an f-string, x.message."""
@@ -162,6 +201,26 @@ class CutLinesAreQuotedTests(unittest.IsolatedAsyncioTestCase):
         self.assert_one_line(
             written, "prefetch preference: could not detach its browser session: RuntimeError: 'p\\nWARNING:"
         )
+
+    async def test_the_line_of_a_cdp_connect_that_failed(self) -> None:
+        # The first line of the error is kept, its URLs scrubbed: it was then written as it came, an ESC and all and
+        # as long as Chrome made it, and so was the host of the URL (the caller's own, for browser.cdp_attach).
+        first_line = "BrowserType.connect_over_cdp: forged by a page\x1b[2J" + "x" * 5000
+        failed = PlaywrightError(first_line + "\nWARNING:app.main:forged\nCall log: ws://u:secret@10.0.0.9:9222/x")
+        playwright = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=AsyncMock(side_effect=failed)))
+
+        with self.assertLogs("app.browser.services.runtime", "WARNING") as logged:
+            with self.assertRaises(BrowserUnreachableError) as raised:
+                await runtime._connect_over_cdp(playwright, "ws://u:secret@evil\x1bhost:9222/devtools/browser/abc")
+
+        (written,) = _written(logged.records)
+        self.assert_one_line(
+            written,
+            "could not connect to Chrome over CDP at 'ws://evil\\x1bhost:9222': "
+            "'BrowserType.connect_over_cdp: forged by a page\\x1b[2J",
+        )
+        self.assertEqual(str(raised.exception), written)
+        self.assertNotIn("secret", written)
 
 
 _LOG_CALLS = frozenset({"debug", "info", "warning", "error", "critical", "exception", "log"})
@@ -264,6 +323,59 @@ class NoErrorPassedWholeToALogCallTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             passed += [f"{path.relative_to(_APP).as_posix()}:{line}" for line in errors_passed_whole(tree)]
         self.assertEqual(passed, [], "pass the error to error_text_for_log")
+
+
+# The functions that make an error's text in a guard of their own, by file.
+_TEXT_GUARDS = {"utils.py": frozenset({"error_text", "error_text_for_log"})}
+# Files that make an error's text without error_text, and why they cannot import it.
+_NO_APP_UTILS = {
+    "mcp_stdio.py": "the stdio bridge, byte-identical with the client package's copy, which has no app.utils",
+    "drop_caps.py": "runs with the container's capabilities before it drops them, on ctypes, os and sys alone",
+}
+
+
+def _a_text_made_from_an_error(node: ast.AST, errors: set[str]) -> bool:
+    """Whether ``node`` makes a text of one of ``errors``: str(e), repr(e), an f-string's {e} or str(e.args[i])."""
+    if isinstance(node, ast.FormattedValue):
+        return isinstance(node.value, ast.Name) and node.value.id in errors
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"str", "repr"}):
+        return False
+    argument = node.args[0] if node.args else None
+    if isinstance(argument, ast.Subscript) and isinstance(argument.value, ast.Attribute):
+        argument = argument.value.value if argument.value.attr == "args" else argument
+    return isinstance(argument, ast.Name) and argument.id in errors
+
+
+def texts_made_from_an_error(tree: ast.AST, guards: frozenset[str] = frozenset()) -> list[int]:
+    """The lines in ``tree`` where a text is made from an error outside the functions named in ``guards``."""
+    lines: list[int] = []
+
+    def visit(node: ast.AST, errors: set[str]) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in guards:
+            return
+        if _a_text_made_from_an_error(node, errors):
+            lines.append(node.lineno)
+        for child in ast.iter_child_nodes(node):
+            visit(child, errors | _error_names(child))
+
+    visit(tree, set())
+    return sorted(set(lines))
+
+
+class NoTextMadeFromAnErrorOutsideTheGuardTests(unittest.TestCase):
+    def test_every_text_taken_from_an_error_is_taken_through_error_text(self) -> None:
+        # str() of an error raises where its text cannot be made, out of the except that took it: a log line, an
+        # exception's message and an answer each lost the error they were about, and a check by its text (whether a
+        # CDP session went with its target) raised in place of its answer.
+        made: list[str] = []
+        for path in sorted(_APP.rglob("*.py")):
+            relative = path.relative_to(_APP).as_posix()
+            if relative in _NO_APP_UTILS:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            guards = _TEXT_GUARDS.get(relative, frozenset())
+            made += [f"{relative}:{line}" for line in texts_made_from_an_error(tree, guards)]
+        self.assertEqual(made, [], "take the error's text with error_text, or error_text_for_log for a log line")
 
 
 class AValidationErrorLoggedTests(unittest.IsolatedAsyncioTestCase):

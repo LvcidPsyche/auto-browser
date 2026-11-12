@@ -27,7 +27,7 @@ from ...approvals import (
     refused_before_effect,
 )
 from ...models import READ_ONLY_ACTIONS, ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
-from ...utils import error_text_for_log, spawn_background_task
+from ...utils import error_text, error_text_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
 from ..click_target import (
@@ -1413,7 +1413,7 @@ class BrowserActionService:
             except PlaywrightTimeoutError:
                 raise
             except PlaywrightError as error:
-                if budget.spent or _NOT_ATTACHED not in str(error):
+                if budget.spent or _NOT_ATTACHED not in error_text(error):
                     raise
             await asyncio.sleep(ENABLED_POLL_SECONDS)
 

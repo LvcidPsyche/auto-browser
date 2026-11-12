@@ -30,7 +30,7 @@ from .routes.sessions import TakeoverRefusalWindows, create_sessions_router, wri
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
 from .safe_json_response import SafeJSONResponse, safe_http_exception_handler, safe_validation_exception_handler
-from .utils import capped_for_log, error_text_for_log
+from .utils import capped_for_log, error_text, error_text_for_log
 from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -48,7 +48,7 @@ if _compliance_template:
     try:
         _compliance_overrides = apply_compliance_template(settings, _compliance_template)
     except ValueError as exc:
-        raise RuntimeError(f"Invalid COMPLIANCE_TEMPLATE={_compliance_template!r}: {exc}") from exc
+        raise RuntimeError(f"Invalid COMPLIANCE_TEMPLATE={_compliance_template!r}: {error_text(exc)}") from exc
 services = build_controller_services(settings, version=_VERSION)
 proxy_store = services.proxy_store
 manager = services.manager

@@ -20,7 +20,7 @@ from ..proxy_personas import (
     ProxyPersonaDuplicateError,
     ProxyPersonaFileError,
 )
-from ..utils import capped_for_log, error_lines_for_log, error_text_for_log, quoted_for_log
+from ..utils import capped_for_log, error_lines_for_log, error_text, error_text_for_log, quoted_for_log
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -107,7 +107,7 @@ def cron_store_errors() -> Iterator[None]:
     try:
         yield
     except CronStoreUnreadableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+        raise HTTPException(status_code=503, detail=error_text(exc)) from None
 
 
 @contextmanager

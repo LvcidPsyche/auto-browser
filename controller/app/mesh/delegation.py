@@ -14,7 +14,7 @@ from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
-from ..utils import RefusalLogWindows, error_text_for_log, held_back_note
+from ..utils import RefusalLogWindows, error_text, error_text_for_log, held_back_note
 from .identity import NodeIdentity
 from .models import (
     DelegationRequest,
@@ -253,7 +253,7 @@ class DelegationManager:
                 peer_node_id,
                 error_text_for_log(exc),
             )
-            raise DelegationError(f"reply envelope verification failed: {exc}") from exc
+            raise DelegationError(f"reply envelope verification failed: {error_text(exc)}") from exc
 
         # Reply timestamp window — symmetric with inbound, closes a MITM replay vector
         # where a captured reply could be re-served long after the original. Against the clock the nonces expire by,
@@ -343,13 +343,13 @@ class DelegationManager:
                     error_text_for_log(exc),
                     held_back_note(held_back, "sender"),
                 )
-            raise DelegationRejected(f"envelope verification failed: {exc}") from exc
+            raise DelegationRejected(f"envelope verification failed: {error_text(exc)}") from exc
 
         # Decode request
         try:
             request = DelegationRequest.model_validate(payload)
         except Exception as exc:
-            raise DelegationRejected(f"Malformed DelegationRequest: {exc}") from exc
+            raise DelegationRejected(f"Malformed DelegationRequest: {error_text(exc)}") from exc
 
         # Nonce freshness — now safe to record: the sender is authenticated, and its request decodes (one that does
         # not runs nothing, and neither does its replay). Counted against the sender's own share of the cache, so a

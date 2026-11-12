@@ -15,7 +15,7 @@ from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError, WebhookKeyRefusedError, job_not_found_text
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
-from ..utils import capped_for_log, quoted_for_log
+from ..utils import capped_for_log, error_text, quoted_for_log
 from ._utils import (
     bounded_limit,
     cron_store_errors,
@@ -123,7 +123,7 @@ def create_operations_router(
                 with unknown_id_is_404(approval_id):
                     return await manager.approve(approval_id, comment=payload.comment)
             except ServerStateRefusal as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from None
+                raise HTTPException(status_code=409, detail=error_text(exc)) from None
 
     @router.post("/approvals/{approval_id}/reject")
     async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
@@ -132,7 +132,7 @@ def create_operations_router(
                 with unknown_id_is_404(approval_id):
                     return await manager.reject(approval_id, comment=payload.comment)
             except ServerStateRefusal as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from None
+                raise HTTPException(status_code=409, detail=error_text(exc)) from None
 
     @router.post("/approvals/{approval_id}/execute")
     async def execute_approval(approval_id: str) -> dict[str, Any]:
@@ -305,7 +305,7 @@ def create_operations_router(
                 raise
             raise HTTPException(status_code=409, detail=CRON_TRIGGER_AUTH_PROFILE_DETAIL) from None
         except CronJobDisabledError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
+            raise HTTPException(status_code=409, detail=error_text(exc)) from None
         except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
             raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
         except BrowserActionError as exc:
@@ -323,7 +323,7 @@ def create_operations_router(
             raise HTTPException(status_code=409, detail=CRON_TRIGGER_SESSION_LIMIT_DETAIL) from None
         except AuthStateDecryptError as exc:
             # A fixed text that says what to check; it names no path.
-            raise HTTPException(status_code=422, detail=str(exc)) from None
+            raise HTTPException(status_code=422, detail=error_text(exc)) from None
         except (KeyError, ValueError) as exc:
             # The job as it is stored: a record with no goal (it answered 404 "Not found"), one the run's request
             # model refuses (400 "Invalid request"), one that holds a list where a run reads text (an unhandled 500:

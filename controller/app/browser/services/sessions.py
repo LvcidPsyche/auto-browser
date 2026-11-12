@@ -24,7 +24,7 @@ from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
-from ...utils import UTC, error_text_for_log, quoted_for_log, run_to_completion, utc_now
+from ...utils import UTC, error_text, error_text_for_log, quoted_for_log, run_to_completion, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -68,7 +68,7 @@ def _task_cancelled() -> bool:
 
 def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
     """A page the controller itself loaded (a start_url, shadow browse's page) that failed for a reason of its own."""
-    text = getattr(exc, "message", None) or str(exc)
+    text = error_text(exc)
     first_line = text.splitlines()[0] if text else ""
     net_error = _NET_ERROR.match(first_line)
     if net_error:

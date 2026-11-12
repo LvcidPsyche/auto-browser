@@ -99,6 +99,24 @@ LOGGED_CHAINED_ERRORS = 3
 LOGGED_GROUP_MEMBERS = 3
 
 
+def error_text(error: object) -> str:
+    """What str() makes of ``error`` (an error, or what one carries, such as its first argument), made so that it
+    never raises: a text that cannot be made (str(KeyError(x)) is repr(x), and an object's repr can raise) is named
+    as error_text_for_log names it, and the except that takes it goes on.
+
+    For an answer, an exception's message or a test of the text, which cut it as they did: neither quoted nor cut.
+    A log line takes error_text_for_log.
+    """
+    try:
+        return str(error)
+    except Exception as failed:
+        return _text_not_made(failed)
+
+
+def _text_not_made(failed: BaseException) -> str:
+    return f"<its text could not be made: {type(failed).__name__}>"
+
+
 def error_text_for_log(error: BaseException) -> str:
     """The error's own text for the log: on one line, cut, and never the values a model was given."""
     try:
@@ -113,7 +131,7 @@ def error_text_for_log(error: BaseException) -> str:
         cut = "" if len(text) <= MAX_LOGGED_PATH_CHARS else f" (cut from {len(text)} characters)"
         return quoted_for_log(text) + cut
     except Exception as failed:
-        return f"<its text could not be made: {type(failed).__name__}>"
+        return _text_not_made(failed)
 
 
 def error_lines_for_log(

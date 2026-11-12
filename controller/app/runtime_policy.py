@@ -19,6 +19,7 @@ from .config import Settings
 from .host_patterns import is_wildcard_pattern
 from .providers.base import BaseProviderAdapter, auth_mode_shown
 from .url_safety import refuse_ambiguous_host
+from .utils import error_text
 
 
 @dataclass(slots=True)
@@ -251,7 +252,7 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
     try:
         refuse_ambiguous_host(settings.cdp_connect_url, field_name="CDP_CONNECT_URL")
     except ValueError as exc:
-        report.errors.append(str(exc))
+        report.errors.append(error_text(exc))
 
 
 def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_id: bool) -> bool:

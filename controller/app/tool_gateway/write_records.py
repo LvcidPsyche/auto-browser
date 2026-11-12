@@ -21,7 +21,7 @@ from ..action_records import write_record
 from ..approvals import held_tool_call_approval
 from ..browser.services.witness import BrowserWitnessService
 from ..network_inspector import url_origin
-from ..utils import error_text_for_log
+from ..utils import error_text, error_text_for_log
 from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval, WitnessPolicyOutcome
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ async def recorded_write(
     try:
         await _refuse_by_policy(manager, session, tool, action_class, policy)
     except PermissionError as exc:
-        await _record_beside(record("blocked", error=str(exc), reached_page=False), tool, exc)
+        await _record_beside(record("blocked", error=error_text(exc), reached_page=False), tool, exc)
         raise
     try:
         yield write

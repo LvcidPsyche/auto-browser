@@ -14,7 +14,7 @@ from ...auth_policy import credentials_for
 from ...browser_sandbox import read_endpoint_file, redact_endpoints, refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
-from ...utils import error_text_for_log, spawn_background_task
+from ...utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task
 from ..request_gate import RequestGate, RequestGateUnavailable
 
 logger = logging.getLogger(__name__)
@@ -49,13 +49,18 @@ async def _connect_over_cdp(playwright: Any, cdp_url: str) -> Browser:
     Playwright's error repeats the whole CDP URL (userinfo, the /devtools/browser/<id> path) in its call log, and
     /readyz, deep health and the startup log show what this raises: its first line is kept, any URL in it reduced to
     scheme://host:port, and the error is not chained. A route or an MCP call answers it 503 with a fixed text.
+    Both that line and the URL (the caller's, for browser.cdp_attach) are quoted and cut: a control character in
+    either is written as its escape, and neither runs past 200 characters.
     """
     try:
         return await playwright.chromium.connect_over_cdp(cdp_url)
     except Exception as exc:
-        first_line = (str(exc).splitlines() or [type(exc).__name__])[0]
+        first_line = (error_text(exc).splitlines() or [type(exc).__name__])[0]
         reason = _URL_IN_TEXT.sub(lambda match: scrubbed_cdp_url(match.group()), first_line)
-        message = f"could not connect to Chrome over CDP at {scrubbed_cdp_url(cdp_url)}: {reason}"
+        message = (
+            f"could not connect to Chrome over CDP at {quoted_for_log(scrubbed_cdp_url(cdp_url))}: "
+            f"{quoted_for_log(reason)}"
+        )
         logger.warning("%s", message)
         raise BrowserUnreachableError(message) from None
 
@@ -240,7 +245,12 @@ class BrowserRuntimeService:
         # Not chained: Playwright's connect error names the endpoint with its path (the server's only secret), and
         # /readyz, deep health and startup log the chain. The cause is logged here with the path redacted. Not a
         # RuntimeError: the routes answer 503 with a fixed text, as for a CDP connect, not 409 Conflict.
-        logger.warning("%s; last connect error: %s", failure_context, redact_endpoints(repr(last_error)))
+        logger.warning(
+            "%s; last connect error: %s: %s",
+            failure_context,
+            type(last_error).__name__,
+            quoted_for_log(redact_endpoints(error_text(last_error))),
+        )
         raise BrowserUnreachableError(failure_context) from None
 
     async def resolve_browser_ws_endpoint(self) -> str:

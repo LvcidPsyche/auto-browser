@@ -111,7 +111,7 @@ from ..tool_inputs import (
     VisionFindInput,
     WaitForSelectorInput,
 )
-from ..utils import capped_for_log, error_text_for_log, json_key, json_safe, quoted_for_log
+from ..utils import capped_for_log, error_text, error_text_for_log, json_key, json_safe, quoted_for_log
 from .drag import drag_drop
 from .packs import register_all
 from .previews import preview_arguments
@@ -436,7 +436,7 @@ class McpToolGateway:
             )
         except CronJobDisabledError as exc:
             # The agent can enable the job, or stop triggering it; a code tells it which refusal this is.
-            message = str(exc.args[0]) if exc.args else "job is disabled"
+            message = error_text(exc.args[0]) if exc.args else "job is disabled"
             return self._refusal_response(message, {"error": message, "code": "cron_job_disabled"}, exc)
         except BrowserUnreachableError as exc:
             # Its message names the endpoint and Playwright's reason: the log has them (runtime.py), the caller not.
@@ -448,7 +448,7 @@ class McpToolGateway:
             # source_selector or source_x/source_y", "Memory profile not found").
             # Surface them so the calling agent can self-correct, instead of
             # collapsing them into the opaque catch-all below.
-            message = str(exc.args[0]) if exc.args else exc.__class__.__name__
+            message = error_text(exc.args[0]) if exc.args else exc.__class__.__name__
             if isinstance(exc, KeyError) and (presented_as := self._presented_as(payload, message)):
                 message = self._unknown_approval_message(spec, message, presented_as)
             return self._refusal_response(message, {"error": message}, exc)
@@ -461,7 +461,7 @@ class McpToolGateway:
             if exc.errno is not None:
                 logger.exception("tool %s failed", payload.name)
                 return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
-            message = str(exc.args[0]) if exc.args else "Not found"
+            message = error_text(exc.args[0]) if exc.args else "Not found"
             return self._refusal_response(message, {"error": message, "code": "not_found"}, exc)
         except PermissionError as exc:
             # Policy refusals raise PermissionError with a reason for the caller:
@@ -474,7 +474,7 @@ class McpToolGateway:
             if exc.errno is not None:
                 logger.exception("tool %s failed", payload.name)
                 return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
-            message = str(exc.args[0]) if exc.args else "Not permitted"
+            message = error_text(exc.args[0]) if exc.args else "Not permitted"
             return self._refusal_response(message, {"error": message, "code": "not_permitted"}, exc)
         except PlaywrightError as exc:
             # The browser's answer about the caller's own page: a selector that
@@ -483,7 +483,7 @@ class McpToolGateway:
             # like a crash and an eval_js error could not be debugged.
             # Keep the reason; drop Playwright's call log and the stack frames of
             # its own evaluation wrapper, which say nothing about the page.
-            message = (getattr(exc, "message", None) or str(exc)).split("\nCall log:")[0]
+            message = error_text(exc).split("\nCall log:")[0]
             message = message.split("\n    at ")[0].strip()
             code = "timeout" if isinstance(exc, PlaywrightTimeoutError) else "browser_error"
             return self._refusal_response(message[:2000], {"error": message[:2000], "code": code}, exc)

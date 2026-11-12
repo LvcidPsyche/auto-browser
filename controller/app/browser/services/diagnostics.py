@@ -19,7 +19,7 @@ from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
 from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
-from ...utils import UTC, error_text_for_log, quoted_for_log, spawn_background_task
+from ...utils import UTC, error_text, error_text_for_log, quoted_for_log, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
 from ..page_read import REFUSED_NETWORK_LOG_DETAIL, locked_read
 from ..window_births import BirthVerdict
@@ -381,7 +381,7 @@ class BrowserDiagnosticsService:
         session.attached_pages.add(page)
 
         page.on("console", lambda message: self._keep_output(page, session.console_messages, console_entry(message)))
-        page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, str(error)))
+        page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, error_text(error)))
         page.on("request", lambda request: self._on_request_started(session, page, request))
         page.on("requestfailed", lambda request: self._record_request_failure(session, page, request))
         page.on("response", lambda response: self._on_response(page, response))

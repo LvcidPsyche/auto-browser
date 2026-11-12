@@ -42,6 +42,7 @@ from ..models import (
 )
 from ..session_ownership import acting_as, verified_operator
 from ..url_safety import refuse_another_navigation_host
+from ..utils import error_text
 from ._utils import (
     OFF_LIST_OTHER_TAB_DETAIL,
     OFF_LIST_PAGE_DETAIL,
@@ -280,10 +281,10 @@ def create_sessions_router(*, manager: Any, refusal_windows: TakeoverRefusalWind
                         totp_hosts=payload.totp_hosts,
                     )
             except SessionLimitError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from None
+                raise HTTPException(status_code=409, detail=error_text(exc)) from None
             except AuthStateDecryptError as exc:
                 # A fixed text that says what to check; it names no path.
-                raise HTTPException(status_code=422, detail=str(exc)) from None
+                raise HTTPException(status_code=422, detail=error_text(exc)) from None
             except RuntimeError as exc:
                 # The caller gets the generic answer; the cause is here, and nowhere else: as a hidden cause, since a
                 # traceback prints the error's text as it is (a persona's name or a URL the caller sent).
@@ -532,10 +533,10 @@ def create_sessions_router(*, manager: Any, refusal_windows: TakeoverRefusalWind
                         protection_mode=protection_mode,
                     )
             except SessionLimitError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from None
+                raise HTTPException(status_code=409, detail=error_text(exc)) from None
             except AuthStateDecryptError as exc:
                 # The fork's own stored state, read back by create_session: the fixed text POST /sessions answers.
-                raise HTTPException(status_code=422, detail=str(exc)) from None
+                raise HTTPException(status_code=422, detail=error_text(exc)) from None
             except RuntimeError as exc:
                 # The caller gets the generic answer; the cause is here, and nowhere else, as create's is.
                 log_hidden_cause(logger, 409, exc, "fork failed for session %s", session_id)

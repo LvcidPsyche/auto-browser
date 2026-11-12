@@ -31,7 +31,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from ..utils import atomic_write_text, error_text_for_log
+from ..utils import atomic_write_text, error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,9 @@ def _retried_while_another_start_writes(step: Callable[[], _T], failed: str) -> 
         except (ValueError, OSError) as exc:
             if time.monotonic() >= deadline:
                 waited = f"{_FILE_BEING_WRITTEN_WAIT_SECONDS:g} s"
-                raise RuntimeError(f"mesh.identity: {failed} after {waited}: {type(exc).__name__}: {exc}") from exc
+                raise RuntimeError(
+                    f"mesh.identity: {failed} after {waited}: {type(exc).__name__}: {error_text(exc)}"
+                ) from exc
             time.sleep(_FILE_BEING_WRITTEN_POLL_SECONDS)
 
 
@@ -176,7 +178,9 @@ def _refused_at_once_where_the_directory_takes_no_new_file(path: Path) -> None:
     try:
         os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _KEY_FILE_MODE))
     except OSError as exc:
-        raise RuntimeError(f"mesh.identity: {path.name} could not be published: {type(exc).__name__}: {exc}") from exc
+        raise RuntimeError(
+            f"mesh.identity: {path.name} could not be published: {type(exc).__name__}: {error_text(exc)}"
+        ) from exc
     try:
         os.unlink(probe)
     except OSError as exc:

@@ -7,7 +7,7 @@ from typing import Any
 
 from ...process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
 from ...providers.base import allowlisted_environment
-from ...utils import without_lone_surrogates
+from ...utils import error_text, without_lone_surrogates
 from ..contracts import TaskContract
 from .base import VerificationResult
 
@@ -162,7 +162,7 @@ class UniversalVerifierAdapter:
                 },
             )
         except Exception as exc:
-            return self._unavailable(f"Universal Verifier output schema is invalid: {exc}")
+            return self._unavailable(f"Universal Verifier output schema is invalid: {error_text(exc)}")
 
     @staticmethod
     async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:

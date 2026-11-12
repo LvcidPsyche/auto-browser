@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import Error as PlaywrightError
 
 from ..action_errors import PAGE_NOT_RESPONDING, BrowserActionError
-from ..utils import error_text_for_log
+from ..utils import error_text, error_text_for_log
 from .element_scripts import (
     ELEMENT_ACTIONABLE_SCRIPT,
     ELEMENT_COVER_SCRIPT,
@@ -271,7 +271,8 @@ class ElementTarget:
         except (PlaywrightError, BrowserActionError) as exc:
             # The file went in; only the check could not run (the page navigated, closed or stopped answering).
             logger.info("element %s: upload not confirmed: %s", self.element_id, error_text_for_log(exc))
-            return {"outcome": "not_confirmed", "reason": f"the check could not run: {str(exc).splitlines()[0][:200]}"}
+            first_line = (error_text(exc).splitlines() or [""])[0]
+            return {"outcome": "not_confirmed", "reason": f"the check could not run: {first_line[:200]}"}
         if missing is None:
             return {"outcome": "confirmed"}
         return {"outcome": "not_confirmed", "reason": missing}

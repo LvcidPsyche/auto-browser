@@ -22,6 +22,8 @@ from urllib.parse import urlsplit
 
 from idna import uts46_remap
 
+from .utils import error_text
+
 # WHATWG: strip leading and trailing C0 control-or-space, then remove every
 # ASCII tab and newline from the input before parsing.
 _C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
@@ -99,7 +101,9 @@ def refuse_another_navigation_host(url: str, *, field_name: str) -> str:
             # ends a label is a final small sigma to str.lower, a small sigma to UTS 46.
             urllib_mapped = host if not host or host.isascii() else browser_host(host)
         except UnicodeError as error:
-            raise ValueError(f"{field_name} writes its host {written!r} with what a browser refuses: {error}") from None
+            raise ValueError(
+                f"{field_name} writes its host {written!r} with what a browser refuses: {error_text(error)}"
+            ) from None
         # Beyond case folding and composition (Cherokee capitals, a name written decomposed; casefold also
         # maps the fi ligature, the long s and the micro sign as UTS 46 does, so those are accepted): full-width
         # forms, segmented digits, a dropped ignorable.

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import Error as PlaywrightError
 
 from ..action_errors import PAGE_NOT_RESPONDING, BrowserActionError
-from ..utils import error_text_for_log, spawn_background_task
+from ..utils import error_text, error_text_for_log, spawn_background_task
 
 if TYPE_CHECKING:
     from playwright.async_api import CDPSession, Page
@@ -479,7 +479,7 @@ class _SetupBudget:
 
 def session_gone(exc: BaseException) -> bool:
     """Whether a CDP failure says its session or target is gone (closed, disposed of), by its text."""
-    text = getattr(exc, "message", None) or str(exc)
+    text = error_text(exc)
     return any(fragment in text for fragment in _SESSION_GONE)
 
 

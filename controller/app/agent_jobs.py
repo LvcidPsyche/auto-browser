@@ -25,6 +25,7 @@ from .utils import (
     PRIVATE_FILE_MODE,
     atomic_write_text,
     error_lines_for_log,
+    error_text,
     error_text_for_log,
     record_json,
     record_path,
@@ -755,7 +756,7 @@ class AgentJobQueue:
             # provider adapter, a Playwright error, or a JSON parse failure were
             # indistinguishable and left no server-side traceback.
             logger.exception("agent job %s failed", job_id)
-            detail = f"{type(exc).__name__}: {exc}"
+            detail = f"{type(exc).__name__}: {error_text(exc)}"
             record = await self.store.finish(
                 record.id,
                 status="failed",

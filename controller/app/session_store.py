@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import SessionRecord
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log, record_json, record_path, run_to_completion
+from .utils import (
+    PRIVATE_FILE_MODE,
+    atomic_write_text,
+    error_text_for_log,
+    record_json,
+    record_path,
+    run_to_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +378,7 @@ class DurableSessionStore:
             return False
         except ValueError as exc:
             if redis_primary:
-                return await self._redis_is_closed(session_id, f"cannot be parsed ({exc})")
+                return await self._redis_is_closed(session_id, f"cannot be parsed ({error_text_for_log(exc)})")
             logger.warning(
                 "the stored record of session %s cannot be parsed, so this write replaces it: %s",
                 session_id,

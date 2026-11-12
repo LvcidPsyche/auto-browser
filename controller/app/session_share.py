@@ -25,6 +25,8 @@ import logging
 import time
 from typing import Any
 
+from .utils import error_text
+
 logger = logging.getLogger(__name__)
 
 # Scope constants
@@ -122,7 +124,7 @@ class SessionShareManager:
             payload = json.loads(payload_json)
 
         except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"invalid share token: {exc}") from exc
+            raise ValueError(f"invalid share token: {error_text(exc)}") from exc
 
         session_id = str(payload.get("session_id") or "").strip()
         if not session_id:

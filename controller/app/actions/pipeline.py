@@ -20,7 +20,7 @@ from ..action_errors import (
 from ..action_records import wait_for_pending_record, write_record
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
-from ..utils import error_text_for_log, quoted_for_log, spawn_background_task, utc_now
+from ..utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task, utc_now
 from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def _withheld_observation(manager: Any, session: Any, exc: PermissionError) -> d
     """A post-action observation refused with ``exc``: the URL as shown, and the refusal, or for an
     OS-level error (it has an errno, and its text can name a server path) a fixed text, the OS text logged."""
     logger.warning("post-action observation withheld for session %s: %s", session.id, error_text_for_log(exc))
-    error = OS_OBSERVATION_ERROR if exc.errno is not None else str(exc)[:300]
+    error = OS_OBSERVATION_ERROR if exc.errno is not None else error_text(exc)[:300]
     return {"url": manager._shown_url(session.page), "observation_error": error}
 
 
@@ -166,11 +166,11 @@ class BrowserActionPipeline:
             # The approval guard says what became of the approval; anything else is a policy block.
             url = context.manager._shown_url(context.session.page)
             if isinstance(exc, ApprovalRefusal):
-                message, code, status_code = str(exc), exc.code, 409
+                message, code, status_code = error_text(exc), exc.code, 409
             elif isinstance(exc, NavigationStoppedError):
                 # Stopped before it was sent (the pre-request gate): its text and url name only the refused
                 # origin, as for a start URL or a new tab; not the page the action went back to.
-                message, code, status_code, url = str(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
+                message, code, status_code, url = error_text(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
             else:
                 message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
             # On the holds now, not once the block's snapshot and trail are written: an operator's
@@ -350,7 +350,7 @@ class BrowserActionPipeline:
         except PermissionError as exc:
             # Still the policy block it is, but after the change: say so in the record.
             context.target[AFTER_CHANGE] = (
-                f"The change was made, then the page it led to was blocked: {str(exc)[:300]}. Observe the page "
+                f"The change was made, then the page it led to was blocked: {error_text(exc)[:300]}. Observe the page "
                 "before acting again, and do not repeat the action: that would make the change twice."
             )
             await self._note_blocks(context, page, blocked_before)
@@ -683,7 +683,7 @@ class BrowserActionPipeline:
             logger.warning(
                 "failure snapshot unavailable for session %s: %s", context.session.id, error_text_for_log(exc)
             )
-            return {"url": context.manager._shown_url(context.session.page), "snapshot_error": str(exc)[:300]}
+            return {"url": context.manager._shown_url(context.session.page), "snapshot_error": error_text(exc)[:300]}
         except PermissionError:
             # The page moved off ALLOWED_HOSTS while the snapshot read it.
             return _withheld_snapshot(context.manager, context.session)
@@ -735,7 +735,9 @@ class BrowserActionPipeline:
             logger.warning("post-action observation failed for session %s: %s", session.id, error_text_for_log(exc))
             return {
                 "url": manager._shown_url(session.page),
-                "observation_error": f"Page changed while it was being observed; observe again. ({exc})"[:300],
+                "observation_error": f"Page changed while it was being observed; observe again. ({error_text(exc)})"[
+                    :300
+                ],
             }
         except PermissionError as exc:
             return _withheld_observation(manager, session, exc)

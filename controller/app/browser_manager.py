@@ -62,7 +62,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
-from .utils import error_text_for_log, quoted_for_log, spawn_background_task
+from .utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task
 from .witness import (
     ReceiptList,
     WitnessActionContext,
@@ -1047,7 +1047,7 @@ class BrowserManager:
             self._assert_runtime_url_allowed(page.url)
         except PermissionError as exc:
             raise RefusedPageError(
-                f"The page navigated on its own to a host ALLOWED_HOSTS does not allow ({exc}) "
+                f"The page navigated on its own to a host ALLOWED_HOSTS does not allow ({error_text(exc)}) "
                 "and is being moved to about:blank. It is not read until it is navigated to an allowed URL."
             ) from exc
         if self.page_provenance.refused_by_another_page(page):

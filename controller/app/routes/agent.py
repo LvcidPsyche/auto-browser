@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..agent_jobs import AgentJobQueueFull
 from ..models import AgentResumeRequest, AgentRunRequest, AgentStepRequest
+from ..utils import error_text
 from ._utils import queue_full, typed_route_errors
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown job") from None
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from None
+                raise HTTPException(status_code=400, detail=error_text(exc)) from None
             except AgentJobQueueFull:
                 raise queue_full(logger, "the resume of job", job_id) from None
 
@@ -110,7 +111,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown job") from None
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from None
+                raise HTTPException(status_code=400, detail=error_text(exc)) from None
 
     @router.post("/agent/jobs/{job_id}/cancel", status_code=202)
     async def cancel_agent_job(job_id: str) -> dict[str, Any]:
@@ -120,6 +121,6 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown job") from None
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from None
+                raise HTTPException(status_code=400, detail=error_text(exc)) from None
 
     return router

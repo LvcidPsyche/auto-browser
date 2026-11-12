@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ...browser.page_read import SESSION_BUSY_DETAIL, start_read
 from ...cdp.passthrough import CDPParamsError, CDPPassthrough
-from ...utils import error_text_for_log, quoted_for_log
+from ...utils import error_text, error_text_for_log, quoted_for_log
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def cdp_raw_command(session_id: str, body: dict[str, Any], request: Reques
         try:
             return await _answered(cdp.raw_cdp_command(method, params))
         except CDPParamsError as exc:
-            raise HTTPException(422, str(exc)) from None
+            raise HTTPException(422, error_text(exc)) from None
         except ValueError:
             raise HTTPException(403, "CDP command is not permitted")
 

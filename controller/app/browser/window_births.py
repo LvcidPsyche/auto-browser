@@ -82,7 +82,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from ..action_errors import WINDOW_BIRTH_WATCHER_UNAVAILABLE, BrowserActionError
-from ..utils import error_text_for_log, spawn_background_task
+from ..utils import error_text, error_text_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -631,7 +631,8 @@ class WindowBirths:
                 context_id, first_target_id = await self._read_context_id(context, page)
             except Exception as exc:
                 raise WindowBirthWatcherUnavailable(
-                    f"the window-birth watcher could not read the new context: {type(exc).__name__}: {exc}"
+                    "the window-birth watcher could not read the new context: "
+                    + f"{type(exc).__name__}: {error_text(exc)}"[:300]
                 ) from exc
             if not context_id or not first_target_id:
                 raise WindowBirthWatcherUnavailable("the window-birth watcher could not read the new context's id")
@@ -672,7 +673,7 @@ class WindowBirths:
             try:
                 await watcher.attach()
             except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"[:300]
+                message = f"{type(exc).__name__}: {error_text(exc)}"[:300]
                 self._attach_failures[id(browser)] = (browser, message, time.monotonic())
                 raise WindowBirthWatcherUnavailable(f"the window-birth watcher could not attach: {message}") from exc
             self._attach_failures.pop(id(browser), None)

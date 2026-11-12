@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 from .auth_policy import credential_names_operator
 from .session_ownership import ANONYMOUS, acting_as, as_system, may_use, owner_identity, verified_operator
-from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, error_text_for_log
+from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, error_text, error_text_for_log
 
 if TYPE_CHECKING:
     from .models import WorkflowProfile
@@ -560,7 +560,7 @@ class CronService:
         try:
             CronTrigger.from_crontab(schedule, timezone=self._timezone)
         except ValueError as exc:
-            raise ValueError(f"Invalid cron schedule {schedule!r}: {exc}") from None
+            raise ValueError(f"Invalid cron schedule {schedule!r}: {error_text(exc)}") from None
 
     def _register_job(self, job: dict[str, Any]) -> None:
         if not _APSCHEDULER_AVAILABLE or self._scheduler is None:
