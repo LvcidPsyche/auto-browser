@@ -259,11 +259,15 @@ All notable changes to auto-browser are documented here.
   catch (a cron route's, a proxy persona's read) still reaches Starlette, which answers a plain-text
   `Internal Server Error`, and the server logs its traceback, as before.
 - **A controller with no token whose `CONTROLLER_ALLOWED_HOSTS` holds a wildcard no longer starts.** With
-  `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, an entry `*`, `*.example.com` or any other wildcard stops startup
-  with a message that names it (see Security). Set a token (`API_BEARER_TOKEN`, or remove
-  `API_ALLOW_TOKENLESS_LOOPBACK` and the controller uses the one in `API_TOKEN_FILE`), or list the exact host names
-  clients use, whose DNS you control. On any controller, an entry in brackets round anything but an IPv6 address
-  (`[localhost]`, `[127.0.0.1]`, `[*]`) or a bare `*.` now stops startup too: write a name without brackets. The
+  `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, on a loopback controller not in production (the only one that
+  starts without a token), an entry `*`, `*.example.com` or any other wildcard stops startup with a message that
+  names it (see Security); a production or exposed controller without a token stops with the error that asks for
+  one, as it did. Set a token (`API_BEARER_TOKEN`, or remove `API_ALLOW_TOKENLESS_LOOPBACK`: the controller then
+  uses the token in `API_TOKEN_FILE`, and generates one there if the file holds none, and demands it, so every
+  client must then send it), or list the exact host names clients use, whose DNS you control. On any controller,
+  an entry in brackets round anything but an IPv6 address (`[localhost]`, `[127.0.0.1]`, `[*]`), an IPv6 address
+  in brackets with a port (`[::1]:8000`, which never matched a Host), an entry with a stray bracket (`local]host`)
+  or a bare `*.` now stops startup too: write a name without brackets, and an IPv6 address without a port. The
   compose files' default no longer lists `testserver`: a client that sends `Host: testserver` to a controller
   started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
 
@@ -913,7 +917,7 @@ All notable changes to auto-browser are documented here.
   run's end is saved. (D7-6)
 - **Every save of a cron store its JSON writer cannot write back now fails with an error its caller handles.** The
   JSON reader takes what the writer cannot write: a value nested deeper than the writer goes (the reader of Python
-  3.12 and later goes deeper than the writer), or a `run_count` of 4,300 digits, which a run makes one digit longer
+  3.12 and later goes deeper than the writer), or a `run_count` of 4,300 nines, which a run makes one digit longer
   than Python prints. The save raised `RecursionError` or `ValueError`: a store holding a legacy webhook key stopped
   the controller's start, `POST /crons`, `DELETE /crons/{id}` and the webhook key's rotate and revoke answered an
   unhandled `500`, a fire refused for its owner's credential raised, and a trigger whose run was queued answered
