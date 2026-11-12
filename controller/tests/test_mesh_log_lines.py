@@ -259,7 +259,8 @@ def test_a_refused_urls_host_of_any_length_is_cut_in_the_line(mesh, caplog: pyte
     assert reply_status(response) == "rejected"
     messages = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
     (line,) = [message for message in messages if message.startswith("mesh.policy.denied")]
-    assert "A URL of host 'hhhh" in line, line[:200]
+    # Cut at 200 characters, the cut mark after the closing quote.
+    assert f"A URL of host '{'h' * 200}'... " in line, line[:300]
     assert len(line) < 600, len(line)
 
 
@@ -323,6 +324,8 @@ def test_an_invalid_envelopes_line_is_cut_whatever_the_envelope_holds(mesh, capl
 
     (line,) = _invalid_envelope_lines(caplog)
     assert "recipient_node_id" in line
+    # Quoted, so the cut mark comes after a closing quote: cut unquoted, the field's own quote was cut with it.
+    assert "error=\"recipient_node_id 'rxxx" in line and line.endswith('x"...'), line[-80:]
     assert len(line) < 500
 
 

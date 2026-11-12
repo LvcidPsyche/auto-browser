@@ -27,7 +27,7 @@ from ..auth_policy import (
     tokenless_loopback_allowed,
 )
 from ..rate_limits import build_rate_limit_key, is_exempt_path
-from ..utils import RefusalLogWindows, capped_for_log, held_back_note
+from ..utils import RefusalLogWindows, held_back_note, quoted_for_log
 from .hosts import install_controller_host_middleware, origin_matches_host
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ CROSS_SITE_WRITE_DETAIL = (
 )
 # The three refusals this module logs (a cross-site write, a Host that is no loopback name, a session network peer)
 # are answered ahead of the rate limiter, to a page that can send them without end: each kind logs one warning a
-# source a window (RefusalLogWindows), and cuts the path or the Host it quotes (capped_for_log).
+# source a window (RefusalLogWindows), and cuts the path or the Host it quotes (quoted_for_log).
 
 
 # The message uvicorn cancels a request's task with once its graceful-shutdown limit has passed (uvicorn/server.py,
@@ -201,11 +201,11 @@ class SessionNetworkPeerMiddleware:
             return
         held_back = self._refusal_log.due(host, now=time.monotonic())
         if held_back is not None:
-            # %r: a page in the session's browser chooses the path, and a line break in it must not start a log line.
+            # Quoted: a page in the session's browser chooses the path, and a line break in it must not start a line.
             logger.warning(
-                "refused a request from session network peer %s to %r%s",
+                "refused a request from session network peer %s to %s%s",
                 host,
-                capped_for_log(scope.get("path", "")),
+                quoted_for_log(scope.get("path", "")),
                 held_back_note(held_back, "peer"),
             )
         if scope["type"] == "websocket":
@@ -450,10 +450,10 @@ def install_controller_http_middleware(
             return await call_next(request)
         held_back = refusal_log.due(request.client.host if request.client else "unknown", now=time.monotonic())
         if held_back is not None:
-            # %r: the path is logged decoded, and a line break a page put in it (%0A) must not start a log line.
+            # Quoted: the path is logged decoded, and a line break a page put in it (%0A) must not start a log line.
             logger.warning(
-                "refused a write to %r from another web origin%s",
-                capped_for_log(_request_path(request)),
+                "refused a write to %s from another web origin%s",
+                quoted_for_log(_request_path(request)),
                 held_back_note(held_back, "client"),
             )
         return JSONResponse(status_code=403, content={"detail": CROSS_SITE_WRITE_DETAIL})
@@ -469,8 +469,8 @@ def install_controller_http_middleware(
         held_back = host_refusal_log.due(request.client.host if request.client else "unknown", now=time.monotonic())
         if held_back is not None:
             logger.warning(
-                "refused unauthenticated request for non-loopback Host %r%s",
-                capped_for_log(host),
+                "refused unauthenticated request for non-loopback Host %s%s",
+                quoted_for_log(host),
                 held_back_note(held_back, "client"),
             )
         return JSONResponse(

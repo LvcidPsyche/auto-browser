@@ -98,8 +98,8 @@ class SchemeGateTests(unittest.TestCase):
 
         self.assertEqual(said["evil.example"], "Host 'evil.example' is not allowlisted")
         self.assertEqual(said[at_the_cut], f"Host '{at_the_cut}' is not allowlisted")
-        self.assertEqual(said[past_it], f"Host '{past_it[:200]}...' is not allowlisted")
-        self.assertEqual(said["a" * 3000 + ".example"], f"Host '{'a' * 200}...' is not allowlisted")
+        self.assertEqual(said[past_it], f"Host '{past_it[:200]}'... is not allowlisted")
+        self.assertEqual(said["a" * 3000 + ".example"], f"Host '{'a' * 200}'... is not allowlisted")
 
     def test_a_refused_scheme_is_named_whole_up_to_200_characters_and_cut_past_them(self) -> None:
         # As the host is. No door hands the gate a long scheme today (the tools bound a URL at 2,000 characters and
@@ -114,8 +114,8 @@ class SchemeGateTests(unittest.TestCase):
 
         self.assertEqual(said["ftp"], "URL scheme 'ftp'" + refused)
         self.assertEqual(said["s" * 200], f"URL scheme '{'s' * 200}'" + refused)
-        self.assertEqual(said["s" * 201], f"URL scheme '{'s' * 200}...'" + refused)
-        self.assertEqual(said["s" * 3000], f"URL scheme '{'s' * 200}...'" + refused)
+        self.assertEqual(said["s" * 201], f"URL scheme '{'s' * 200}'..." + refused)
+        self.assertEqual(said["s" * 3000], f"URL scheme '{'s' * 200}'..." + refused)
 
 
 class ForkRouteTests(unittest.TestCase):

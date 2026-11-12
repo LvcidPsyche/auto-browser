@@ -553,7 +553,8 @@ class TheRefusalsLogLineTests(unittest.TestCase):
             self.refuse("/x/" + "p" * 5000)
 
         message = logs.records[0].getMessage()
-        self.assertIn("/x/pppp", message)
+        # Cut at 200 characters, the cut mark after the closing quote.
+        self.assertIn("'/x/" + "p" * 197 + "'...", message)
         self.assertLess(len(message), 400)
 
 
@@ -610,7 +611,8 @@ class TheHostRefusalsLogLineTests(unittest.TestCase):
             self.refuse(_client(), "h" * 5000 + ".example")
 
         message = logs.records[0].getMessage()
-        self.assertIn("hhhh", message)
+        # Cut at 200 characters, the cut mark after the closing quote.
+        self.assertIn("'" + "h" * 200 + "'...", message)
         self.assertLess(len(message), 400)
 
     def test_a_host_holding_a_line_break_cannot_start_a_line_of_the_log(self) -> None:
@@ -672,7 +674,8 @@ class ASessionNetworkPeersLogLineTests(unittest.IsolatedAsyncioTestCase):
             await self.refuse(middleware, path="/x/" + "p" * 5000)
 
         message = logs.records[0].getMessage()
-        self.assertIn("/x/pppp", message)
+        # Cut at 200 characters, the cut mark after the closing quote.
+        self.assertIn("'/x/" + "p" * 197 + "'...", message)
         self.assertLess(len(message), 400)
 
     async def test_a_path_holding_line_breaks_cannot_start_a_line_of_the_log(self) -> None:

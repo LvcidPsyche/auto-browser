@@ -164,7 +164,8 @@ class McpResourceReadTests(unittest.IsolatedAsyncioTestCase):
 
         (record,) = logged.records
         line = record.getMessage()
-        self.assertEqual(line, f"MCP resource read of {capped_for_log(uri)!r} failed: RuntimeError")
+        # Quoted, with the cut mark after the closing quote.
+        self.assertEqual(line, f"MCP resource read of {uri[:200]!r}... failed: RuntimeError")
         self.assertNotIn("\n", line)
         # The answer repeated the URI whole too: it is cut as the line cuts it, in the same code and words.
         self.assert_internal_error(answer, capped_for_log(uri))

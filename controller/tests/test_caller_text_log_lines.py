@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from fastapi import HTTPException
 from playwright.async_api import Error as PlaywrightError
 
 from app.actions.pipeline import BrowserActionPipeline
@@ -29,6 +30,8 @@ from app.mesh.peers import PeerRegistryFile
 from app.mesh.transport import make_envelope
 from app.network_inspector import _scrub_body
 from app.routes._utils import internal_error
+from app.routes.extensions.cdp import _get_cdp
+from app.utils import quoted_for_log
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
 
 # A line break, an ESC and 5,000 characters, after a line a reader of the log would take for the controller's.
@@ -45,7 +48,9 @@ class OneLineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(written.splitlines(), [written], ascii(written[:300]))
         self.assertIn("forged by a caller", written)
         self.assertNotIn("\x1b", written)
-        self.assertIn("xxx...", written)
+        # The cut mark after the closing quote (a double one where the text holds a single one): inside it, it read
+        # as the text's own last characters.
+        self.assertRegex(written, "xxx['\"][.][.][.]")
         self.assertLess(len(written), 600, ascii(written[:300]))
 
     async def test_the_memory_profile_saved_line(self) -> None:
@@ -132,6 +137,42 @@ class OneLineTests(unittest.IsolatedAsyncioTestCase):
         (written,) = _written(logged.records)
         self.assertIn(f"mesh.delegation.reply_verification_failed peer={peer.node_id} error=", written)
         self.assert_one_line_cut(written)
+
+    async def test_a_browsers_error_in_the_cdp_routes_attach_line(self) -> None:
+        # The session id is one the controller made, which cdp_sessions holds; the error is the browser's, which
+        # Playwright writes over several lines (its call log, the browser's own log).
+        session_id = "0123456789ab"
+        active_tab = SimpleNamespace(
+            context=SimpleNamespace(new_cdp_session=AsyncMock(side_effect=PlaywrightError(FORGED)))
+        )
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                cdp_sessions={session_id: SimpleNamespace(page=SimpleNamespace())},
+                browser_manager=SimpleNamespace(sessions={session_id: SimpleNamespace(page=active_tab)}),
+            )
+        )
+
+        with (
+            self.assertLogs("app.routes.extensions.cdp", level="WARNING") as logged,
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await _get_cdp(app, session_id)
+
+        self.assertEqual(raised.exception.status_code, 503)
+        (written,) = _written(logged.records)
+        self.assertTrue(
+            written.startswith(f"cdp: could not attach to the active tab of {session_id}: 'p\\n"), ascii(written[:80])
+        )
+        self.assert_one_line_cut(written)
+
+
+class CutMarkTests(unittest.TestCase):
+    def test_a_quoted_text_that_is_cut_has_its_mark_after_the_closing_quote(self) -> None:
+        # 'xyyy...' read as a text that ends in three dots; 'xyyy'... says the text went on.
+        self.assertEqual(quoted_for_log("x" + "y" * 4999), "'x" + "y" * 199 + "'...")
+        self.assertEqual(quoted_for_log("x" * 200), "'" + "x" * 200 + "'")
+        self.assertEqual(quoted_for_log("a\nb"), "'a\\nb'")
+        self.assertEqual(quoted_for_log(["z" * 300]), '"' + "['" + "z" * 198 + '"...')
 
 
 class InternalErrorTests(unittest.TestCase):

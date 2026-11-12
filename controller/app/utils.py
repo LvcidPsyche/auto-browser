@@ -68,14 +68,17 @@ def capped_for_log(text: str) -> str:
 
 
 def quoted_for_log(value: object) -> str:
-    """``value`` as a log line carries it: quoted, a line break in it escaped, and cut (capped_for_log).
+    """``value`` as a log line carries it: quoted, a line break in it escaped, and cut to MAX_LOGGED_PATH_CHARS with
+    "..." after the closing quote where something was cut ('xyyy'...): inside the quotes, the mark read as the
+    text's own last characters.
 
     A str is quoted as it is. Anything else prints itself as it likes, and a str subclass answers repr() as it
     likes, so what repr() gave is quoted in turn, by str's own repr.
     """
     try:
         text = value if type(value) is str else repr(value)
-        return str.__repr__(capped_for_log(text))
+        quoted = str.__repr__(text[:MAX_LOGGED_PATH_CHARS])
+        return quoted if len(text) <= MAX_LOGGED_PATH_CHARS else quoted + "..."
     except Exception:
         return f"<a {type(value).__name__} that could not be printed>"
 

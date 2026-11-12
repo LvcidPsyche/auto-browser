@@ -15,7 +15,7 @@ from ..browser.services.session_creation import SessionLimitError
 from ..cron_service import CronJobDisabledError, WebhookKeyRefusedError, job_not_found_text
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
-from ..utils import capped_for_log
+from ..utils import capped_for_log, quoted_for_log
 from ._utils import (
     bounded_limit,
     cron_store_errors,
@@ -181,7 +181,7 @@ def create_operations_router(
         with persona_file_errors():
             deleted = proxy_store.delete_persona(name)
         if not deleted:
-            raise HTTPException(status_code=404, detail=f"Proxy persona not found: {capped_for_log(name)!r}")
+            raise HTTPException(status_code=404, detail=f"Proxy persona not found: {quoted_for_log(name)}")
         return {"deleted": True, "name": name}
 
     @router.get("/crons")

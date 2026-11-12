@@ -62,7 +62,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
-from .utils import capped_for_log, spawn_background_task
+from .utils import quoted_for_log, spawn_background_task
 from .witness import (
     ReceiptList,
     WitnessActionContext,
@@ -818,9 +818,7 @@ class BrowserManager:
         # strength of its host and opened local files in the browser.
         if parsed.scheme.lower() not in HTTP_URL_SCHEMES:
             # Cut as the host is below: the scheme is the caller's text, as long as its URL.
-            raise PermissionError(
-                f"URL scheme {capped_for_log(parsed.scheme)!r} is not allowed; only http and https are"
-            )
+            raise PermissionError(f"URL scheme {quoted_for_log(parsed.scheme)} is not allowed; only http and https are")
         host = parsed.hostname
         if not host:
             # No more of the URL than its scheme: a refusal's text is logged and kept in records, and this URL
@@ -835,7 +833,7 @@ class BrowserManager:
             if fnmatch.fnmatch(host, pattern) or host == normalized or host.endswith(f".{normalized}"):
                 return
         # The host is the caller's text, as long as its URL: cut, as a log line's text is.
-        raise PermissionError(f"Host {capped_for_log(host)!r} is not allowlisted")
+        raise PermissionError(f"Host {quoted_for_log(host)} is not allowlisted")
 
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)

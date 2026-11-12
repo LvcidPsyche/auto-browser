@@ -330,15 +330,19 @@ All notable changes to auto-browser are documented here.
   closed while it was moved off. Several lines wrote a Playwright error's text, which can run over several lines and
   quote the selector or the URL an agent gave: a post-action observation withheld or failed, a failure snapshot, a
   step that failed after an action's change, a refused page not moved off, an agent step's observe, a bot challenge's
-  takeover, an upload's check. `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long
-  as the reply was, and the MCP transport's `requested unsupported protocol version` line the `protocolVersion` an
-  `initialize` sent, as long as the body: one wrote a line of 90,073 characters. Each is now written quoted, a
-  control character as its escape, and cut at 200 characters, as a
-  route's hidden cause is (see Fixed). A REST route's `500` wrote the route's arguments as they came, a path the
-  caller wrote among them, and the error by a traceback that prints its text as it is: it now writes, at ERROR, the
-  route's message with its arguments quoted and cut, the error's class and its text quoted and cut, and every frame
-  the error was raised through, a line each (see the upgrade note). An error's text in the controller's other lines (a
-  failed download, a CDP command, a drag, the network inspector's own errors) is still written as it is.
+  takeover, an upload's check, a CDP route's attach to a session's active tab.
+  `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
+  MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
+  as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,
+  and cut at 200 characters, as a route's hidden cause is (see Fixed). A line or an answer that quotes a text it cut
+  puts the cut mark after the closing quote (`'xyyy'...`): inside it (`'xyyy...'`), the mark read as the text's own
+  last characters. The errors in `artifact lookup failed` and `mesh.delegation.envelope_invalid`, which quote the
+  name asked for or the envelope's field, were cut as they came, so the cut took their closing quote: each is
+  quoted now too. A REST route's `500` wrote the route's arguments as they came, a path the caller wrote among them,
+  and the error by a traceback that prints its text as it is: it now writes, at ERROR, the route's message with its
+  arguments quoted and cut, the error's class and its text quoted and cut, and every frame the error was raised
+  through, a line each (see the upgrade note). An error's text in the controller's other lines (a failed download, a
+  CDP command, a drag, the network inspector's own errors) is still written as it is.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:

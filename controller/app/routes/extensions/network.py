@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ...browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError, locked_read
-from ...utils import capped_for_log
+from ...utils import quoted_for_log
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ async def network_remove_hook(session_id: str, pattern: str, request: Request):
 
 def _no_inspector(session_id: str) -> HTTPException:
     """The 404 of a session with no inspector. Its id is the caller's, as long as the path: it is named cut."""
-    return HTTPException(404, f"No network inspector for session {capped_for_log(session_id)!r}")
+    return HTTPException(404, f"No network inspector for session {quoted_for_log(session_id)}")
 
 
 def _get_inspector(app, session_id: str):

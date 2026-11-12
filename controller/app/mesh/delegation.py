@@ -14,7 +14,7 @@ from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
-from ..utils import RefusalLogWindows, capped_for_log, held_back_note, quoted_for_log
+from ..utils import RefusalLogWindows, held_back_note, quoted_for_log
 from .identity import NodeIdentity
 from .models import (
     DelegationRequest,
@@ -333,13 +333,14 @@ class DelegationManager:
         except EnvelopeVerificationError as exc:
             # To get here a caller needs no key and no credential, only the id of a registered peer, and the error
             # quotes the envelope's own fields, as long as the body cap allows. So one line a window for the peer
-            # named, with the count of the rest in the next, and the error cut as a refused request's path is.
+            # named, with the count of the rest in the next, and the error quoted and cut as a refused request's path
+            # is (cut unquoted, the field's own quote was cut with it, and the cut mark read as the field's).
             held_back = self._invalid_envelope_log.due(sender_id, now=time.monotonic())
             if held_back is not None:
                 logger.warning(
                     "mesh.delegation.envelope_invalid sender=%s error=%s%s",
                     sender_id,
-                    capped_for_log(str(exc)),
+                    quoted_for_log(str(exc)),
                     held_back_note(held_back, "sender"),
                 )
             raise DelegationRejected(f"envelope verification failed: {exc}") from exc

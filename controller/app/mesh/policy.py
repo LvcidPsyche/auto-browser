@@ -16,7 +16,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from ..url_safety import browser_equivalent_url
-from ..utils import capped_for_log
+from ..utils import quoted_for_log
 from .models import CapabilityGrant, DelegationRequest, PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ def _refused_url_shown(url: str, patterns: list[str]) -> str:
         return "A URL that cannot be read"
     if not parts.hostname:
         return "A URL with no host name"
-    shown = f"A URL of host {capped_for_log(parts.hostname)!r}"
+    shown = f"A URL of host {quoted_for_log(parts.hostname)}"
     if parts.username is not None or parts.password is not None:
         return f"{shown} that carries userinfo, which no pattern allows,"
     try:

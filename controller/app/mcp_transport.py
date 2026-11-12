@@ -392,7 +392,7 @@ class McpHttpTransport:
         except Exception as exc:
             # The class only, and the URI quoted and cut, as it is caller input of any length: an exception's text can
             # carry a page URL with a token in it, so the client's message is fixed text and the log keeps the class.
-            logger.warning("MCP resource read of %r failed: %s", capped_for_log(uri), type(exc).__name__)
+            logger.warning("MCP resource read of %s failed: %s", quoted_for_log(uri), type(exc).__name__)
             return self._json_error_response(
                 request_id, -32603, f"Could not read resource: {capped_for_log(uri)}", headers=headers
             )

@@ -1053,7 +1053,11 @@ def test_a_404_in_a_routes_own_words_cuts_a_long_id(client: TestClient, route: R
     long_id = "x" + "y" * 59_999
     response = _call(client, _with_id(route, long_id))
 
-    assert (response.status_code, response.json()) == (404, {"detail": words.format(long_id[:200] + "...")})
+    # The cut mark after the id, and after its closing quote where the words quote it ('xyyy'...).
+    assert (response.status_code, response.json()) == (
+        404,
+        {"detail": words.replace("}", "}...").format(long_id[:200])},
+    )
     assert len(response.content) < 1024
     # An id of an ordinary length is named whole, in the route's words as before.
     response = _call(client, _with_id(route, "nope-1"))
