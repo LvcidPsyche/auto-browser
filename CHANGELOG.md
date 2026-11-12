@@ -247,9 +247,10 @@ All notable changes to auto-browser are documented here.
   error by its traceback (`Traceback (most recent call last):` and the frames as Python prints them), which an alert
   or a log parser may look for. It now holds, in its message, the route's message, `answered 500 for` the error's
   class and text, the three outermost frames and the ten nearest the raise, a line each, with the count of those
-  between, and each error it was raised from or while handling, by its class and text (see Security): match on
-  `answered 500 for` instead. The record carries no `exc_info`, so a handler that reads the exception from it (an
-  error tracker's logging integration, a structured formatter) gets the message alone. So are, in the same form,
+  between, the first three errors it was raised from or while handling, by class and text, with the count of the
+  rest, and of a group the first three errors it holds, the same way (see Security): match on `answered 500 for`
+  instead. The record carries no `exc_info`, so a handler that reads the exception from it (an error tracker's
+  logging integration, a structured formatter) gets the message alone. So are, in the same form,
   `POST /mesh/receive`'s (`mesh.receive failed: answered 500 for`, where it was `mesh.receive error`), the ERROR of
   an agent job worker that crashed on a job (`agent job worker ... crashed on`), of an agent step that failed
   (`agent step failed for session`) and of a background task that failed (`background task ... failed`), and the
@@ -383,8 +384,10 @@ All notable changes to auto-browser are documented here.
   agent job worker's crash, an agent step that failed and a background task that failed, each a traceback, which
   prints a Playwright error's text as it is. The `RuntimeError` behind a `409 Conflict` of `POST /sessions` and of
   a fork, written by its traceback too (a persona's name or a URL the caller sent among it), is written as a
-  route's hidden cause. An error's text under a traceback the controller still writes elsewhere (an MCP tool's or
-  an agent job's unexpected error, a readiness check that failed) is written as it is.
+  route's hidden cause. Other lines still write an error by its traceback, which prints its text as it is: an MCP
+  tool's or an agent job's unexpected error and a readiness check that failed among them, and otherwise mostly the
+  failures of the controller's own work (a store's, an audit event's or a witness receipt's write, a maintenance
+  sweep).
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:
