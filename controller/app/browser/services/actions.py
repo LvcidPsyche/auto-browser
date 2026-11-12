@@ -1326,7 +1326,6 @@ class BrowserActionService:
         session: "BrowserSession",
         locator: Any,
         *,
-        timeout_ms: float | None = None,
         budget: _Budget | None = None,
     ) -> None:
         """Playwright's own click on ``locator``, for a target the human-like press could not take.
@@ -1349,9 +1348,9 @@ class BrowserActionService:
         away. An element made invisible keeps its box, which was all that was asked for then, and the press
         went to what was behind it. The steps share the click's budget (_Budget), as the steps of Playwright's
         own click share its timeout: ``budget`` where the click began before this (a human-like try, the scroll
-        into view), else one of ``timeout_ms``. Playwright's own click is given what is left of it.
+        into view), else the session's own (ACTION_TIMEOUT_MS). Playwright's own click is given what is left of it.
         """
-        budget = budget or self._budget(timeout_ms)
+        budget = budget or self._budget(None)
         if not press_is_read():
             await locator.click(timeout=budget.left_ms())
             return

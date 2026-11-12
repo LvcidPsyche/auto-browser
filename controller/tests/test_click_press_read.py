@@ -247,7 +247,7 @@ async def test_a_click_playwright_places_is_pressed_by_the_controller_where_it_w
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
         service, session, done = _service(CLOSE)
         with reading_presses("click", "read", None):
-            await service.click_as_playwright_places_it(session, _locator(done), timeout_ms=1000)
+            await service.click_as_playwright_places_it(session, _locator(done), budget=_Budget(1000))
         assert done == [*CHECKS, placed, ASKED, "mouse down", "mouse up"]
         session.page.mouse.move.assert_awaited_once_with(*PLACED_AT)
         arg = service.manager.element_ids.evaluate.await_args.args[2]
@@ -301,7 +301,7 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         service, session, done = _service(CLOSE)
         locator = _locator(done, each_step_takes=0.02)
         with reading_presses("click", "read", None):
-            await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(250))
         # The last is the question whether the pointer finds the target where it was put: its first message had
         # no bound of its own either, so a target that had left by then was waited for a whole default more.
         assert list(locator.budgets) == ["enabled", "trial hover", "box", "place", "hover", "box again", "pointer"]
@@ -313,7 +313,7 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         service, session, done = _service(CLOSE)
         locator = _locator(done, each_step_takes=0.02)
         with reading_presses("click", "read", None):
-            await service.click_as_playwright_places_it(session, locator, timeout_ms=30)
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(30))
         assert (locator.budgets["box again"], locator.budgets["pointer"]) == (1, 1), locator.budgets
 
         # No budget named: the session's own (ACTION_TIMEOUT_MS), which is what Playwright gives a step left to
@@ -328,7 +328,7 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         # Not read, the click is Playwright's own, and its timeout is the budget.
         service, session, done = _service(CLOSE)
         locator = _locator(done)
-        await service.click_as_playwright_places_it(session, locator, timeout_ms=250)
+        await service.click_as_playwright_places_it(session, locator, budget=_Budget(250))
         assert done == ["click"] and 200 < locator.budgets["click"] <= 250, locator.budgets
 
 
@@ -340,7 +340,7 @@ async def test_a_placed_click_whose_time_is_up_at_its_last_question_ends_as_a_ti
         service, session, done = _service(CLOSE)
         late = _locator(done, each_step_takes=0.02, under_the_pointer=False)
         with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError) as ended:
-            await service.click_as_playwright_places_it(session, late, timeout_ms=30)
+            await service.click_as_playwright_places_it(session, late, budget=_Budget(30))
         assert "Timeout 30ms exceeded" in str(ended.value)
         assert late.budgets["pointer"] == 1 and done[-1] == ASKED, (late.budgets, done)
         service.manager.element_ids.evaluate.assert_not_awaited()
