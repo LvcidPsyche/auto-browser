@@ -1093,6 +1093,8 @@ class BrowserActionService:
         payload["text_redacted"] = True
 
     async def locator_is_sensitive_input(self, locator: Any) -> bool:
+        """Whether the field ``locator`` names is to be taken as secret: by its own attributes, and so where they
+        cannot be read (a field not there yet when they are asked for can be a password field once it comes)."""
         try:
             attributes = {
                 "type": await locator.get_attribute("type"),
@@ -1103,7 +1105,8 @@ class BrowserActionService:
                 "aria_label": await locator.get_attribute("aria-label"),
             }
         except Exception:
-            return False
+            # Attributes that could not be read say nothing of the field: its preview is withheld, as a secret's is.
+            return True
         return self.is_sensitive_field(attributes)
 
     @staticmethod

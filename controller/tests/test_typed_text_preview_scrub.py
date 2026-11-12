@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+from app.action_errors import BrowserActionError
 from app.browser.services.actions import BrowserActionService
+from app.browser_manager import BrowserManager
 from app.pii_scrub import PiiScrubber
+from tests.test_actions_verification import PAGE, URL, _session
+from tests.test_browser_manager_actions import FakeContext, FakeLocator, FakePage, _settings
 
 PREVIEW_CHARS = 80
 SSN = "123-45-6789"
@@ -59,6 +67,72 @@ async def test_type_stores_the_scrubbed_preview_in_the_action_target() -> None:
 
     target = manager._run_action.await_args.args[2]
     assert target["text_preview"] == "[REDACTED]"
+
+
+def _typing_manager(tmp_path: Path, field: FakeLocator) -> tuple[BrowserManager, FakePage]:
+    """The real type through the real pipeline, on a fake page whose ``#pw`` is ``field``; the records are mocks."""
+    manager = BrowserManager(_settings(tmp_path))
+    manager.audit.append = AsyncMock()
+    manager._append_jsonl = AsyncMock()
+    manager._persist_session = AsyncMock()
+    manager._record_witness_receipt = AsyncMock()
+    manager._settle = AsyncMock()
+    manager._ensure_witness_remote_ready = AsyncMock()
+    manager._check_bot_challenge = AsyncMock(return_value=None)
+    manager._light_snapshot = AsyncMock(return_value={**PAGE, "tab_count": 1})
+    manager._observation_payload = AsyncMock(return_value=PAGE)
+    page = FakePage(URL)
+    page.locators["#pw"] = field
+    manager.sessions["s1"] = _session(tmp_path, page, FakeContext(page))
+    return manager, page
+
+
+def _recorded_targets(manager: BrowserManager) -> list[dict]:
+    """The target of every record the type wrote: actions.jsonl, the audit log and the receipt."""
+    lines = [call.args[1]["target"] for call in manager._append_jsonl.await_args_list]
+    events = [call.kwargs["details"]["target"] for call in manager.audit.append.await_args_list]
+    receipts = [call.kwargs["target"] for call in manager._record_witness_receipt.await_args_list]
+    assert lines and events and receipts
+    return [*lines, *events, *receipts]
+
+
+async def test_a_field_whose_attributes_could_not_be_read_keeps_no_preview(tmp_path: Path) -> None:
+    # Attributes that could not be read were taken to say "not secret": a password field that came in after the read
+    # had timed out (ACTION_TIMEOUT_MS) and before the scroll had took the text, and its first 80 characters were
+    # kept in the result, actions.jsonl, the audit log and the receipt.
+    field = FakeLocator("#pw", attributes={"type": "password"})
+    late = [PlaywrightTimeoutError("Timeout 15000ms exceeded.")]
+
+    async def get_attribute(name: str) -> str | None:
+        if late:
+            raise late.pop()
+        return field.attributes.get(name)
+
+    field.get_attribute = AsyncMock(side_effect=get_attribute)
+    manager, page = _typing_manager(tmp_path, field)
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.type("s1", selector="#pw", text="hunter2-secret")
+
+    assert "".join(call.args[0] for call in page.keyboard.type.await_args_list) == "hunter2-secret"
+    for target in (result["target"], *_recorded_targets(manager)):
+        assert "text_preview" not in target and target.get("text_redacted") is True, target
+
+
+async def test_a_type_into_a_field_that_never_came_records_no_preview(tmp_path: Path) -> None:
+    # The type fails (the field is not there for the attribute read, nor for the scroll), and its failure record is
+    # written from the same target: it kept the text that was to be typed.
+    field = FakeLocator("#pw")
+    field.get_attribute = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 15000ms exceeded."))
+    field.scroll_into_view_if_needed = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 15000ms exceeded."))
+    manager, page = _typing_manager(tmp_path, field)
+
+    with patch("asyncio.sleep", new=AsyncMock()), pytest.raises(BrowserActionError):
+        await manager.type("s1", selector="#pw", text="hunter2-secret")
+
+    page.keyboard.type.assert_not_awaited()
+    for target in _recorded_targets(manager):
+        assert "text_preview" not in target and target.get("text_redacted") is True, target
 
 
 async def test_the_export_of_a_typed_email_fills_the_redaction() -> None:
