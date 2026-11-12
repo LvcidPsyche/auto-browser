@@ -138,27 +138,49 @@ class AnErrorWithNoTextTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _makes_a_text(argument: ast.expr) -> bool:
-    """Whether ``argument`` makes a text before the call it is passed to runs: str(x), an f-string, x.message."""
-    if isinstance(argument, ast.JoinedStr):
+    """Whether ``argument`` makes a text before the call it is passed to runs, anywhere in it: str(x) or repr(x), an
+    f-string, x.message, or a text made of one (cut, its first line)."""
+    return any(
+        _makes_text(node) or (isinstance(node, ast.Attribute) and node.attr == "message") for node in ast.walk(argument)
+    )
+
+
+def _makes_text(node: ast.AST) -> bool:
+    """Whether ``node`` itself makes a text: an f-string, str(x), repr(x) or a .format()."""
+    if isinstance(node, ast.JoinedStr):
         return True
-    if isinstance(argument, ast.Attribute):
-        return argument.attr == "message"
-    return isinstance(argument, ast.Call) and isinstance(argument.func, ast.Name) and argument.func.id == "str"
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in {"str", "repr"}
+    return isinstance(node.func, ast.Attribute) and node.func.attr == "format"
 
 
 class NoTextMadeOutsideTheGuardTests(unittest.TestCase):
     def test_quoted_for_log_is_never_passed_a_text_made_for_it(self) -> None:
         # Such a text is an error's (str(exc), exc.message, str(task.exception())): error_text_for_log makes it.
-        made: list[str] = []
-        for path in sorted(_APP.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call) or not node.args:
-                    continue
-                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-                if name == "quoted_for_log" and _makes_a_text(node.args[0]):
-                    made.append(f"{path.relative_to(_APP).as_posix()}:{node.lineno}")
+        made = [f"{relative}:{line}" for relative, tree in _app_modules() for line in texts_made_for_quoting(tree)]
         self.assertEqual(made, [], "pass the error to error_text_for_log, which makes its text in its own try")
+
+
+def _app_modules() -> list[tuple[str, ast.AST]]:
+    """Each module of controller/app, by its path under app/ and its tree."""
+    return [
+        (path.relative_to(_APP).as_posix(), ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        for path in sorted(_APP.rglob("*.py"))
+    ]
+
+
+def texts_made_for_quoting(tree: ast.AST) -> list[int]:
+    """The lines in ``tree`` where quoted_for_log is passed a text made for it (see _makes_a_text)."""
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name == "quoted_for_log" and _makes_a_text(node.args[0]):
+            lines.append(node.lineno)
+    return lines
 
 
 class CutLinesAreQuotedTests(unittest.IsolatedAsyncioTestCase):
@@ -228,34 +250,46 @@ _LOG_CALLS = frozenset({"debug", "info", "warning", "error", "critical", "except
 
 
 def _a_text_made_for_the_line(argument: ast.expr) -> bool:
-    """Whether ``argument`` is a text made before logging takes it (an f-string, str(x), repr(x)), or one cut."""
-    if isinstance(argument, ast.Subscript) and isinstance(argument.slice, ast.Slice):
-        argument = argument.value
-    if isinstance(argument, ast.JoinedStr):
-        return True
-    return (
-        isinstance(argument, ast.Call) and isinstance(argument.func, ast.Name) and argument.func.id in {"str", "repr"}
+    """Whether ``argument`` makes a text before logging takes it, anywhere in it: an f-string, str(x), repr(x) or a
+    .format(), cut or not."""
+    return any(_makes_text(node) for node in ast.walk(argument))
+
+
+def _a_message_made_for_the_line(message: ast.expr) -> bool:
+    """Whether a log call's message is made in the call: an f-string, a call, or a text formatted with %. A message
+    joined from constants and names (a route's own format) is not made from a caller's text."""
+    return any(
+        isinstance(node, ast.JoinedStr | ast.Call) or (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod))
+        for node in ast.walk(message)
     )
+
+
+def _log_message(node: ast.Call) -> ast.expr | None:
+    """A log call's message: its first argument, logger.log's second; None for a call passed none."""
+    index = 1 if node.func.attr == "log" else 0
+    return node.args[index] if len(node.args) > index else None
+
+
+def log_texts_made_for_the_line(tree: ast.AST) -> list[int]:
+    """The lines in ``tree`` of each log call whose message is made in the call, or that is passed a text made for
+    it (see _a_message_made_for_the_line and _a_text_made_for_the_line)."""
+    lines = []
+    for node in ast.walk(tree):
+        arguments = _log_arguments(node)
+        if arguments is None:
+            continue
+        message = _log_message(node)
+        if message is not None and _a_message_made_for_the_line(message):
+            lines.append(message.lineno)
+        lines += [argument.lineno for argument in arguments if _a_text_made_for_the_line(argument)]
+    return lines
 
 
 class NoLogArgumentMadeForTheLineTests(unittest.TestCase):
     def test_no_log_call_is_passed_a_text_made_or_cut_for_it(self) -> None:
         # Made before the call, an error's text is made outside any guard, and cut by slicing it is neither quoted
         # nor escaped: error_text_for_log does both (quoted_for_log for a text that is not an error's).
-        made: list[str] = []
-        for path in sorted(_APP.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                    continue
-                if node.func.attr not in _LOG_CALLS or "log" not in ast.unparse(node.func.value).lower():
-                    continue
-                arguments = node.args[2:] if node.func.attr == "log" else node.args[1:]
-                made += [
-                    f"{path.relative_to(_APP).as_posix()}:{argument.lineno}"
-                    for argument in arguments
-                    if _a_text_made_for_the_line(argument)
-                ]
+        made = [f"{relative}:{line}" for relative, tree in _app_modules() for line in log_texts_made_for_the_line(tree)]
         self.assertEqual(made, [], "pass the error to error_text_for_log, and any other text to quoted_for_log")
 
 
@@ -400,7 +434,7 @@ def reprs_in_log_formats(tree: ast.AST) -> list[tuple[int, str]]:
         arguments = _log_arguments(node)
         if arguments is None:
             continue
-        message = node.args[1] if node.func.attr == "log" else node.args[0]
+        message = _log_message(node)
         if not (isinstance(message, ast.Constant) and isinstance(message.value, str)):
             continue
         conversions = [match.group(1) for match in _CONVERSION.finditer(message.value) if match.group(1) != "%"]
@@ -424,6 +458,95 @@ class NoCallersTextWrittenByReprTests(unittest.TestCase):
                 if (relative, argument) not in _KEPT_REPR
             ]
         self.assertEqual(written, [], "write a caller's value with %s and quoted_for_log")
+
+
+def _module(line: str) -> ast.AST:
+    """A module whose except clause (its error named exc) holds ``line``, at _LINE; error is an error parameter."""
+    return ast.parse(
+        "def f(logger, task, value, during, error: BaseException):\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        f"        {line}\n"
+    )
+
+
+_LINE = 5
+# Mutation cases: each shape a scan exists to refuse, as a line of such a module, which the scan must name.
+_REFUSED = [
+    (
+        "quoted_for_log",
+        texts_made_for_quoting,
+        [
+            "quoted_for_log(str(exc))",
+            "quoted_for_log(str(exc)[:200])",
+            "quoted_for_log(str(exc).splitlines()[0])",
+            "quoted_for_log(repr(exc))",
+            "quoted_for_log(exc.message)",
+            'quoted_for_log(f"{exc}")',
+        ],
+    ),
+    (
+        "made for the line",
+        log_texts_made_for_the_line,
+        [
+            'logger.warning("failure: %s", f"{exc}")',
+            'logger.warning("failure: %s", str(exc)[:200])',
+            'logger.warning("failure: %s", repr(exc))',
+            'logger.warning("failure: %s", "{}".format(exc))',
+            'logger.warning(f"failure: {exc}")',
+            'logger.warning("failure: %s" % exc)',
+            'logger.warning("failure: {}".format(exc))',
+            'logger.log(30, f"failure: {exc}")',
+        ],
+    ),
+    (
+        "passed whole",
+        errors_passed_whole,
+        [
+            'logger.warning("failure: %s", exc)',
+            'logger.warning("failure: %s", exc.message)',
+            'logger.warning("failure: %s", exc.args)',
+            'logger.warning("failure: %s", exc.args[0])',
+            'logger.warning("failure: %s", task.exception())',
+            'logger.warning("failure: %s", error)',
+            'logger.log(30, "failure: %r", exc)',
+        ],
+    ),
+    (
+        "made from an error",
+        texts_made_from_an_error,
+        ['raise ValueError(f"failure: {exc}")', "text = str(exc)", "text = repr(exc)", "text = str(exc.args[0])"],
+    ),
+    (
+        "by repr",
+        lambda tree: [line for line, _argument in reprs_in_log_formats(tree)],
+        ['logger.info("value=%r", value)', 'logger.log(20, "value=%r", value)'],
+    ),
+]
+# The shapes that take the text through a guard: no scan names them.
+_GUARDED = [
+    'logger.warning("failure: %s", error_text_for_log(exc))',
+    'logger.warning("failure: %s: %s", type(exc).__name__, error_text_for_log(error))',
+    'logger.warning("failure during " + during + ": %s", error_text_for_log(exc))',
+    'logger.info("value=%s", quoted_for_log(value))',
+    "quoted_for_log(value[:10])",
+    'raise ValueError(f"failure: {error_text(exc)}"[:300])',
+]
+
+
+class TheScansRefuseEachShapeTests(unittest.TestCase):
+    def test_each_scan_names_each_shape_it_refuses(self) -> None:
+        for name, scan, lines in _REFUSED:
+            for line in lines:
+                with self.subTest(scan=name, line=line):
+                    self.assertEqual(set(scan(_module(line))), {_LINE})
+
+    def test_no_scan_names_a_text_taken_through_a_guard(self) -> None:
+        for line in _GUARDED:
+            for name, scan, _lines in _REFUSED:
+                with self.subTest(scan=name, line=line):
+                    self.assertEqual(scan(_module(line)), [])
 
 
 class AValidationErrorLoggedTests(unittest.IsolatedAsyncioTestCase):
