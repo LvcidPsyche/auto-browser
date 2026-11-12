@@ -1410,6 +1410,33 @@ async def test_a_read_click_in_a_scaled_frame_does_not_press_what_the_page_puts_
         assert await _title(env, session_id) == "start"
 
 
+@pytest.mark.parametrize("focus_click_ms", [None, 3000])
+async def test_a_type_whose_placed_focus_click_is_refused_focuses_its_field_with_no_press(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, focus_click_ms: int | None
+) -> None:
+    # The field of the scaled frame's link, with the page's cover over where its focus click is placed. The type
+    # ended as target_moved, the field empty, where 1.17.0 focused the field with no press when Playwright refused
+    # its click. With the focus click's own budget (FOCUS_CLICK_TIMEOUT_MS) the placed click can run out of time
+    # first on a fast machine, and the type went on there by the timeout: 3000 ms gives every step its time.
+    if focus_click_ms is not None:
+        monkeypatch.setattr(actions_module, "FOCUS_CLICK_TIMEOUT_MS", focus_click_ms)
+    cover = (
+        '<div style="position: fixed; left: 600px; top: 120px; width: 80px; height: 60px" '
+        "onclick=\"document.title = 'PAGE COVER PRESSED'\"></div>"
+    )
+    field = SCALED_LINK.replace(
+        "<a id='link' href='#opened' style='display: block; width: 3000px; height: 120px' "
+        "onclick=\"event.preventDefault(); top.document.title = 'OPENED'\">Card</a>",
+        "<input id='q' style='display: block; width: 3000px; height: 120px; border: 0; padding: 0'>",
+    )
+    assert "id='q'" in field
+    async with browser_env(tmp_path, {"/": SCALED_FRAME + cover, "/inner": field}) as env:
+        session_id = await env.create("/")
+        await env.manager.execute_decision(session_id, _type("write", selector=IN_THE_FRAME + "#q"))
+        assert await env.page(session_id).frame_locator("#frame").locator("#q").input_value() == "x"
+        assert await _title(env, session_id) == "start"
+
+
 async def test_a_read_click_two_frames_down_in_a_scaled_frame_does_not_press_what_the_page_puts_over_them(
     tmp_path: Path,
 ) -> None:

@@ -485,9 +485,12 @@ All notable changes to auto-browser are documented here.
     of its layout when it is to be pressed (`hidden`, `display: none`), or that the pointer does not find where
     the click was placed (made invisible since, or under something), answers `target_moved`, which is retryable
     (one that has left the page, or was made invisible before the pointer was placed, is waited for, as a click
-    waits, and ends the click when its time does). In two places the point is not Playwright's, and such a click
-    can be placed beside its target and end when its time does, where it used to press: an element CSS turns
-    that a corner of the screen cuts, and, in a frame, a link over two lines inside something CSS turns.
+    waits, and ends the click when its time does). A `type`, whose press only puts the caret, focuses its field
+    with no press where that press is refused so, as where Playwright refuses its own click (a field that has
+    left the page is then waited for up to `ACTION_TIMEOUT_MS` once more). In two places the point is not
+    Playwright's, and such a click can be placed beside its target and end when its time does, where it used to
+    press: an element CSS turns that a corner of the screen cuts, and, in a frame, a link over two lines inside
+    something CSS turns.
   - A new approval's reason opens with the controller's sentence, which says what the target (or, asked at the
     press, what the click would press) reads as and what the agent labelled the action, before the agent's own
     reason (one already pending for the same action and kind is reused as it stands); the dashboard's confirm

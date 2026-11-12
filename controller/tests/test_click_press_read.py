@@ -30,6 +30,7 @@ from app.browser.click_target import (
     reading_presses,
     refuse_press_not_asked_about,
 )
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services.actions import (
     _PRESS_PLACE_SCRIPT,
     _RECEIVES_POINTER_SCRIPT,
@@ -454,6 +455,70 @@ async def test_a_target_that_stays_disabled_ends_the_click_when_its_budget_does(
     # 20 ms a look under a budget of 500: looked at more than once, also where a look is held up for ten
     # times as long (under a budget of 50 one stall of 30 ms left it at a single look), and nothing else done.
     assert len(done) >= 2 and set(done) == {"is it enabled"}, done
+
+
+def _field(done: list[str], **given: Any) -> SimpleNamespace:
+    """A field whose focus click goes as ``_locator``'s click does, and which ``focus()`` puts the caret in."""
+    field = _locator(done, **given)
+    focused = {"now": False}
+    placed_or_asked = field.evaluate
+
+    async def evaluate(script: str, *args: Any, **named: Any) -> Any:
+        if script == ELEMENT_HAS_FOCUS_SCRIPT:
+            return focused["now"]
+        return await placed_or_asked(script, *args, **named)
+
+    async def focus(**_given: Any) -> None:
+        done.append("focus")
+        focused["now"] = True
+
+    field.evaluate, field.focus = evaluate, focus
+    return field
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        pytest.param({"under_the_pointer": False}, id="the pointer does not find it where the click was placed"),
+        pytest.param({"box": None}, id="it has no box once the pointer is on it"),
+    ],
+)
+async def test_a_types_focus_click_refused_where_it_was_placed_focuses_its_field_with_no_press(
+    refused: dict[str, Any],
+) -> None:
+    # 1.17.0 focused the field where Playwright's own click was refused (a PlaywrightError). For a type whose target
+    # is read the placed click is the controller's own, and its refusal (target_moved) ended the type, which a retry
+    # met again: nothing was pressed, and nothing was typed either.
+    service, session, done = _service(CLOSE)
+    field = _field(done, **refused)
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()), reading_presses("type", "write", None):
+        await service.focus_verified(session, field, action="type")
+    assert done[-1] == "focus" and "mouse down" not in done, done
+    service.manager.element_ids.evaluate.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("given", "code"),
+    [
+        pytest.param({}, "press_needs_approval", id="a button of the table under the pointer"),
+        pytest.param({"box": None, "place": {**PLACE, "boxless": True, "contents": True}}, "target_has_no_box"),
+    ],
+)
+async def test_a_types_focus_click_that_asks_or_has_no_box_still_ends_the_type(
+    given: dict[str, Any], code: str
+) -> None:
+    # Only target_moved is a focus click that pressed nothing and may be focused instead: one stopped for an approval
+    # asks for it, and a field with no box of its own is named as such, as before.
+    service, session, done = _service(DELETE)
+    field = _field(done, **given)
+    with (
+        patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()),
+        reading_presses("type", "write", None),
+        pytest.raises(BrowserActionError) as ended,
+    ):
+        await service.focus_verified(session, field, action="type")
+    assert ended.value.code == code
+    assert "focus" not in done and "mouse down" not in done, done
 
 
 async def test_a_target_with_no_box_once_the_pointer_is_on_it_is_not_pressed() -> None:

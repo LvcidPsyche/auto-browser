@@ -63,12 +63,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A placed click the controller refused before its press: nothing was pressed.
+TARGET_MOVED = "target_moved"
+
 
 def _target_left_the_pointer() -> BrowserActionError:
     """The target had no box any more once Playwright's checks had passed, or once it had put the pointer on it."""
     return BrowserActionError(
         "Nothing was pressed: the target is no longer shown. Observe the page again and retry.",
-        code="target_moved",
+        code=TARGET_MOVED,
         status_code=409,
         retryable=True,
     )
@@ -80,7 +83,7 @@ def _target_not_under_the_pointer() -> BrowserActionError:
     return BrowserActionError(
         "Nothing was pressed: where the click was placed, the pointer does not find the target. Observe the page "
         "again and retry.",
-        code="target_moved",
+        code=TARGET_MOVED,
         status_code=409,
         retryable=True,
     )
@@ -1480,6 +1483,10 @@ class BrowserActionService:
         except PlaywrightError:
             # Covered or not clickable: focus it without clicking anything.
             pass
+        except BrowserActionError as exc:
+            # So too where the controller's own press refused the click Playwright placed: nothing was pressed.
+            if exc.code != TARGET_MOVED:
+                raise
         if await self._has_focus(locator):
             return
         await locator.focus()

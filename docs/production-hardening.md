@@ -241,8 +241,11 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     has left the page, or was made invisible before the pointer was placed, is waited for, as a click waits, and
     ends the click when its time does), and neither is one with no box of its own, whose children are laid out
     in its place (`display: contents`): where a press on it would land cannot be read, so the action answers
-    `target_has_no_box`, and the agent names an element inside it. A target inside a frame is placed on what the
-    screen shows of it, also where its frame runs off the screen or CSS draws the frame at another size.
+    `target_has_no_box`, and the agent names an element inside it. A `type`, whose press only puts the caret,
+    focuses its field with no press wherever that press ends as `target_moved`, here and below, as where
+    Playwright refuses its own click; a field that has left the page is then waited for once more, up to
+    `ACTION_TIMEOUT_MS`. A target inside a frame is placed on what the screen shows of it, also where its frame
+    runs off the screen or CSS draws the frame at another size.
     An element that CSS turns is placed at the middle of what the screen shows of the box around it (around the
     first of its boxes that the screen shows, where it has several), where Playwright takes the mean of that box's
     corners, each held to the screen. The two are one point while the turn is flat and none of the box is off the
@@ -258,7 +261,7 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     Playwright does not look through a frame that CSS transforms, or that stands inside anything
     CSS transforms (a dialog the page centres with a transform is one), so there the question above is the only
     one asked: where the page has put something of its own over such a frame, or the frame holds another frame
-    that lies over the target, the action ends as `target_moved` with nothing pressed. In a frame that CSS turns
+    that lies over the target, the click ends as `target_moved` with nothing pressed. In a frame that CSS turns
     or mirrors, a click that has to be placed can end so with nothing over the target, or when its time runs out:
     the point is carried into the frame by the target's two boxes, which holds for a frame that is moved or
     scaled and not for one that is turned. A click that is not read is Playwright's own click there, which
