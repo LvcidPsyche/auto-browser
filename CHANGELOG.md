@@ -272,6 +272,13 @@ All notable changes to auto-browser are documented here.
   or a bare `*.` now stops startup too: write a name without brackets, and an IPv6 address without a port. The
   compose files' default no longer lists `testserver`: a client that sends `Host: testserver` to a controller
   started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
+- **An approval asked for a `type` whose field reads as secret answers its text hidden.** Such an approval says
+  `text_hidden: true`, and `GET /approvals`, `GET /approvals/{id}`, the approval tools, a decision's and an
+  execution's answer and the `approval_required` error give its `action.text` as "text hidden: its field reads as
+  secret, or could not be read", as its webhook's and SSE event's summary do (see Security). A client that retries
+  the action from the `action` an approval answers, not from its own, now sends that text, which the approval does
+  not match: retry with the action you asked with. The `text_preview` of a type whose text submits its form and
+  leaves the page (a search that ends in a newline) is now withheld, and that type's receipt is `restricted`.
 
 ### Security
 
@@ -551,27 +558,50 @@ All notable changes to auto-browser are documented here.
   three runs in Chromium).
   The order is the same in every release since the autofill was bound to the session's hosts, 1.8.1 to 1.17.0 (by
   their code; the probe ran on this release's).
-- **A type into a field whose attributes could not be read keeps no preview of its text.** A `type` decides from
-  its field's attributes whether the text is secret, and by selector attributes it could not read were taken to
-  say "not secret". A password field that came in after that read had timed out (`ACTION_TIMEOUT_MS`) and before
-  the scroll's wait had the typed text kept as the action's `text_preview` (its first 80 characters) in the
-  answer, `actions.jsonl`, the session's audit log and the witness receipt, and another operator under named
-  credentials (`API_BEARER_TOKENS`) read it in `GET /audit/events`. A type that failed, its field never there, kept
-  the text it was to type in its failure record the same way, nothing typed; so did a type by `element_id` whose
-  read failed (its element gone from the page), and a type cancelled while it read them, each under a `standard`
-  receipt. The preview is now withheld (`text_redacted: true`) as the type begins, and given back only once the
-  attributes have been read and say the field is not secret; what is typed does not change. The selector's case
-  is in every release from 0.1.0 (the function was `BrowserManager._locator_is_sensitive_input` before 1.1.0).
-- **A field a type finds secret as it runs now restricts the type's witness receipt.** The Witness policy was asked
-  once, before the action ran, when only the caller's `sensitive` flag could say the text was secret: a type into
-  a password field the caller did not mark withheld its preview, and its receipt was still `standard`, with no
-  `sensitive_input` concern, though its own target said `text_redacted: true`. Such a receipt kept the page's
-  observations before and after the type (its text excerpt, its interactable elements' labels, its URLs) for
-  whoever reads the session's receipts (`GET /sessions/{id}/witness` and its bundle, a hosted Witness service);
-  no observation carries a field's value, so the password itself was not in it. 1.17.0's entry says the opposite
-  ("a field an action finds sensitive only as it runs restricts that action's own receipt"): that now holds, by
-  selector and by `element_id`. What the run was decided by (a block, an approval) is still the policy's answer
-  before it. 1.16.0 and 1.17.0 wrote such a receipt so (by their code; the probes ran on this release's).
+- **A type's text is shown only where a read of its field has found the field not secret, and its receipt is
+  restricted where it is not shown.** A `type` keeps a preview of its text (`text_preview`, its first 80 characters,
+  scrubbed) in its answer, `actions.jsonl`, the session's audit log and its witness receipt, and an approval asked
+  for a type shows the text in its summary (the webhook's and the SSE event's), the dashboard's queue and confirm
+  dialog, and what `GET /approvals` answers. Whether the text is secret is read from the field's attributes, and the
+  text was shown with no read that said "not secret": attributes that could not be read were taken to say it, so a
+  password field that came in after the read had timed out (`ACTION_TIMEOUT_MS`) kept the preview, which another
+  operator under named credentials (`API_BEARER_TOKENS`) read in `GET /audit/events`; a type whose read failed or
+  was cancelled (its field never there, its `element_id`'s element gone) kept the text it was to type in its
+  failure record; a type refused before it ran (a policy block, a page `ALLOWED_HOSTS` refuses) kept it in its
+  blocked record, no field read and nothing typed; the field was read before the scroll, the focus click and the
+  clear, so a login form that makes its field a password field once it is focused (an honest pattern), or as the
+  text goes in, had the text typed into a password field with its preview kept, by selector and by `element_id`;
+  and an approval, which a type asks for before it runs (one labelled `post`, `payment`, `account_change` or
+  `destructive`, say, and any type in a governed run), showed the text whole whenever the caller had
+  not marked it `sensitive`, its webhook included. The preview is now withheld (`text_redacted: true`) when the
+  type's target is made, and given back only where the field, read after the focus and the clear just before the
+  first keystroke, and again once the text is in, reads as not secret both times; what is typed does not change.
+  A read that fails or is cancelled withholds it, and once the text is in that includes a field gone from the page:
+  a text whose Enter submits its form and leaves the page now keeps no preview (by selector, each attribute's read
+  then waits a second at most for the field). A type whose preview is withheld has a `restricted` receipt with a
+  `sensitive_input` concern, as the caller's `sensitive` flag gives it, without the page's observations before and
+  after the type (no observation carries a field's value, but they hold its text excerpt, its interactable elements'
+  labels and its URLs, for whoever reads the session's receipts). The policy was asked once, before the action ran,
+  when only that flag could say the text was secret, and such a receipt was `standard` with no `sensitive_input`
+  concern, though 1.17.0's entry says "a field an action finds sensitive only as it runs restricts that action's
+  own receipt": that now holds. What the run was decided by (a block, an approval) is still the policy's answer
+  before it. An approval asked for a type now reads the field first, as the type reads it (by selector or
+  `element_id`, with the same bound): where it reads as secret or cannot be read, the approval says
+  `text_hidden: true`, and its text reads "text hidden: its field reads as secret, or could not be read" in its
+  summary, the queue and the dialog, and in every answer that hands the approval out (`GET /approvals` and
+  `GET /approvals/{id}`, the approval tools, an approve's, a reject's and an execution's answer, and the
+  `approval_required` error). A later request that reads the field as secret hides the text of the pending approval
+  it reuses. The approval's stored record keeps the text, as before: the action retried with the approval's id is
+  matched against it. A text the caller marked `sensitive` is withheld everywhere, as before (its approval stores
+  only a digest of it), and its field is not read for its approval. A typed text still shows: as the preview of a
+  field read as not secret, and in the approval of one (a post's or a message's text is what its approver must
+  see), which includes a field whose attributes do not say it is secret (a PIN field with no such type, name or
+  label) and one that turns secret and back again while the text goes in; in an approval's reason, the agent's own
+  words, which can quote it; and in an agent step's own `decision` (in its answer, `agent_steps.jsonl` and
+  `agent_runs.jsonl`), which is what the model wrote. The case of attributes that could not be read by selector is
+  in every release from 0.1.0 (the function was `BrowserManager._locator_is_sensitive_input` before 1.1.0); the
+  `standard` receipt in 1.16.0 and 1.17.0; the other paths in 1.17.0 (by their code; the probes ran on this
+  release's).
 
 ### Fixed
 
