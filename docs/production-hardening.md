@@ -264,23 +264,46 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     Playwright does not look through a frame that CSS transforms, or that stands inside anything
     CSS transforms (a dialog the page centres with a transform is one), so there the question above is the only
     one asked: where the page has put something of its own over such a frame, or the frame holds another frame
-    that lies over the target, the click ends as `target_moved` with nothing pressed. In a frame that CSS turns
-    or mirrors, a click that has to be placed can end so with nothing over the target, or when its time runs out:
-    the point is carried into the frame by the target's two boxes, which holds for a frame that is moved or
-    scaled and not for one that is turned. A click that is not read is Playwright's own click there, which
-    presses what is at the point it picks and calls it done: what covers the frame, or the page beside the frame
-    when the element is larger than the frame shows or the frame is another site's and scaled. In a frame that
-    runs in a process of its own (another site's, or a sandboxed one) Playwright counts an element's box from the
-    corner of the frame's border, so with a border or padding on the frame every press there, Playwright's own
-    included, goes down up and left of the element's middle by that much. The element is asked whether the
-    pointer is over it before the controller presses. One less than twice as wide or as high as the border and
-    padding together is not pressed: Playwright's checks before a click do not find it at the point they take,
-    and the click ends when its time does (Playwright's own click fails the same way from a pixel smaller). A
-    click Playwright places there is asked whether the pointer finds its target at a point off by the same amount,
-    so one whose part on the screen ends within that much of where Playwright presses (a button half off the
-    frame's right or lower edge) ends as `target_moved` with nothing pressed, where Playwright's own click presses
-    it. The read at the press has half a second to set up and half a second to run; when it fails or runs past
-    either, the press goes on, and an info-level log line says so.
+    that lies over the target, the click ends as `target_moved` with nothing pressed. A click that has to be
+    placed on an element inside a frame asks the element's document where it saw the pointer arrive, and asks the
+    element there: the browser gives a document the pointer's point through every border, padding and turn of
+    the frames around it. That point is the pointer's only while the frame stays where it was: where the
+    element's box has moved since the click was placed (a page that moves the frame once the pointer has
+    arrived), the click ends as `target_moved` with nothing pressed. Where the document saw nothing, the pointer
+    is over another document (or a listener of the page's on the window stopped both the pointermove and the
+    mousemove before the controller's heard them), and the click ends as `target_moved`, unless a frame inside
+    the element (a video in a card) lies at the point carried into the frame by the element's two boxes: that is
+    taken for the element, as Playwright's own click takes it. A frame inside another frame is asked at such a
+    point, carried into the outer frame's document, which holds where the outer frame is moved or scaled, and
+    not where it is turned or mirrored or, as below, where it runs in a process of its own and has a border or
+    padding; and a document that runs no script (a frame sandboxed without `allow-scripts`) cannot say where it
+    saw the pointer, so there the element is asked at such a point as well. In a frame CSS turns, a click that
+    has to be placed can end as `target_moved`, or when its time runs out (a card wider than a frame turned 30
+    degrees): in a frame of another process Playwright counts the element's box as if the frame were not turned,
+    so the pointer goes down beside the element, and in one of the page's own Playwright's checks do not pass. A
+    click that is not read is Playwright's own click there, which presses what is at the point it picks and calls
+    it done: what covers the frame, or the page beside the frame when the element is larger than the frame shows
+    or the frame is another site's and scaled. In a frame that runs in a process of its own (another site's, or a
+    sandboxed one) Playwright counts an element's box from the corner of the frame's border, so with a border or
+    padding on the frame every press there, Playwright's own included, goes down up and left of the element's
+    middle by that much. The element is asked whether the pointer is over it before the controller presses. One
+    less than twice as wide or as high as the border and padding together is not pressed: Playwright's checks
+    before a click do not find it at the point they take, and the click ends when its time does (Playwright's own
+    click fails the same way from a pixel smaller). Inside a frame nested in such a frame, Playwright's own check
+    is off by the outer frame's border and padding too: a button half off the inner frame's right edge was
+    pressed by no way of clicking, Playwright's own included. A point carried by the two boxes there is off by as
+    much, the pointer that far up and left of it. So where the element's document runs no script, a click
+    Playwright places whose element's part on the screen ends within that much of where Playwright presses (a
+    button half off the frame's right or lower edge) ends as `target_moved` with nothing pressed, where
+    Playwright's own click presses it, and what the page shows of its own under the pointer on hover (CSS can,
+    with no script), short of that point, is pressed. Where the element's document saw no move, a frame inside
+    the element that ends within that much of where Playwright presses is missed, and the click ends as
+    `target_moved`, as it does wherever the frame inside the element is in a closed shadow root or is a
+    `fencedframe` (its document finds the root's host at the point, or a tag that is no frame's, where
+    Playwright's own click presses); and a frame the page puts under the pointer once Playwright's hover has
+    passed, within that much of a frame inside the element, can be pressed. The read at the press has half a
+    second to set up and half a second to run; when it fails or runs past either, the press goes on, and an
+    info-level log line says so.
   - Retried with the approval it asked for (the same session, the same action), an action runs as the kind
     approved, and its target is not read again before the decision: a page that had stopped answering turned the
     retry into a click that asked for nothing and left its approval unspent. At the press the button must read as

@@ -11,6 +11,7 @@ against real Chromium.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
@@ -666,3 +668,232 @@ async def test_a_place_counted_from_a_box_that_stood_is_counted_once() -> None:
 
     await BrowserActionService._place_of(SimpleNamespace(bounding_box=bounding_box, evaluate=evaluate), _Budget(5000))
     assert reads == ["box", "place", "box"]
+
+
+def _framed_node(name: str, frame: Any, asked: list[Any], record: Any = None, answer: Any = True) -> SimpleNamespace:
+    """A handle on an element in a frame: what it is asked, and, read with a watch, the record ``record``."""
+
+    async def evaluate(script: str, given: Any) -> Any:
+        if script != _RECEIVES_POINTER_SCRIPT:
+            assert "seen.at" in script, script
+            if isinstance(record, BaseException):
+                raise record
+            return record
+        asked.append((name, given))
+        return answer
+
+    return SimpleNamespace(
+        evaluate=evaluate,
+        bounding_box=AsyncMock(return_value=BOX),
+        owner_frame=AsyncMock(return_value=frame),
+        dispose=AsyncMock(),
+    )
+
+
+async def test_a_placed_click_in_a_frame_asks_its_target_where_its_document_saw_the_pointer_arrive() -> None:
+    # The point of the question was carried into a frame by the target's two boxes, and Playwright's box of an
+    # element in a frame of another process leaves out the frame's border and padding: the question was asked
+    # that far from the pointer. The target's document is asked where it saw the pointer's move arrive, and the
+    # target is asked at that point, a point of its own document (``true`` for its box: nothing is carried). The
+    # frame above is asked as before, at the point of the main frame carried by its own two boxes.
+    asked: list[tuple[str, list[Any]]] = []
+    outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
+    up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))
+    target = _framed_node("the target", up, asked, record=[7.5, 8.25])
+    watch = SimpleNamespace(dispose=AsyncMock())
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    found = await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, watch=watch, placed_by=BOX)
+    assert found is True
+    assert asked == [("the target", [7.5, 8.25, True, False, True]), ("the frame", [5.0, 6.0, BOX, False, False])]
+    # The record says the target is in a frame, and no box of the target carries anything: the target is not looked
+    # for again, and its box is read once, to tell that it is where the click was placed by.
+    locator.evaluate.assert_not_awaited()
+    target.bounding_box.assert_awaited_once()
+    # The watch is the caller's to give back; the handles the question took are its own.
+    watch.dispose.assert_not_awaited()
+    target.dispose.assert_awaited_once()
+    outer.dispose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("along", ["x", "y"])
+@pytest.mark.parametrize(("moved_by", "found"), [(0.5, True), (0.6, False)])
+async def test_a_record_is_not_taken_where_the_target_has_moved_since_the_click_was_placed(
+    along: str, moved_by: float, found: bool
+) -> None:
+    # The record is the point where the target's document saw the pointer arrive. A page that moves the frame after
+    # that move (on it) leaves the pointer, which does not move, over another point of that document, and the record
+    # does not say so: asked at it, the question found the card, and the press went down on what had come under
+    # the pointer. The target's box must still be the one the click was placed by, to half a pixel; else no.
+    asked: list[tuple[str, list[Any]]] = []
+    outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
+    up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))
+    target = _framed_node("the target", up, asked, record=[7.5, 8.25])
+    target.bounding_box = AsyncMock(return_value={**BOX, along: BOX[along] + moved_by})
+    watch = SimpleNamespace(dispose=AsyncMock())
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    answer = await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, watch=watch, placed_by=BOX)
+    assert answer is found
+    assert [name for name, _ in asked] == (["the target", "the frame"] if found else [])
+    target.dispose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("a_frame_of_the_target_is_there", [True, False])
+async def test_a_placed_click_whose_move_its_targets_document_never_saw_is_asked_only_for_a_frame_of_the_target(
+    a_frame_of_the_target_is_there: bool,
+) -> None:
+    # No record: the pointer's move went to another document. Over a frame inside the target (a video in a card),
+    # which Playwright's own check of a click takes for its target, the click is pressed, as it was: the question
+    # is asked by the two boxes, and only such a frame is a yes. Anything else (the page over the frame, a frame
+    # over the target, a frame the page put under the pointer) is a no.
+    asked: list[tuple[str, list[Any]]] = []
+    outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
+    up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))
+    target = _framed_node("the target", up, asked, record=None, answer=a_frame_of_the_target_is_there)
+    watch = SimpleNamespace(dispose=AsyncMock())
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    found = await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, watch=watch)
+    assert found is a_frame_of_the_target_is_there
+    walked = [("the frame", [5.0, 6.0, BOX, False, False])] if a_frame_of_the_target_is_there else []
+    assert asked == [("the target", [5.0, 6.0, BOX, False, True, True]), *walked]
+    locator.evaluate.assert_not_awaited()
+
+
+async def test_a_placed_click_in_a_frame_that_runs_no_script_is_asked_by_the_targets_two_boxes() -> None:
+    # A document that runs no script (a sandboxed frame without allow-scripts) runs no listener either: its watch
+    # says so (``false``), no record can come, and the question is carried by the two boxes, as it was before.
+    asked: list[tuple[str, list[Any]]] = []
+    target = _framed_node("the target", SimpleNamespace(parent_frame=None), asked, record=False)
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    watch = SimpleNamespace(dispose=AsyncMock())
+    assert await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, watch=watch) is True
+    assert asked == [("the target", [5.0, 6.0, BOX, False, True])]
+    locator.evaluate.assert_not_awaited()
+
+
+async def test_a_watch_the_targets_document_cannot_read_is_a_no() -> None:
+    # The record is read in the target's own document, which the driver refuses for a handle of another (the
+    # selector found an element in another document since, or the frame went to another page): a no, and not the
+    # timeout a question that goes unanswered ends a placed click with.
+    asked: list[tuple[str, list[Any]]] = []
+    refused = PlaywrightError("JSHandles can be evaluated only in the context they were created!")
+    target = _framed_node("the target", SimpleNamespace(parent_frame=None), asked, record=refused)
+    locator = SimpleNamespace(evaluate=AsyncMock(), element_handle=AsyncMock(return_value=target))
+
+    watch = SimpleNamespace(dispose=AsyncMock())
+    assert await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, watch=watch) is False
+    assert asked == []
+    target.dispose.assert_awaited_once()
+
+
+def _framed_click(framed: bool, box: Any = BOX) -> tuple[Any, Any, Any, SimpleNamespace, list[str]]:
+    """A read click Playwright places, on a target in a frame or not, whose handles note what is done with them."""
+    service, session, done = _service(CLOSE)
+    locator = _locator(done, place={**PLACE, "framed": framed})
+
+    async def note(what: str, value: Any = None) -> Any:
+        done.append(what)
+        return value
+
+    async def stop(script: str) -> None:
+        assert "stop()" in script, script
+        await note("stop the watch")
+
+    watch = SimpleNamespace(evaluate=stop, dispose=lambda: note("give the watch back"))
+
+    async def evaluate_handle(script: str) -> Any:
+        assert "pointermove" in script
+        return await note("watch the pointer", watch)
+
+    target = SimpleNamespace(
+        bounding_box=lambda: note("the target's box", box),
+        evaluate_handle=evaluate_handle,
+        dispose=lambda: note("give the target back"),
+    )
+    locator.element_handle = lambda **_given: note("look for the target", target)
+    session.page.locator = lambda _selector: SimpleNamespace(evaluate=AsyncMock(return_value=[1280, 720]))
+    service._receives_pointer_at = AsyncMock(return_value=True)
+    return service, session, locator, watch, done
+
+
+@pytest.mark.parametrize("framed", [True, False])
+async def test_a_placed_click_in_a_frame_sets_its_watch_up_between_playwrights_hover_and_its_own_move(
+    framed: bool,
+) -> None:
+    # After the hover, or the record would be of the hover's move; before the controller's own move to the same
+    # point, which is the one the record is of. A target in the main frame needs none: (x, y) is its point. The
+    # target is looked for once, for its box and the watch, and both are given back after the press.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, watch, done = _framed_click(framed)
+
+        async def move(x: float, y: float) -> None:
+            done.append(f"the pointer is put at {(x, y)}")
+
+        session.page.mouse.move = move
+        with reading_presses("click", "read", None):
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
+    put = f"the pointer is put at {PLACED_AT}"
+    looked = ["look for the target", "the target's box", "watch the pointer"] if framed else []
+    given_back = ["stop the watch", "give the watch back", "give the target back"] if framed else []
+    assert done == [*CHECKS, "hover at {'x': 12.0, 'y': 7.0}", *looked, put, "mouse down", "mouse up", *given_back]
+    asked = service._receives_pointer_at.await_args.kwargs
+    assert asked["watch"] is (watch if framed else None)
+    # The box the click was placed by, which the target's must still be where a record is taken.
+    assert asked["placed_by"] == BOX
+
+
+async def test_the_watch_of_a_placed_click_is_given_back_when_the_click_ends_before_its_question() -> None:
+    # The record and the target are handles the page keeps until they are given back: a click that ended between
+    # setting the watch up and asking (the page went away under the move) left both with the page for good.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, watch, done = _framed_click(True)
+        session.page.mouse.move = AsyncMock(side_effect=RuntimeError("the page has gone"))
+        with reading_presses("click", "read", None), pytest.raises(RuntimeError, match="the page has gone"):
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
+    assert done[-3:] == ["stop the watch", "give the watch back", "give the target back"]
+    service._receives_pointer_at.assert_not_awaited()
+    assert "mouse down" not in done
+
+
+async def test_the_watch_of_a_placed_click_is_stopped_where_its_record_was_never_read() -> None:
+    # Reading the record ends the watch. A question that ended before it read the record (no move came to the
+    # target's document, and the target's second look-up failed) left the watch's listeners on the frame's window.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, watch, done = _framed_click(True)
+        service._receives_pointer_at = AsyncMock(return_value=False)
+        with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as ended:
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
+    assert (ended.value.code, ended.value.retryable) == ("target_moved", True)
+    assert done[-3:] == ["stop the watch", "give the watch back", "give the target back"]
+    assert "mouse down" not in done
+
+
+async def test_a_click_cancelled_as_it_gives_its_watch_back_still_gives_the_target_back() -> None:
+    # A cancellation is no Exception: raised where the watch was given back, it skipped the target's, which the
+    # page then kept for good. Each is given back, and the cancellation is raised after.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, watch, done = _framed_click(True)
+
+        async def cancelled() -> None:
+            done.append("give the watch back")
+            raise asyncio.CancelledError
+
+        watch.dispose = cancelled
+        with reading_presses("click", "read", None), pytest.raises(asyncio.CancelledError):
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
+    assert done[-4:] == ["mouse up", "stop the watch", "give the watch back", "give the target back"]
+
+
+async def test_a_placed_click_in_a_frame_whose_target_has_no_box_sets_no_watch_up() -> None:
+    # A watch set up for a click that ended at the box (the target was no longer shown) listened on in the frame
+    # until its next move: it is set up once the target has a box. The target is given back.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, watch, done = _framed_click(True, box=None)
+        with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as ended:
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
+    assert (ended.value.code, ended.value.retryable) == ("target_moved", True)
+    assert done[-3:] == ["look for the target", "the target's box", "give the target back"]
+    service._receives_pointer_at.assert_not_awaited()

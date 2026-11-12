@@ -140,11 +140,16 @@ _step_clock = time.perf_counter
 # pointer found the link or the button and not the node: Playwright's hover said yes, this question said no, and a
 # no ends a placed click. Never of a frame on the way up, which must itself be what the pointer finds, and not
 # before a human-like press, where a no only hands the click to the placing.
-_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
+# ``box`` is ``true`` where (x, y) is already a point of el's own document: where that document saw the pointer
+# arrive (_POINTER_WATCH_SCRIPT), for the target of a placed click in a frame. Nothing is carried then.
+# ``onlyFrames``, given only where it is true: that document saw no move, so the pointer is over another one, and only a
+# frame that is el or inside it (a video in a card) can be what the pointer finds there. Playwright's own check of a
+# click takes the pointer over a frame inside its target for the target.
+_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide, onlyFrames]) => {
   const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
   const field = el.matches('input, textarea, select') || el.isContentEditable;
   const target = (wide && !field && el.closest('button, [role=button], a, [role=link]')) || el;
-  if (window !== window.top) {
+  if (window !== window.top && box !== true) {
     if (!box) return 'framed';
     const own = el.getBoundingClientRect();
     if (!(own.width > 0 && own.height > 0 && box.width > 0 && box.height > 0)) return false;
@@ -158,6 +163,7 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
     hit = inner;
   }
   if (!hit) return false;
+  if (onlyFrames && !hit.matches('iframe, frame, object, embed')) return false;
   const label = hit.closest ? hit.closest('label') : null;
   if (label && label.control === el) return over(label);
   for (let node = hit; node; node = node.assignedSlot || node.parentNode || node.host) {
@@ -165,6 +171,43 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide]) => {
   }
   return false;
 }"""
+
+# (el) => a record of the next move of the pointer that el's document sees: ``at`` is null until one comes, then
+# the point it came to, in that document's own viewport, and false where the document runs no script (a frame
+# sandboxed without allow-scripts: a mail's body), which runs no listener either though it answers the driver's
+# questions: it is asked with a made-up event, of an EventTarget of its own, which nothing of the page's hears.
+# Set up for the target of a placed click inside a frame, once Playwright's hover is done and before the
+# controller puts the pointer on the same point itself (a move to the point the pointer is on is sent to the page
+# as any other). The browser hands a move to the one document under the pointer, in that document's own
+# coordinates, whatever lies between it and the screen: a frame's border and padding, a frame of another process,
+# a turn. So the record is where the pointer is, where the target's two boxes only told where Playwright counts it
+# to be. A trusted pointermove, heard on the way down, so that a listener of the page's that stops it at the target
+# does not keep it from the record; or the mousemove after it, where a listener the page put on the window first
+# stops the pointermove there (a pointermove has the point in fractions of a pixel, a mousemove in whole ones). The
+# listener takes one and goes, or goes when the record is read (_POINTER_SEEN_SCRIPT), or when the click ends
+# (_POINTER_WATCH_STOP_SCRIPT). Where no script runs, it is never called.
+_POINTER_WATCH_SCRIPT = """(el) => {
+  const view = el.ownerDocument.defaultView;
+  const seen = { at: false };
+  const probe = new EventTarget();
+  probe.addEventListener('watch', () => { seen.at = null; });
+  probe.dispatchEvent(new Event('watch'));
+  const note = (event) => {
+    if (!event.isTrusted) return;
+    seen.at = [event.clientX, event.clientY];
+    seen.stop();
+  };
+  const moves = ['pointermove', 'mousemove'];
+  seen.stop = () => moves.forEach((type) => view.removeEventListener(type, note, true));
+  moves.forEach((type) => view.addEventListener(type, note, true));
+  return seen;
+}"""
+
+# (el, seen) => the record of _POINTER_WATCH_SCRIPT, read in el's own document (the driver refuses a handle of
+# another), and the end of its watch.
+_POINTER_SEEN_SCRIPT = "(el, seen) => { seen.stop(); return seen.at; }"
+# (seen) => the end of the watch, where the click ends with its record not read.
+_POINTER_WATCH_STOP_SCRIPT = "(seen) => seen.stop()"
 
 # (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of what the
 # viewport shows of the first of el's boxes that it shows a part of (an inline element broken over lines
@@ -254,6 +297,16 @@ _NOT_ATTACHED = "Element is not attached to the DOM"
 # placing; asked again where Playwright has placed the pointer, it goes by what the documents it asked have said.
 POINTER_CHECK_FRAMES = 8
 POINTER_CHECK_TIMEOUT_MS = 1000
+# How far the target's box of a placed click in a frame may have moved, each way, between the placing and the
+# question, for the record of where the pointer arrived to be taken (_receives_pointer_at's ``placed_by``).
+PLACED_BOX_MOVED_PX = 0.5
+
+
+def _box_kept(box: dict[str, float] | None, placed_by: dict[str, float] | None) -> bool:
+    """Whether ``box`` is where ``placed_by`` was, to PLACED_BOX_MOVED_PX each way."""
+    if not box or not placed_by:
+        return False
+    return all(abs(box[edge] - placed_by[edge]) <= PLACED_BOX_MOVED_PX for edge in ("x", "y"))
 
 
 class _Budget:
@@ -1358,19 +1411,62 @@ class BrowserActionService:
             raise _target_has_no_box() if place["contents"] else _target_left_the_pointer()
         position = {"x": float(place["x"]), "y": float(place["y"])}
         await locator.hover(position=position, timeout=budget.left_ms())
-        box = await locator.bounding_box(timeout=budget.left_ms())
-        if not box:
-            raise _target_left_the_pointer()
-        # Where Playwright puts a position: the corner of the element's box, its border, the offset.
-        x = float(box["x"] + place["border"][0] + position["x"])
-        y = float(box["y"] + place["border"][1] + position["y"])
-        await session.page.mouse.move(x, y)
-        asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
-        # A question the page does not answer within its bound raises its timeout (_receives_pointer_at), and the
-        # click ends as that timeout, as at any step before this one: a no is the page's answer.
-        if not await self._receives_pointer_at(locator, x, y, placed=True, timeout_ms=asked_within):
-            raise _target_not_under_the_pointer()
-        await self.press_mouse(session, x, y)
+        # In a frame the target's document is asked where it sees the pointer's move below arrive, and the
+        # question is asked at that point (_POINTER_WATCH_SCRIPT). (x, y) is counted from Playwright's box, which in
+        # a frame of another process with a border or padding is up and left of the element by that much: the
+        # pointer went there, and the question, carried into the frame by that same box, was asked beside the
+        # pointer. The target is looked for once, for its box and for the watch, and both handles are given back
+        # once the click has pressed or ended: a handle is the page's to keep until then. The watch is set up once
+        # the target has a box: set up for a click that ends here, it listened on until the frame's next move.
+        target = watch = None
+        try:
+            if place["framed"]:
+                target = await locator.element_handle(timeout=budget.left_ms())
+                box = await target.bounding_box()
+                if box:
+                    watch = await target.evaluate_handle(_POINTER_WATCH_SCRIPT)
+            else:
+                box = await locator.bounding_box(timeout=budget.left_ms())
+            if not box:
+                raise _target_left_the_pointer()
+            # Where Playwright puts a position: the corner of the element's box, its border, the offset.
+            x = float(box["x"] + place["border"][0] + position["x"])
+            y = float(box["y"] + place["border"][1] + position["y"])
+            await session.page.mouse.move(x, y)
+            asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+            # A question the page does not answer within its bound raises its timeout (_receives_pointer_at), and
+            # the click ends as that timeout, as at any step before this one: a no is the page's answer.
+            if not await self._receives_pointer_at(
+                locator, x, y, placed=True, watch=watch, placed_by=box, timeout_ms=asked_within
+            ):
+                raise _target_not_under_the_pointer()
+            await self.press_mouse(session, x, y)
+        finally:
+            await self._give_back(watch, target)
+
+    @staticmethod
+    async def _give_back(watch: Any, target: Any) -> None:
+        """End a placed click's watch, where its record was not read, and give the watch and the target back.
+
+        Each on its own: a cancellation at one (it is no Exception) skipped the next, which the page then kept for
+        good. It is raised once all are done. Without the stop, a click whose record was never read (no move came
+        to the target's document, and the question ended before it read the record) left the watch's listeners on
+        the frame's window until its next move.
+        """
+        steps: list[Any] = []
+        if watch is not None:
+            steps += [lambda: watch.evaluate(_POINTER_WATCH_STOP_SCRIPT), watch.dispose]
+        if target is not None:
+            steps.append(target.dispose)
+        cancelled: asyncio.CancelledError | None = None
+        for step in steps:
+            try:
+                with contextlib.suppress(Exception):
+                    await step()
+            except asyncio.CancelledError as exc:
+                cancelled = cancelled or exc
+        if cancelled is not None:
+            raise cancelled
 
     @staticmethod
     async def _place_of(locator: Any, budget: _Budget) -> tuple[Any, dict[str, Any]]:
@@ -1398,7 +1494,14 @@ class BrowserActionService:
 
     @staticmethod
     async def _receives_pointer_at(
-        locator: Any, x: float, y: float, *, placed: bool = False, timeout_ms: float = POINTER_CHECK_TIMEOUT_MS
+        locator: Any,
+        x: float,
+        y: float,
+        *,
+        placed: bool = False,
+        watch: Any = None,
+        placed_by: dict[str, float] | None = None,
+        timeout_ms: float = POINTER_CHECK_TIMEOUT_MS,
     ) -> bool:
         """Whether the pointer at (x, y) finds the element ``locator`` names, through the frames it is in.
 
@@ -1412,6 +1515,27 @@ class BrowserActionService:
         target POINTER_CHECK_FRAMES frames down or deeper is a yes: the documents asked said so, the ones above
         them are Playwright's hover's to check, and a no would end a click that Playwright's own makes.
 
+        ``watch``: the target is in a frame, and this is the record of where its document saw the pointer arrive
+        (_POINTER_WATCH_SCRIPT), read here in the target's own document, and the caller's to give back. The target
+        is then asked at that point, a point of its own document, and not at (x, y) carried by its two boxes.
+        Playwright's box of an element in a frame of another process leaves out the frame's border and padding,
+        so with either the carried point was that far down and right of the pointer: a button whose part on the
+        screen ended within that much of the pointer ended the click as target_moved, where Playwright's own click
+        pressed it, and what the page put under the pointer once Playwright's hover had passed (a row's "Delete")
+        was pressed where it did not reach that far. No move seen is a no, the pointer being over another
+        document (or the page stopped both moves on the window before the watch heard them), unless what lies at
+        the carried point is a frame inside the target (a video in a card), which Playwright's own check takes for
+        its target. A document that runs no script can say nothing, and its target is asked by the two boxes. The
+        frames on the way up are asked as before.
+
+        ``placed_by``: the target's box the click was placed by, with the watch. The record is of a point of the
+        target's document, and a page that moves the frame once the pointer has arrived (on that move) leaves the
+        pointer, which does not move, over another point of it: asked at the record, the question found the card,
+        and the press went down on what the move had put under the pointer, where nothing reads it in a frame of
+        another origin. So the record is taken only where the target's box is still that one, to
+        PLACED_BOX_MOVED_PX each way; else no (target_moved). The box read again is the one the two boxes carry the
+        point by where there is no record, and they carry it as the frame is now.
+
         ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the
         click has left where that is less. The first message had no bound given, so it waited by Playwright's
         default, a whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed. Where
@@ -1421,22 +1545,33 @@ class BrowserActionService:
         """
         handles: list[Any] = []
         try:
-            found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y, None, False, placed], timeout=timeout_ms)
-            if found != "framed":
-                return found is True
+            if watch is None:
+                found = await locator.evaluate(
+                    _RECEIVES_POINTER_SCRIPT, [x, y, None, False, placed], timeout=timeout_ms
+                )
+                if found != "framed":
+                    return found is True
             # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
             # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
             node = await locator.element_handle(timeout=timeout_ms)
             handles.append(node)
+            # Where the target's document saw the pointer arrive: a point there, None for no move, False for a
+            # document that runs no script, and for no watch (the two boxes carry the point, as before).
+            at = await node.evaluate(_POINTER_SEEN_SCRIPT, watch) if watch is not None else False
+            only_frames = at is None
             # The element itself, before a human-like press, is asked as well that the pointer is over it, and
             # where the click was placed, as the button or the link it is in. Neither is asked of a frame.
             arrived, wide = not placed, placed
             for _ in range(POINTER_CHECK_FRAMES):
                 box = await node.bounding_box()
-                asked = [x, y, box, arrived, wide]
+                if at and not _box_kept(box, placed_by):
+                    return False
+                asked = [*(at or (x, y)), True if at else box, arrived, wide]
+                if only_frames:
+                    asked.append(True)
                 if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, asked) is not True:
                     return False
-                arrived = wide = False
+                at = only_frames = arrived = wide = False
                 frame = await node.owner_frame()
                 if frame is None or frame.parent_frame is None:
                     return True

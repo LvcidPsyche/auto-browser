@@ -2209,3 +2209,351 @@ async def test_no_click_aimed_at_a_small_control_presses_the_button_around_it(tm
             assert (await page.title(), await page.evaluate("window.dots")) == ("start", clicks)
     finally:
         random.setstate(state)
+
+
+# A frame the page cannot reach into (sandboxed, so in a process of its own), and in it a card that is a link,
+# wider than the frame, so that its click is one Playwright places. When the pointer first moves over the card the
+# frame's page puts something of its own (a button, or a frame with one in it), no part of the card, under the
+# pointer: it reaches 5 px right of and below the pointer. EDGE is the frame's border and padding.
+COVERED_AS_THE_POINTER_ARRIVES_IN_A_FRAME = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 600px; height: 300px; EDGE }</style>"
+    '<iframe id="frame" sandbox="allow-scripts" srcdoc="'
+    "<body style='margin: 0'>"
+    "<a id='card' href='#' style='position: fixed; left: 0; top: 100px; width: 3000px; height: 60px' "
+    "onclick=&quot;this.textContent = 'OPENED'; return false&quot;>Card</a>"
+    "COVER"
+    "<script>document.getElementById('card').addEventListener('mousemove', (event) => {"
+    " const del = document.getElementById('del');"
+    " if (!event.isTrusted || del.style.display === 'block') return;"
+    " del.style.left = (event.clientX + 5 - 60) + 'px'; del.style.top = (event.clientY + 5 - 40) + 'px';"
+    " del.style.display = 'block'; });</script>"
+    '"></iframe>'
+)
+COVERS = {
+    "a button": (
+        "<button id='del' style='position: fixed; display: none; width: 60px; height: 40px; padding: 0' "
+        "onclick=&quot;this.textContent = 'DELETED'&quot;>Delete</button>"
+    ),
+    "a frame": (
+        "<iframe id='del' src='/delete' style='position: fixed; display: none; width: 60px; height: 40px; "
+        "border: 0'></iframe>"
+    ),
+}
+DELETE_IN_A_FRAME = (
+    "<body style='margin: 0'><button id='b' style='width: 60px; height: 40px; padding: 0' "
+    "onclick=\"this.textContent = 'DELETED'\">Delete</button>"
+)
+
+
+@pytest.mark.parametrize(
+    ("edge", "cover"),
+    [
+        ("border: 0; padding: 0", "a button"),
+        ("border: 10px solid #999; padding: 10px", "a button"),
+        ("border: 10px solid #999; padding: 10px", "a frame"),
+    ],
+)
+async def test_a_placed_click_in_a_frame_of_another_process_is_not_pressed_on_what_came_under_the_pointer(
+    tmp_path: Path, edge: str, cover: str
+) -> None:
+    # The placed click's last question, whether the pointer finds the target, was carried into the frame by the
+    # target's two boxes, and Playwright's box in a frame of another process leaves out the frame's border and
+    # padding: with 20 px of them the question was asked 20 px down and right of the pointer, found the card there,
+    # and the press went down on the "Delete" the page had put under the pointer once Playwright's hover had
+    # passed. Nothing reads what is pressed inside a frame of another origin. Without a border the question was at
+    # the pointer, and said no. The target's document is now asked where it saw the pointer arrive; a frame the
+    # page put there is no frame of the card's, and the card's document saw no move.
+    page = COVERED_AS_THE_POINTER_ARRIVES_IN_A_FRAME.replace("EDGE", edge).replace("COVER", COVERS[cover])
+    async with browser_env(tmp_path, {"/": page, "/delete": DELETE_IN_A_FRAME}) as env:
+        session_id = await env.create("/")
+        frame = env.page(session_id).frame_locator("#frame")
+        refused = None
+
+        try:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#card"))
+        except BrowserActionError as exc:
+            refused = exc
+
+        # The shape the fixture stands for: the cover came up, under the pointer.
+        assert await frame.locator("#del").is_visible()
+        delete = frame.frame_locator("#del").locator("#b") if cover == "a frame" else frame.locator("#del")
+        assert await delete.inner_text() == "Delete", "the press went down on the page's button"
+        assert await frame.locator("#card").inner_text() == "Card"
+        assert refused is not None and (refused.code, refused.retryable) == ("target_moved", True)
+
+
+# Such a frame with a border of 10 px and 5 px of padding, and in it a button of 80 px that runs 45 px past the
+# frame's right edge: the middle of what the screen shows of it is 5 px outside the frame. Playwright counts the
+# button's box from the corner of the frame's border, 15 px up and left of the button, and so presses 10 px
+# inside the frame, on the button. WAYS is a script of the frame's page that does something with the pointer's
+# moves: nothing; stop them at the button; make up a move of its own, at the frame's corner, before each real one;
+# stop the pointermove on the window, before any listener of the window's after it.
+HALF_OFF_A_BORDERED_FRAME = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 600px; height: 300px; border: 10px solid #999; padding: 5px }</style>"
+    '<iframe id="frame" sandbox="allow-scripts" srcdoc="'
+    "<body style='margin: 0'>"
+    "<button id='go' style='position: fixed; right: -45px; top: 100px; width: 80px; height: 30px' "
+    "onclick=&quot;this.textContent = 'PRESSED'&quot;>Go</button>"
+    "WAYS"
+    '"></iframe>'
+)
+WAYS = {
+    "nothing": "",
+    "stopped at the button": (
+        "<script>for (const type of ['pointermove', 'mousemove']) document.getElementById('go')"
+        ".addEventListener(type, (event) => event.stopPropagation());</script>"
+    ),
+    "made up before each": (
+        "<script>window.addEventListener('pointermove', (event) => { if (event.isTrusted) "
+        "window.dispatchEvent(new PointerEvent('pointermove', { clientX: 1, clientY: 1 })); }, true);</script>"
+    ),
+    "stopped on the window first": (
+        "<script>window.addEventListener('pointermove', (event) => event.stopImmediatePropagation(), true);</script>"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("route", "ways"),
+    [
+        ("direct", "nothing"),
+        ("read", "nothing"),
+        ("read", "stopped at the button"),
+        ("read", "made up before each"),
+        ("read", "stopped on the window first"),
+    ],
+)
+async def test_a_button_half_off_a_bordered_frame_of_another_process_is_pressed_as_playwrights_own_click_presses_it(
+    tmp_path: Path, route: str, ways: str
+) -> None:
+    # The same question, asked 15 px down and right of the pointer, was asked outside the frame, where nothing is
+    # found: the read click ended as target_moved with nothing over its target, where the click that is not read
+    # (Playwright's own) pressed the button. What the page does with the pointer's moves does not change where
+    # the frame's document saw the pointer: it is told first, and only of a real move, and where the page stops
+    # the pointermove on the window before the watch hears it, by the mousemove after it.
+    async with browser_env(tmp_path, {"/": HALF_OFF_A_BORDERED_FRAME.replace("WAYS", WAYS[ways])}) as env:
+        session_id = await env.create("/")
+        frame = env.page(session_id).frame_locator("#frame")
+        # The shape the fixture stands for: the frame's document is 600 px wide and begins at 115; the button's
+        # box, as Playwright counts it, begins 15 px short of where the button is (680 = 115 + 600 + 45 - 80).
+        box = await frame.locator("#go").bounding_box()
+        assert (box["x"], box["width"]) == (665, 80), box
+
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#go")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#go"))
+        assert await frame.locator("#go").inner_text() == "PRESSED"
+
+
+# A frame whose document runs no script (sandboxed without allow-scripts, as a mail's body is shown), with a
+# border, and in it a card that is a link wider than the frame. Pressed, the frame's address ends in #opened.
+IN_A_FRAME_THAT_RUNS_NO_SCRIPT = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 600px; height: 300px; EDGE }</style>"
+    '<iframe id="frame" sandbox="" srcdoc="'
+    "<body style='margin: 0'>"
+    "<a id='card' href='#opened' style='position: fixed; left: 0; top: 100px; width: 3000px; height: 60px'>Card</a>"
+    '"></iframe>'
+)
+HEARS_A_LISTENER = """() => {
+  let heard = false;
+  const probe = new EventTarget();
+  probe.addEventListener('probe', () => { heard = true; });
+  probe.dispatchEvent(new Event('probe'));
+  return heard;
+}"""
+
+
+@pytest.mark.parametrize("edge", ["border: 0; padding: 0", "border: 10px solid #999; padding: 10px"])
+async def test_a_placed_click_in_a_frame_that_runs_no_script_is_pressed(tmp_path: Path, edge: str) -> None:
+    # Its document runs no listener, so it can say nothing of where it saw the pointer arrive: the question is
+    # carried by the target's two boxes there, as before, and the card is pressed.
+    async with browser_env(tmp_path, {"/": IN_A_FRAME_THAT_RUNS_NO_SCRIPT.replace("EDGE", edge)}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        # The shape the fixture stands for: the frame's document answers the driver and runs no listener.
+        assert await page.frames[1].evaluate(HEARS_A_LISTENER) is False
+        await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#card"))
+        await page.wait_for_timeout(100)
+        assert page.frames[1].url.endswith("#opened"), page.frames[1].url
+
+
+# Such a frame of another process holding a card wider than itself, and over all of the card that the frame shows
+# a frame of the card's own (a video: an iframe, an object or an embed), so that Playwright's point (the middle of
+# what the viewport shows of the card) and the controller's (the middle of what the frame shows of it) are both on
+# the video: the pointer is over that frame, whose document is told of the pointer's moves, and the card's is not.
+# Pressed, the video's frame says so; a press on the card itself goes nowhere.
+A_FRAME_IN_THE_CARD = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 600px; height: 300px; EDGE }</style>"
+    '<iframe id="frame" sandbox="allow-scripts" srcdoc="'
+    "<body style='margin: 0'>"
+    "<a id='card' href='#' onclick='return false' style='position: fixed; left: 0; top: 100px; width: 3000px; "
+    "height: 60px'>VIDEO</a>"
+    '"></iframe>'
+)
+OVER_THE_CARD = "position: absolute; left: 0; top: 0; width: 600px; height: 60px; border: 0"
+FRAMES_IN_THE_CARD = {
+    "iframe": f"<iframe id='video' src='/video' style='{OVER_THE_CARD}'></iframe>",
+    "object": f"<object id='video' type='text/html' data='/video' style='{OVER_THE_CARD}'></object>",
+    "embed": f"<embed id='video' type='text/html' src='/video' style='{OVER_THE_CARD}'>",
+}
+VIDEO = (
+    "<body style='margin: 0'><div id='v' style='width: 100%; height: 100%' "
+    "onclick=\"this.textContent = 'CLICKED'\">video</div>"
+)
+BORDERED = "border: 10px solid #999; padding: 10px"
+
+
+async def _the_video(page: Any) -> Locator:
+    """What the video's document shows, found by its address: an object's or an embed's frame as an iframe's."""
+    for _ in range(50):
+        for frame in page.frames:
+            if frame.url.endswith("/video"):
+                return frame.locator("#v")
+        await page.wait_for_timeout(100)
+    raise AssertionError("the video's frame never came")
+
+
+@pytest.mark.parametrize(
+    ("video", "edge", "route"),
+    [
+        ("iframe", "border: 0; padding: 0", "direct"),
+        ("iframe", "border: 0; padding: 0", "read"),
+        ("iframe", BORDERED, "direct"),
+        ("iframe", BORDERED, "read"),
+        ("object", BORDERED, "read"),
+        ("embed", BORDERED, "read"),
+    ],
+)
+async def test_a_placed_click_on_a_card_whose_middle_is_a_frame_of_its_own_is_pressed_as_playwrights_own_click_is(
+    tmp_path: Path, video: str, edge: str, route: str
+) -> None:
+    # Playwright's own check of a click takes the pointer over a frame inside its target for the target, and its
+    # click presses there. The card's document sees no move then, and a read click asked only it, so it ended as
+    # target_moved: it is asked as well whether a frame of the card is at the point.
+    page = A_FRAME_IN_THE_CARD.replace("EDGE", edge).replace("VIDEO", FRAMES_IN_THE_CARD[video])
+    async with browser_env(tmp_path, {"/": page, "/video": VIDEO}) as env:
+        session_id = await env.create("/")
+        shown = await _the_video(env.page(session_id))
+        await shown.wait_for()
+        if route == "direct":
+            await env.manager.click(session_id, selector=IN_THE_FRAME + "#card")
+        else:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#card"))
+        assert await shown.inner_text() == "CLICKED"
+
+
+# A frame of another process filled by a button: where the pointer is put at (150, 160), its document has it at
+# (50, 60).
+FILLED_BY_A_BUTTON = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 600px; height: 300px; border: 0 }</style>"
+    '<iframe id="frame" sandbox="allow-scripts" srcdoc="'
+    "<body style='margin: 0'><button id='b' style='position: fixed; left: 0; top: 0; width: 600px; "
+    "height: 300px'>B</button>"
+    '"></iframe>'
+)
+
+
+async def test_the_watch_of_a_placed_click_takes_one_move_and_goes_or_goes_when_it_is_read(tmp_path: Path) -> None:
+    # The question is asked where the first move after the watch arrived, the controller's own; a move after it is
+    # not taken for it, and does not find a listener there. A watch read before any move came ends there too.
+    async with browser_env(tmp_path, {"/": FILLED_BY_A_BUTTON}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        button = await page.frame_locator("#frame").locator("#b").element_handle()
+        watch = await button.evaluate_handle(actions_module._POINTER_WATCH_SCRIPT)
+        await page.mouse.move(150, 160)
+        await page.mouse.move(250, 260)
+        assert await button.evaluate(actions_module._POINTER_SEEN_SCRIPT, watch) == [50, 60]
+
+        read_first = await button.evaluate_handle(actions_module._POINTER_WATCH_SCRIPT)
+        assert await button.evaluate(actions_module._POINTER_SEEN_SCRIPT, read_first) is None
+        await page.mouse.move(300, 300)
+        assert await read_first.evaluate("(seen) => seen.at") is None
+
+
+# Such a frame, and in it a card wider than the frame (so that its click is placed), with a "Delete" of the frame's
+# own over the card's left part, short of the pointer. On the third move in a row to one point with the pointer in
+# the frame's document all the while (Playwright's checks and its hover put the pointer there, then the controller's
+# own move to the same point) the frame's page asks the page around it to move the frame 100 px right. The pointer
+# does not move, and is then over "Delete" in the frame's document.
+MOVED_UNDER_THE_POINTER = (
+    "<title>start</title><style>body { margin: 0 } #frame { position: absolute; left: 100px; top: 100px; "
+    "width: 600px; height: 300px; EDGE }</style>"
+    '<iframe id="frame" sandbox="allow-scripts" srcdoc="'
+    "<body style='margin: 0'>"
+    "<a id='card' href='#' style='position: fixed; left: 0; top: 100px; width: 3000px; height: 60px' "
+    "onclick=&quot;this.textContent = 'OPENED'; return false&quot;>Card</a>"
+    "<button id='del' style='position: fixed; left: 0; top: 100px; width: 520px; height: 60px; padding: 0' "
+    "onclick=&quot;this.textContent = 'DELETED'&quot;>Delete</button>"
+    "<script>let last = null, times = 0; window.addEventListener('mousemove', (event) => {"
+    " if (!event.isTrusted || times === 3) return;"
+    " const again = last !== null && last[0] === event.clientX && last[1] === event.clientY;"
+    " last = [event.clientX, event.clientY]; times = again ? times + 1 : 1;"
+    " if (times === 3) parent.postMessage('move', '*'); }, true);"
+    " window.addEventListener('message', (event) => { if (event.data === 'elsewhere' && times < 3) times = 0; });"
+    "</script>"
+    '"></iframe>'
+    # The page around the frame tells it of a move it sees itself: the pointer left the frame meanwhile.
+    "<script>const frame = document.getElementById('frame');"
+    " window.addEventListener('mousemove', () => frame.contentWindow.postMessage('elsewhere', '*'));"
+    " window.addEventListener('message', (event) => { if (event.data === 'move') frame.style.left = '200px'; });"
+    "</script>"
+)
+
+
+@pytest.mark.parametrize("edge", ["border: 0; padding: 0", BORDERED])
+async def test_a_placed_click_whose_frame_the_page_moves_once_the_pointer_has_arrived_is_not_pressed(
+    tmp_path: Path, edge: str
+) -> None:
+    # Where the target's document saw the pointer arrive is a point of that document, and a frame moved after it
+    # leaves the pointer over another one: asked at that record, the question found the card, and the press went
+    # down on the "Delete" that the move had put under the pointer, which nothing reads in a frame of another
+    # origin. Asked by the two boxes, read again at the question, it said no. The record is taken only where the
+    # target's box is still the one the click was placed by.
+    async with browser_env(tmp_path, {"/": MOVED_UNDER_THE_POINTER.replace("EDGE", edge)}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        frame = page.frame_locator("#frame")
+        refused = None
+
+        try:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#card"))
+        except BrowserActionError as exc:
+            refused = exc
+
+        # The shape the fixture stands for: the controller's own move came, and the page moved the frame on it.
+        assert await page.evaluate("() => document.getElementById('frame').style.left") == "200px"
+        assert await frame.locator("#del").inner_text() == "Delete", "the press went down on the page's button"
+        assert await frame.locator("#card").inner_text() == "Card"
+        assert refused is not None and (refused.code, refused.retryable) == ("target_moved", True)
+
+
+async def test_a_placed_click_whose_pointer_is_on_a_frame_of_the_card_short_of_the_carried_point_is_not_pressed(
+    tmp_path: Path,
+) -> None:
+    # A limit kept in 1.18.0 (the docs): where the card's document saw no move, a frame of the card's own is looked
+    # for at the point carried by the card's two boxes, which in a frame of another process is the frame's border
+    # and padding (20 px) right of and below the pointer. A video 580 px wide has the pointer on it, at 570, and
+    # that point, at 590, on the card beside it: the read click ends as target_moved, retryable, with nothing
+    # pressed, where Playwright's own click (the one that is not read) presses the video.
+    narrow = FRAMES_IN_THE_CARD["iframe"].replace("width: 600px", "width: 580px")
+    page = A_FRAME_IN_THE_CARD.replace("EDGE", BORDERED).replace("VIDEO", narrow)
+    async with browser_env(tmp_path, {"/": page, "/video": VIDEO}) as env:
+        session_id = await env.create("/")
+        shown = await _the_video(env.page(session_id))
+        await shown.wait_for()
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#card"))
+        assert (refused.value.code, refused.value.retryable) == ("target_moved", True)
+        assert await shown.inner_text() == "video"
+
+        # The shape the fixture stands for: where Playwright puts the pointer, the video is.
+        await env.manager.click(session_id, selector=IN_THE_FRAME + "#card")
+        assert await shown.inner_text() == "CLICKED"

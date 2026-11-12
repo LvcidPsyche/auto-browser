@@ -599,17 +599,24 @@ All notable changes to auto-browser are documented here.
   much, the pointer was looked for by that box, and a press near the edge of a small element went down on what
   stands beside it. For an action that is read, whose placed click the controller presses itself, the point is
   taken on what the screen shows of the element (also through a frame that runs off the screen, or one CSS draws
-  at another size), and the element and its frames are asked again where the press goes down. Three limits
-  stay. Playwright does not look through a frame that CSS transforms, or that stands inside anything CSS
-  transforms (a dialog centred with a transform is one), so its own click, which a click that is not read still
-  is, presses what is at the point it picks and ends as done: what the page has put over such a frame, or has
-  beside it where the element is larger than the frame shows or the frame is another site's and scaled. In a
-  frame of another process that has a border or padding, an element less than twice as wide or as high as the
-  two together is not pressed: the click ends when its time does, as Playwright's own does from a pixel smaller.
-  Both are older than this release. And a read click that has to be placed in a frame CSS turns or mirrors can
-  end as `target_moved`, or when its time runs out, with nothing over its target: the point is carried into the
-  frame by the element's boxes, which holds for a frame that is moved or scaled. Before, that press went down
-  unchecked at the middle of the box.
+  at another size), and the element and its frames are asked again where the press goes down: the element where
+  its own document saw the pointer arrive, which the browser gives through every border, padding and turn of the
+  frames around it, and a frame inside another at a point carried by its boxes. Where the element's box has moved
+  since the click was placed (a page that moves the frame once the pointer has arrived), that point is no longer
+  the pointer's, and the click ends as `target_moved` with nothing pressed. Three limits stay. Playwright does
+  not look through a frame that CSS transforms, or that stands inside anything CSS transforms (a dialog centred
+  with a transform is one), so its own click, which a click that is not read still is, presses what is at the
+  point it picks and ends as done: what the page has put over such a frame, or has beside it where the element
+  is larger than the frame shows or the frame is another site's and scaled. In a frame of another process that
+  has a border or padding, an element less than twice as wide or as high as the two together is not pressed:
+  the click ends when its time does, as Playwright's own does from a pixel smaller. Both are older than this
+  release. And a point carried by boxes holds for a frame that is moved or scaled, and leaves out the border and
+  padding of a frame of another process. Such a point is asked of a frame inside another, of the element in a
+  document that runs no script (a frame sandboxed without `allow-scripts`), and of a frame inside the element (a
+  video in a card) where the element's document saw no move: a read click that has to be placed there can end as
+  `target_moved`, or when its time runs out, with nothing over its target, and a frame the page puts under the
+  pointer once Playwright's hover has passed, within that much of a frame inside the element, can be pressed. In a
+  frame CSS turns such a click can end so as well. Before, that press went down unchecked at the middle of the box.
 - **A selector click has one time limit for all its waits.** The scroll into view, the read of the element's box,
   the checks, the question what the pointer finds and the click Playwright places each waited up to
   `ACTION_TIMEOUT_MS` of their own. A target that left the page once the checks had passed held its session for
