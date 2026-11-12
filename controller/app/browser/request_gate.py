@@ -45,7 +45,7 @@ from typing import Any, Callable
 
 from ..action_errors import BROWSER_ACTION_BLOCKED, PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError
 from ..network_inspector import url_origin
-from ..utils import spawn_background_task
+from ..utils import error_text_for_log, spawn_background_task
 from .element_world import session_gone
 
 logger = logging.getLogger(__name__)
@@ -315,7 +315,10 @@ class RequestGate:
             # as the window-birth watcher expects too. Anything else (a timeout on a live browser) may leave it.
             level = logging.DEBUG if session_gone(exc) else logging.WARNING
             logger.log(
-                level, "pre-request gate: could not detach its session: %s", f"{type(exc).__name__}: {exc}"[:200]
+                level,
+                "pre-request gate: could not detach its session: %s: %s",
+                type(exc).__name__,
+                error_text_for_log(exc),
             )
 
     def ending(self, ending: bool = True) -> None:

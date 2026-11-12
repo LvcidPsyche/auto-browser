@@ -14,7 +14,7 @@ from ...auth_policy import credentials_for
 from ...browser_sandbox import read_endpoint_file, redact_endpoints, refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
-from ...utils import spawn_background_task
+from ...utils import error_text_for_log, spawn_background_task
 from ..request_gate import RequestGate, RequestGateUnavailable
 
 logger = logging.getLogger(__name__)
@@ -334,9 +334,10 @@ class BrowserRuntimeService:
             gates.ending(browser, False)
             logger.error(
                 "pre-request gate loss: session(s) %s did not close, and disconnecting the shared browser failed "
-                "(%s): the replacement gate stays attached, so their context stays gated",
+                "(%s: %s): the replacement gate stays attached, so their context stays gated",
                 names,
-                f"{type(exc).__name__}: {exc}"[:200],
+                type(exc).__name__,
+                error_text_for_log(exc),
             )
             return False
         await gates.release(browser)

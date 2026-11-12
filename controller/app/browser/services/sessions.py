@@ -333,7 +333,9 @@ class BrowserSessionService(SessionCreation):
                 )
             )
         except Exception as exc:
-            logger.error("could not record session %s as closed: %s", session.id, f"{type(exc).__name__}: {exc}"[:200])
+            logger.error(
+                "could not record session %s as closed: %s: %s", session.id, type(exc).__name__, error_text_for_log(exc)
+            )
 
     async def _lock_for_close(self, session: "BrowserSession") -> bool:
         """Take the session lock for closing, even from an action stuck on its page.
@@ -401,9 +403,10 @@ class BrowserSessionService(SessionCreation):
                 raise
             self._mark_gate_ending(browser, session_id, False)
             logger.error(
-                "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
+                "the isolated browser of session %s did not close (%s: %s): its pre-request gate stays attached",
                 session_id,
-                f"{type(exc).__name__}: {exc}"[:200],
+                type(exc).__name__,
+                error_text_for_log(exc),
             )
             return False
         await self._teardown_step(

@@ -355,7 +355,12 @@ All notable changes to auto-browser are documented here.
   roll-back, an error answer's entry that was left out. Each of these that writes an error's whole text makes it
   where it quotes it: an error whose text cannot be made (a `KeyError` of a key whose `repr` raises) is named
   `<its text could not be made: RuntimeError>` and the line is written all the same, and a text that was cut is
-  followed by its length (`'xyyy'... (cut from 5041 characters)`).
+  followed by its length (`'xyyy'... (cut from 5041 characters)`). The lines that cut an error's text at 200 or
+  300 characters as it came, a line break and an ESC in it, now quote it too: the pre-request gate's (a detach of
+  its session, a page's `targetId` read, and the bypass of a page's service workers, which wrote the text whole),
+  the window-birth watcher's (a detach, a refused window's close, a re-attach), the prefetch preference's clean-up,
+  an isolated browser that did not close, a session that could not be recorded as closed, and a shared browser
+  that could not be disconnected.
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,

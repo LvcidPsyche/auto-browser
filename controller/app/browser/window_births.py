@@ -82,7 +82,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from ..action_errors import WINDOW_BIRTH_WATCHER_UNAVAILABLE, BrowserActionError
-from ..utils import spawn_background_task
+from ..utils import error_text_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,11 @@ class WindowBirthWatcher:
         try:
             await asyncio.wait_for(self._cdp.detach(), timeout=DETACH_TIMEOUT_SECONDS)
         except Exception as exc:
-            logger.debug("window-birth watcher: could not detach its session: %s", f"{type(exc).__name__}: {exc}"[:200])
+            logger.debug(
+                "window-birth watcher: could not detach its session: %s: %s",
+                type(exc).__name__,
+                error_text_for_log(exc),
+            )
 
     def _on_close(self, _session: Any = None) -> None:
         # The browser's session went down (disconnect, close, or on its own): the watcher is dead. Its births
@@ -509,8 +513,9 @@ class WindowBirthWatcher:
             except Exception as exc:
                 birth.closed = False
                 logger.warning(
-                    "window-birth watcher: could not close an unreported refused window: %s",
-                    f"{type(exc).__name__}: {exc}"[:200],
+                    "window-birth watcher: could not close an unreported refused window: %s: %s",
+                    type(exc).__name__,
+                    error_text_for_log(exc),
                 )
 
     def _start_recheck(self, *, now: bool = False) -> None:
@@ -684,7 +689,7 @@ class WindowBirths:
             try:
                 await self._ensure(browser)
             except Exception as exc:
-                logger.warning("window-birth watcher: could not re-attach after a loss: %s", f"{exc}"[:300])
+                logger.warning("window-birth watcher: could not re-attach after a loss: %s", error_text_for_log(exc))
 
         with contextlib.suppress(RuntimeError):
             spawn_background_task(reattach())
