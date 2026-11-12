@@ -646,7 +646,9 @@ class CronService:
         _refuse_what_a_run_cannot_take(job)
         # An empty value is no value (_refuse_what_a_run_cannot_take), to the session too: as it was stored, false, 0,
         # [] or {} reached the session's record, which refuses each, after its browser context had opened.
-        start_url, auth_profile, proxy_persona = (job.get(field) or None for field in _TEXT_OF_A_RUN)
+        start_url = job.get("start_url") or None
+        auth_profile = job.get("auth_profile") or None
+        proxy_persona = job.get("proxy_persona") or None
         run_request = AgentRunRequest(
             provider=job.get("provider") or "openai",
             goal=job["goal"],
