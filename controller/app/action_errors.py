@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .utils import capped_for_log
+
 # PII_SCRUB_SCREENSHOT_STRICT refused to return a screenshot it could not scrub.
 SCREENSHOT_WITHHELD = "screenshot_withheld"
 # The page's isolated world did not answer a message within its deadline: the renderer may have crashed or hung.
@@ -106,20 +108,22 @@ class SessionNotFoundError(KeyError):
         self.session_id = session_id
         self.status = status
         self.reason = reason
+        # The caller's id, as long as a request line lets it be: cut, as the routes' 404s cut an id.
+        shown = capped_for_log(session_id)
         if status == "closed" and reason == SESSION_CLOSED_GATE_LOST:
             self.code = "session_closed"
             message = (
-                f"Session {session_id} was closed by the controller: its pre-request gate detached from the "
+                f"Session {shown} was closed by the controller: its pre-request gate detached from the "
                 "browser, so its pages could no longer be stopped before loading a host ALLOWED_HOSTS does not "
                 "allow. Create a new session."
             )
         elif status == "closed":
             self.code = "session_closed"
-            message = f"Session {session_id} is closed. Create a new session, or list sessions to find a live one."
+            message = f"Session {shown} is closed. Create a new session, or list sessions to find a live one."
         elif status in {"interrupted", "failed"}:
             self.code = "session_interrupted"
             message = (
-                f"Session {session_id} is {status}: its browser is gone (for example after a controller "
+                f"Session {shown} is {status}: its browser is gone (for example after a controller "
                 "restart) and it cannot be resumed. Create a new session."
             )
         elif status is not None:
@@ -128,13 +132,13 @@ class SessionNotFoundError(KeyError):
             # stopped without being recorded as closed.
             self.code = "session_not_live"
             message = (
-                f"Session {session_id} is recorded as {status} but is not running on this controller "
+                f"Session {shown} is recorded as {status} but is not running on this controller "
                 "(it may belong to another controller instance). Create a new session, or list sessions "
                 "to find a live one."
             )
         else:
             self.code = "unknown_session"
-            message = f"No session with id {session_id}. List sessions to find a live one, or create a new session."
+            message = f"No session with id {shown}. List sessions to find a live one, or create a new session."
         super().__init__(message)
         self.message = message
 

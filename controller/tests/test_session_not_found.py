@@ -17,11 +17,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from app.action_errors import SessionNotFoundError
+from app.action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import McpToolCallRequest, SessionRecord
 from app.tool_gateway import McpToolGateway
+
+# A caller's id as long as a request line lets it be.
+LONG_ID = "x" + "y" * 59_999
 
 
 def _record(session_id: str, status: str) -> SessionRecord:
@@ -83,6 +86,22 @@ class SessionLookupTests(_RealManagerTestCase):
                 self.assertNotEqual(str(caught.exception), session_id)
                 # Still a KeyError, so existing 404 handling is unchanged.
                 self.assertIsInstance(caught.exception, KeyError)
+
+    def test_each_message_cuts_a_long_id_as_the_route_404s_cut_one(self) -> None:
+        # Each message named the caller's id whole, and the REST 404 and an MCP tool's error are that message.
+        for kwargs in (
+            {},
+            {"status": "closed"},
+            {"status": "closed", "reason": SESSION_CLOSED_GATE_LOST},
+            {"status": "interrupted"},
+            {"status": "active"},
+        ):
+            with self.subTest(**kwargs):
+                ordinary, long = SessionNotFoundError("sess-1", **kwargs), SessionNotFoundError(LONG_ID, **kwargs)
+
+                self.assertEqual(long.message, ordinary.message.replace("sess-1", LONG_ID[:200] + "..."))
+                self.assertEqual(str(long), long.message)
+                self.assertEqual((long.code, long.reason, long.session_id), (ordinary.code, ordinary.reason, LONG_ID))
 
     async def test_get_record_still_returns_closed_records(self) -> None:
         await self.manager.session_store.upsert(_record("sess-closed", "closed"))
@@ -164,30 +183,49 @@ class GatewaySurfaceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RestSurfaceTests(unittest.TestCase):
-    def test_rest_404_carries_the_reason_and_code(self) -> None:
+    def setUp(self) -> None:
         import app.main as main_module
 
-        with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(
-                    main_module, "validate_runtime_policy", return_value=SimpleNamespace(errors=[], warnings=[])
-                )
-            )
-            for service in (
-                main_module.manager,
-                main_module.job_queue,
-                main_module.cron_service,
-                main_module.maintenance,
-            ):
-                for method_name in ("startup", "shutdown"):
-                    stack.enter_context(patch.object(service, method_name, new=AsyncMock()))
-            client = stack.enter_context(TestClient(main_module.app))
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(
+            patch.object(main_module, "validate_runtime_policy", return_value=SimpleNamespace(errors=[], warnings=[]))
+        )
+        for service in (
+            main_module.manager,
+            main_module.job_queue,
+            main_module.cron_service,
+            main_module.maintenance,
+        ):
+            for method_name in ("startup", "shutdown"):
+                stack.enter_context(patch.object(service, method_name, new=AsyncMock()))
+        self.client = stack.enter_context(TestClient(main_module.app))
 
-            response = client.get("/sessions/sess-never-existed")
+    def test_rest_404_carries_the_reason_and_code(self) -> None:
+        response = self.client.get("/sessions/sess-never-existed")
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["code"], "unknown_session")
         self.assertIn("No session with id sess-never-existed", response.json()["detail"])
+
+    def test_a_long_id_is_cut_in_each_404_that_names_it(self) -> None:
+        # The sessions router, a route behind it and the app-wide session check (require_session_access, which
+        # refuses an id with no record under named credentials) answered a 60,000-character id in a detail of 60,079.
+        detail = (
+            f"No session with id {LONG_ID[:200] + '...'}. List sessions to find a live one, or create a new session."
+        )
+        with patch("app.browser.services.sessions.has_named_credentials", return_value=True):
+            checked = self.client.get("/approvals", params={"session_id": LONG_ID})
+        for name, response in (
+            ("router", self.client.get(f"/sessions/{LONG_ID}")),
+            ("observe", self.client.get(f"/sessions/{LONG_ID}/observe")),
+            ("app-wide check", checked),
+        ):
+            with self.subTest(name):
+                self.assertEqual(
+                    (response.status_code, response.json()), (404, {"detail": detail, "code": "unknown_session"})
+                )
+                self.assertLess(len(response.content), 1024)
 
 
 if __name__ == "__main__":
