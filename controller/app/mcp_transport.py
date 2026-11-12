@@ -61,6 +61,8 @@ MAX_CLIENT_OBJECT_DEPTH = 32
 MAX_CLIENT_OBJECT_JSON_BYTES = 64 * 1024
 # How many decimal digits a bit of an integer is counted for (_json_length_at_least): 0.30102, just under log10(2).
 _DIGITS_PER_BIT, _DIGITS_PER_BIT_SCALE = 30_102, 100_000
+# How the JSON writer writes a float that is no finite number, by its repr.
+_NON_FINITE_AS_JSON = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}
 logger = logging.getLogger(__name__)
 
 
@@ -878,7 +880,9 @@ class McpHttpTransport:
             payload = [asdict(session) for session in self._sessions.values() if session.id not in gone]
             atomic_write_text(
                 self._session_store_path,
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                # Compact, as the bounds measure each field: indented, a session at the bounds took some 35 times
+                # what is bounded. Every controller reads the table the same, however it is laid out.
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 mode=PRIVATE_FILE_MODE,
             )
         for session in going:
@@ -947,9 +951,9 @@ def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
 
     The walk is a loop over one iterator a level, where a function that calls itself would run out of frames on the
     depth it is to refuse. It ends at the first thing past a bound, so a value of a million keys is not gone through
-    to be refused: it counts a byte for each key and each value, and one for each character of text and each digit
-    of an integer it can count at no cost (_json_length_at_least), which is no more than the JSON takes. Only a value
-    that is under both by that count is written out to be measured.
+    to be refused: it counts a byte for each key and each value, and one for each character of text, each digit of
+    an integer it can count at no cost and each character of a float (_json_length_at_least), which is no more than
+    the JSON takes. Only a value that is under both by that count is written out to be measured.
     """
     too_large = f"is larger than {MAX_CLIENT_OBJECT_JSON_BYTES} bytes as JSON"
     at_least = 0
@@ -972,16 +976,21 @@ def _past_a_client_object_bound(value: dict[str, Any]) -> str | None:
 
 
 def _json_length_at_least(part: object) -> int:
-    """At most the bytes ``part`` takes as JSON, as far as the walk can count them at no cost: a text's length, and
-    an integer's digits counted from its bits.
+    """At most the bytes ``part`` takes as JSON, as far as the walk can count them at no cost: a text's length, an
+    integer's digits counted from its bits, and a float's length as the writer writes it.
 
     An integer of n bits is at least 2 ** (n - 1), so it has at least 1 + (n - 1) * log10(2) digits, the fraction
     dropped, and _DIGITS_PER_BIT is just under log10(2): no more are counted than it has. str() of it would cost
     what writing it out does, and counted as one byte, 2,000 integers of 4,000 digits passed the walk and were
-    written out whole to be refused. A bool, which is an int, counts nothing here, as anything else does.
+    written out whole to be refused. A float is written as its repr, or as NaN, Infinity or -Infinity, which the
+    JSON reader takes from a body: counted as one byte, 65,000 of them were written out (1,625,007 bytes) to be
+    refused. A bool, which is an int, counts nothing here, as anything else does.
     """
     if isinstance(part, str):
         return len(part)
+    if isinstance(part, float):
+        written = float.__repr__(part)
+        return len(_NON_FINITE_AS_JSON.get(written, written))
     if isinstance(part, int) and not isinstance(part, bool):
         return (max(part.bit_length(), 1) - 1) * _DIGITS_PER_BIT // _DIGITS_PER_BIT_SCALE + 1
     return 0

@@ -970,9 +970,14 @@ All notable changes to auto-browser are documented here.
   whose message names the field and the bound and nothing of the value: no session is made and nothing is
   written. What is kept can be longer than what was sent, and it is what the next start measures: keys that differ
   only in a lone surrogate meet once it is replaced, and all but one of them are numbered (`" (2)"`, `" (3)"`, ...).
-  The file is still written whole at every write of it: at the table's cap of 500 sessions, with both fields of
-  each at 64 KiB, it is 62.7 MiB, and on the host it was measured on (Windows, Python 3.12) one write of it took
-  about 951 ms on the event loop, and a small `initialize` and a `DELETE /mcp` at the cap about a second each.
+  The file is now written compactly, as the bound measures each field: written indented, a session at the bounds
+  took up to some 35 times what is bounded (fields of lists 32 levels deep, 4.44 MiB a session, 2.17 GiB at the
+  cap). It is still written whole at every write of it: at the table's cap of 500 sessions, with both fields of
+  each at 64 KiB, it is 62.6 MiB whatever the fields hold. On the host it was measured on (Windows, Python 3.12, a
+  host other work shared) one write of it took about 0.8 s on the event loop for fields that each hold one long
+  text, and about 15 s for fields of small numbers in a list (zeros, 2 or 32 levels deep, or floats); a small
+  `initialize` and a `DELETE /mcp` at the cap took as long, as each writes the table. A float is now counted at the
+  length it is written at, so a value of floats past the bound is refused without being written out to be measured.
   A session an older version stored past either bound is dropped when the file is read, with one WARNING that
   counts them and quotes none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down
   answers `400` `-32700`, as a body that is no JSON does, where it was an unhandled `500`. A session whose first

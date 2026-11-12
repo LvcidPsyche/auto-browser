@@ -421,6 +421,53 @@ class McpClientObjectBoundsTests(_Transport):
             if counted > written or (not isinstance(number, bool) and counted < written - 2):
                 self.fail(f"an integer of {written} characters as JSON is counted {counted}")
 
+    def test_the_table_is_written_as_the_bounds_measure_it_compactly(self) -> None:
+        # Written indented, a session at the bounds took some 35 times what is bounded: fields of lists 32 deep at
+        # 64 KiB compact were 4.44 MiB a session in the table, 2.17 GiB at its cap of 500.
+        value = {"a": [[[0, 1.5, "x"]]], "b": {"c": None}}
+        self.assert_an_ordinary_answer(self.initialize(client_info=value, capabilities=value))
+
+        text = self.store.read_text(encoding="utf-8")
+        self.assertNotIn("\n", text)
+        self.assertEqual(text, json.dumps(json.loads(text), ensure_ascii=False, separators=(",", ":")))
+        (session,) = self.stored()
+        self.assertEqual((session["client_info"], session["client_capabilities"]), (value, value))
+        # Every controller reads it back as it reads one written indented.
+        self.assertEqual(list(self.transport_over_the_store()._sessions), [session["id"]])
+
+    def test_a_value_of_floats_past_the_bound_is_refused_by_the_walk_without_being_written_out(self) -> None:
+        # The walk counted a float as one byte: 65,000 floats were counted 65,000 bytes, and written out (1,625,007
+        # bytes) to be refused.
+        floats = {"a": [-2.2250738585072014e-308] * 3000}
+
+        with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
+            verdict = mcp_transport._past_a_client_object_bound(floats)
+
+        self.assertEqual(verdict, TOO_LARGE)
+        self.assertEqual(dumps.call_count, 0)
+        refused = self.initialize_as_written(capabilities=json.dumps(floats))
+        error = {"code": -32602, "message": f"initialize: capabilities {TOO_LARGE}"}
+        self.assertEqual(refused.json(), {"jsonrpc": "2.0", "id": 1, "error": error})
+        self.assertEqual(self.transport._sessions, {})
+
+    def test_a_float_is_counted_at_the_length_it_is_written_at(self) -> None:
+        # NaN and the infinities too: the JSON reader takes them from a body, and the writer writes them so.
+        for number in (0.0, -0.0, 0.5, 1e16, 1e-7, -2.2250738585072014e-308, 1.7976931348623157e308, 1 / 3):
+            with self.subTest(number=number):
+                self.assertEqual(mcp_transport._json_length_at_least(number), len(json.dumps(number)))
+        for number in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(number=number):
+                self.assertEqual(mcp_transport._json_length_at_least(number), len(json.dumps(number)))
+
+    def test_a_value_of_floats_and_non_finite_numbers_at_the_bound_is_kept(self) -> None:
+        # Counted as written, so a value at the bound is still written out once to be measured, and kept.
+        numbers = {"a": [0.25, float("nan"), float("-inf"), 1e300] * 2000}
+        at = _padded(numbers, BYTES_BOUND, as_kept=False)
+
+        with patch.object(mcp_transport.json, "dumps", wraps=json.dumps) as dumps:
+            self.assertIsNone(mcp_transport._past_a_client_object_bound(at))
+        self.assertEqual(dumps.call_count, 1)
+
     def test_a_body_the_json_reader_cannot_go_down_is_answered_as_one_that_cannot_be_read(self) -> None:
         # How deep Python's JSON reader goes before it gives up (RecursionError, which is no ValueError) is the
         # interpreter's own, so the reader is stood in for: such a body was an unhandled 500.
