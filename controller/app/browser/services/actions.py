@@ -1016,6 +1016,7 @@ class BrowserActionService:
             observation=None if session is None else await self._approval_observation(session),
             origin=origin,
             arguments=arguments,
+            text_hidden=await self._approval_hides_its_text(session, decision),
         )
         if session is None:
             # No session means no witness receipt to carry the request, so the
@@ -1107,6 +1108,25 @@ class BrowserActionService:
             origin=origin,
             arguments=arguments,
         )
+
+    async def _approval_hides_its_text(self, session: "BrowserSession | None", decision: BrowserActionDecision) -> bool:
+        """Whether the approval asked for ``decision`` hides its text: a type the caller did not mark sensitive (that
+        text is hidden and stored as a digest already) whose field reads as secret, or cannot be read, read as the
+        type's operation reads it, by element_id or by selector and with the same bound (field_reads_not_secret).
+
+        The approval is asked for before the type runs, so before any read of its field, and its summary (the
+        webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole.
+        """
+        if session is None or decision.action != "type" or decision.sensitive or not decision.text:
+            return False
+        try:
+            target = self.resolve_target(selector=decision.selector, element_id=decision.element_id)
+            if target.get("element_id"):
+                element = self.manager.element_ids.element(session.page, target["element_id"])
+                return not await self.field_reads_not_secret(element, None)
+            return not await self.field_reads_not_secret(None, session.page.locator(target["selector"]).first)
+        except Exception:
+            return True
 
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
         return {

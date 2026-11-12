@@ -19,6 +19,7 @@ from typing import Any, TypeVar
 from fastapi import HTTPException
 
 from .action_errors import BrowserActionError, SessionNotFoundError
+from .approval_display import shown_approval
 from .models import ApprovalDecider, ApprovalOrigin, ApprovalRecord, ApprovalStatus
 
 # The attribute a refusal carries the notes of the approvals given back with it in.
@@ -203,7 +204,7 @@ class ApprovalRequiredError(HTTPException):
             "status": "approval_required",
             "message": message or f"{approval.kind} actions require human approval",
             "approval_id": approval.id,
-            "approval": approval.model_dump(),
+            "approval": shown_approval(approval),
         }
         super().__init__(status_code=409, detail=self.payload)
 

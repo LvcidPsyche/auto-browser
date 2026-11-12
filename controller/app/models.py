@@ -596,6 +596,10 @@ class ApprovalRecord(BaseModel):
     # all). None for an action approval, whose record is the whole action.
     arguments_size: int | None = None
     arguments_sha256: str | None = None
+    # Recorded by the server: a type the caller did not mark sensitive whose field read as secret, or could not be
+    # read, when its approval was asked for. Its text is hidden in all the approval shows (app.approval_display) and
+    # kept here, where the action retried with the approval is matched. False in a record stored before 1.18.0.
+    text_hidden: bool = False
 
 
 class ApprovalDecisionRequest(StrictInputModel):

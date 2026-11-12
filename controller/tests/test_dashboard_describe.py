@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from app.approval_display import approval_summary, shown_code_points
+from app.approval_display import FIELD_TEXT_HIDDEN, approval_summary, shown_approval, shown_code_points
 from app.models import ApprovalRecord, BrowserActionDecision
 from app.routes.extensions import _DASHBOARD_HTML
 from app.tool_gateway.gateway import McpToolGateway
@@ -132,6 +132,32 @@ def test_a_sensitive_type_says_the_agent_hid_its_text_whatever_the_field() -> No
 
     assert password == f'type · selector="#pw" · {AGENT_HID_TEXT}'
     assert comment == f'type · selector="#comment" · {AGENT_HID_TEXT}'
+
+
+def test_a_type_whose_field_read_secret_says_so_in_the_queue_and_the_dialog_as_the_server_does() -> None:
+    # Its field read as secret, or could not be read, when the approval was asked for: the server answers the text
+    # hidden (shown_approval), and the queue row and the confirm dialog say why, as the webhook's summary does.
+    record = ApprovalRecord(
+        id="a1",
+        session_id="s",
+        kind="account_change",
+        status="pending",
+        created_at="t",
+        updated_at="t",
+        reason="r",
+        action=BrowserActionDecision(action="type", reason="r", selector="#pw", text="hunter2"),
+        text_hidden=True,
+    )
+    expected = f'type · selector="#pw" · {FIELD_TEXT_HIDDEN} · clear_first=true'
+
+    row, dialog = in_node(
+        "[describeAction(input.action, input.origin, undefined, input.text_hidden), approvalConfirmText(input)]",
+        shown_approval(record),
+    )
+
+    assert row == approval_summary(record) == expected
+    assert f"\n\n{expected}\n\n" in dialog
+    assert "hunter2" not in row + dialog
 
 
 def test_the_element_id_that_runs_comes_before_the_selector_it_overrides() -> None:

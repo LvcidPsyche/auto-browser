@@ -82,6 +82,9 @@ UNBOUND_FIELDS = frozenset({"reason", "confidence"})
 NOT_USED_BY = "(not used by {action})"
 NOT_USED_FOR = "(not used: {field} runs)"
 SENSITIVE_TEXT_HIDDEN = "text hidden at the agent's request (sensitive)"
+# Written for the text of a type the agent did not mark sensitive whose field read as secret, or could not be read,
+# when the approval was asked for (ApprovalRecord.text_hidden), and answered as its text (shown_approval).
+FIELD_TEXT_HIDDEN = "text hidden: its field reads as secret, or could not be read"
 # Written after a select_option value that runs: it goes to Playwright as valueOrLabel (element_target
 # matches the same way), so it picks the first option whose value or whose label it is.
 VALUE_OR_LABEL = "(matches an option's value or label)"
@@ -94,6 +97,7 @@ APPROVAL_DISPLAY = {
     "notUsedBy": NOT_USED_BY,
     "notUsedFor": NOT_USED_FOR,
     "sensitiveTextHidden": SENSITIVE_TEXT_HIDDEN,
+    "fieldTextHidden": FIELD_TEXT_HIDDEN,
     "valueOrLabel": VALUE_OR_LABEL,
 }
 
@@ -213,14 +217,25 @@ def approval_summary(approval: ApprovalRecord) -> str:
     tool = approval_tool(approval)
     if tool is not None:
         return shown_code_points(f"tool call {tool}")
-    return describe_action(approval.action, cut=APPROVAL_SUMMARY_CUT)
+    return describe_action(approval.action, cut=APPROVAL_SUMMARY_CUT, text_hidden=approval.text_hidden)
 
 
-def describe_action(action: BrowserActionDecision, *, cut: int | None) -> str:
+def shown_approval(approval: ApprovalRecord) -> dict[str, Any]:
+    """An approval as an answer hands it out (GET /approvals, the approval tools, a decision's and an execution's
+    answer, the approval_required error): its record, with a type's text written FIELD_TEXT_HIDDEN where
+    its field read as secret, or could not be read, when the approval was asked for. The record keeps the text."""
+    shown = approval.model_dump()
+    if approval.text_hidden and shown["action"]["text"] is not None:
+        shown["action"]["text"] = FIELD_TEXT_HIDDEN
+    return shown
+
+
+def describe_action(action: BrowserActionDecision, *, cut: int | None, text_hidden: bool = False) -> str:
     """The action, field by field from APPROVAL_FIELDS, as the dashboard's describeAction writes it.
 
     Each value as JSON, so a string shows its quotes and a newline in it shows
     as an escape; a string longer than ``cut`` characters says how many it leaves out.
+    ``text_hidden`` is the approval's (ApprovalRecord.text_hidden).
     """
     fields = action.model_dump()
     parts = [action.action]
@@ -229,7 +244,12 @@ def describe_action(action: BrowserActionDecision, *, cut: int | None) -> str:
         # An empty string is set: only a value and a label can be one, and either runs (select_option).
         if (actions is not None and action.action not in actions) or value is None:
             continue
-        part = SENSITIVE_TEXT_HIDDEN if name == "text" and action.sensitive else _shown_field(name, value, cut)
+        if name == "text" and action.sensitive:
+            part = SENSITIVE_TEXT_HIDDEN
+        elif name == "text" and text_hidden:
+            part = FIELD_TEXT_HIDDEN
+        else:
+            part = _shown_field(name, value, cut)
         note = unused_note(action.action, name, fields)
         if note is None and action.action == "select_option" and name == "value":
             note = VALUE_OR_LABEL

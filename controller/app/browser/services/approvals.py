@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...approval_display import approval_provenance
+from ...approval_display import approval_provenance, shown_approval
 from ...approvals import CONTROLLER_SCOPE, held_for_execution
 from ...auth_policy import has_named_credentials
 from ...models import ApprovalDecider, ApprovalRecord
@@ -53,13 +53,13 @@ class BrowserApprovalService:
             for session in {item.session_id for item in approvals if item.session_id != CONTROLLER_SCOPE}
         }
         return [
-            approval.model_dump()
+            shown_approval(approval)
             for approval in approvals
             if _usable(approval, lookups.get(approval.session_id), named=named)
         ]
 
     async def get(self, approval_id: str) -> dict[str, Any]:
-        return (await self._accessible(approval_id)).model_dump()
+        return shown_approval(await self._accessible(approval_id))
 
     async def arguments(self, approval_id: str) -> dict[str, Any]:
         """A tool call's whole arguments, for whoever may read its approval (KeyError otherwise, as get)."""
@@ -150,7 +150,7 @@ class BrowserApprovalService:
                     decided_via=decided_via,
                     decided_by=verified_operator(),  # of this withdraw: the record names the approver it restores
                 )
-            return {**approval.model_dump(), "message": message}
+            return {**shown_approval(approval), "message": message}
         await self.manager.audit.append(
             event_type="approval_decision",
             status="approved",
@@ -168,7 +168,7 @@ class BrowserApprovalService:
         await self._decision_receipt(
             approval, action="approve", comment=comment, decided_via=decided_via, decided_by=approval.decided_by
         )
-        return approval.model_dump()
+        return shown_approval(approval)
 
     async def reject(
         self,
@@ -197,7 +197,7 @@ class BrowserApprovalService:
                 },
             )
             return {
-                **approval.model_dump(),
+                **shown_approval(approval),
                 "message": (
                     f"approval {approval.id} is claimed by an action: the rejection stops the action unless it "
                     "has begun, and the approval then becomes rejected"
@@ -220,7 +220,7 @@ class BrowserApprovalService:
         await self._decision_receipt(
             approval, action="reject", comment=comment, decided_via=decided_via, decided_by=approval.decided_by
         )
-        return approval.model_dump()
+        return shown_approval(approval)
 
     async def rejection_receipt(self, approval: ApprovalRecord) -> None:
         """The witness receipt of an operator's reject that a give-back applied (ApprovalStore.record_given_back).
@@ -359,6 +359,6 @@ class BrowserApprovalService:
                 approved_action=approval.action,
             )
         return {
-            "approval": latest.model_dump(),
+            "approval": shown_approval(latest),
             "execution": execution,
         }

@@ -550,12 +550,15 @@ class ApprovalStore:
         observation: dict | None = None,
         origin: ApprovalOrigin = "action",
         arguments: str | None = None,
+        text_hidden: bool = False,
     ) -> ApprovalRecord:
         """The pending approval of this action, or a new one; ``arguments`` is a tool call's whole arguments.
 
         They are written beside the record before it, so no listing shows an
         approval whose arguments cannot be read, and the record keeps their size
         and sha256 (the identical call reuses the record, and so its arguments).
+        ``text_hidden``: the type's field read as secret, or could not be read
+        (ApprovalRecord.text_hidden); a reused record is hidden from then on.
         """
         async with self._lock:
             await self._sweep_arguments()
@@ -569,6 +572,11 @@ class ApprovalStore:
                     # whose text aged out (SENSITIVE_TEXT_RETENTION) could never be approved.
                     self._prune_sensitive_texts()
                     self._sensitive_texts[existing.id] = (action.text or "", time.monotonic())
+                if text_hidden and not existing.text_hidden:
+                    # Its field read as plain when it was first asked for, and now as secret.
+                    existing.text_hidden = True
+                    existing.updated_at = self._later_than(existing.updated_at)
+                    await self._persist(existing)
                 return existing
 
             now = utc_now()
@@ -584,6 +592,7 @@ class ApprovalStore:
                 observation=observation,
                 owner=owner,
                 origin=origin,
+                text_hidden=text_hidden,
             )
             if arguments is not None:
                 approval.arguments_size = len(arguments)
