@@ -402,6 +402,8 @@ ApprovalDecider = Literal["operator", "agent"]
 # What an approval may be spent on: a browser action, or a governed tool call
 # the MCP gateway approves through a stand-in action it builds itself.
 ApprovalOrigin = Literal["action", "tool_call"]
+# How the field of the type an approval is asked for read (ApprovalRecord.field_read).
+ApprovalFieldRead = Literal["plain", "secret", "unread"]
 SessionStatus = Literal["active", "closed", "interrupted", "failed"]
 AgentJobKind = Literal["agent_step", "agent_run"]
 AgentJobStatus = Literal[
@@ -596,10 +598,18 @@ class ApprovalRecord(BaseModel):
     # all). None for an action approval, whose record is the whole action.
     arguments_size: int | None = None
     arguments_sha256: str | None = None
-    # Recorded by the server: a type the caller did not mark sensitive whose field read as secret, or could not be
-    # read, when its approval was asked for. Its text is hidden in all the approval shows (app.approval_display) and
-    # kept here, where the action retried with the approval is matched. False in a record stored before 1.18.0.
-    text_hidden: bool = False
+    # Recorded by the server, for a type the caller did not mark sensitive: how its field's attributes read when the
+    # approval was asked for, and at each later request for the same action that reused the record while it was
+    # pending (ApprovalStore.create_or_reuse_pending). Only "plain" shows the type's text in what the approval
+    # shows (app.approval_display); the text is kept here whatever this says, where the action retried with the
+    # approval is matched.
+    # - "plain": they did not say secret.
+    # - "secret": they did, at any read. It stays: a field once read as secret is hidden though a later read finds
+    #   it plain (a password field whose "show password" is on).
+    # - "unread": no read has answered yet (the field not on the page, the page busy), or the record was stored
+    #   before 1.18.0 and does not say. The next read that answers settles it.
+    # Any other approval leaves it "unread", and nothing of it is hidden for that.
+    field_read: ApprovalFieldRead = "unread"
 
 
 class ApprovalDecisionRequest(StrictInputModel):

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from app.approval_display import FIELD_TEXT_HIDDEN, approval_summary, shown_approval, shown_code_points
+from app.approval_display import approval_summary, shown_approval, shown_code_points
 from app.models import ApprovalRecord, BrowserActionDecision
 from app.routes.extensions import _DASHBOARD_HTML
 from app.tool_gateway.gateway import McpToolGateway
@@ -46,6 +46,9 @@ NODE_TIMEOUT_SECONDS = 60
 CUT = 200
 ELEMENT = "op-" + "a" * 24
 AGENT_HID_TEXT = "text hidden at the agent's request (sensitive)"
+# What stands for a type's text where its field did not read plain (app.approval_display.FIELD_TEXT_HIDDEN).
+SECRET_FIELD = "text hidden: its field reads as secret"
+UNREAD_FIELD = "text hidden: its field has not been read"
 
 
 def _declaration(name: str) -> str:
@@ -73,8 +76,9 @@ def in_node(expression: str, given: Any, names: tuple[str, ...] = DECLARATIONS) 
 
 
 def describe(*cases: tuple[dict[str, Any], str | None], cut: int | None = None) -> list[str]:
+    """Each action as the queue writes it for an approval whose field read plain: a type's text shown."""
     return in_node(
-        "input.cases.map(([action, origin]) => describeAction(action, origin, input.cut ?? undefined))",
+        "input.cases.map(([action, origin]) => describeAction(action, origin, input.cut ?? undefined, 'plain'))",
         {"cases": cases, "cut": cut},
     )
 
@@ -134,10 +138,8 @@ def test_a_sensitive_type_says_the_agent_hid_its_text_whatever_the_field() -> No
     assert comment == f'type · selector="#comment" · {AGENT_HID_TEXT}'
 
 
-def test_a_type_whose_field_read_secret_says_so_in_the_queue_and_the_dialog_as_the_server_does() -> None:
-    # Its field read as secret, or could not be read, when the approval was asked for: the server answers the text
-    # hidden (shown_approval), and the queue row and the confirm dialog say why, as the webhook's summary does.
-    record = ApprovalRecord(
+def _approval_of(action: BrowserActionDecision, **given: Any) -> ApprovalRecord:
+    return ApprovalRecord(
         id="a1",
         session_id="s",
         kind="account_change",
@@ -145,19 +147,58 @@ def test_a_type_whose_field_read_secret_says_so_in_the_queue_and_the_dialog_as_t
         created_at="t",
         updated_at="t",
         reason="r",
-        action=BrowserActionDecision(action="type", reason="r", selector="#pw", text="hunter2"),
-        text_hidden=True,
+        action=action,
+        **given,
     )
-    expected = f'type · selector="#pw" · {FIELD_TEXT_HIDDEN} · clear_first=true'
+
+
+@pytest.mark.parametrize(
+    ("field_read", "text"),
+    [("plain", 'text="hunter2"'), ("secret", SECRET_FIELD), ("unread", UNREAD_FIELD), (None, UNREAD_FIELD)],
+    ids=["plain", "secret", "unread", "a-record-that-does-not-say"],
+)
+def test_a_types_text_shows_in_the_queue_and_the_dialog_only_where_its_field_read_plain(
+    field_read: str | None, text: str
+) -> None:
+    # How the type's field read when its approval was asked for (ApprovalRecord.field_read): only plain shows the
+    # text. Else the server answers the text hidden (shown_approval), and the queue row and the confirm dialog say
+    # which it is, as the webhook's summary does. A record that does not say (stored before 1.18.0) is unread.
+    action = BrowserActionDecision(action="type", reason="r", selector="#pw", text="hunter2")
+    record = _approval_of(action, **({} if field_read is None else {"field_read": field_read}))
+    expected = f'type · selector="#pw" · {text} · clear_first=true'
 
     row, dialog = in_node(
-        "[describeAction(input.action, input.origin, undefined, input.text_hidden), approvalConfirmText(input)]",
+        "[describeAction(input.action, input.origin, undefined, input.field_read), approvalConfirmText(input)]",
         shown_approval(record),
     )
 
     assert row == approval_summary(record) == expected
     assert f"\n\n{expected}\n\n" in dialog
-    assert "hunter2" not in row + dialog
+    assert ("hunter2" in row + dialog) is (field_read == "plain")
+
+
+def test_the_queue_hides_a_types_text_in_an_answer_that_does_not_say_how_its_field_read() -> None:
+    # The dashboard's own rule, whatever the server answered: no word of the field is not "plain".
+    (row,) = in_node(
+        "[describeAction(input, 'action', undefined, undefined)]",
+        {"action": "type", "selector": "#pw", "text": "hunter2"},
+    )
+
+    assert row == f'type · selector="#pw" · {UNREAD_FIELD}'
+
+
+def test_a_text_no_type_reads_shows_whatever_the_approval_says_of_a_field() -> None:
+    # Only a type has a field its text goes to: a click that carries a text types nothing, and its approval binds
+    # the text, so its approver sees it, marked as not used.
+    record = _approval_of(BrowserActionDecision(action="click", reason="r", selector="#go", text="hello"))
+    expected = 'click · selector="#go" · text="hello" (not used by click)'
+
+    (row,) = in_node(
+        "[describeAction(input.action, input.origin, undefined, input.field_read)]", shown_approval(record)
+    )
+
+    assert row == approval_summary(record) == expected
+    assert shown_approval(record)["action"]["text"] == "hello"
 
 
 def test_the_element_id_that_runs_comes_before_the_selector_it_overrides() -> None:
@@ -222,6 +263,7 @@ def test_the_confirm_dialog_is_short_names_the_target_first_and_points_to_the_ro
         "session_id": "sess-1",
         "origin": "action",
         "action": {"action": "type", "selector": "#note", "text": "x" * 300, "clear_first": True},
+        "field_read": "plain",
         "reason": "\u202e" + "y" * 250,
     }
 
@@ -354,6 +396,7 @@ def test_the_queue_and_the_server_summary_say_the_same() -> None:
             updated_at="t",
             reason="r",
             action=action,
+            field_read="plain",  # as describe writes them: a type's text shown
         )
         for index, action in enumerate(actions)
     ]

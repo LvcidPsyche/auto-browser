@@ -15,7 +15,7 @@ import unicodedata
 from decimal import Decimal
 from typing import Any
 
-from .models import ApprovalRecord, BrowserActionDecision
+from .models import ApprovalFieldRead, ApprovalRecord, BrowserActionDecision
 from .url_safety import host_as_sent
 
 # Characters of one string field a short account of an approval shows before it says how many it
@@ -82,9 +82,13 @@ UNBOUND_FIELDS = frozenset({"reason", "confidence"})
 NOT_USED_BY = "(not used by {action})"
 NOT_USED_FOR = "(not used: {field} runs)"
 SENSITIVE_TEXT_HIDDEN = "text hidden at the agent's request (sensitive)"
-# Written for the text of a type the agent did not mark sensitive whose field read as secret, or could not be read,
-# when the approval was asked for (ApprovalRecord.text_hidden), and answered as its text (shown_approval).
-FIELD_TEXT_HIDDEN = "text hidden: its field reads as secret, or could not be read"
+# Written for the text of a type the agent did not mark sensitive whose field did not read plain, by how it read
+# (ApprovalRecord.field_read), and answered as its text (shown_approval). "unread" is also what stands for a record
+# that does not say (stored before 1.18.0), and for a read that failed: asked for again, the approval reads the field.
+FIELD_TEXT_HIDDEN: dict[str, str] = {
+    "secret": "text hidden: its field reads as secret",
+    "unread": "text hidden: its field has not been read",
+}
 # Written after a select_option value that runs: it goes to Playwright as valueOrLabel (element_target
 # matches the same way), so it picks the first option whose value or whose label it is.
 VALUE_OR_LABEL = "(matches an option's value or label)"
@@ -217,25 +221,35 @@ def approval_summary(approval: ApprovalRecord) -> str:
     tool = approval_tool(approval)
     if tool is not None:
         return shown_code_points(f"tool call {tool}")
-    return describe_action(approval.action, cut=APPROVAL_SUMMARY_CUT, text_hidden=approval.text_hidden)
+    return describe_action(approval.action, cut=APPROVAL_SUMMARY_CUT, field_read=approval.field_read)
+
+
+def _hidden_text(action: BrowserActionDecision, field_read: ApprovalFieldRead) -> str | None:
+    """What stands for the text of the action an approval is for, by how its field read (ApprovalRecord.field_read);
+    None where the text shows as it is: the field read plain, the action is no type (nothing types its text), or the
+    caller marked it sensitive (hidden as the caller's, and stored as a digest)."""
+    if action.action != "type" or action.sensitive or field_read == "plain":
+        return None
+    return FIELD_TEXT_HIDDEN[field_read]
 
 
 def shown_approval(approval: ApprovalRecord) -> dict[str, Any]:
     """An approval as an answer hands it out (GET /approvals, the approval tools, a decision's and an execution's
-    answer, the approval_required error): its record, with a type's text written FIELD_TEXT_HIDDEN where
-    its field read as secret, or could not be read, when the approval was asked for. The record keeps the text."""
+    answer, the approval_required error): its record, with a type's text written as FIELD_TEXT_HIDDEN says
+    unless its field read plain (_hidden_text). The record keeps the text."""
     shown = approval.model_dump()
-    if approval.text_hidden and shown["action"]["text"] is not None:
-        shown["action"]["text"] = FIELD_TEXT_HIDDEN
+    hidden = _hidden_text(approval.action, approval.field_read)
+    if hidden is not None and shown["action"]["text"] is not None:
+        shown["action"]["text"] = hidden
     return shown
 
 
-def describe_action(action: BrowserActionDecision, *, cut: int | None, text_hidden: bool = False) -> str:
+def describe_action(action: BrowserActionDecision, *, cut: int | None, field_read: ApprovalFieldRead = "unread") -> str:
     """The action, field by field from APPROVAL_FIELDS, as the dashboard's describeAction writes it.
 
     Each value as JSON, so a string shows its quotes and a newline in it shows
     as an escape; a string longer than ``cut`` characters says how many it leaves out.
-    ``text_hidden`` is the approval's (ApprovalRecord.text_hidden).
+    ``field_read`` is the approval's (ApprovalRecord.field_read).
     """
     fields = action.model_dump()
     parts = [action.action]
@@ -246,8 +260,8 @@ def describe_action(action: BrowserActionDecision, *, cut: int | None, text_hidd
             continue
         if name == "text" and action.sensitive:
             part = SENSITIVE_TEXT_HIDDEN
-        elif name == "text" and text_hidden:
-            part = FIELD_TEXT_HIDDEN
+        elif name == "text" and (hidden := _hidden_text(action, field_read)) is not None:
+            part = hidden
         else:
             part = _shown_field(name, value, cut)
         note = unused_note(action.action, name, fields)

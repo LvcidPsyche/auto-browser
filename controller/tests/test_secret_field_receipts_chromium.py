@@ -11,13 +11,16 @@ came kept the text it was to type in its failure record. Only the page server is
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.action_errors import BrowserActionError
+from app.approvals import ApprovalRequiredError
 from app.browser.element_world import READ
+from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
 from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromium: that module's autouse browser
     _shared_chromium,
@@ -351,3 +354,67 @@ async def _holds_kept(env: Any, session: Any, element_id: str) -> int:
     """How many holds on a typed field the element ids' world still keeps: a type gives its own back."""
     element = env.manager.element_ids.element(session.page, element_id)
     return await element.evaluate("(el, arg, registry) => registry.fieldHolds.size", effect=READ)
+
+
+# A note field the page puts in when the test says so (addNote), so its timing is the test's.
+LATE_NOTE = (
+    "<title>post</title><script>window.addNote = () => document.body.insertAdjacentHTML("
+    "'beforeend', '<textarea id=\"note\" aria-label=\"Note\"></textarea>');</script>"
+)
+
+
+async def _asked_for(env: Any, session_id: str, decision: BrowserActionDecision) -> dict[str, Any]:
+    with pytest.raises(ApprovalRequiredError) as asked:
+        await env.manager.execute_decision(session_id, decision)
+    return asked.value.payload["approval"]
+
+
+async def test_an_approval_asked_before_its_field_is_on_the_page_shows_its_text_once_asked_again(
+    tmp_path: Path,
+) -> None:
+    # The approval's read of the field waited ACTION_TIMEOUT_MS (15 s by default) for one not on the page, and the
+    # one flag it then set hid the text for good: a post's approver stayed blind though the field came and read
+    # plain. The read is given up on at FIELD_RECHECK_TIMEOUT_MS and leaves the field unread; asked for again once
+    # the field is there, the same approval shows its text.
+    async with browser_env(tmp_path, {"/post": LATE_NOTE}) as env:
+        session_id = await env.create("/post")
+        session = env.manager.sessions[session_id]
+        post = BrowserActionDecision(
+            action="type", reason="post it", selector="#note", text="hello all", risk_category="post"
+        )
+
+        began = time.monotonic()
+        unread = await _asked_for(env, session_id, post)
+        took = time.monotonic() - began
+        await session.page.evaluate("() => window.addNote()")
+        plain = await _asked_for(env, session_id, post)
+
+        assert took < 5, took
+        assert unread["id"] == plain["id"]
+        assert (unread["action"]["text"], unread["field_read"]) == (
+            "text hidden: its field has not been read",
+            "unread",
+        )
+        assert (plain["action"]["text"], plain["field_read"]) == ("hello all", "plain")
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_an_approval_asked_for_a_type_into_a_password_field_hides_its_text(tmp_path: Path, by: str) -> None:
+    async with browser_env(tmp_path, {"/login": LOGIN}) as env:
+        session_id = await env.create("/login")
+        named = {"selector": "#pw"}
+        if by == "element_id":
+            items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+            (field,) = [item for item in items if item.get("label") == "Password"]
+            named = {"element_id": field["element_id"]}
+        change = BrowserActionDecision(
+            action="type", reason="change it", text=TEXT, risk_category="account_change", **named
+        )
+
+        approval = await _asked_for(env, session_id, change)
+
+        assert (approval["field_read"], approval["action"]["text"]) == (
+            "secret",
+            "text hidden: its field reads as secret",
+        )
+        assert TEXT not in json.dumps(await env.manager.list_approvals())

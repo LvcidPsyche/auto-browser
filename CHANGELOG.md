@@ -272,10 +272,14 @@ All notable changes to auto-browser are documented here.
   or a bare `*.` now stops startup too: write a name without brackets, and an IPv6 address without a port. The
   compose files' default no longer lists `testserver`: a client that sends `Host: testserver` to a controller
   started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
-- **An approval asked for a `type` whose field reads as secret answers its text hidden.** Such an approval says
-  `text_hidden: true`, and `GET /approvals`, `GET /approvals/{id}`, the approval tools, a decision's and an
-  execution's answer and the `approval_required` error give its `action.text` as "text hidden: its field reads as
-  secret, or could not be read", as its webhook's and SSE event's summary do (see Security). A client that retries
+- **An approval asked for a `type` shows its text only where its field read as plain.** An approval now says how
+  the field of its `type` read when it was asked for, as `field_read`: `plain`, `secret`, or `unread` (the read
+  did not answer within a second, or an earlier release stored the approval). Unless it is `plain`,
+  `GET /approvals`, `GET /approvals/{id}`, the approval tools, a decision's and an execution's answer and the
+  `approval_required` error give its `action.text` as "text hidden: its field reads as secret" or "text hidden:
+  its field has not been read", as its webhook's and SSE event's summary do (see Security). A pending approval
+  for a `type` that 1.17.0 stored shows no text after the upgrade: decide it from the page, or ask for the same
+  action again, which reuses the approval and reads its field. A client that retries
   the action from the `action` an approval answers, not from its own, now sends that text, which the approval does
   not match: retry with the action you asked with. The `text_preview` of a type whose text submits its form and
   leaves the page (a search that ends in a newline) is now withheld, and that type's receipt is `restricted`; so
@@ -636,12 +640,17 @@ All notable changes to auto-browser are documented here.
   concern, though 1.17.0's entry says "a field an action finds sensitive only as it runs restricts that action's
   own receipt": that now holds. What the run was decided by (a block, an approval) is still the policy's answer
   before it. An approval asked for a type now reads the field first (the one its selector or `element_id` names:
-  no node has focus for the text yet): where it reads as secret or cannot be read, the approval says
-  `text_hidden: true`, and its text reads "text hidden: its field reads as secret, or could not be read" in its
-  summary, the queue and the dialog, and in every answer that hands the approval out (`GET /approvals` and
-  `GET /approvals/{id}`, the approval tools, an approve's, a reject's and an execution's answer, and the
-  `approval_required` error). A later request that reads the field as secret hides the text of the pending approval
-  it reuses. The approval's stored record keeps the text, as before: the action retried with the approval's id is
+  no node has focus for the text yet), within a second, and says how it read as `field_read`: `plain`, `secret`,
+  or `unread` where the read did not answer in that time (a field not on the page yet, a busy page). Only `plain`
+  shows the text: else it reads "text hidden: its field reads as secret" or "text hidden: its field has not been
+  read" in the approval's summary, the queue and the dialog, and in every answer that hands the approval out
+  (`GET /approvals` and `GET /approvals/{id}`, the approval tools, an approve's, a reject's and an execution's
+  answer, and the `approval_required` error). A later request for the same action reuses the pending approval and
+  reads the field again: an `unread` field takes what that read says, a `plain` one turns `secret` if it says so,
+  and `secret` stays whatever a later read says (a password field whose "show password" is on reads as plain). A
+  pending approval for a type that an earlier release stored does not say how its field read, so it is `unread`,
+  its text hidden until such a request reads the field as plain. The approval's stored record keeps the text, as
+  before: the action retried with the approval's id is
   matched against it. A text the caller marked `sensitive` is withheld everywhere, as before (its approval stores
   only a digest of it), and its field is not read for its approval. A typed text still shows: as the preview of a
   field read as not secret, and in the approval of one (a post's or a message's text is what its approver must

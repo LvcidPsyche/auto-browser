@@ -634,8 +634,8 @@ async function loadAgentJobs() {
 // Reasons and actions come from pages and agents, so they are written as text
 // only. An approval stores the exact action it authorises, typed text
 // included; a type action marked sensitive never shows that text here, nor
-// one whose field read as secret, or could not be read, when its approval was
-// asked for (text_hidden: the server answers the text hidden too).
+// one whose field did not read plain when its approval was asked for
+// (field_read: the server answers the text hidden too).
 // The fields and how they read come from the server (app.approval_display), so
 // the queue says what the webhook and SSE summary say, field for field.
 const APPROVAL_DISPLAY = __APPROVAL_DISPLAY__;
@@ -675,8 +675,9 @@ const shownField = (name, value, cut) => {
   const shown = `${name}=${shownValue(sent, cut)}`;
   return written === null ? shown : `${shown} (host as written: ${written})`;
 };
-// textHidden: the approval's text_hidden (its type's field read as secret, or could not be read).
-const describeAction = (action, origin, cut, textHidden) => {
+// fieldRead: the approval's field_read (how its type's field read: 'plain', 'secret' or 'unread'). Only
+// 'plain' shows a type's text, as the server's _hidden_text: an answer that does not say is unread.
+const describeAction = (action, origin, cut, fieldRead) => {
   if (!action || typeof action !== 'object') return '—';
   // A governed tool call (eval_js, set_cookies, ...) is approved through a
   // stand-in action whose text is "<tool> sha256:<digest of its arguments>"
@@ -709,7 +710,9 @@ const describeAction = (action, origin, cut, textHidden) => {
     if ((actions && !actions.includes(action.action)) || !isSet(value)) return;
     let part = shownField(name, value, cut);
     if (name === 'text' && action.sensitive) part = APPROVAL_DISPLAY.sensitiveTextHidden;
-    else if (name === 'text' && textHidden) part = APPROVAL_DISPLAY.fieldTextHidden;
+    else if (name === 'text' && verb === 'type' && fieldRead !== 'plain') {
+      part = APPROVAL_DISPLAY.fieldTextHidden[fieldRead === 'secret' ? 'secret' : 'unread'];
+    }
     const note = unusedNote(name)
       ?? (verb === 'select_option' && name === 'value' ? APPROVAL_DISPLAY.valueOrLabel : null);
     parts.push(note ? `${part} ${note}` : part);
@@ -741,7 +744,7 @@ const approvalConfirmText = (approval) => {
       : 'Nothing more of the call is kept than this preview.';
   }
   return `Approve this ${asText(approval.kind, 'unknown')} action in session ${asText(approval.session_id)}?\\n\\n`
-    + `${describeAction(approval.action, approval.origin, APPROVAL_DISPLAY.cut, approval.text_hidden)}\\n\\n`
+    + `${describeAction(approval.action, approval.origin, APPROVAL_DISPLAY.cut, approval.field_read)}\\n\\n`
     + `${toolCall ? 'Arguments (server preview)' : 'Reason (what an agent wrote in it is unverified)'}: `
     + `${shownText(shown)}\\n\\n${whole}`;
 };
@@ -809,7 +812,7 @@ const approvalCells = (a) => {
     [asText(a.id, ''), 'mono'],
     [asText(a.session_id, '').slice(0, 12), 'mono'],
     [a.kind, undefined],
-    [describeAction(a.action, a.origin, undefined, a.text_hidden), 'mono wrap'],
+    [describeAction(a.action, a.origin, undefined, a.field_read), 'mono wrap'],
     [shownText(a.reason), 'wrap'],
   ];
 };
@@ -1009,7 +1012,7 @@ async function loadReplay() {
         // account, which the approval does not bind.
         appendCell(row, a.id);
         appendCell(row, a.kind);
-        appendCell(row, describeAction(a.action, a.origin, undefined, a.text_hidden));
+        appendCell(row, describeAction(a.action, a.origin, undefined, a.field_read));
         // As the queue shows it: what would hide or reorder the agent's words, as its code point.
         appendCell(row, shownText(a.reason));
         appendNodeCell(row, statusBadge(a.status));

@@ -772,11 +772,14 @@ cron job that an earlier version stored with a `start_url` these rules refuse fa
 browser opens, and the controller logs why.
 
 A `type` the agent marked sensitive reads "text hidden at the agent's request (sensitive)":
-the agent can mark any text sensitive, so look at the field it types into. One it did not mark, whose
-field reads as secret (a password field, say) or could not be read when the approval was asked for,
-reads "text hidden: its field reads as secret, or could not be read", and `GET /approvals` answers that
-text for it, with `text_hidden: true`; the approval keeps the text the action must be retried with. An
-operator's rejection
+the agent can mark any text sensitive, so look at the field it types into. One it did not mark shows
+its text only where its field read as plain when the approval was asked for (`field_read: "plain"`).
+A field that read as secret (a password field, say) reads "text hidden: its field reads as secret"
+(`field_read: "secret"`), and stays so. One whose read did not answer within a second (a field not on
+the page yet), and any pending `type` approval stored before 1.18.0, reads "text hidden: its field has
+not been read" (`field_read: "unread"`) until the same action is asked for again and the read answers.
+`GET /approvals` answers that text for it; the approval keeps the text the action must be retried
+with. An operator's rejection
 stops the agent from approving the same request itself (`AUTONOMOUS_APPROVALS=true`) only within its
 session, or in controller scope for the same operator; with `AUTONOMOUS_APPROVALS=true` the agent
 approves its own calls, and can repeat a rejected one in a new session.

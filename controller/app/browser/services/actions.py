@@ -27,7 +27,14 @@ from ...approvals import (
     held_tool_call_approval,
     refused_before_effect,
 )
-from ...models import READ_ONLY_ACTIONS, ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
+from ...models import (
+    READ_ONLY_ACTIONS,
+    ApprovalFieldRead,
+    ApprovalKind,
+    ApprovalOrigin,
+    BrowserActionDecision,
+    totp_host_allowed,
+)
 from ...utils import error_text, error_text_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -402,6 +409,8 @@ _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
 # taken, which had focus a moment before, and from then on for the page's answer to each read and give-back. No read
 # waits for a field once the text is in: a hold on a node the page took away (the text's Enter submitted its form)
 # fails at once, where a read by selector waited this long for each attribute of a field that was gone.
+# And how long the read of a type's field for its approval takes at most, before the approval is asked for
+# (_approval_field_read): one that has not answered by then leaves the field unread.
 FIELD_RECHECK_TIMEOUT_MS = 1000
 _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   type: el.getAttribute('type') || '',
@@ -468,8 +477,9 @@ def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
 
 
 async def _answered_soon(call: Awaitable[Any]) -> Any:
-    """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own, and
-    a page that stops answering would hold the type, and its session, with it."""
+    """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own (a
+    page that stops answering would hold the type, and its session, with it), and the reads of a field for its
+    approval are bounded one by one, not together."""
     return await asyncio.wait_for(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
 
 
@@ -1095,7 +1105,7 @@ class BrowserActionService:
             observation=None if session is None else await self._approval_observation(session),
             origin=origin,
             arguments=arguments,
-            text_hidden=await self._approval_hides_its_text(session, decision),
+            field_read=await self._approval_field_read(session, decision),
         )
         if session is None:
             # No session means no witness receipt to carry the request, so the
@@ -1188,24 +1198,38 @@ class BrowserActionService:
             arguments=arguments,
         )
 
-    async def _approval_hides_its_text(self, session: "BrowserSession | None", decision: BrowserActionDecision) -> bool:
-        """Whether the approval asked for ``decision`` hides its text: a type the caller did not mark sensitive (that
-        text is hidden and stored as a digest already) whose field reads as secret, or cannot be read, read as the
-        type's operation reads it, by element_id or by selector and with the same bound (field_reads_not_secret).
+    async def _approval_field_read(
+        self, session: "BrowserSession | None", decision: BrowserActionDecision
+    ) -> ApprovalFieldRead:
+        """How the field of the type an approval is asked for reads (ApprovalRecord.field_read): "plain" or "secret"
+        by its attributes, "unread" where the read does not answer. Unread too, and nothing read: an action that is
+        no type, and a type the caller marked sensitive (that text is hidden and stored as a digest already).
 
         The approval is asked for before the type runs, so before any read of its field, and its summary (the
-        webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole.
+        webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole. The field
+        read is the one the selector or the element_id names, as it is now: no node has focus for the text yet (the
+        type reads the node it holds: _TypedField). The whole read answers within FIELD_RECHECK_TIMEOUT_MS, the
+        approval not yet asked for: by selector it waited ACTION_TIMEOUT_MS for a field not on the page.
         """
-        if session is None or decision.action != "type" or decision.sensitive or not decision.text:
-            return False
+        if session is None or decision.action != "type" or decision.sensitive:
+            return "unread"
         try:
-            target = self.resolve_target(selector=decision.selector, element_id=decision.element_id)
-            if target.get("element_id"):
-                element = self.manager.element_ids.element(session.page, target["element_id"])
-                return not await self.field_reads_not_secret(element, None)
-            return not await self.field_reads_not_secret(None, session.page.locator(target["selector"]).first)
+            attributes = await _answered_soon(self._named_field_attributes(session.page, decision))
         except Exception:
-            return True
+            return "unread"
+        return "secret" if self.is_sensitive_field(attributes) else "plain"
+
+    async def _named_field_attributes(self, page: "Page", decision: BrowserActionDecision) -> Mapping[str, Any]:
+        """The attributes is_sensitive_field reads, of the field ``decision`` names, by element_id or by selector."""
+        target = self.resolve_target(selector=decision.selector, element_id=decision.element_id)
+        if target.get("element_id"):
+            element = self.manager.element_ids.element(page, target["element_id"])
+            return await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ, within_ms=FIELD_RECHECK_TIMEOUT_MS)
+        locator = page.locator(target["selector"]).first
+        return {
+            name: await locator.get_attribute(name, timeout=FIELD_RECHECK_TIMEOUT_MS)
+            for name in ("type", "name", "id", "autocomplete", "placeholder", "aria-label")
+        }
 
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
         return {
@@ -1286,33 +1310,6 @@ class BrowserActionService:
             return
         payload.pop("text_redacted", None)
         payload.update(preview)
-
-    async def field_reads_not_secret(self, element: Any, locator: Any) -> bool:
-        """Whether a read of a type's field's attributes says it is not secret, for the type's approval, asked for
-        before the type runs (the type reads the node it holds: _TypedField): by its ElementTarget (``element``),
-        where a read that fails raises, else by its ``locator``, where one that fails says secret
-        (locator_is_sensitive_input)."""
-        if element is None:
-            return not await self.locator_is_sensitive_input(locator)
-        return not self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ))
-
-    async def locator_is_sensitive_input(self, locator: Any, *, timeout_ms: float | None = None) -> bool:
-        """Whether the field ``locator`` names is to be taken as secret: by its own attributes, and so where they
-        cannot be read (a field not there yet when they are asked for can be a password field once it comes).
-        ``timeout_ms`` bounds each read's wait for the field (None: Playwright's default, ACTION_TIMEOUT_MS)."""
-        try:
-            attributes = {
-                "type": await locator.get_attribute("type", timeout=timeout_ms),
-                "name": await locator.get_attribute("name", timeout=timeout_ms),
-                "id": await locator.get_attribute("id", timeout=timeout_ms),
-                "autocomplete": await locator.get_attribute("autocomplete", timeout=timeout_ms),
-                "placeholder": await locator.get_attribute("placeholder", timeout=timeout_ms),
-                "aria_label": await locator.get_attribute("aria-label", timeout=timeout_ms),
-            }
-        except Exception:
-            # Attributes that could not be read say nothing of the field: its preview is withheld, as a secret's is.
-            return True
-        return self.is_sensitive_field(attributes)
 
     @staticmethod
     def is_sensitive_field(attributes: Mapping[str, Any]) -> bool:
