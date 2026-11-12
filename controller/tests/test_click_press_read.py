@@ -716,7 +716,7 @@ async def test_a_placed_click_in_a_frame_asks_its_target_where_its_document_saw_
     outer.dispose.assert_awaited_once()
 
 
-@pytest.mark.parametrize("along", ["x", "y"])
+@pytest.mark.parametrize("along", ["x", "y", "width", "height"])
 @pytest.mark.parametrize(("moved_by", "found"), [(0.5, True), (0.6, False)])
 async def test_a_record_is_not_taken_where_the_target_has_moved_since_the_click_was_placed(
     along: str, moved_by: float, found: bool
@@ -724,7 +724,8 @@ async def test_a_record_is_not_taken_where_the_target_has_moved_since_the_click_
     # The record is the point where the target's document saw the pointer arrive. A page that moves the frame after
     # that move (on it) leaves the pointer, which does not move, over another point of that document, and the record
     # does not say so: asked at it, the question found the card, and the press went down on what had come under
-    # the pointer. The target's box must still be the one the click was placed by, to half a pixel; else no.
+    # the pointer. The target's box must still be the one the click was placed by, to half a pixel; else no. Its
+    # size as well: a frame scaled about the target's corner keeps the corner of its box.
     asked: list[tuple[str, list[Any]]] = []
     outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
     up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))

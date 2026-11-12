@@ -297,16 +297,18 @@ _NOT_ATTACHED = "Element is not attached to the DOM"
 # placing; asked again where Playwright has placed the pointer, it goes by what the documents it asked have said.
 POINTER_CHECK_FRAMES = 8
 POINTER_CHECK_TIMEOUT_MS = 1000
-# How far the target's box of a placed click in a frame may have moved, each way, between the placing and the
-# question, for the record of where the pointer arrived to be taken (_receives_pointer_at's ``placed_by``).
+# How far the target's box of a placed click in a frame may have moved or changed its size, each way, between the
+# placing and the question, for the record of where the pointer arrived to be taken (_receives_pointer_at's
+# ``placed_by``).
 PLACED_BOX_MOVED_PX = 0.5
 
 
 def _box_kept(box: dict[str, float] | None, placed_by: dict[str, float] | None) -> bool:
-    """Whether ``box`` is where ``placed_by`` was, to PLACED_BOX_MOVED_PX each way."""
+    """Whether ``box`` is where ``placed_by`` was and of its size, to PLACED_BOX_MOVED_PX each way: a frame scaled
+    about the target's corner keeps the corner of its box."""
     if not box or not placed_by:
         return False
-    return all(abs(box[edge] - placed_by[edge]) <= PLACED_BOX_MOVED_PX for edge in ("x", "y"))
+    return all(abs(box[edge] - placed_by[edge]) <= PLACED_BOX_MOVED_PX for edge in ("x", "y", "width", "height"))
 
 
 class _Budget:
@@ -1532,9 +1534,11 @@ class BrowserActionService:
         target's document, and a page that moves the frame once the pointer has arrived (on that move) leaves the
         pointer, which does not move, over another point of it: asked at the record, the question found the card,
         and the press went down on what the move had put under the pointer, where nothing reads it in a frame of
-        another origin. So the record is taken only where the target's box is still that one, to
-        PLACED_BOX_MOVED_PX each way; else no (target_moved). The box read again is the one the two boxes carry the
-        point by where there is no record, and they carry it as the frame is now.
+        another origin. So the record is taken only where the target's box is still that one, its corner and its
+        size, to PLACED_BOX_MOVED_PX each way; else no (target_moved). A frame of the page's own process scaled
+        about the target's corner keeps the corner, and the press went down where the scale had put the pointer.
+        The box read again is the one the two boxes carry the point by where there is no record, and they carry
+        it as the frame is now.
 
         ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the
         click has left where that is less. The first message had no bound given, so it waited by Playwright's

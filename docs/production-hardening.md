@@ -274,8 +274,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     placed on an element inside a frame asks the element's document where it saw the pointer arrive, and asks the
     element there: the browser gives a document the pointer's point through every border, padding and turn of
     the frames around it. That point is the pointer's only while the frame stays where it was: where the
-    element's box has moved since the click was placed (a page that moves the frame once the pointer has
-    arrived), the click ends as `target_moved` with nothing pressed. Where the document saw nothing, the pointer
+    element's box has moved or changed its size since the click was placed (a page that moves the frame once the
+    pointer has arrived, or scales one that runs in the page's process), the click ends as `target_moved` with
+    nothing pressed. Where the document saw nothing, the pointer
     is over another document (or a listener of the page's on the window stopped both the pointermove and the
     mousemove before the controller's heard them), and the click ends as `target_moved`, unless a frame inside
     the element (a video in a card) lies at the point carried into the frame by the element's two boxes: that is

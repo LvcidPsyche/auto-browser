@@ -2534,6 +2534,43 @@ async def test_a_placed_click_whose_frame_the_page_moves_once_the_pointer_has_ar
         assert refused is not None and (refused.code, refused.retryable) == ("target_moved", True)
 
 
+# Such a frame of the page's own process (not sandboxed), which the page draws at twice its size on that move,
+# about the card's top-left corner: the card's box keeps its corner and doubles its size, and the pointer, which
+# does not move, is then halfway between that corner and where it was in the frame's document, over "Delete".
+SCALED_UNDER_THE_POINTER = MOVED_UNDER_THE_POINTER.replace(' sandbox="allow-scripts"', "").replace(
+    "frame.style.left = '200px'", "frame.style.transformOrigin = 'ORIGIN'; frame.style.transform = 'scale(2)'"
+)
+
+
+@pytest.mark.parametrize(("edge", "origin"), [("border: 0; padding: 0", "0 100px"), (BORDERED, "20px 120px")])
+async def test_a_placed_click_whose_frame_the_page_scales_once_the_pointer_has_arrived_is_not_pressed(
+    tmp_path: Path, edge: str, origin: str
+) -> None:
+    # The record was taken where the target's box kept its corner, and a scale about that corner keeps it: asked at
+    # the record, the question found the card, and the press went down on the "Delete" the scale had put under the
+    # pointer (the read at the press carries its point into the frame by the frame's box, border and padding, not
+    # through a scale). Before the record, the point carried by the two boxes saw the scale. The box must keep its
+    # size as well.
+    scaled = SCALED_UNDER_THE_POINTER.replace("EDGE", edge).replace("ORIGIN", origin)
+    async with browser_env(tmp_path, {"/": scaled}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+        frame = page.frame_locator("#frame")
+        refused = None
+
+        try:
+            await env.manager.execute_decision(session_id, _click("read", selector=IN_THE_FRAME + "#card"))
+        except BrowserActionError as exc:
+            refused = exc
+
+        # The shape the fixture stands for: a frame the page reaches into, which it scaled on the controller's move.
+        assert await page.evaluate("() => document.getElementById('frame').contentDocument !== null")
+        assert await page.evaluate("() => document.getElementById('frame').style.transform") == "scale(2)"
+        assert await frame.locator("#del").inner_text() == "Delete", "the press went down on the page's button"
+        assert await frame.locator("#card").inner_text() == "Card"
+        assert refused is not None and (refused.code, refused.retryable) == ("target_moved", True)
+
+
 async def test_a_placed_click_whose_pointer_is_on_a_frame_of_the_card_short_of_the_carried_point_is_not_pressed(
     tmp_path: Path,
 ) -> None:
