@@ -245,8 +245,10 @@ All notable changes to auto-browser are documented here.
 - **A REST route's `500 Internal error` is logged with no Python traceback under it.** Its ERROR record carried the
   error by its traceback (`Traceback (most recent call last):` and the frames as Python prints them), which an alert
   or a log parser may look for. It now holds, in its message, the route's message, `answered 500 for` the error's
-  class and text, and every frame the error was raised through, a line each (see Security): match on `answered 500
-  for` instead.
+  class and text, the three outermost frames and the ten nearest the raise, a line each, with the count of those
+  between, and each error it was raised from or while handling, by its class and text (see Security): match on
+  `answered 500 for` instead. The record carries no `exc_info`, so a handler that reads the exception from it (an
+  error tracker's logging integration, a structured formatter) gets the message alone.
 - **A controller with no token whose `CONTROLLER_ALLOWED_HOSTS` holds a wildcard no longer starts.** With
   `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, an entry `*`, `*.example.com` or any other wildcard stops startup
   with a message that names it (see Security). Set a token (`API_BEARER_TOKEN`, or remove
@@ -340,9 +342,12 @@ All notable changes to auto-browser are documented here.
   name asked for or the envelope's field, were cut as they came, so the cut took their closing quote: each is
   quoted now too. A REST route's `500` wrote the route's arguments as they came, a path the caller wrote among them,
   and the error by a traceback that prints its text as it is: it now writes, at ERROR, the route's message with its
-  arguments quoted and cut, the error's class and its text quoted and cut, and every frame the error was raised
-  through, a line each (see the upgrade note). An error's text in the controller's other lines (a failed download, a
-  CDP command, a drag, the network inspector's own errors) is still written as it is.
+  arguments quoted and cut, the error's class and its text quoted and cut, the three outermost frames and the ten
+  nearest the raise, a line each, with the count of those between (a `RecursionError`'s record was a thousand
+  lines, one a frame), and the first three errors it was raised from or while handling, by class and text, quoted
+  and cut, with the count of the rest (see the upgrade note). The record of a route's hidden cause names those
+  errors too. An error's text in the controller's other lines (a failed download, a CDP command, a drag, the network
+  inspector's own errors) is still written as it is.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:

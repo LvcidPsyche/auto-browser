@@ -6,6 +6,7 @@ import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from logging import ERROR, WARNING, Logger
+from types import TracebackType
 
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
@@ -134,13 +135,16 @@ def unknown_id_is_404(key: str) -> Iterator[None]:
 
 
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:
-    """The 500 for the error being handled, logged at ERROR as log_hidden_cause logs a cause, with every frame.
+    """The 500 for the error being handled, logged at ERROR as log_hidden_cause logs a cause, with the route's own
+    frames and those nearest the raise.
 
     It was logged by exc_info, with the route's arguments as they came (a path the caller wrote) and a traceback
     that prints the error's text as it is: the caller's text in either is quoted and cut now, and the error is
-    told by its class, its text and each frame it was raised through.
+    told by its class, its text, the frames above, and each error it was raised from or while handling. It was then
+    written with every frame, and a RecursionError's record was a thousand lines.
     """
-    _log_cause(logger, ERROR, 500, sys.exception(), None, message, *args)
+    cause = sys.exception()
+    _log_cause(logger, ERROR, 500, cause, _route_frames(cause.__traceback__), message, *args)
     return HTTPException(status_code=500, detail="Internal error")
 
 
@@ -156,9 +160,18 @@ def queue_full(logger: Logger, refused: str, subject: str) -> HTTPException:
 
 # Of a hidden cause's traceback, the frames nearest the raise: they say where, and the route's message says which call.
 HIDDEN_CAUSE_FRAMES = 3
+# Of a 500's traceback, the outermost frames (where the route caught it, the route's own line, the call it made: which
+# path led there) and the frames nearest the raise (where, and the calls just before it), with the count of those
+# between: a record a few lines long however deep the error was raised. Ten such frames reach from a service call
+# into the library that raised; a frame says no more the hundredth time it repeats.
+INTERNAL_ERROR_ROUTE_FRAMES = 3
+INTERNAL_ERROR_NEAREST_FRAMES = 10
+# The errors one was raised from or while handling, each named on a line, nearest first, as a traceback names them;
+# past these, how many more there were.
+CHAINED_CAUSES_NAMED = 3
 
 
-def _cause_text(cause: Exception) -> str:
+def _cause_text(cause: BaseException) -> str:
     """The error's own text for the log: on one line, cut, and never the values a model was given."""
     try:
         if isinstance(cause, ValidationError):
@@ -188,20 +201,61 @@ def log_hidden_cause(logger: Logger, status: int, cause: Exception, message: str
     is why the traceback is written here and not by exc_info, which prints the error's text as it is; of its
     frames only the last HIDDEN_CAUSE_FRAMES are kept, a line each: the file, the line and the function. A frame
     as the interpreter prints it is two lines on Python 3.12 and, from 3.13, as many as its call is written over,
-    so the record would be as long as the Python it ran on made it.
+    so the record would be as long as the Python it ran on made it. Each error it was raised from or while
+    handling is named under them (_chained_causes), as the traceback named it.
     """
-    _log_cause(logger, WARNING, status, cause, HIDDEN_CAUSE_FRAMES, message, *args)
+    frames = traceback.extract_tb(cause.__traceback__, limit=-HIDDEN_CAUSE_FRAMES)
+    _log_cause(logger, WARNING, status, cause, [_frame_line(frame) for frame in frames], message, *args)
 
 
 def _log_cause(
-    logger: Logger, level: int, status: int, cause: Exception, frames_kept: int | None, message: str, *args: object
+    logger: Logger, level: int, status: int, cause: BaseException, where: list[str], message: str, *args: object
 ) -> None:
-    """The record of log_hidden_cause and of internal_error: the frames nearest the raise, or every one (None)."""
+    """The record of log_hidden_cause and of internal_error: the frames each keeps, then the errors it chained."""
     shown = tuple(arg if isinstance(arg, (int, float)) else quoted_for_log(arg) for arg in args)
-    frames = traceback.extract_tb(cause.__traceback__, limit=-frames_kept if frames_kept else None)
-    where = "\n".join(f"  {frame.filename}:{frame.lineno} in {frame.name}" for frame in frames)
+    lines = "\n".join([*where, *_chained_causes(cause)])
     text = _cause_text(cause)
-    logger.log(level, message + ": answered %d for %s: %s\n%s", *shown, status, type(cause).__name__, text, where)
+    logger.log(level, message + ": answered %d for %s: %s\n%s", *shown, status, type(cause).__name__, text, lines)
+
+
+def _frame_line(frame: traceback.FrameSummary) -> str:
+    return f"  {frame.filename}:{frame.lineno} in {frame.name}"
+
+
+def _route_frames(tb: TracebackType | None) -> list[str]:
+    """A 500's frames: the route's own (the outermost) and those nearest the raise, and how many were left out."""
+    total = sum(1 for _ in traceback.walk_tb(tb))
+    kept = INTERNAL_ERROR_ROUTE_FRAMES + INTERNAL_ERROR_NEAREST_FRAMES
+    if total <= kept:
+        return [_frame_line(frame) for frame in traceback.extract_tb(tb)]
+    route = [_frame_line(frame) for frame in traceback.extract_tb(tb, limit=INTERNAL_ERROR_ROUTE_FRAMES)]
+    nearest = [_frame_line(frame) for frame in traceback.extract_tb(tb, limit=-INTERNAL_ERROR_NEAREST_FRAMES)]
+    return [*route, f"  ... {total - kept} frames left out", *nearest]
+
+
+def _chained_causes(cause: BaseException) -> list[str]:
+    """A line for each error ``cause`` was raised from (__cause__) or while handling (__context__, unless the raise
+    suppressed it), as a traceback names them: the nearest CHAINED_CAUSES_NAMED by class and text, quoted and cut,
+    and how many more there were. The record left them out, so a wrapped error was told only by its wrapper."""
+    lines: list[str] = []
+    seen, error, more = {id(cause)}, cause, 0
+    while True:
+        if error.__cause__ is not None:
+            how, error = "from", error.__cause__
+        elif error.__context__ is not None and not error.__suppress_context__:
+            how, error = "while handling", error.__context__
+        else:
+            break
+        if id(error) in seen:  # a chain that comes back to an error it named, which a traceback stops at too
+            break
+        seen.add(id(error))
+        if len(lines) < CHAINED_CAUSES_NAMED:
+            lines.append(f"  raised {how} {type(error).__name__}: {_cause_text(error)}")
+        else:
+            more += 1
+    if more:
+        lines.append(f"  and {more} more before them")
+    return lines
 
 
 @contextmanager

@@ -202,3 +202,97 @@ class InternalErrorTests(unittest.TestCase):
         # Every frame it was raised through, a line each: the file, the line and the function.
         self.assertTrue(where and all(re.fullmatch(r"  .+:\d+ in \S+", line) for line in where), where)
         self.assertTrue(where[-1].endswith(" in route_body"), where)
+
+    def _record(self, raise_it) -> str:
+        """The record internal_error writes for what ``raise_it`` raises, caught here as a route catches it."""
+        with self.assertLogs("tests.internal_error", level="ERROR") as logged:
+            try:
+                raise_it()
+            except Exception:
+                error = internal_error(logging.getLogger("tests.internal_error"), "observe failed for %s", "s1")
+        self.assertEqual((error.status_code, error.detail), (500, "Internal error"))
+        (written,) = _written(logged.records)
+        return written
+
+    def test_a_deep_errors_record_is_as_long_whatever_its_depth(self) -> None:
+        # A RecursionError's record held a line for each of its thousand frames: 118,954 characters. The depth is a
+        # function that calls itself as deep as it is asked, which no recursion limit decides.
+        def dive(depth: int) -> None:
+            if depth == 0:
+                raise RecursionError("maximum recursion depth exceeded")
+            dive(depth - 1)
+
+        records = {depth: self._record(lambda: dive(depth)) for depth in (40, 400)}
+
+        for depth, written in records.items():
+            first, *where = written.splitlines()
+            self.assertEqual(
+                first, "observe failed for 's1': answered 500 for RecursionError: 'maximum recursion depth exceeded'"
+            )
+            # The route's own frames (here _record's, the lambda's, the first dive), the count of those between, and
+            # the ten nearest the raise: 2 + depth + 1 frames in all.
+            frames = [line for line in where if re.fullmatch(r"  .+:\d+ in \S+", line)]
+            self.assertEqual(len(frames), 13, where)
+            self.assertEqual(where[3], f"  ... {depth + 3 - 13} frames left out", where)
+            self.assertEqual([line.rsplit(" in ", 1)[1] for line in where[:3]], ["_record", "<lambda>", "dive"])
+            self.assertTrue(all(line.endswith(" in dive") for line in where[4:]), where)
+            self.assertEqual(len(where), 14)
+        # Ten times as deep, and one digit longer: the count's.
+        self.assertEqual(len(records[400]) - len(records[40]), 1)
+        self.assertLess(len(records[400]), 3000)
+
+    def test_each_error_it_was_raised_from_or_while_handling_is_named(self) -> None:
+        def raised_from() -> None:
+            try:
+                raise ValueError("inner " + FORGED)
+            except ValueError as exc:
+                raise RuntimeError("outer") from exc
+
+        def raised_while_handling() -> None:
+            try:
+                raise KeyError("first")
+            except KeyError:
+                raise RuntimeError("second")
+
+        def raised_from_none() -> None:
+            try:
+                raise KeyError("hidden")
+            except KeyError:
+                raise RuntimeError("alone") from None
+
+        def raised_through_five() -> None:
+            error: BaseException | None = None
+            for index in range(5):
+                try:
+                    raise OSError(f"cause {index}") from error
+                except OSError as exc:
+                    error = exc
+            raise RuntimeError("last") from error
+
+        written = self._record(raised_from)
+        (chained,) = [line for line in written.splitlines() if line.startswith("  raised ")]
+        # On its own line, by its class and its text, quoted and cut: the caller's text in it starts no line.
+        self.assertEqual([line for line in written.splitlines() if "forged by a caller" in line], [chained])
+        self.assertTrue(chained.startswith("  raised from ValueError: 'inner p\\n"), chained[:80])
+        self.assertIn(f"'... (cut from {len('inner ' + FORGED)} characters)", chained)
+        self.assertNotIn("\x1b", written)
+        self.assertLess(len(chained), 400)
+
+        written = self._record(raised_while_handling)
+        self.assertIn("\n  raised while handling KeyError: \"'first'\"", written)
+
+        written = self._record(raised_from_none)
+        self.assertNotIn("hidden", written)
+        self.assertNotIn("  raised ", written)
+
+        # The nearest three, and how many more: a chain can be as long as its errors.
+        lines = self._record(raised_through_five).splitlines()
+        self.assertEqual(
+            [line for line in lines if line.startswith(("  raised ", "  and "))],
+            [
+                "  raised from OSError: 'cause 4'",
+                "  raised from OSError: 'cause 3'",
+                "  raised from OSError: 'cause 2'",
+                "  and 2 more before them",
+            ],
+        )
