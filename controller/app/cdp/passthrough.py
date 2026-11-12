@@ -362,8 +362,10 @@ class CDPPassthrough:
         """
         params = {} if params is None else params
         if not isinstance(method, str) or method not in _ALLOWED_CDP_COMMANDS:
+            # Quoted and cut, as an unknown MCP method is named: the caller's own text, as long as its body.
             raise ValueError(
-                f"CDP command {method!r} is not in the allowed list. Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
+                f"CDP command {quoted_for_log(method)} is not in the allowed list. "
+                f"Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
             )
         _check_params(method, params)
         try:

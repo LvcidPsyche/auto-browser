@@ -367,6 +367,18 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "not in the allowed list"):
                 await passthrough.raw_cdp_command(blocked, {"expression": "document.cookie"})
 
+    async def test_a_refused_command_is_named_quoted_and_cut(self) -> None:
+        # The caller's own text, as long as its body: the refusal repeated it whole, 60,000 characters of it.
+        method = "Page.navigate\x1b[2J" + "x" * 60_000
+
+        with self.assertRaises(ValueError) as refused:
+            await CDPPassthrough(_FakeCDPSession({})).raw_cdp_command(method)
+
+        text = str(refused.exception)
+        self.assertTrue(text.startswith("CDP command 'Page.navigate\\x1b[2Jxxx"), text[:80])
+        self.assertIn("xxx'... is not in the allowed list. Allowed: [", text)
+        self.assertLess(len(text), 2000, len(text))
+
     async def test_a_raw_command_takes_only_its_own_parameters_by_name_and_type(self) -> None:
         # NAV-31: params went to the browser as the caller wrote them.
         fake = _FakeCDPSession({"DOM.getDocument": {"root": {"nodeId": 1}}})
