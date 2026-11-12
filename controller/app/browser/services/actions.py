@@ -1724,9 +1724,7 @@ class BrowserActionService:
             signals.append(f"upload_{delivery['outcome']}")
 
         verified: bool | None = bool(signals)
-        if action_name == "navigate":
-            verified = "url_changed" in signals or "title_changed" in signals
-        elif action_name in {"go_back", "go_forward"}:
+        if action_name in {"navigate", "go_back", "go_forward"}:
             verified = "url_changed" in signals or "title_changed" in signals
         elif action_name in {
             "click",

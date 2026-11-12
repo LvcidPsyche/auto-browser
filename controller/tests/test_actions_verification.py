@@ -105,6 +105,23 @@ def test_a_wait_or_a_reload_reports_nothing_verified(action: str) -> None:
     assert changed == {"verified": None, "signals": ["text_excerpt_changed"], "target_seen_after": None}
 
 
+@pytest.mark.parametrize("action", ["navigate", "go_back", "go_forward"])
+@pytest.mark.parametrize(
+    ("after", "verified"),
+    [
+        ({**PAGE, "text_excerpt": "new"}, False),
+        ({**PAGE, "active_element": "input#q"}, False),
+        ({**PAGE, "url": "https://example.com/next"}, True),
+        ({**PAGE, "title": "Next"}, True),
+    ],
+    ids=["text-only", "focus-only", "url", "title"],
+)
+def test_a_navigation_is_verified_by_its_url_or_title_alone(action: str, after: dict, verified: bool) -> None:
+    # No test held the rule: a navigation given the default (any signal) passed every file, and so did a go_back or
+    # a go_forward. A page whose text or focus changed while its address and title did not was not navigated.
+    assert BrowserActionService.action_verification(action, {}, PAGE, after)["verified"] is verified
+
+
 async def test_the_action_snapshot_counts_the_sessions_tabs(tmp_path: Path) -> None:
     manager = BrowserManager(_settings(tmp_path))
     manager.settings.pii_scrub_action_screenshots = False
