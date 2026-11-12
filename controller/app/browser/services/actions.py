@@ -27,7 +27,7 @@ from ...approvals import (
     refused_before_effect,
 )
 from ...models import READ_ONLY_ACTIONS, ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
-from ...utils import error_text_for_log, quoted_for_log, spawn_background_task
+from ...utils import error_text_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
 from ..click_target import (
@@ -398,21 +398,7 @@ class BrowserActionService:
             await self.manager.window_births.close_unreported(session)
             await self.manager._settle(session.page)
             spawn_background_task(self.manager.window_births.close_unreported(session))
-            challenge = await self.manager._check_bot_challenge(session)
-            if challenge:
-                # The page's title and URLs, as long as ten frames' make them: quoted and cut.
-                logger.warning("bot challenge detected after navigation: %s", quoted_for_log(challenge))
-                try:
-                    await self.manager.request_human_takeover(
-                        session.id,
-                        reason=f"Bot challenge detected: {challenge['signal']}",
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "failed to request human takeover after bot challenge on session %s: %s",
-                        session.id,
-                        error_text_for_log(exc),
-                    )
+            # A bot challenge it lands on is the pipeline's to find and hand over, as after every action.
 
         return await self.manager._run_action(session, "navigate", {"url": url}, operation)
 

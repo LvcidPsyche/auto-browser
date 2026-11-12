@@ -347,20 +347,20 @@ All notable changes to auto-browser are documented here.
   the page's URL whole (its query scrubbed, as long as the page made it), and so did the line of a refused page that
   closed while it was moved off. Several lines wrote a Playwright error's text, which can run over several lines and
   quote the selector or the URL an agent gave: a post-action observation withheld or failed, a failure snapshot, a
-  step that failed after an action's change, a refused page not moved off, an agent step's observe, a bot challenge's
-  takeover, an upload's check, a CDP route's attach to a session's active tab, a CDP command and an element read
-  (the latter with the caller's selector, written whole), a download that was not saved, cancelled or deleted (and
-  the name the page gave one whose partial file stayed), a drag's release and scroll watch, the network inspector's
-  own errors (and a hook's pattern, with the page's URL it matched, both written whole, and the origin of a URL
-  whose query it could not scrub), a session's close steps, a page snapshot, a page the controller loaded that did
-  not load, a page's settle, an accessibility snapshot, a bot challenge's probe and the challenge it found, a
-  session's extension hooks, an element's upload and marker clean-up, a page call sent again, a blocked action's
-  roll-back, an error answer's entry that was left out. Each of these that writes an error's whole text makes it
-  where it quotes it: an error whose text cannot be made (a `KeyError` of a key whose `repr` raises) is named
-  `<its text could not be made: RuntimeError>` and the line is written all the same, and a text that was cut is
-  followed by its length (`'xyyy'... (cut from 5041 characters)`). The lines that cut an error's text at 200 or
-  300 characters as it came, a line break and an ESC in it, now quote it too: the pre-request gate's (a detach of
-  its session, a page's `targetId` read, and the bypass of a page's service workers, which wrote the text whole),
+  step that failed after an action's change, a refused page not moved off, an agent step's observe, an upload's
+  check, a CDP route's attach to a session's active tab, a CDP command and an element read (the latter with the
+  caller's selector, written whole), a download that was not saved, cancelled or deleted (and the name the page gave
+  one whose partial file stayed), a drag's release and scroll watch, the network inspector's own errors (and a
+  hook's pattern, with the page's URL it matched, both written whole, and the origin of a URL whose query it could
+  not scrub), a session's close steps, a page snapshot, a page the controller loaded that did not load, a page's
+  settle, an accessibility snapshot, a bot challenge's probe, a session's extension hooks, an element's upload and
+  marker clean-up, a page call sent again, a blocked action's roll-back, an error answer's entry that was left out.
+  Each of these that writes an error's whole text makes it where it quotes it: an error whose text cannot be made
+  (a `KeyError` of a key whose `repr` raises) is named `<its text could not be made: RuntimeError>` and the line is
+  written all the same, and a text that was cut is followed by its length (`'xyyy'... (cut from 5041 characters)`).
+  The lines that cut an error's text at 200 or 300 characters as it came, a line break and an ESC in it, now quote
+  it too: the pre-request gate's (a detach of its session, a page's `targetId` read, and the bypass of a page's
+  service workers, which wrote the text whole),
   the window-birth watcher's (a detach, a refused window's close, a re-attach), the prefetch preference's clean-up,
   an isolated browser that did not close, a session that could not be recorded as closed, and a shared browser
   that could not be disconnected.
@@ -598,6 +598,15 @@ All notable changes to auto-browser are documented here.
   as labelled, unclassified, and a "Delete account" button labelled `read` asked for no approval, where it reads as
   `destructive`. Such a call now fails as one whose session went away does, and that read, on its first try, is made
   again on a new session.
+- **A navigation onto a bot challenge asks for one takeover.** A `navigate` probed its page for a challenge and asked
+  for a takeover itself, and the pipeline then probed the page again, as after every action, asked for a second
+  takeover and failed the action with `captcha_detected`: each record of the takeover (its `actions.jsonl` line, its
+  `takeover_requested` audit event, its receipt) was written twice, and every navigation probed its page twice. A
+  challenge that passed between the two probes (an interstitial that clears by itself) left a takeover asked for
+  under a navigation reported done. Older than this release. The pipeline's probe and takeover are now the only ones,
+  as for every other action, and the two WARNING lines that only `navigate`'s own probe wrote go with it:
+  `bot challenge detected after navigation`, and the one for a takeover request that failed. The challenge is still
+  in the action's `captcha_detected` error and in the takeover's records.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
