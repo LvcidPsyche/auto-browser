@@ -979,13 +979,18 @@ All notable changes to auto-browser are documented here.
   write fails (a full disk) is dropped before the error is answered: `500`, for that request alone. With the table
   at its cap, the session it would have put out stays, and its event stream with it: sessions past a cap now go
   once the table is written without them, where they went before the write.
-- **A body field refused for a value nested about a thousand levels deep or more is answered `422`, not `500`.** A
-  REST route whose body is read into a request model (`POST /sessions`, `POST /crons` and the others) answers a
-  field it refuses with `422` and each error's `input`, the value as it was sent, and the answer's encoder goes
-  down that value a call a level: on Python 3.12 and 3.14, whose JSON reader takes such a body, it raised
-  `RecursionError` and the request was an unhandled `500`. That `422` now holds each error's `type`, `loc` and
-  `msg`, without its `input`; every other `422` is as it was. The image runs Python 3.11, whose JSON reader refuses
-  such a body first, with the `400` it answered before.
+- **A refused value nested more than 100 levels deep is answered without it, where some hundreds of levels answered
+  `500`.** A REST route whose body is read into a request model (`POST /sessions`, `POST /crons` and the others)
+  answers a field it refuses with `422` and each error's `input`, the value as it was sent, and MCP `tools/call`
+  answers params it refuses with `-32602` `Invalid tools/call params` and the same errors in its `data`. Each walk
+  of such an answer goes down the value by recursion: the encoder a call a level, and the walks that write a lone
+  surrogate as U+FFFD and a `NaN`, an infinity or `1e999` as `null` two frames a level on Python 3.11. A value
+  nested deep enough that one of them gave up was an unhandled `500`: on 3.11, the image's Python, from about 490
+  levels around a lone surrogate, `NaN` or `1e999` (a `POST /sessions` whose `name` was such a list) and from about
+  500 for `tools/call`; on 3.12 at about 980 around `NaN` or `1e999` for `POST /sessions`, and on 3.12 and 3.14
+  from about 990 for `tools/call`. An error whose `input` is nested more than 100 levels deep (the value itself the
+  first) now leaves its `input` out and keeps its `type`, `loc`, `msg` and the rest; a shallower `input` is
+  repeated as it was. A body nested past what the JSON reader goes down is still the reader's `400`.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,

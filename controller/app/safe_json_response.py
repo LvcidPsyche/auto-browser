@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
@@ -56,16 +56,11 @@ async def safe_http_exception_handler(request: Request, exc: HTTPException) -> R
 
 
 async def safe_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
-    """FastAPI's own 422, unless what was refused holds a lone surrogate or a non-finite number, or is nested deeper
-    than the encoder goes: its errors quote the input."""
+    """FastAPI's own 422, unless what was refused holds a lone surrogate or a non-finite number: its errors quote the
+    input. An input nested past MAX_REPEATED_INPUT_DEPTH is left out of its error first (errors_to_repeat)."""
+    exc = RequestValidationError(errors_to_repeat(exc.errors()), body=exc.body)
     try:
         return await request_validation_exception_handler(request, exc)
-    except RecursionError:
-        # The encoder goes down an input a call a level, and the JSON reader of Python 3.12 or 3.14 takes a value
-        # deeper than that (a list 1,500 deep): the answer failed, an unhandled 500. Each error's kind, place and
-        # message, without the input it repeats.
-        errors = [{"type": error["type"], "loc": list(error["loc"]), "msg": error["msg"]} for error in exc.errors()]
-        return SafeJSONResponse(status_code=422, content={"detail": errors})
     except UnicodeEncodeError:
         clean = RequestValidationError(without_lone_surrogates(list(exc.errors())), body=exc.body)
         return await request_validation_exception_handler(request, clean)
@@ -74,3 +69,45 @@ async def safe_validation_exception_handler(request: Request, exc: RequestValida
         # quotes it back: no JSON, so the answer itself failed, a 500. FastAPI's content, written as any answer
         # holding one is (null in its place, and U+FFFD for a lone surrogate beside it).
         return SafeJSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
+
+
+# How deep an input may be nested, the input itself the first level, and still be repeated in its error (the REST 422,
+# MCP tools/call's -32602). Every walk an answer takes after it recurses down the input: FastAPI's encoder a call a
+# level, and without_lone_surrogates and json_safe two frames a level on Python 3.11 (one on 3.12 and later). An
+# answer is made some 30 frames deep, and 100 levels and the error round them take some 210 more on 3.11: under a
+# quarter of the default recursion limit of 1,000, where a refused value some 490 levels deep made one of those walks
+# raise RecursionError, an unhandled 500.
+MAX_REPEATED_INPUT_DEPTH = 100
+
+
+def errors_to_repeat(errors: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Validation errors as an answer repeats them: an input nested deeper than MAX_REPEATED_INPUT_DEPTH left out.
+
+    Each error's kind, place and message are kept. The depth is measured by a loop: what is to be spared is a walk
+    that recurses.
+    """
+    return [
+        dict(error) if _nested_at_most(error.get("input"), MAX_REPEATED_INPUT_DEPTH) else _without_input(error)
+        for error in errors
+    ]
+
+
+def _without_input(error: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in error.items() if key != "input"}
+
+
+def _nested_at_most(value: Any, levels: int) -> bool:
+    """Whether no list, tuple or dict in ``value`` lies deeper than ``levels`` (``value`` itself at the first)."""
+    pending = [(value, 1)]
+    while pending:
+        part, level = pending.pop()
+        if isinstance(part, dict):
+            children: Iterable[Any] = part.values()
+        elif isinstance(part, list | tuple):
+            children = part
+        else:
+            continue
+        if level > levels:
+            return False
+        pending.extend((child, level + 1) for child in children)
+    return True

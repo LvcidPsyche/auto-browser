@@ -20,7 +20,7 @@ from .audit import get_current_operator
 from .browser.page_read import bounded, locked_read
 from .mcp_instructions import server_instructions
 from .models import McpToolCallRequest, OperatorIdentity
-from .safe_json_response import SafeJSONResponse
+from .safe_json_response import SafeJSONResponse, errors_to_repeat
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .tool_inputs import MAX_TOOL_RESULT_CHARS
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, capped_for_log, json_safe, utc_now, without_lone_surrogates
@@ -267,7 +267,7 @@ class McpHttpTransport:
                     request_id,
                     -32602,
                     "Invalid tools/call params",
-                    data={"errors": exc.errors()},
+                    data={"errors": errors_to_repeat(exc.errors())},
                     headers=self._session_headers(session),
                 )
             tool_response = await self.tool_gateway.call_tool(tool_request)
