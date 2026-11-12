@@ -15,11 +15,10 @@ from . import process_hardening
 from .action_errors import BrowserActionError, SessionNotFoundError
 from .api_token import ensure_api_credential, ensure_takeover_token
 from .app_factory import build_controller_services, create_controller_app
-from .auth_policy import has_named_credentials, resolve_auth_policy
+from .auth_policy import has_named_credentials
 from .compliance import apply_compliance_template, write_compliance_manifest
 from .config import get_settings
 from .middleware import install_controller_http_middleware
-from .middleware.hosts import install_controller_host_middleware
 from .proxy_personas import warn_about_ownerless_personas
 from .routes._utils import log_hidden_cause
 from .routes.agent import create_agent_router
@@ -40,12 +39,6 @@ logging.basicConfig(level=_log_level)
 # its credential, and a provider's can carry one. Its warnings and errors still come through.
 logging.getLogger("httpx").setLevel(max(_log_level, logging.WARNING))
 logger = logging.getLogger(__name__)
-
-
-def _install_controller_host_middleware(application: FastAPI, allowed_hosts: list[str]) -> None:
-    install_controller_host_middleware(
-        application, allowed_hosts, requires_credential=lambda: resolve_auth_policy(settings).required
-    )
 
 
 settings = get_settings()

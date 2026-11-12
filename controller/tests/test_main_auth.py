@@ -244,11 +244,23 @@ class MainAuthTests(unittest.TestCase):
         async def root() -> dict[str, bool]:
             return {"ok": True}
 
-        main_module._install_controller_host_middleware(app, ["controller.example.com"])
+        # As the app installs it: with the HTTP middleware, which asks the token gate's own policy for the Host check.
+        settings = SimpleNamespace(
+            api_bearer_token="secret",
+            controller_allowed_host_patterns=["controller.example.com"],
+            request_rate_limit_exempt_path_list=[],
+            operator_id_header="X-Operator-Id",
+            operator_name_header="X-Operator-Name",
+            require_operator_id=False,
+        )
+        install_controller_http_middleware(
+            app, settings=settings, rate_limiter=None, metrics=SimpleNamespace(enabled=False)
+        )
+        token = {"authorization": "Bearer secret"}
 
         with TestClient(app) as client:
-            allowed = client.get("/", headers={"host": "controller.example.com"})
-            rejected = client.get("/", headers={"host": "evil.example.com"})
+            allowed = client.get("/", headers={"host": "controller.example.com", **token})
+            rejected = client.get("/", headers={"host": "evil.example.com", **token})
 
         self.assertEqual(allowed.status_code, 200)
-        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual((rejected.status_code, rejected.text), (400, "Invalid host header"))
