@@ -17,6 +17,7 @@ DELETE's write (made from a shallower place in the stack) did not, made every cl
 
 from __future__ import annotations
 
+import gc
 import json
 import tempfile
 import unittest
@@ -596,6 +597,75 @@ class McpSessionTableStartTests(_Transport):
         self.assertEqual(list(self.transport._sessions), ["plain"])
         (line,) = logs.output
         self.assertIn("1 MCP sessions", line)
+
+
+class McpSessionTableStartCollectorTests(_Transport):
+    """A start reads and measures the table with the cyclic garbage collector off, and gives it back as it found it.
+
+    The read makes a list or an object for each one in the file, tens of millions at the table's cap, and no cycle:
+    each collection it set off went through all of them, which none could free. On Python 3.11, the image's, a table
+    of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read in some 60 s with the
+    collector on and in 3.4 s with it off.
+    """
+
+    TABLE = [_record("s0", {"a": [0]}, {"b": [[]]})]
+
+    def setUp(self) -> None:
+        super().setUp()
+        collecting = gc.isenabled()
+        self.addCleanup(gc.enable if collecting else gc.disable)
+        self.store.write_text(json.dumps(self.TABLE), encoding="utf-8")
+
+    def start_noting_the_collector(self, failing: str | None) -> list[tuple[str, bool]]:
+        """A start whose read and measures note whether the collector is on, the step ``failing`` names raising."""
+        read, measure = json.loads, mcp_transport._stored_client_json
+        noted: list[tuple[str, bool]] = []
+
+        def noting(step: str, call):
+            def run(*args, **kwargs):
+                noted.append((step, gc.isenabled()))
+                if step == failing:
+                    raise RuntimeError(f"{step} failed")
+                return call(*args, **kwargs)
+
+            return run
+
+        with (
+            patch.object(mcp_transport.json, "loads", side_effect=noting("the read", read)),
+            patch.object(mcp_transport, "_stored_client_json", side_effect=noting("a measure", measure)),
+        ):
+            try:
+                self.transport = self.transport_over_the_store()
+            except RuntimeError as error:
+                self.assertEqual(str(error), "a measure failed")
+        return noted
+
+    def test_the_read_and_the_measuring_run_with_the_collector_off(self) -> None:
+        self.assertTrue(gc.isenabled())
+
+        noted = self.start_noting_the_collector(None)
+
+        self.assertEqual(noted, [("the read", False), ("a measure", False), ("a measure", False)])
+        self.assertEqual(list(self.transport._sessions), ["s0"])
+        self.assertTrue(gc.isenabled())
+
+    def test_a_start_gives_the_collector_back_as_it_found_it_on_every_way_out(self) -> None:
+        # The read that fails is logged and the start goes on with no session; a malformed record is passed over;
+        # a measure that fails is the start's own error.
+        malformed = [{"client_info": {}, "client_capabilities": {}}]
+        for found_on in (True, False):
+            for failing in (None, "the read", "a malformed record", "a measure"):
+                with self.subTest(found_on=found_on, failing=failing):
+                    table = malformed if failing == "a malformed record" else self.TABLE
+                    self.store.write_text(json.dumps(table), encoding="utf-8")
+                    (gc.enable if found_on else gc.disable)()
+
+                    noted = self.start_noting_the_collector(failing)
+
+                    self.assertEqual(gc.isenabled(), found_on)
+                    self.assertTrue(noted)
+                    self.assertEqual([on for _, on in noted], [False] * len(noted))
+                    gc.enable()
 
 
 NOTIFIED = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}

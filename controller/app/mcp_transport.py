@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import math
@@ -848,6 +849,23 @@ class McpHttpTransport:
     def _load_sessions(self) -> None:
         if self._session_store_path is None or not self._session_store_path.exists():
             return
+        # The read makes a list or an object for each one in the file, tens of millions at the table's cap, and no
+        # cycle: each collection it set off went through all of them, and none could free one. On Python 3.11, the
+        # image's, a table of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read
+        # in some 60 s with the cyclic collector on and in 3.4 s with it off. It is off for the read and the measuring
+        # after it, for every thread (what another thread makes meanwhile is collected once it is back), and given
+        # back as it was found on every way out. What the read made is freed before then, as _read_sessions returns,
+        # but for the client fields of the sessions kept.
+        collecting = gc.isenabled()
+        gc.disable()
+        try:
+            self._read_sessions()
+        finally:
+            if collecting:
+                gc.enable()
+
+    def _read_sessions(self) -> None:
+        """Read the table back, but for the sessions stored past a bound (see _load_sessions)."""
         try:
             payload = json.loads(self._session_store_path.read_text(encoding="utf-8"))
         except Exception as exc:
