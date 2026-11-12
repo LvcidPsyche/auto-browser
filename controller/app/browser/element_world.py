@@ -321,10 +321,14 @@ class PageWorld:
         try:
             if self._cdp is None:
                 self._cdp = await self._attach(page, setup=setup)
+            cdp = self._cdp
             if self._frame_id is None:
-                tree = await self._send(self._cdp, "Page.getFrameTree", None, setup=setup, keep_session=keep_session)
+                tree = await self._send(cdp, "Page.getFrameTree", None, setup=setup, keep_session=keep_session)
+                if self._cdp is not cdp:
+                    # Dropped while its tree was read, by a call that timed out on it: the frame is a dead session's.
+                    raise PlaywrightError("Session closed while its frame tree was read")
                 self._frame_id = tree["frameTree"]["frame"]["id"]
-            return self._cdp, self._frame_id
+            return cdp, self._frame_id
         finally:
             self._lock.release()
 

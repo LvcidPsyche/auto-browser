@@ -22,9 +22,11 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
+from app.browser.click_target import classified_risk, read_click_target
 from app.browser.element_ids import ElementIds
 from app.browser.element_target import ElementTarget
-from app.browser.element_world import CHANGES_PAGE, READ, PageWorld
+from app.browser.element_world import CHANGES_PAGE, READ, PageWorld, session_gone
+from app.models import BrowserActionDecision
 from app.tool_gateway import drag
 from app.tool_inputs import FindElementsInput, GetPageHtmlInput
 from tests.test_allowed_hosts_reads import gateway_for, manager_for, read_session
@@ -494,6 +496,114 @@ async def test_element_ids_hands_keep_session_to_the_world() -> None:
     assert ids._world(page)._cdp is cdp
     await asyncio.sleep(0.05)
     assert cdp.detached == 0
+
+
+# -- a frame tree read on a session another call drops meanwhile ---------------------
+
+RACE_MS = 500  # the bound of the call that drops the session: the reading call is held at its frame tree long before
+DELETE_ACCOUNT = {"tag": "button", "type": "submit", "role": "", "submits": False, "labels": ["Delete account"]}
+
+
+class RacedPage:
+    """A page whose every attach is a CDP session of its own (a world that kept a dropped one cannot pass an identity
+    check by its being reused), whose world's creation can find no frame once, whose frame tree can be held, and whose
+    next script can hang. ElementIds can key a world by it."""
+
+    def __init__(self, script_value: Any = "read") -> None:
+        self.script_value = script_value
+        self.sessions: list[RacedCdp] = []
+        self.no_frame_once = False
+        self.hold_tree = False
+        self.tree_held = asyncio.Event()
+        self.let_tree_go = asyncio.Event()
+        self.hang_script_once = False
+        self.script_hung = asyncio.Event()
+
+        async def new_cdp_session(_page: Any) -> RacedCdp:
+            self.sessions.append(RacedCdp(self))
+            return self.sessions[-1]
+
+        self.context = SimpleNamespace(new_cdp_session=new_cdp_session)
+
+
+class RacedCdp(SlowCdp):
+    def __init__(self, page: RacedPage) -> None:
+        super().__init__({}, page.script_value)
+        self.page = page
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        page = self.page
+        if method == "Page.getFrameTree" and page.hold_tree:
+            page.hold_tree = False
+            page.tree_held.set()
+            await page.let_tree_go.wait()
+        if method == "Page.createIsolatedWorld" and page.no_frame_once:
+            page.no_frame_once = False
+            raise PlaywrightError("Protocol error (Page.createIsolatedWorld): No frame for given id found")
+        if method == SCRIPT and page.hang_script_once:
+            page.hang_script_once = False
+            page.script_hung.set()
+            await asyncio.sleep(HUNG_S)
+        return await super().send(method, params)
+
+
+async def read_while_the_session_is_dropped(
+    instance: PageWorld, page: RacedPage, reading: Callable[[], Any], *, no_frame_beside: bool
+) -> asyncio.Task[Any]:
+    """Start ``reading`` once a call beside it hangs on the world's session, and hold its frame tree's answer until
+    the call beside it has timed out and dropped that session. ``no_frame_beside``: a change met "No frame" first, so
+    the reading call reads the frame tree on its first try; else its own first try meets it and its retry does."""
+    page.hang_script_once = True
+    beside = asyncio.ensure_future(instance.call(page, "decl", effect=READ, timeout_ms=RACE_MS))
+    await asyncio.wait_for(page.script_hung.wait(), timeout=TEST_BOUND_S)
+    page.no_frame_once = True
+    if no_frame_beside:
+        with pytest.raises(PlaywrightError):
+            await instance.call(page, "decl", effect=CHANGES_PAGE)
+    page.hold_tree = True
+    read = asyncio.ensure_future(reading())
+    await asyncio.wait_for(page.tree_held.wait(), timeout=TEST_BOUND_S)
+    with pytest.raises(BrowserActionError) as dropped:
+        await asyncio.wait_for(beside, timeout=TEST_BOUND_S)
+    assert dropped.value.code == PAGE_NOT_RESPONDING
+    assert (instance._cdp, instance._frame_id) == (None, None)
+    page.let_tree_go.set()
+    return read
+
+
+async def test_a_frame_tree_read_on_a_session_dropped_meanwhile_fails_as_a_session_gone_and_is_not_kept() -> None:
+    # The frame id was written on a world whose session another call had dropped: the call went on to None.send
+    # (AttributeError, no code), and the world was left with a frame and no session.
+    page = RacedPage()
+    instance = PageWorld(SimpleNamespace(action_timeout_ms=LONG_MS))
+    assert await instance.call(page, "decl", effect=READ) == "read"
+
+    read = await read_while_the_session_is_dropped(
+        instance, page, lambda: instance.call(page, "decl", effect=READ), no_frame_beside=False
+    )
+
+    with pytest.raises(PlaywrightError) as gone:
+        await asyncio.wait_for(read, timeout=TEST_BOUND_S)
+    assert session_gone(gone.value)
+    assert (instance._cdp, instance._frame_id) == (None, None)
+
+
+async def test_a_clicks_target_read_on_a_session_dropped_meanwhile_is_read_again_and_classified() -> None:
+    # The read failed open: a "Delete account" button labelled read was recorded as unclassified, and no approval was
+    # asked. On its first try a session gone is read again on a new session.
+    page = RacedPage({"value": DELETE_ACCOUNT, "issued": [], "tag": "t"})
+    ids = ElementIds(SimpleNamespace(action_timeout_ms=LONG_MS))
+    await ids.evaluate(page, "() => 1")
+    click = BrowserActionDecision(action="click", reason="r", risk_category="read", x=10, y=20)
+
+    read = await read_while_the_session_is_dropped(
+        ids._world(page), page, lambda: read_click_target(ids, page, click, session_id="s1"), no_frame_beside=True
+    )
+
+    target = await asyncio.wait_for(read, timeout=TEST_BOUND_S)
+    assert target == DELETE_ACCOUNT
+    assert classified_risk(target, "read") == "destructive"
+    assert len(page.sessions) == 2 and page.sessions[0].detached == 1
 
 
 # -- at the gateway: under bounded(), not at the default action timeout ------------

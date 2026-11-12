@@ -586,6 +586,14 @@ All notable changes to auto-browser are documented here.
   on the click's waits for its target. A page that stops answering holds a click still: the pointer's moves,
   and the questions asked of the target once it is found, wait for the page, and a page busy for 6 seconds
   once the checks had passed held a click for 7.4 seconds under a limit of 3, which then pressed.
+- **A call into a page's isolated world no longer fails with an `AttributeError` when another call drops the page's
+  session under it.** A call that read the page's frame tree again (after a "No frame for given id found") kept the
+  frame it read where another call on the same page had run out of time meanwhile and dropped the session: the world
+  was left with a frame and no session, and the call failed with `'NoneType' object has no attribute 'send'`, no
+  error code, where a read whose session went away is sent again on a new one. Older than this release. The read of a fast-profile click's target
+  (STORE-42) runs beside the session's other calls, and failed so: the click went on as labelled, unclassified, and a
+  "Delete account" button labelled `read` asked for no approval, where it reads as `destructive`. Such a call now
+  fails as one whose session went away does, and that read, on its first try, is made again on a new session.
 - **`resources/read` refuses a URI that is not a non-empty string.** A number, a list, an object or `null` raised an
   unhandled `AttributeError`, so the client got a `500`, and an empty or missing URI was answered as a resource not
   found. Each is now `-32602`, in the same words `resources/subscribe` uses. (MCP-09)
