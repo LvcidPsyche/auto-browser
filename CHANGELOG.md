@@ -755,7 +755,10 @@ All notable changes to auto-browser are documented here.
   `/sessions/{id}/network` routes and the two `/sessions/{id}/cdp` routes, for a session with no inspector or no CDP
   session. Each says what it said, with the id cut at 200 characters. So do the MCP transport's `404`
   `Unknown MCP session` (`-32001`), which repeated the `Mcp-Session-Id` header whole, and its `403`
-  `Forbidden Origin header` (`-32000`), the `Origin` header.
+  `Forbidden Origin header` (`-32000`), the `Origin` header, and its answers that repeated a caller's text whole:
+  `Unknown MCP method` (`-32601`), the method; `Resource not found` (`-32002`) of a read or a subscribe, and
+  `Could not read resource` (`-32603`), the URI; and the `data.requested` of `Unsupported MCP protocol version`
+  (`400`, `-32602`), the `MCP-Protocol-Version` header.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host

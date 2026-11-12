@@ -166,8 +166,9 @@ class McpResourceReadTests(unittest.IsolatedAsyncioTestCase):
         line = record.getMessage()
         self.assertEqual(line, f"MCP resource read of {capped_for_log(uri)!r} failed: RuntimeError")
         self.assertNotIn("\n", line)
-        # The answer is not a log line: it is as it was.
-        self.assert_internal_error(answer, uri)
+        # The answer repeated the URI whole too: it is cut as the line cuts it, in the same code and words.
+        self.assert_internal_error(answer, capped_for_log(uri))
+        self.assertLess(len(json.dumps(answer)), 1024)
 
     async def test_an_unknown_resource_or_session_is_still_not_found_and_not_logged(self) -> None:
         self.manager.get_console_messages.side_effect = SessionNotFoundError("bob-session")

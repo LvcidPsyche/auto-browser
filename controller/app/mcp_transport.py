@@ -309,7 +309,7 @@ class McpHttpTransport:
         return self._json_error_response(
             request_id,
             -32601,
-            f"Unknown MCP method: {method}",
+            f"Unknown MCP method: {capped_for_log(method)}",
             headers=self._session_headers(session),
         )
 
@@ -393,9 +393,13 @@ class McpHttpTransport:
             # The class only, and the URI quoted and cut, as it is caller input of any length: an exception's text can
             # carry a page URL with a token in it, so the client's message is fixed text and the log keeps the class.
             logger.warning("MCP resource read of %r failed: %s", capped_for_log(uri), type(exc).__name__)
-            return self._json_error_response(request_id, -32603, f"Could not read resource: {uri}", headers=headers)
+            return self._json_error_response(
+                request_id, -32603, f"Could not read resource: {capped_for_log(uri)}", headers=headers
+            )
         if content is None:
-            return self._json_error_response(request_id, -32002, f"Resource not found: {uri}", headers=headers)
+            return self._json_error_response(
+                request_id, -32002, f"Resource not found: {capped_for_log(uri)}", headers=headers
+            )
         return self._json_result_response(request_id, {"contents": [content]}, headers=headers)
 
     async def _read_resource(self, uri: str) -> dict[str, Any] | None:
@@ -468,7 +472,7 @@ class McpHttpTransport:
             return self._json_error_response(
                 request_id,
                 -32002,
-                f"Resource not found: {uri}",
+                f"Resource not found: {capped_for_log(uri)}",
                 headers=self._session_headers(session),
             )
         if uri in NEVER_NOTIFIED_RESOURCES:
@@ -743,7 +747,7 @@ class McpHttpTransport:
                 request_id,
                 -32602,
                 "Unsupported MCP protocol version",
-                data={"requested": protocol_version, "supported": list(SUPPORTED_PROTOCOL_VERSIONS)},
+                data={"requested": capped_for_log(protocol_version), "supported": list(SUPPORTED_PROTOCOL_VERSIONS)},
                 status_code=400,
                 headers=self._session_headers(session),
             )

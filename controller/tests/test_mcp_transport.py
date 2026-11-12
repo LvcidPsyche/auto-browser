@@ -426,6 +426,56 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(written.splitlines(), [written])
         self.assertLess(len(written), 400, written[:80])
 
+    def test_an_answer_that_repeats_a_callers_text_cuts_it(self) -> None:
+        # Each repeated the method, the URI or the MCP-Protocol-Version header whole: 60,000 characters came back
+        # as 60,000. Each is cut at 200 characters, as Unknown MCP session cuts its header, in the same code and words.
+        headers = self._ready_headers()
+        long_method, long_uri, long_version = "m" * 60_000, "browser://" + "u" * 59_990, "v" * 60_000
+        answers = [
+            (
+                "method",
+                self.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 9, "method": long_method}),
+                200,
+                (-32601, f"Unknown MCP method: {'m' * 200}..."),
+            ),
+            (
+                "subscribe",
+                self._resource_call(headers, "resources/subscribe", long_uri),
+                200,
+                (-32002, f"Resource not found: {long_uri[:200]}..."),
+            ),
+            (
+                "read",
+                self._resource_call(headers, "resources/read", long_uri),
+                200,
+                (-32002, f"Resource not found: {long_uri[:200]}..."),
+            ),
+            (
+                "version header",
+                self.client.post(
+                    "/mcp",
+                    headers={**headers, MCP_PROTOCOL_HEADER: long_version},
+                    json={"jsonrpc": "2.0", "id": 10, "method": "ping"},
+                ),
+                400,
+                (-32602, "Unsupported MCP protocol version"),
+            ),
+        ]
+        for name, response, status, (code, message) in answers:
+            with self.subTest(name):
+                self.assertEqual(response.status_code, status, response.text[:200])
+                error = response.json()["error"]
+                self.assertEqual((error["code"], error["message"]), (code, message))
+                self.assertLess(len(response.content), 1024)
+        self.assertEqual(answers[-1][1].json()["error"]["data"]["requested"], "v" * 200 + "...")
+        # The mismatch's "got ..." is reached only by a version this server supports, which is short.
+        mismatch = self.client.post(
+            "/mcp",
+            headers={**headers, MCP_PROTOCOL_HEADER: "2025-06-18"},
+            json={"jsonrpc": "2.0", "id": 11, "method": "ping"},
+        )
+        self.assertTrue(mismatch.json()["error"]["message"].endswith("expected 2025-11-25, got 2025-06-18"))
+
     def test_sessions_survive_transport_restart_when_store_path_is_configured(self) -> None:
         session_id, protocol_version = self._initialize()
         init_response = self.client.post(
