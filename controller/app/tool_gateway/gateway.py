@@ -111,7 +111,7 @@ from ..tool_inputs import (
     VisionFindInput,
     WaitForSelectorInput,
 )
-from ..utils import error_text_for_log, json_key, json_safe, quoted_for_log
+from ..utils import capped_for_log, error_text_for_log, json_key, json_safe, quoted_for_log
 from .drag import drag_drop
 from .packs import register_all
 from .previews import preview_arguments
@@ -524,7 +524,8 @@ class McpToolGateway:
 
     def _unknown_tool_message(self, name: str) -> str:
         """Point a mistyped or guessed tool name at the tool the caller meant."""
-        message = f"Unknown tool: {name}"
+        # Cut, as an unknown MCP method is: the caller's own text, as long as the body.
+        message = f"Unknown tool: {capped_for_log(name)}"
         served = list(self._registry.tools)
         # A client that rewrote the dot, or dropped the namespace.
         for candidate in (name.replace("_", ".", 1), f"browser.{name}"):

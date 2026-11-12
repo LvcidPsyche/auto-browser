@@ -473,6 +473,16 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.execute_action: action={'action': 'click'", await error_for("browser.click"))
         self.manager.observe.assert_not_awaited()
 
+    async def test_an_unknown_tool_is_named_cut_as_an_unknown_mcp_method_is(self) -> None:
+        # The caller's own text, as long as the body: a name of 60,000 characters was answered whole.
+        name = "browser.x" + "y" * 60_000
+
+        response = await self.gateway.call_tool(McpToolCallRequest(name=name, arguments={}))
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.content[0].text, f"Unknown tool: {name[:200]}...")
+        self.assertEqual(response.structuredContent["error"], response.content[0].text)
+
     async def test_invalid_arguments_drop_pydantics_value_error_prefix(self) -> None:
         response = await self.gateway.call_tool(McpToolCallRequest(name="browser.find_elements", arguments={}))
 

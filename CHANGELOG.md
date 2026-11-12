@@ -810,7 +810,8 @@ All notable changes to auto-browser are documented here.
   `Forbidden Origin header` (`-32000`), the `Origin` header, and its answers that repeated a caller's text whole:
   `Unknown MCP method` (`-32601`), the method; `Resource not found` (`-32002`) of a read or a subscribe, and
   `Could not read resource` (`-32603`), the URI; and the `data.requested` of `Unsupported MCP protocol version`
-  (`400`, `-32602`), the `MCP-Protocol-Version` header. The message of a session id that names no live session,
+  (`400`, `-32602`), the `MCP-Protocol-Version` header. So does the `Unknown tool:` error of a tool call (MCP
+  `tools/call`, `POST /mcp/tools/call`), the tool's name. The message of a session id that names no live session,
   which is the `detail` of every route's `404` for it (`unknown_session`, `session_closed`, `session_interrupted`,
   `session_not_live`, the app-wide session check's included) and the text of an MCP tool's error, named the id
   whole: an id of 60,000 characters came back in a `detail` of 60,079. It names the id cut at 200 characters, with
