@@ -148,11 +148,12 @@ def _record_to_write(jobs: dict[str, Any], job_id: str, what: str) -> dict[str, 
 
 
 def _runs_counted(job_id: str, record: dict[str, Any]) -> int:
-    """The record's run_count, or 0, with a WARNING, for one that is no whole number (a store edited by hand)."""
+    """The record's run_count, or 0, with a WARNING, for one that is no integer as JSON writes one (true, false and
+    3.0 among them: a store edited by hand)."""
     count = record.get("run_count", 0)
     if isinstance(count, int) and not isinstance(count, bool):
         return count
-    logger.warning("cron job %s: its stored run_count is no whole number, so its runs are counted from 0", job_id)
+    logger.warning("cron job %s: its stored run_count is no integer, so its runs are counted from 0", job_id)
     return 0
 
 

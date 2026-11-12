@@ -365,11 +365,12 @@ class CronRunMetadataTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.service.job_queue.enqueue_run.await_count, queued_before + 1)
 
-    async def test_a_stored_run_count_that_is_no_whole_number_is_counted_from_0_again(self) -> None:
+    async def test_a_stored_run_count_that_is_no_integer_is_counted_from_0_again(self) -> None:
         good = await self.service.create_job(name="good", goal="g", webhook_enabled=True)
         self.assert_answered_as_for_a_good_record(await self._trigger(good), good["id"], 0)
         self.assertEqual(self._stored(good["id"])["run_count"], 1)
-        for value in (None, "3", [1], {"a": 1}, True, False, 2.5):
+        # 3.0 too: a whole number, but written as a float, which the count was never stored as.
+        for value in (None, "3", [1], {"a": 1}, True, False, 2.5, 3.0):
             with self.subTest(value=value):
                 job = await self.service.create_job(name="n", goal="g", webhook_enabled=True)
                 self._store_as(job["id"], {**self._stored(job["id"]), "run_count": value})
@@ -384,7 +385,7 @@ class CronRunMetadataTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(stored["last_run_at"])
                 self.assertEqual(
                     [record.getMessage() for record in logged.records],
-                    [f"cron job {job['id']}: its stored run_count is no whole number, so its runs are counted from 0"],
+                    [f"cron job {job['id']}: its stored run_count is no integer, so its runs are counted from 0"],
                 )
 
     async def test_a_record_that_is_no_object_by_the_save_leaves_the_store_as_it_is(self) -> None:

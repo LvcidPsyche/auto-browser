@@ -769,7 +769,8 @@ All notable changes to auto-browser are documented here.
   name. It now says `The https URL has no host name`, to a tool's caller too. And the refusal of a host that
   `ALLOWED_HOSTS` does not allow (`Host '...' is not allowlisted`) named the host whole, as long as the URL was: it
   names its first 200 characters now, to a tool's caller too, and so does the refusal of a scheme that is not
-  http(s) (`URL scheme '...' is not allowed`), though no tool or route hands that check a long scheme today.
+  http(s) (`URL scheme '...' is not allowed`), though a request refuses such a scheme before that check: only a
+  cron job's stored `start_url` (a store edited by hand) hands it a long one today.
 - **An unknown approval id no longer writes a traceback to the log, and no `404` repeats a long id whole.** A REST
   route that maps no answer of its own for a `KeyError` gets the app's `404` `Not found: <key>` and its
   `unmapped KeyError` warning, which is there to tell a bug from an unknown id. The five approval routes by id
@@ -880,7 +881,8 @@ All notable changes to auto-browser are documented here.
   each fire. A start leaves such a job as it is, with one WARNING that names the job, where a key held as it was
   sent, by a store of an earlier version, stopped the controller's start; a readable key held so beside a hash that
   cannot be read is removed from the store, as the start removes every other such key, and the WARNING says so.
-  `browser.trigger_cron_job`, which takes no key, is unchanged.
+  `browser.trigger_cron_job`, which takes no key, is unchanged but for a record that is no JSON object, which it
+  answers as an unknown job (`Cron job not found: <id>`) where it answered `Tool execution failed`.
 - **With its key proved, a cron trigger no longer passes on what the run's session answers its own caller, nor
   answers `500` for a stored job a run cannot take.** `POST /crons/{id}/trigger` answered `403`
   `browser_action_blocked`, with the refused host in its text, for a `start_url` whose load the pre-request gate
@@ -903,10 +905,12 @@ All notable changes to auto-browser are documented here.
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
   write that fails when the run has already ended is logged too, and the answer stays `triggered: true`. A stored
   `run_count` that is `null`, a string, a list or an object (a store edited by hand) answered an unhandled `500`
-  there with the run queued, so that a webhook's sender, which tries a `5xx` again, queued one more run at each
-  try: such a count, and one that is `true` or a fraction, is now counted from 0 again, with a WARNING that names
-  the job. A record that is no JSON object by then, and a store holding a value nested deeper than the JSON writer
-  goes, are left as they are and logged, there and where the run's end is saved. (D7-6)
+  there with the run queued, so that a webhook's sender, which tries a `5xx` again, ran the job again: a try while
+  the run still held the job's slot was answered `previous_run_active`, and each one after it ended queued another
+  run. Such a count, and one that is `true`, `false` or a number written as a float (`2.5`, and `3.0` too), is now
+  counted from 0 again, with a WARNING that names the job. A record that is no JSON object by then, and a store
+  holding a value nested deeper than the JSON writer goes, are left as they are and logged, there and where the
+  run's end is saved. (D7-6)
 - **Every save of a cron store its JSON writer cannot write back now fails with an error its caller handles.** The
   JSON reader takes what the writer cannot write: a value nested deeper than the writer goes (the reader of Python
   3.12 and later goes deeper than the writer), or a `run_count` of 4,300 digits, which a run makes one digit longer
