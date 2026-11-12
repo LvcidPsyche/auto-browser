@@ -14,7 +14,7 @@ from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
-from ..utils import RefusalLogWindows, held_back_note, quoted_for_log
+from ..utils import RefusalLogWindows, error_text_for_log, held_back_note
 from .identity import NodeIdentity
 from .models import (
     DelegationRequest,
@@ -251,7 +251,7 @@ class DelegationManager:
             logger.warning(
                 "mesh.delegation.reply_verification_failed peer=%s error=%s",
                 peer_node_id,
-                quoted_for_log(str(exc)),
+                error_text_for_log(exc),
             )
             raise DelegationError(f"reply envelope verification failed: {exc}") from exc
 
@@ -340,7 +340,7 @@ class DelegationManager:
                 logger.warning(
                     "mesh.delegation.envelope_invalid sender=%s error=%s%s",
                     sender_id,
-                    quoted_for_log(str(exc)),
+                    error_text_for_log(exc),
                     held_back_note(held_back, "sender"),
                 )
             raise DelegationRejected(f"envelope verification failed: {exc}") from exc

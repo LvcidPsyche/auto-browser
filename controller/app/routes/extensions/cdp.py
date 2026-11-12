@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ...browser.page_read import SESSION_BUSY_DETAIL, start_read
 from ...cdp.passthrough import CDPParamsError, CDPPassthrough
-from ...utils import quoted_for_log
+from ...utils import error_text_for_log, quoted_for_log
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ async def _get_cdp(app, session_id: str):
         # Not the old passthrough: it reads a tab other than the one checked, maybe a refused one. The id is one this
         # controller made (cdp_sessions holds it); the error is the browser's, which Playwright writes over several
         # lines (its call log, the browser's own log): quoted and cut.
-        logger.warning("cdp: could not attach to the active tab of %s: %s", session_id, quoted_for_log(str(exc)))
+        logger.warning("cdp: could not attach to the active tab of %s: %s", session_id, error_text_for_log(exc))
         raise HTTPException(503, "Could not attach to the session's active tab. Try again.") from None
     cdps[session_id] = fresh
     try:

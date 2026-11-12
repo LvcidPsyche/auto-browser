@@ -352,7 +352,10 @@ All notable changes to auto-browser are documented here.
   whose query it could not scrub), a session's close steps, a page snapshot, a page the controller loaded that did
   not load, a page's settle, an accessibility snapshot, a bot challenge's probe and the challenge it found, a
   session's extension hooks, an element's upload and marker clean-up, a page call sent again, a blocked action's
-  roll-back, an error answer's entry that was left out.
+  roll-back, an error answer's entry that was left out. Each of these that writes an error's whole text makes it
+  where it quotes it: an error whose text cannot be made (a `KeyError` of a key whose `repr` raises) is named
+  `<its text could not be made: RuntimeError>` and the line is written all the same, and a text that was cut is
+  followed by its length (`'xyyy'... (cut from 5041 characters)`).
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,

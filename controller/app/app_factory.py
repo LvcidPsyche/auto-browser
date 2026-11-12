@@ -35,7 +35,7 @@ from .safe_json_response import SafeJSONResponse
 from .session_ownership import may_use
 from .session_share import SessionShareManager
 from .tool_gateway import McpToolGateway
-from .utils import quoted_for_log
+from .utils import error_text_for_log, quoted_for_log
 from .vision_target import VisionTargeter
 
 logger = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ class SessionArtifactFiles(StaticFiles):
                 # cannot parse and puts that name in the error too, in quotes: quote and cut both, or one
                 # request writes a log line as long as the request line allows (cut unquoted, the error's
                 # own quote was cut with it, and the cut mark read as the name's last characters).
-                logger.warning("artifact lookup failed for %s: %s", quoted_for_log(path), quoted_for_log(str(exc)))
+                logger.warning("artifact lookup failed for %s: %s", quoted_for_log(path), error_text_for_log(exc))
             raise HTTPException(status_code=404) from None
         # A path that resolves to nothing is the parent's 404, so nothing is leaked.
         if session_id is not None and not await self._may_serve(session_id):

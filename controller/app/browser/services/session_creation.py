@@ -23,7 +23,7 @@ from ...models import resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
-from ...utils import UTC, quoted_for_log, run_to_completion
+from ...utils import UTC, error_text_for_log, quoted_for_log, run_to_completion
 from ..request_gate import RequestGateUnavailable
 
 if TYPE_CHECKING:
@@ -225,7 +225,7 @@ class SessionCreation:
                 try:
                     await self.manager._session_created_hook(session_id, page)
                 except Exception as exc:
-                    logger.warning("session created hook failed for %s: %s", session_id, quoted_for_log(str(exc)))
+                    logger.warning("session created hook failed for %s: %s", session_id, error_text_for_log(exc))
 
             if start_url:
                 # The lock keeps the page guard (diagnostics) from moving the page to

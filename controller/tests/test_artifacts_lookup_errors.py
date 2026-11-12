@@ -131,7 +131,7 @@ def test_a_logged_path_is_capped_so_a_client_cannot_write_huge_log_lines(client,
     assert "aaaa" in message  # still says which request it was
     # Each cut mark after a closing quote: the path's, and the error's, which quotes the name in turn.
     assert message.startswith(f"artifact lookup failed for {'a' * 200!r}...: "), message[:300]
-    assert re.search("aaa['\"][.][.][.]$", message), message[-80:]
+    assert re.search("aaa['\"][.][.][.] [(]cut from [0-9]+ characters[)]$", message), message[-80:]
     assert "Invalid argument" in message
     assert "a" * 300 not in message  # neither the requested path nor the path the error carries
     assert len(message) < 600

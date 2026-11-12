@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -325,7 +326,8 @@ def test_an_invalid_envelopes_line_is_cut_whatever_the_envelope_holds(mesh, capl
     (line,) = _invalid_envelope_lines(caplog)
     assert "recipient_node_id" in line
     # Quoted, so the cut mark comes after a closing quote: cut unquoted, the field's own quote was cut with it.
-    assert "error=\"recipient_node_id 'rxxx" in line and line.endswith('x"...'), line[-80:]
+    assert "error=\"recipient_node_id 'rxxx" in line, line[:200]
+    assert re.search('x"[.][.][.] [(]cut from [0-9]+ characters[)]$', line), line[-80:]
     assert len(line) < 500
 
 

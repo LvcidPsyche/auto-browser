@@ -27,7 +27,7 @@ from ...approvals import (
     refused_before_effect,
 )
 from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
-from ...utils import quoted_for_log, spawn_background_task
+from ...utils import error_text_for_log, quoted_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
 from ..click_target import (
@@ -408,7 +408,7 @@ class BrowserActionService:
                     logger.warning(
                         "failed to request human takeover after bot challenge on session %s: %s",
                         session.id,
-                        quoted_for_log(str(exc)),
+                        error_text_for_log(exc),
                     )
 
         return await self.manager._run_action(session, "navigate", {"url": url}, operation)
@@ -1048,7 +1048,7 @@ class BrowserActionService:
             await page.wait_for_load_state("networkidle", timeout=min(self.manager.settings.action_timeout_ms, 5000))
         except Exception as exc:
             # Busy pages legitimately never reach networkidle; proceed anyway.
-            logger.debug("settle: networkidle not reached: %s", quoted_for_log(str(exc)))
+            logger.debug("settle: networkidle not reached: %s", error_text_for_log(exc))
         await page.wait_for_timeout(250)
 
     async def run_action(

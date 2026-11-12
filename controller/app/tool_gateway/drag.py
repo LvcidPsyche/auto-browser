@@ -26,7 +26,7 @@ from ..browser import page_read
 from ..browser.element_ids import target_element_id
 from ..browser.element_target import ElementTarget, centre
 from ..browser.page_read import bounded, locked_read
-from ..utils import quoted_for_log
+from ..utils import error_text_for_log
 
 if TYPE_CHECKING:
     from ..tool_inputs import DragDropInput
@@ -198,7 +198,7 @@ async def _release_after_failure(page: Any) -> None:
     try:
         await _release_through_a_cancel(page)
     except (PlaywrightError, RuntimeError) as exc:
-        logger.warning("could not release the mouse button after a drag that failed: %s", quoted_for_log(str(exc)))
+        logger.warning("could not release the mouse button after a drag that failed: %s", error_text_for_log(exc))
 
 
 async def _release_through_a_cancel(page: Any) -> None:
@@ -220,7 +220,7 @@ async def _release_through_a_cancel(page: Any) -> None:
     if not release.cancelled() and release.exception() is not None:
         logger.warning(
             "could not release the mouse button after a drag that was cancelled: %s",
-            quoted_for_log(str(release.exception())),
+            error_text_for_log(release.exception()),
         )
     raise cancel
 
@@ -286,7 +286,7 @@ async def _stop_watching_quietly(manager: Any, session: Any, nonce: str) -> None
         )
     except (PlaywrightError, BrowserActionError, TimeoutError) as exc:
         # The wait's own error is the one to report; the listener goes with the page.
-        logger.debug("drag: the scroll watch could not be removed: %s", quoted_for_log(str(exc)))
+        logger.debug("drag: the scroll watch could not be removed: %s", error_text_for_log(exc))
 
 
 async def _point(manager: Any, session: Any, end: DragEnd, *, checked: bool) -> tuple[float, float]:

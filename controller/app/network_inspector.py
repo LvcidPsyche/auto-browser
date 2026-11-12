@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page, Request, Response
 
     from .pii_scrub import PiiScrubber
-from .utils import UTC, quoted_for_log, spawn_background_task
+from .utils import UTC, error_text_for_log, quoted_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ class NetworkInspector:
             self._page.remove_listener("requestfailed", self._on_request_failed)
             self._page.remove_listener("requestfinished", self._on_request_finished)
         except Exception as exc:
-            logger.debug("network inspector listener removal failed (page likely closed): %s", quoted_for_log(str(exc)))
+            logger.debug("network inspector listener removal failed (page likely closed): %s", error_text_for_log(exc))
         self._page = None
         # Drain pending entries — requestfailed/requestfinished will never fire after detach
         spawn_background_task(self._flush_pending())
@@ -186,7 +186,7 @@ class NetworkInspector:
                     await fn(entry)
                 except Exception as exc:
                     logger.warning(
-                        "network inspector hook %s raised: %s", quoted_for_log(pattern), quoted_for_log(str(exc))
+                        "network inspector hook %s raised: %s", quoted_for_log(pattern), error_text_for_log(exc)
                     )
 
     # ── Listeners (synchronous wrappers → schedule async work) ─────────────
@@ -297,7 +297,7 @@ class NetworkInspector:
             try:
                 request._pii_entry_id = req_id  # type: ignore[attr-defined]
             except Exception as exc:
-                logger.debug("could not tag request object for %s: %s", quoted_for_log(url), quoted_for_log(str(exc)))
+                logger.debug("could not tag request object for %s: %s", quoted_for_log(url), error_text_for_log(exc))
 
             untracked: list[dict[str, Any]] = []
             async with self._lock:
@@ -318,7 +318,7 @@ class NetworkInspector:
                 await self._fire_hooks(stale)
 
         except Exception as exc:
-            logger.debug("network inspector request error: %s", quoted_for_log(str(exc)))
+            logger.debug("network inspector request error: %s", error_text_for_log(exc))
 
     def _request_content(self, request: "Request", method: str) -> tuple[str, bool, str | None, dict[str, str]]:
         """(scrubbed URL, whether anything was redacted, request body, masked headers) of a request."""
@@ -335,7 +335,7 @@ class NetworkInspector:
                 if raw and len(raw) <= self.body_max_bytes and _byte_length(raw) <= self.body_max_bytes:
                     req_body = raw
             except Exception as exc:
-                logger.debug("could not read request body for %s: %s", quoted_for_log(url), quoted_for_log(str(exc)))
+                logger.debug("could not read request body for %s: %s", quoted_for_log(url), error_text_for_log(exc))
 
         # Scrub request body
         if req_body and self.scrubber:
@@ -390,7 +390,7 @@ class NetworkInspector:
                     logger.debug(
                         "could not read response body for %s: %s",
                         quoted_for_log(entry.get("url", "?")),
-                        quoted_for_log(str(exc)),
+                        error_text_for_log(exc),
                     )
                 if resp_body and self.scrubber:
                     resp_body, body_hit = _scrub_body(self.scrubber, resp_body, content_type, entry.get("url", "?"))
@@ -401,7 +401,7 @@ class NetworkInspector:
                 entry["pii_redacted"] = pii_hit
 
         except Exception as exc:
-            logger.debug("network inspector response error: %s", quoted_for_log(str(exc)))
+            logger.debug("network inspector response error: %s", error_text_for_log(exc))
 
     async def _handle_request_failed(self, request: "Request") -> None:
         try:
@@ -422,7 +422,7 @@ class NetworkInspector:
             await self._fire_hooks(entry)
 
         except Exception as exc:
-            logger.debug("network inspector requestfailed error: %s", quoted_for_log(str(exc)))
+            logger.debug("network inspector requestfailed error: %s", error_text_for_log(exc))
 
     async def _handle_request_finished(self, request: "Request") -> None:
         try:
@@ -440,7 +440,7 @@ class NetworkInspector:
             await self._fire_hooks(entry)
 
         except Exception as exc:
-            logger.debug("network inspector requestfinished error: %s", quoted_for_log(str(exc)))
+            logger.debug("network inspector requestfinished error: %s", error_text_for_log(exc))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

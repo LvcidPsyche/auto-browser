@@ -20,7 +20,7 @@ from ..action_errors import (
 from ..action_records import wait_for_pending_record, write_record
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
-from ..utils import quoted_for_log, spawn_background_task, utc_now
+from ..utils import error_text_for_log, quoted_for_log, spawn_background_task, utc_now
 from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ MARKS_OWN_EFFECT = frozenset({"upload"})
 def _withheld_observation(manager: Any, session: Any, exc: PermissionError) -> dict[str, Any]:
     """A post-action observation refused with ``exc``: the URL as shown, and the refusal, or for an
     OS-level error (it has an errno, and its text can name a server path) a fixed text, the OS text logged."""
-    logger.warning("post-action observation withheld for session %s: %s", session.id, quoted_for_log(str(exc)))
+    logger.warning("post-action observation withheld for session %s: %s", session.id, error_text_for_log(exc))
     error = OS_OBSERVATION_ERROR if exc.errno is not None else str(exc)[:300]
     return {"url": manager._shown_url(session.page), "observation_error": error}
 
@@ -416,7 +416,7 @@ class BrowserActionPipeline:
                 spawn_background_task(context.manager.window_births.close_unreported(session))
         except Exception as exc:
             logger.debug(
-                "failed to roll back blocked action navigation for session %s: %s", session.id, quoted_for_log(str(exc))
+                "failed to roll back blocked action navigation for session %s: %s", session.id, error_text_for_log(exc)
             )
         await self._leave_disallowed_page(context)
         failed = await self._failure_snapshot(context, label=f"blocked-{context.action_name}")
@@ -451,7 +451,7 @@ class BrowserActionPipeline:
             await session.page.goto("about:blank")
         except Exception as exc:
             manager.page_provenance.blank_failed(session.page)
-            logger.warning("could not move session %s off a disallowed page: %s", session.id, quoted_for_log(str(exc)))
+            logger.warning("could not move session %s off a disallowed page: %s", session.id, error_text_for_log(exc))
         except BaseException:
             # Cancelled: a blank still counted would exempt the page's own next about:blank commit.
             manager.page_provenance.blank_failed(session.page)
@@ -664,7 +664,7 @@ class BrowserActionPipeline:
             return await context.manager._light_snapshot(context.session, label=label)
         except PlaywrightError as exc:
             logger.warning(
-                "failure snapshot unavailable for session %s: %s", context.session.id, quoted_for_log(str(exc))
+                "failure snapshot unavailable for session %s: %s", context.session.id, error_text_for_log(exc)
             )
             return {"url": context.manager._shown_url(context.session.page), "snapshot_error": str(exc)[:300]}
         except PermissionError:
@@ -695,7 +695,7 @@ class BrowserActionPipeline:
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
         except PlaywrightError as exc:
             logger.info(
-                "post-action observation failed for session %s, retrying: %s", session.id, quoted_for_log(str(exc))
+                "post-action observation failed for session %s, retrying: %s", session.id, error_text_for_log(exc)
             )
         except PermissionError as exc:
             # The page moved itself off ALLOWED_HOSTS after the action's own check.
@@ -713,7 +713,7 @@ class BrowserActionPipeline:
             await manager._settle(session.page)
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
         except PlaywrightError as exc:
-            logger.warning("post-action observation failed for session %s: %s", session.id, quoted_for_log(str(exc)))
+            logger.warning("post-action observation failed for session %s: %s", session.id, error_text_for_log(exc))
             return {
                 "url": manager._shown_url(session.page),
                 "observation_error": f"Page changed while it was being observed; observe again. ({exc})"[:300],

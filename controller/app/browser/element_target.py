@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import Error as PlaywrightError
 
 from ..action_errors import PAGE_NOT_RESPONDING, BrowserActionError
-from ..utils import quoted_for_log
+from ..utils import error_text_for_log
 from .element_scripts import (
     ELEMENT_ACTIONABLE_SCRIPT,
     ELEMENT_COVER_SCRIPT,
@@ -270,7 +270,7 @@ class ElementTarget:
             missing = await self.evaluate(UPLOAD_LANDED_SCRIPT, [nonce, name, size], effect=READ, attached=False)
         except (PlaywrightError, BrowserActionError) as exc:
             # The file went in; only the check could not run (the page navigated, closed or stopped answering).
-            logger.info("element %s: upload not confirmed: %s", self.element_id, quoted_for_log(str(exc)))
+            logger.info("element %s: upload not confirmed: %s", self.element_id, error_text_for_log(exc))
             return {"outcome": "not_confirmed", "reason": f"the check could not run: {str(exc).splitlines()[0][:200]}"}
         if missing is None:
             return {"outcome": "confirmed"}
@@ -305,14 +305,14 @@ class ElementTarget:
             await handle.dispose()
         except PlaywrightError as exc:
             # The page went during the upload; its handles went with it.
-            logger.debug("element %s: upload handle not disposed: %s", self.element_id, quoted_for_log(str(exc)))
+            logger.debug("element %s: upload handle not disposed: %s", self.element_id, error_text_for_log(exc))
 
     async def _unmark(self, nonce: str) -> None:
         try:
             await self._world.call(self._page, UPLOAD_UNMARK_SCRIPT, self.element_id, nonce, effect=IDEMPOTENT)
         except PlaywrightError as exc:
             # The page went (closed, crashed): the marker went with it.
-            logger.debug("element %s: marker not removed: %s", self.element_id, quoted_for_log(str(exc)))
+            logger.debug("element %s: marker not removed: %s", self.element_id, error_text_for_log(exc))
         except BrowserActionError as exc:
             if exc.code != PAGE_NOT_RESPONDING:
                 raise

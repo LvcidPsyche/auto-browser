@@ -24,7 +24,7 @@ from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
-from ...utils import UTC, quoted_for_log, run_to_completion, utc_now
+from ...utils import UTC, error_text_for_log, quoted_for_log, run_to_completion, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -445,7 +445,7 @@ class BrowserSessionService(SessionCreation):
                 raise
             logger.warning("the step to %s for session %s was cancelled on its own", label, session_id)
         except Exception as exc:
-            logger.warning("failed to %s for session %s: %s", label, session_id, quoted_for_log(str(exc)))
+            logger.warning("failed to %s for session %s: %s", label, session_id, error_text_for_log(exc))
         else:
             return True
         if failed_steps is not None:
@@ -739,7 +739,7 @@ class BrowserSessionService(SessionCreation):
             # have moved meanwhile, so its URL is shown as for any other read.
             return self.manager._shown_url(page), "", True
         except PlaywrightError as exc:
-            logger.debug("page snapshot failed for session %s: %s", session.id, quoted_for_log(str(exc)))
+            logger.debug("page snapshot failed for session %s: %s", session.id, error_text_for_log(exc))
             return "", "", False
         # And after the read: the page can move while its title is read, and come back.
         if read.moved():

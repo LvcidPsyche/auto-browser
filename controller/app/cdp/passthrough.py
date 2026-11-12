@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..browser_scripts import AB_ATTR_MAX, AB_MAX_ATTRIBUTES, ELEMENT_ASSETS_SCRIPT, cap_text, cap_url
-from ..utils import quoted_for_log
+from ..utils import error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +233,7 @@ class CDPPassthrough:
         except Exception as exc:
             # The selector is the caller's, and the error the browser's: quoted and cut.
             logger.warning(
-                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), quoted_for_log(str(exc))
+                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), error_text_for_log(exc)
             )
             return {"error": "cdp_element_intelligence_failed", "selector": selector}
 
@@ -351,7 +351,7 @@ class CDPPassthrough:
 
         except Exception as exc:
             logger.warning(
-                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), quoted_for_log(str(exc))
+                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), error_text_for_log(exc)
             )
             return {"error": "cdp_element_intelligence_failed", "selector": selector}
 
@@ -373,7 +373,7 @@ class CDPPassthrough:
             result = await self._cdp.send(method, params)
         except Exception as exc:
             # The method is one of the allowlist's; the error is the browser's.
-            logger.warning("cdp.raw_command error method=%r: %s", method, quoted_for_log(str(exc)))
+            logger.warning("cdp.raw_command error method=%r: %s", method, error_text_for_log(exc))
             return {"error": "cdp_command_failed", "method": method}
         if method.startswith("DOM."):
             _blank_typed_passwords(result)

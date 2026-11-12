@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ...browser_scripts import cap_title, cap_url
-from ...utils import quoted_for_log
+from ...utils import error_text_for_log
 from ..page_read import bounded
 
 logger = logging.getLogger(__name__)
@@ -160,7 +160,7 @@ class BrowserBotChallengeService:
                     visible_frames.append(src)
         except Exception as exc:
             # Page may be mid-navigation or already closed; check with what we have.
-            logger.debug("bot challenge probe could not read page content: %s", quoted_for_log(str(exc)))
+            logger.debug("bot challenge probe could not read page content: %s", error_text_for_log(exc))
 
         matched_frames = [_origin_and_path(src) for src in visible_frames if _frame_signal(src)]
         signal = _page_signal(url) or next(filter(None, map(_frame_signal, visible_frames)), None)
