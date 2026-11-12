@@ -775,6 +775,24 @@ async def test_a_placed_click_in_a_frame_that_runs_no_script_is_asked_by_the_tar
     locator.evaluate.assert_not_awaited()
 
 
+async def test_a_question_cancelled_as_it_gives_a_handle_back_still_gives_the_others_back() -> None:
+    # The question gave its handles back in one loop that let only an Exception by: a cancellation at the target's
+    # skipped the frame's above it, which the page then kept for good. Each is given back, and the cancellation is
+    # raised after.
+    asked: list[tuple[str, list[Any]]] = []
+    outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
+    up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))
+    target = _framed_node("the target", up, asked, record=[7.5, 8.25])
+    target.dispose = AsyncMock(side_effect=asyncio.CancelledError)
+    watch = SimpleNamespace(dispose=AsyncMock())
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    with pytest.raises(asyncio.CancelledError):
+        await BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, watch=watch, placed_by=BOX)
+    target.dispose.assert_awaited_once()
+    outer.dispose.assert_awaited_once()
+
+
 async def test_a_watch_the_targets_document_cannot_read_is_a_no() -> None:
     # The record is read in the target's own document, which the driver refuses for a handle of another (the
     # selector found an element in another document since, or the frame went to another page): a no, and not the

@@ -6,7 +6,7 @@ import logging
 import random
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -301,6 +301,23 @@ POINTER_CHECK_TIMEOUT_MS = 1000
 # placing and the question, for the record of where the pointer arrived to be taken (_receives_pointer_at's
 # ``placed_by``).
 PLACED_BOX_MOVED_PX = 0.5
+
+
+async def _each_on_its_own(steps: list[Callable[[], Awaitable[Any]]]) -> None:
+    """Run each step of a give-back (a handle's dispose, a watch's stop), whatever the one before did.
+
+    A step that fails is let go: what it gives back goes with the page. A cancellation (it is no Exception) at one
+    skipped the rest, which the page then kept for good: it is raised once every step has run.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    for step in steps:
+        try:
+            with contextlib.suppress(Exception):
+                await step()
+        except asyncio.CancelledError as exc:
+            cancelled = cancelled or exc
+    if cancelled is not None:
+        raise cancelled
 
 
 def _box_kept(box: dict[str, float] | None, placed_by: dict[str, float] | None) -> bool:
@@ -1477,15 +1494,7 @@ class BrowserActionService:
             steps += [lambda: watch.evaluate(_POINTER_WATCH_STOP_SCRIPT), watch.dispose]
         if target is not None:
             steps.append(target.dispose)
-        cancelled: asyncio.CancelledError | None = None
-        for step in steps:
-            try:
-                with contextlib.suppress(Exception):
-                    await step()
-            except asyncio.CancelledError as exc:
-                cancelled = cancelled or exc
-        if cancelled is not None:
-            raise cancelled
+        await _each_on_its_own(steps)
 
     @staticmethod
     async def _place_of(locator: Any, budget: _Budget) -> tuple[Any, dict[str, Any]]:
@@ -1611,9 +1620,7 @@ class BrowserActionService:
         except Exception:
             return False
         finally:
-            for handle in handles:
-                with contextlib.suppress(Exception):
-                    await handle.dispose()
+            await _each_on_its_own([handle.dispose for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         coords = await self.locator_center(locator)
