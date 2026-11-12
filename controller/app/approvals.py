@@ -1013,8 +1013,9 @@ class ApprovalStore:
         (a decision, a claim and a give-back change its status alone), so the action the store holds is written back,
         whatever it is: plain, to be keyed under the file's key by the next good start, as a record nothing wrote; or
         keyed under that key already, by a good process over the same store between this read and this write. In
-        this process it matches as before, both sides keyed in memory. A record the store does not hold yet (one
-        asked for in this process) is kept under this process's key.
+        this process a plain one matches as before, both sides keyed in memory; one keyed under the file's key
+        matches only in a process that holds that key. A record the store does not hold yet (one asked for in this
+        process) is kept under this process's key.
         """
         if not self._keyed_by_this_process_alone:
             return approval

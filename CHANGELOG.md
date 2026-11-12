@@ -224,7 +224,8 @@ All notable changes to auto-browser are documented here.
   scope or in an open session: it cannot tell the file's key from one that is gone, and the next start that reads
   the file matches again the rejections kept under it. Nor does such a start rewrite the stand-ins 1.17.0 stored,
   nor does a decision, a claim or a give-back of one there: it logs how many it left, they match their calls there
-  as before, and the next start that reads the file rewrites them with what was decided of them there (an
+  as before (a stand-in keyed under the file's key, by a start that read it, matches only where that key is held),
+  and the next start that reads the file rewrites them with what was decided of them there (an
   operator's rejection still stops the agent's own approval of the call, and an approval can still run until it
   expires). A file that holds no key is left as it is, to be removed by hand. After a
   downgrade to 1.17.0, an approval for a tool call that 1.18.0 stored or rewrote matches no call there (the call

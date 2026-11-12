@@ -466,7 +466,7 @@ class ListedOperatorTests(unittest.TestCase):
         "a short token's letters before a digit": ("dev2", "alice:dev", None, ["lists 'dev2', which no credential"]),
         # Every place the token stands is judged, not only the first: here the first is inside a word.
         "a short token as a word after its letters in a word": ("devx dev", "alice:dev", None, [kept_back(1)]),
-        # A letter or a digit of any script is one: beside the token, it makes the entry an id, named.
+        # A letter or a number of any script is one: beside the token, it makes the entry an id, named.
         "a short token's letters before a letter outside ASCII": (
             "dev\N{LATIN SMALL LETTER E WITH ACUTE}",
             "alice:dev",
@@ -478,6 +478,14 @@ class ListedOperatorTests(unittest.TestCase):
             "alice:dev",
             None,
             ["lists 'dev\N{ARABIC-INDIC DIGIT THREE}', which no credential"],
+        ),
+        # A Roman numeral, as a fraction, is a number that is neither a letter nor a digit (str.isalnum is true of
+        # it, isalpha and isdigit are not): a rule written with those two would take it for the end of a word.
+        "a short token's letters before a Roman numeral": (
+            "dev\N{ROMAN NUMERAL FOUR}",
+            "alice:dev",
+            None,
+            ["lists 'dev\N{ROMAN NUMERAL FOUR}', which no credential"],
         ),
         # A token of eight characters or fewer has no eight in a row short of itself, and cut short by one it was
         # named: six characters of seven, and seven of eight.
