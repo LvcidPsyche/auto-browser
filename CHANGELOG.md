@@ -331,7 +331,9 @@ All notable changes to auto-browser are documented here.
   quote the selector or the URL an agent gave: a post-action observation withheld or failed, a failure snapshot, a
   step that failed after an action's change, a refused page not moved off, an agent step's observe, a bot challenge's
   takeover, an upload's check. `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long
-  as the reply was. Each is now written quoted, a control character as its escape, and cut at 200 characters, as a
+  as the reply was, and the MCP transport's `requested unsupported protocol version` line the `protocolVersion` an
+  `initialize` sent, as long as the body: one wrote a line of 90,073 characters. Each is now written quoted, a
+  control character as its escape, and cut at 200 characters, as a
   route's hidden cause is (see Fixed). A REST route's `500` wrote the route's arguments as they came, a path the
   caller wrote among them, and the error by a traceback that prints its text as it is: it now writes, at ERROR, the
   route's message with its arguments quoted and cut, the error's class and its text quoted and cut, and every frame

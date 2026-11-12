@@ -23,7 +23,15 @@ from .models import McpToolCallRequest, OperatorIdentity
 from .safe_json_response import SafeJSONResponse, errors_to_repeat
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .tool_inputs import MAX_TOOL_RESULT_CHARS
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, capped_for_log, json_safe, utc_now, without_lone_surrogates
+from .utils import (
+    PRIVATE_FILE_MODE,
+    atomic_write_text,
+    capped_for_log,
+    json_safe,
+    quoted_for_log,
+    utc_now,
+    without_lone_surrogates,
+)
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -633,9 +641,10 @@ class McpHttpTransport:
             # downgrade exists to serve. The client compares this against what it
             # supports and disconnects itself if it cannot proceed.
             negotiated_version = CURRENT_PROTOCOL_VERSION
+            # Quoted and cut: the client's value, as long as the body.
             logger.info(
-                "MCP client requested unsupported protocol version %r; offering %s",
-                requested_version,
+                "MCP client requested unsupported protocol version %s; offering %s",
+                quoted_for_log(requested_version),
                 negotiated_version,
             )
 

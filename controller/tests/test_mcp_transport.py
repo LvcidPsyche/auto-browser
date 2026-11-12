@@ -412,6 +412,20 @@ class McpTransportTests(unittest.TestCase):
             (error["code"], error["message"]), (-32000, f"Forbidden Origin header: {long_origin[:200]}...")
         )
 
+    def test_an_unsupported_protocol_version_is_logged_quoted_and_cut(self) -> None:
+        # The INFO line repeated the client's protocolVersion with %r, as long as the body: "v\n" * 30,000 wrote one
+        # record of 90,073 characters. It is quoted and cut at 200 characters, and the counter-offer is as before.
+        with self.assertLogs("app.mcp_transport", level="INFO") as logged:
+            response = self._initialize_with_version("v\n" * 30_000)
+
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertEqual(response.json()["result"]["protocolVersion"], "2025-11-25")
+        (written,) = [record.getMessage() for record in logged.records if "protocol version" in record.getMessage()]
+        self.assertTrue(written.startswith("MCP client requested unsupported protocol version 'v\\nv\\n"), written[:80])
+        self.assertTrue(written.endswith("; offering 2025-11-25"), written[-80:])
+        self.assertEqual(written.splitlines(), [written])
+        self.assertLess(len(written), 400, written[:80])
+
     def test_sessions_survive_transport_restart_when_store_path_is_configured(self) -> None:
         session_id, protocol_version = self._initialize()
         init_response = self.client.post(
