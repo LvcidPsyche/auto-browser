@@ -49,6 +49,7 @@ from ._utils import (
     REFUSED_TAB,
     TAKEOVER_LINK_ROUTE,
     UNJUDGED_TAB_DETAIL,
+    log_hidden_cause,
     persona_file_errors,
     require_safe_segment,
     typed_route_errors,
@@ -283,9 +284,10 @@ def create_sessions_router(*, manager: Any, refusal_windows: TakeoverRefusalWind
             except AuthStateDecryptError as exc:
                 # A fixed text that says what to check; it names no path.
                 raise HTTPException(status_code=422, detail=str(exc)) from None
-            except RuntimeError:
-                # The caller gets the generic answer; the cause is here, and nowhere else.
-                logger.warning("create session failed", exc_info=True)
+            except RuntimeError as exc:
+                # The caller gets the generic answer; the cause is here, and nowhere else: as a hidden cause, since a
+                # traceback prints the error's text as it is (a persona's name or a URL the caller sent).
+                log_hidden_cause(logger, 409, exc, "create session failed")
                 raise HTTPException(status_code=409, detail="Conflict") from None
             return created
 
@@ -534,9 +536,9 @@ def create_sessions_router(*, manager: Any, refusal_windows: TakeoverRefusalWind
             except AuthStateDecryptError as exc:
                 # The fork's own stored state, read back by create_session: the fixed text POST /sessions answers.
                 raise HTTPException(status_code=422, detail=str(exc)) from None
-            except RuntimeError:
-                # The caller gets the generic answer; the cause is here, and nowhere else.
-                logger.warning("fork failed for session %s", session_id, exc_info=True)
+            except RuntimeError as exc:
+                # The caller gets the generic answer; the cause is here, and nowhere else, as create's is.
+                log_hidden_cause(logger, 409, exc, "fork failed for session %s", session_id)
                 raise HTTPException(status_code=409, detail="Conflict") from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes answer it. Every other PermissionError

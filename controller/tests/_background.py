@@ -38,12 +38,13 @@ class _Failures(logging.Handler):
         self.names: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.funcName != _FAILURE_REPORTER or not record.exc_info:
+        if record.funcName != _FAILURE_REPORTER:
             return
-        _type, exc, traceback = record.exc_info
-        # The first frame of a task's traceback is its coroutine's.
-        where = traceback.tb_frame.f_code.co_qualname if traceback is not None else record.getMessage()
-        self.names.append(f"{where} (raised {type(exc).__name__}: {exc})")
+        # The record names the error by its class and text, then the frames it was raised through, a line each, and
+        # carries no exc_info. The first frame of a task's traceback is its coroutine's.
+        failed, *frames = record.getMessage().splitlines()
+        where = frames[0].rsplit(" in ", 1)[-1] if frames else "?"
+        self.names.append(f"{where} (raised {failed.partition(' failed: ')[2] or failed})")
 
 
 _FAILURES = _Failures()

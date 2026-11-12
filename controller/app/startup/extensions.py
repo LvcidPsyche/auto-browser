@@ -13,6 +13,8 @@ import logging
 import shlex
 from pathlib import Path
 
+from ..utils import quoted_for_log
+
 logger = logging.getLogger(__name__)
 
 
@@ -281,7 +283,7 @@ async def on_session_created(app, session_id: str, page) -> None:
 
         app.state.cdp_sessions[session_id] = await CDPPassthrough.from_page(page)
     except Exception as exc:
-        logger.warning("on_session_created: cdp session failed — %s", exc)
+        logger.warning("on_session_created: cdp session failed — %s", quoted_for_log(str(exc)))
 
     try:
         settings = getattr(app.state, "settings", None)
@@ -293,7 +295,7 @@ async def on_session_created(app, session_id: str, page) -> None:
             await apply_fingerprint(page.context, config)
             logger.debug("on_session_created: stealth profile=%s applied", stealth_profile)
     except Exception as exc:
-        logger.warning("on_session_created: stealth fingerprint failed — %s", exc)
+        logger.warning("on_session_created: stealth fingerprint failed — %s", quoted_for_log(str(exc)))
 
 
 def _release_session_state(app, session_id: str) -> None:

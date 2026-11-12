@@ -24,7 +24,7 @@ from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
-from ...utils import UTC, run_to_completion, utc_now
+from ...utils import UTC, quoted_for_log, run_to_completion, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -79,7 +79,8 @@ def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
         reason = "the browser could not open it"
     # The operator's log keeps what the agent is not told: a failure that is no load failure is the one to look at.
     level = logging.INFO if reason != "the browser could not open it" else logging.WARNING
-    logger.log(level, "%s: the page did not load: %s", action, first_line[:300])
+    # The browser's first line, which can quote the page's URL: quoted, an ESC as its escape, and cut.
+    logger.log(level, "%s: the page did not load: %s", action, quoted_for_log(first_line))
     return BrowserActionError(
         _LOAD_FAILED[action].format(reason=reason), action=action, status_code=400, retryable=True
     )
@@ -444,7 +445,7 @@ class BrowserSessionService(SessionCreation):
                 raise
             logger.warning("the step to %s for session %s was cancelled on its own", label, session_id)
         except Exception as exc:
-            logger.warning("failed to %s for session %s: %s", label, session_id, exc)
+            logger.warning("failed to %s for session %s: %s", label, session_id, quoted_for_log(str(exc)))
         else:
             return True
         if failed_steps is not None:
@@ -738,7 +739,7 @@ class BrowserSessionService(SessionCreation):
             # have moved meanwhile, so its URL is shown as for any other read.
             return self.manager._shown_url(page), "", True
         except PlaywrightError as exc:
-            logger.debug("page snapshot failed for session %s: %s", session.id, exc)
+            logger.debug("page snapshot failed for session %s: %s", session.id, quoted_for_log(str(exc)))
             return "", "", False
         # And after the read: the page can move while its title is read, and come back.
         if read.moved():

@@ -83,7 +83,8 @@ async def network_register_hook(session_id: str, body: NetworkHookRequest, reque
     # Hooks via API are logged-only (no external callback for security)
 
     async def _log_hook(req: dict):
-        logger.info("network.hook pattern=%r matched url=%r", pattern, req.get("url"))
+        # The caller's pattern and the page's URL, each as long as its maker likes: quoted and cut.
+        logger.info("network.hook pattern=%s matched url=%s", quoted_for_log(pattern), quoted_for_log(req.get("url")))
 
     inspector.register_hook(pattern, _log_hook)
     return {"status": "registered", "pattern": pattern}

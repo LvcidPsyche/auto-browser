@@ -111,7 +111,7 @@ from ..tool_inputs import (
     VisionFindInput,
     WaitForSelectorInput,
 )
-from ..utils import json_key, json_safe
+from ..utils import json_key, json_safe, quoted_for_log
 from .drag import drag_drop
 from .packs import register_all
 from .previews import preview_arguments
@@ -224,7 +224,7 @@ def _json_safe_detail(detail: dict[str, Any]) -> dict[str, Any]:
         try:
             safe[json_key(key)] = json_safe(value)
         except (TypeError, ValueError, RecursionError) as exc:
-            logger.warning("left %r out of an error's detail: %s", key, exc)
+            logger.warning("left %s out of an error's detail: %s", quoted_for_log(key), quoted_for_log(str(exc)))
     return safe
 
 

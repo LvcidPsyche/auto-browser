@@ -11,7 +11,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from .artifacts import SessionArtifactService
 from .network_inspector import url_origin
-from .utils import spawn_background_task, utc_now
+from .utils import quoted_for_log, spawn_background_task, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class DownloadCaptureService:
                 failure = await download.failure()
         except Exception as exc:
             # The record says only that the save failed; why (a disk error, the browser's word) is the operator's.
-            logger.warning("could not save a download of session %s: %s", session.id, exc)
+            logger.warning("could not save a download of session %s: %s", session.id, quoted_for_log(str(exc)))
             failure = "download_save_failed"
         except BaseException as exc:
             # Whatever ended the save, the reserved name would count toward the cap for good.
@@ -76,9 +76,9 @@ class DownloadCaptureService:
                 # open handle refuses the delete. The exception that ended the save is what goes on.
                 logger.warning(
                     "could not delete the partial download %s of session %s: %s",
-                    destination.name,
+                    quoted_for_log(destination.name),  # the name the page suggested
                     session.id,
-                    unlink_error,
+                    quoted_for_log(str(unlink_error)),
                 )
             if isinstance(exc, asyncio.CancelledError) and _loop_is_running():
                 # Cancelled mid-save: the browser's copy would stay until its context closes. That delete goes on
@@ -125,7 +125,7 @@ class DownloadCaptureService:
             await download.cancel()
         except PlaywrightError as exc:
             # Only capture() saves a download, so nothing is kept either way.
-            logger.debug("could not cancel a refused download for session %s: %s", session.id, exc)
+            logger.debug("could not cancel a refused download for session %s: %s", session.id, quoted_for_log(str(exc)))
         record = {
             "id": uuid4().hex[:12],
             "timestamp": utc_now(),
@@ -146,7 +146,9 @@ class DownloadCaptureService:
             try:
                 await download.cancel()
             except PlaywrightError as exc:
-                logger.debug("could not cancel a refused download for session %s: %s", session.id, exc)
+                logger.debug(
+                    "could not cancel a refused download for session %s: %s", session.id, quoted_for_log(str(exc))
+                )
         await self._discard(download)
         record = {
             "id": uuid4().hex[:12],
@@ -172,7 +174,7 @@ class DownloadCaptureService:
         try:
             await download.delete()
         except PlaywrightError as exc:
-            logger.debug("could not delete the browser's copy of a download: %s", exc)
+            logger.debug("could not delete the browser's copy of a download: %s", quoted_for_log(str(exc)))
 
     @staticmethod
     def _saved_count(directory: Path) -> int:

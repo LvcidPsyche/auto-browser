@@ -397,7 +397,8 @@ class BrowserActionService:
             spawn_background_task(self.manager.window_births.close_unreported(session))
             challenge = await self.manager._check_bot_challenge(session)
             if challenge:
-                logger.warning("bot challenge detected after navigation: %s", challenge)
+                # The page's title and URLs, as long as ten frames' make them: quoted and cut.
+                logger.warning("bot challenge detected after navigation: %s", quoted_for_log(challenge))
                 try:
                     await self.manager.request_human_takeover(
                         session.id,
@@ -1047,7 +1048,7 @@ class BrowserActionService:
             await page.wait_for_load_state("networkidle", timeout=min(self.manager.settings.action_timeout_ms, 5000))
         except Exception as exc:
             # Busy pages legitimately never reach networkidle; proceed anyway.
-            logger.debug("settle: networkidle not reached: %s", exc)
+            logger.debug("settle: networkidle not reached: %s", quoted_for_log(str(exc)))
         await page.wait_for_timeout(250)
 
     async def run_action(

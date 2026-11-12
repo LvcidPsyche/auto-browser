@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..browser_scripts import AB_ATTR_MAX, AB_MAX_ATTRIBUTES, ELEMENT_ASSETS_SCRIPT, cap_text, cap_url
+from ..utils import quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,10 @@ class CDPPassthrough:
             async with self._css_agents():
                 return await self._read_element(selector)
         except Exception as exc:
-            logger.warning("cdp.element_intelligence error selector=%r: %s", selector, exc)
+            # The selector is the caller's, and the error the browser's: quoted and cut.
+            logger.warning(
+                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), quoted_for_log(str(exc))
+            )
             return {"error": "cdp_element_intelligence_failed", "selector": selector}
 
     async def _read_element(self, selector: str) -> dict[str, Any]:
@@ -346,7 +350,9 @@ class CDPPassthrough:
             }
 
         except Exception as exc:
-            logger.warning("cdp.element_intelligence error selector=%r: %s", selector, exc)
+            logger.warning(
+                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), quoted_for_log(str(exc))
+            )
             return {"error": "cdp_element_intelligence_failed", "selector": selector}
 
     async def raw_cdp_command(self, method: str, params: dict[str, Any] = None) -> dict[str, Any]:
@@ -366,7 +372,8 @@ class CDPPassthrough:
                     return await self._cdp.send(method, params)
             result = await self._cdp.send(method, params)
         except Exception as exc:
-            logger.warning("cdp.raw_command error method=%r: %s", method, exc)
+            # The method is one of the allowlist's; the error is the browser's.
+            logger.warning("cdp.raw_command error method=%r: %s", method, quoted_for_log(str(exc)))
             return {"error": "cdp_command_failed", "method": method}
         if method.startswith("DOM."):
             _blank_typed_passwords(result)

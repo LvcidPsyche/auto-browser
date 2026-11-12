@@ -329,6 +329,29 @@ def test_an_invalid_envelopes_line_is_cut_whatever_the_envelope_holds(mesh, capl
     assert len(line) < 500
 
 
+def test_an_error_the_receive_route_meets_is_one_record_with_the_peers_text_quoted_and_cut(
+    mesh, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The route takes no credential, and wrote what it did not expect by logger.exception: a traceback that prints
+    # the error's text as it is, and the error can quote what the peer sent. A line break, an ESC, 5,000 characters.
+    peers_text = "tool:x\nWARNING:app.main:forged by a peer\x1b[2J" + "x" * 5000
+    failed = AsyncMock(side_effect=RuntimeError("no grant for " + peers_text))
+    monkeypatch.setattr(mesh.app.state.delegation_manager, "receive_inbound", failed)
+    caplog.set_level(logging.INFO)
+
+    response = _post_unsigned(mesh, mesh.server.node_id)
+
+    assert (response.status_code, response.json()) == (500, {"detail": "Mesh receive failed"})
+    (record,) = [record for record in caplog.records if record.name == "app.routes.extensions.mesh"]
+    assert (record.levelno, record.exc_info) == (logging.ERROR, None)
+    first, *where = record.getMessage().splitlines()
+    assert first.startswith("mesh.receive failed: answered 500 for RuntimeError: 'no grant for tool:x\\nWARNING:"), (
+        first
+    )
+    assert "\x1b" not in record.getMessage() and len(first) < 400, first[:120]
+    assert where and all(line.startswith("  ") and "forged" not in line for line in where), where
+
+
 def test_the_two_approval_lines_are_one_line_each(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """The shipped start passes no approval handler, so these two are reached only by a caller of the class."""
     server, legit = NodeIdentity(tmp_path / "server"), NodeIdentity(tmp_path / "legit")

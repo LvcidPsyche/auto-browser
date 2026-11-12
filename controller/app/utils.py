@@ -11,15 +11,17 @@ import re
 import stat
 import tempfile
 import time
+import traceback
 import uuid
 from collections import OrderedDict
 from collections.abc import Coroutine
 from datetime import date, datetime, timezone
 from datetime import time as time_of_day
 from pathlib import Path, PurePath
+from types import TracebackType
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,88 @@ def quoted_for_log(value: object) -> str:
         return quoted if len(text) <= MAX_LOGGED_PATH_CHARS else quoted + "..."
     except Exception:
         return f"<a {type(value).__name__} that could not be printed>"
+
+
+# Of an error a record names by its frames (a route's 500, a worker's crash), the outermost (where it was caught, the
+# caller's own line, the call it made: which path led there) and those nearest the raise (where, and the calls just
+# before it), with the count of those between: a record a few lines long however deep the error was raised. Ten such
+# frames reach from a service call into the library that raised; a frame says no more the hundredth time it repeats.
+LOGGED_OUTERMOST_FRAMES = 3
+LOGGED_NEAREST_FRAMES = 10
+# The errors one was raised from or while handling, each named on a line, nearest first, as a traceback names them;
+# past these, how many more there were.
+LOGGED_CHAINED_ERRORS = 3
+
+
+def error_text_for_log(error: BaseException) -> str:
+    """The error's own text for the log: on one line, cut, and never the values a model was given."""
+    try:
+        if isinstance(error, ValidationError):
+            # pydantic prints the value of each field it refused, and a body holds a webhook key or a password:
+            # which field and what kind of refusal, no more.
+            refused = error.errors(include_url=False, include_context=False, include_input=False)
+            fields = "; ".join(f"{'.'.join(str(part) for part in entry['loc'])}: {entry['type']}" for entry in refused)
+            text = f"{error.error_count()} refused by {error.title}: {fields}"
+        else:
+            text = str(error)
+        cut = "" if len(text) <= MAX_LOGGED_PATH_CHARS else f" (cut from {len(text)} characters)"
+        return quoted_for_log(text) + cut
+    except Exception as failed:
+        return f"<its text could not be made: {type(failed).__name__}>"
+
+
+def error_lines_for_log(
+    error: BaseException, *, outermost: int = LOGGED_OUTERMOST_FRAMES, nearest: int = LOGGED_NEAREST_FRAMES
+) -> str:
+    """Where ``error`` was raised, and what it chained, for the lines under a record's message.
+
+    In place of the traceback exc_info writes, which prints each error's text as it is (a page's, a caller's): a
+    frame a line (the file, the line and the function), the ``outermost`` and the ``nearest`` with the count of
+    those between, or with no outermost the nearest alone; then each error it was raised from or while handling.
+    A frame as the interpreter prints it is two lines on Python 3.12 and, from 3.13, as many as its call is written
+    over, so a record would be as long as the Python it ran on made it.
+    """
+    return "\n".join([*_frame_lines(error.__traceback__, outermost, nearest), *_chained_errors(error)])
+
+
+def _frame_line(frame: traceback.FrameSummary) -> str:
+    return f"  {frame.filename}:{frame.lineno} in {frame.name}"
+
+
+def _frame_lines(tb: TracebackType | None, outermost: int, nearest: int) -> list[str]:
+    if outermost == 0:
+        return [_frame_line(frame) for frame in traceback.extract_tb(tb, limit=-nearest)]
+    total = sum(1 for _ in traceback.walk_tb(tb))
+    if total <= outermost + nearest:
+        return [_frame_line(frame) for frame in traceback.extract_tb(tb)]
+    first = [_frame_line(frame) for frame in traceback.extract_tb(tb, limit=outermost)]
+    last = [_frame_line(frame) for frame in traceback.extract_tb(tb, limit=-nearest)]
+    return [*first, f"  ... {total - outermost - nearest} frames left out", *last]
+
+
+def _chained_errors(error: BaseException) -> list[str]:
+    """A line for each error ``error`` was raised from (__cause__) or while handling (__context__, unless the raise
+    suppressed it), as a traceback names them: the nearest LOGGED_CHAINED_ERRORS by class and text, quoted and cut,
+    and how many more there were. A record that left them out told a wrapped error only by its wrapper."""
+    lines: list[str] = []
+    seen, more = {id(error)}, 0
+    while True:
+        if error.__cause__ is not None:
+            how, error = "from", error.__cause__
+        elif error.__context__ is not None and not error.__suppress_context__:
+            how, error = "while handling", error.__context__
+        else:
+            break
+        if id(error) in seen:  # a chain that comes back to an error it named, which a traceback stops at too
+            break
+        seen.add(id(error))
+        if len(lines) < LOGGED_CHAINED_ERRORS:
+            lines.append(f"  raised {how} {type(error).__name__}: {error_text_for_log(error)}")
+        else:
+            more += 1
+    if more:
+        lines.append(f"  and {more} more before them")
+    return lines
 
 
 # A caller refused ahead of the rate limiter, or one that needs no credential to be refused, can be refused without
@@ -370,4 +454,11 @@ def _log_background_task_exception(task: asyncio.Task[Any]) -> None:
         return
     exc = task.exception()
     if exc is not None:
-        logger.error("background task %s failed: %s", task.get_name(), exc, exc_info=exc)
+        # Not by exc_info, which prints the error's text as it is: a page's, in a Playwright error.
+        logger.error(
+            "background task %s failed: %s: %s\n%s",
+            task.get_name(),
+            type(exc).__name__,
+            error_text_for_log(exc),
+            error_lines_for_log(exc),
+        )

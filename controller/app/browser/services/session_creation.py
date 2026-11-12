@@ -225,7 +225,7 @@ class SessionCreation:
                 try:
                     await self.manager._session_created_hook(session_id, page)
                 except Exception as exc:
-                    logger.warning("session created hook failed for %s: %s", session_id, exc)
+                    logger.warning("session created hook failed for %s: %s", session_id, quoted_for_log(str(exc)))
 
             if start_url:
                 # The lock keeps the page guard (diagnostics) from moving the page to

@@ -415,7 +415,9 @@ class BrowserActionPipeline:
                 await context.manager._settle(session.page)
                 spawn_background_task(context.manager.window_births.close_unreported(session))
         except Exception as exc:
-            logger.debug("failed to roll back blocked action navigation for session %s: %s", session.id, exc)
+            logger.debug(
+                "failed to roll back blocked action navigation for session %s: %s", session.id, quoted_for_log(str(exc))
+            )
         await self._leave_disallowed_page(context)
         failed = await self._failure_snapshot(context, label=f"blocked-{context.action_name}")
         await self._record_terminal_event(

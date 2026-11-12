@@ -8,6 +8,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from .._utils import internal_error
+
 logger = logging.getLogger(__name__)
 
 mesh_router = APIRouter(prefix="/mesh", tags=["mesh"])
@@ -80,8 +82,9 @@ async def mesh_receive(request: Request):
     except (DelegationRejected, DelegationReplayError):
         raise HTTPException(403, "Mesh delegation rejected")
     except Exception:
-        logger.exception("mesh.receive error")
-        raise HTTPException(500, "Mesh receive failed")
+        # As a route's 500 is logged: the route takes no credential, and a traceback prints the error's text as it
+        # is, which can quote what the peer sent.
+        raise internal_error(logger, "mesh.receive failed", detail="Mesh receive failed") from None
 
     identity = app.state.mesh_identity
     reply_payload = response.model_dump(mode="json")

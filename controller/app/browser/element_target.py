@@ -305,14 +305,14 @@ class ElementTarget:
             await handle.dispose()
         except PlaywrightError as exc:
             # The page went during the upload; its handles went with it.
-            logger.debug("element %s: upload handle not disposed: %s", self.element_id, exc)
+            logger.debug("element %s: upload handle not disposed: %s", self.element_id, quoted_for_log(str(exc)))
 
     async def _unmark(self, nonce: str) -> None:
         try:
             await self._world.call(self._page, UPLOAD_UNMARK_SCRIPT, self.element_id, nonce, effect=IDEMPOTENT)
         except PlaywrightError as exc:
             # The page went (closed, crashed): the marker went with it.
-            logger.debug("element %s: marker not removed: %s", self.element_id, exc)
+            logger.debug("element %s: marker not removed: %s", self.element_id, quoted_for_log(str(exc)))
         except BrowserActionError as exc:
             if exc.code != PAGE_NOT_RESPONDING:
                 raise

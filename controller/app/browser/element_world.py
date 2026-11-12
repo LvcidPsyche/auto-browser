@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import Error as PlaywrightError
 
 from ..action_errors import PAGE_NOT_RESPONDING, BrowserActionError
-from ..utils import spawn_background_task
+from ..utils import quoted_for_log, spawn_background_task
 
 if TYPE_CHECKING:
     from playwright.async_api import CDPSession, Page
@@ -259,12 +259,12 @@ class PageWorld:
                     code=_CHANGE_UNCONFIRMED,
                     retryable=False,
                 ) from exc
-            logger.debug("element ids: calling the world again after: %s", exc.message)
+            logger.debug("element ids: calling the world again after: %s", quoted_for_log(exc.message))
             return await self._call(page, declaration, args, timeout_ms, setup=setup, keep_session=keep_session)
         except PlaywrightError as exc:
             if effect not in _SENT_AGAIN or not (_NO_FRAME in exc.message or session_gone(exc)):
                 raise
-            logger.debug("element ids: calling the world again after: %s", exc.message)
+            logger.debug("element ids: calling the world again after: %s", quoted_for_log(exc.message))
             return await self._call(page, declaration, args, timeout_ms, setup=setup, keep_session=keep_session)
 
     async def _call(

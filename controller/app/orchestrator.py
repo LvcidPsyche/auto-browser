@@ -14,7 +14,7 @@ from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
-from .utils import quoted_for_log
+from .utils import error_lines_for_log, error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +137,16 @@ class BrowserOrchestrator:
             # This module logged nothing at all, so a crashing provider adapter,
             # a Playwright error and a JSON parse failure were indistinguishable
             # — the caller got the constant string "Agent step failed" and there
-            # was no server-side traceback anywhere to diagnose from.
-            logger.exception("agent step failed for session %s (provider=%s)", session_id, provider_name)
+            # was no server-side traceback anywhere to diagnose from. Its frames, and not by exc_info, which prints
+            # the error's text as it is: a page's, in a Playwright error, or a provider's answer.
+            logger.error(
+                "agent step failed for session %s (provider=%s): %s: %s\n%s",
+                session_id,
+                provider_name,
+                type(exc).__name__,
+                error_text_for_log(exc),
+                error_lines_for_log(exc),
+            )
             if isinstance(exc, ProviderAPIError):
                 error_code: int | None = exc.status_code or (503 if exc.retryable else 502)
             elif isinstance(exc, httpx.HTTPStatusError):

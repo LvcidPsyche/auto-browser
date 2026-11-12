@@ -14,6 +14,7 @@ from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...artifacts import in_thread_writing
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
 from ...pii_scrub import pii_words
+from ...utils import quoted_for_log
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
 
@@ -576,7 +577,7 @@ class BrowserObservationService:
         try:
             snapshot = await page.aria_snapshot(mode="ai", timeout=ARIA_SNAPSHOT_TIMEOUT_MS)
         except Exception as exc:
-            logger.debug("failed to capture accessibility snapshot: %s", exc)
+            logger.debug("failed to capture accessibility snapshot: %s", quoted_for_log(str(exc)))
             return unavailable_outline("accessibility_snapshot_unavailable")
         # A large page's snapshot runs to megabytes (3 MB, ~0.25 s to parse, for
         # 20,000 links), so it is parsed off the event loop other sessions share.

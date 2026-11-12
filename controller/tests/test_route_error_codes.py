@@ -296,11 +296,12 @@ def test_a_runtime_error_answered_409_is_logged_with_its_cause(
     with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(route, RuntimeError("boom-cause")):
         response = _call(client, route)
     assert (response.status_code, response.json()) == (409, {"detail": "Conflict"})
-    logged = [r for r in caplog.records if r.name == "app.routes.sessions" and r.exc_info]
+    logged = [r for r in caplog.records if r.name == "app.routes.sessions" and "answered 409 for" in r.getMessage()]
     assert logged, "the route answered 409 without logging the RuntimeError"
-    assert logged[0].exc_info[0] is RuntimeError
     assert logged[0].levelno == logging.WARNING
-    assert "boom-cause" in str(logged[0].exc_info[1])
+    # As a hidden cause, by its class and text in the record, and not by exc_info.
+    assert ": answered 409 for RuntimeError: 'boom-cause'" in logged[0].getMessage()
+    assert logged[0].exc_info is None
 
 
 @pytest.mark.parametrize("route", [r for r in ALL_ROUTES if r.value_error_is_generic], ids=lambda r: r.id)
@@ -473,6 +474,29 @@ def test_unexpected_error_is_logged_and_answers_generically(
         # The error by its class and its text, quoted, in the record itself (internal_error): not by exc_info.
         assert ": answered 500 for RuntimeError: 'boom at /srv/secret/path'" in logged[0].getMessage()
         assert logged[0].exc_info is None
+
+
+@pytest.mark.parametrize(
+    "route", [route for route in ALL_ROUTES if route.method in ("create_session", "fork_session")], ids=lambda r: r.id
+)
+def test_a_create_or_fork_conflict_is_logged_as_a_hidden_cause_and_not_by_its_traceback(
+    client: TestClient, route: Route, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The RuntimeError behind the 409 was written by exc_info, which prints its text as it is: a persona's name or
+    # a URL the caller sent among it. A line break, an ESC and 5,000 characters.
+    theirs = "persona p\nWARNING:app.main:forged by a caller\x1b[2J" + "x" * 5000
+    with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(route, RuntimeError(theirs)):
+        response = _call(client, route)
+
+    assert (response.status_code, response.json()) == (409, {"detail": "Conflict"})
+    (logged,) = _warnings_of(caplog, "app.routes.sessions")
+    assert logged.exc_info is None
+    first, *where = logged.getMessage().splitlines()
+    assert ": answered 409 for RuntimeError: 'persona p\\nWARNING:app.main:forged by a caller\\x1b[2Jxxx" in first, (
+        first
+    )
+    assert "\x1b" not in logged.getMessage() and len(first) < 500, first[:120]
+    assert where and all(line.startswith("  ") and "forged" not in line for line in where), where
 
 
 # The three errors a route answers with a fixed text. A server-side fault raises them too (a state file that no longer

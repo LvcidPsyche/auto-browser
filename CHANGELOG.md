@@ -248,7 +248,15 @@ All notable changes to auto-browser are documented here.
   class and text, the three outermost frames and the ten nearest the raise, a line each, with the count of those
   between, and each error it was raised from or while handling, by its class and text (see Security): match on
   `answered 500 for` instead. The record carries no `exc_info`, so a handler that reads the exception from it (an
-  error tracker's logging integration, a structured formatter) gets the message alone.
+  error tracker's logging integration, a structured formatter) gets the message alone. So are, in the same form,
+  `POST /mesh/receive`'s (`mesh.receive failed: answered 500 for`, where it was `mesh.receive error`), the ERROR of
+  an agent job worker that crashed on a job (`agent job worker ... crashed on`), of an agent step that failed
+  (`agent step failed for session`) and of a background task that failed (`background task ... failed`), and the
+  WARNING behind a `409 Conflict` of `POST /sessions` and `POST /sessions/{id}/fork` (`answered 409 for`). This is
+  the record of the `500 Internal error` a route answers where it catches the error (nearly every route under
+  `/sessions`, and those of `/agent/jobs`, `/approvals` and `/audit/events` among them): an error a route does not
+  catch (a cron route's, a proxy persona's read) still reaches Starlette, which answers a plain-text
+  `Internal Server Error`, and the server logs its traceback, as before.
 - **A controller with no token whose `CONTROLLER_ALLOWED_HOSTS` holds a wildcard no longer starts.** With
   `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, an entry `*`, `*.example.com` or any other wildcard stops startup
   with a message that names it (see Security). Set a token (`API_BEARER_TOKEN`, or remove
@@ -332,7 +340,14 @@ All notable changes to auto-browser are documented here.
   closed while it was moved off. Several lines wrote a Playwright error's text, which can run over several lines and
   quote the selector or the URL an agent gave: a post-action observation withheld or failed, a failure snapshot, a
   step that failed after an action's change, a refused page not moved off, an agent step's observe, a bot challenge's
-  takeover, an upload's check, a CDP route's attach to a session's active tab.
+  takeover, an upload's check, a CDP route's attach to a session's active tab, a CDP command and an element read
+  (the latter with the caller's selector, written whole), a download that was not saved, cancelled or deleted (and
+  the name the page gave one whose partial file stayed), a drag's release and scroll watch, the network inspector's
+  own errors (and a hook's pattern, with the page's URL it matched, both written whole, and the origin of a URL
+  whose query it could not scrub), a session's close steps, a page snapshot, a page the controller loaded that did
+  not load, a page's settle, an accessibility snapshot, a bot challenge's probe and the challenge it found, a
+  session's extension hooks, an element's upload and marker clean-up, a page call sent again, a blocked action's
+  roll-back, an error answer's entry that was left out.
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,
@@ -340,14 +355,20 @@ All notable changes to auto-browser are documented here.
   puts the cut mark after the closing quote (`'xyyy'...`): inside it (`'xyyy...'`), the mark read as the text's own
   last characters. The errors in `artifact lookup failed` and `mesh.delegation.envelope_invalid`, which quote the
   name asked for or the envelope's field, were cut as they came, so the cut took their closing quote: each is
-  quoted now too. A REST route's `500` wrote the route's arguments as they came, a path the caller wrote among them,
-  and the error by a traceback that prints its text as it is: it now writes, at ERROR, the route's message with its
-  arguments quoted and cut, the error's class and its text quoted and cut, the three outermost frames and the ten
-  nearest the raise, a line each, with the count of those between (a `RecursionError`'s record was a thousand
-  lines, one a frame), and the first three errors it was raised from or while handling, by class and text, quoted
-  and cut, with the count of the rest (see the upgrade note). The record of a route's hidden cause names those
-  errors too. An error's text in the controller's other lines (a failed download, a CDP command, a drag, the network
-  inspector's own errors) is still written as it is.
+  quoted now too. A REST route's `500 Internal error` (that of a route that catches the error; see the upgrade
+  note) wrote the route's arguments as they came, a path the caller wrote among them, and the error by a traceback
+  that prints its text as it is: it now writes, at ERROR, the route's message with its arguments quoted and cut, the
+  error's class and its text quoted and cut, the three outermost frames and the ten nearest the raise, a line each,
+  with the count of those between (a `RecursionError`'s record was a thousand lines, one a frame), and the first
+  three errors it was raised from or while handling, by class and text, quoted and cut, with the count of the rest
+  (see the upgrade note). The record of a route's hidden cause names those errors too. So is written what
+  `POST /mesh/receive`, which takes no credential, did not expect, where it wrote a traceback (the error can quote
+  what the peer sent); and so are an agent job worker's crash, an agent step that failed and a background task
+  that failed, each a traceback, which prints a Playwright error's text as it is. The `RuntimeError` behind a
+  `409 Conflict` of `POST /sessions` and of a fork, written by its traceback too (a persona's name or a URL the
+  caller sent among it), is written as a route's hidden cause. An error's text under a traceback the controller
+  still writes elsewhere (an MCP tool's or an agent job's unexpected error, a readiness check that failed) is
+  written as it is.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:

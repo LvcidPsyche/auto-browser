@@ -21,7 +21,15 @@ from .models import (
     OperatorIdentity,
 )
 from .session_ownership import acting_as
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_json, record_path, utc_now
+from .utils import (
+    PRIVATE_FILE_MODE,
+    atomic_write_text,
+    error_lines_for_log,
+    error_text_for_log,
+    record_json,
+    record_path,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -634,7 +642,15 @@ class AgentJobQueue:
                             await task
                     raise
             except Exception as exc:
-                logger.exception("agent job worker %s crashed on %s: %s", worker_index, job_id, exc)
+                # Not by exc_info, which prints the error's text as it is: a page's, in a Playwright error.
+                logger.error(
+                    "agent job worker %s crashed on %s: %s: %s\n%s",
+                    worker_index,
+                    job_id,
+                    type(exc).__name__,
+                    error_text_for_log(exc),
+                    error_lines_for_log(exc),
+                )
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():
                     # Told to stop, and the job failed as it stopped (its record could not be written): stop anyway,

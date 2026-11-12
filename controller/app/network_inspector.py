@@ -127,7 +127,7 @@ class NetworkInspector:
             self._page.remove_listener("requestfailed", self._on_request_failed)
             self._page.remove_listener("requestfinished", self._on_request_finished)
         except Exception as exc:
-            logger.debug("network inspector listener removal failed (page likely closed): %s", exc)
+            logger.debug("network inspector listener removal failed (page likely closed): %s", quoted_for_log(str(exc)))
         self._page = None
         # Drain pending entries — requestfailed/requestfinished will never fire after detach
         spawn_background_task(self._flush_pending())
@@ -185,7 +185,9 @@ class NetworkInspector:
                 try:
                     await fn(entry)
                 except Exception as exc:
-                    logger.warning("network inspector hook %r raised: %s", pattern, exc)
+                    logger.warning(
+                        "network inspector hook %s raised: %s", quoted_for_log(pattern), quoted_for_log(str(exc))
+                    )
 
     # ── Listeners (synchronous wrappers → schedule async work) ─────────────
 
@@ -295,7 +297,7 @@ class NetworkInspector:
             try:
                 request._pii_entry_id = req_id  # type: ignore[attr-defined]
             except Exception as exc:
-                logger.debug("could not tag request object for %s: %s", quoted_for_log(url), exc)
+                logger.debug("could not tag request object for %s: %s", quoted_for_log(url), quoted_for_log(str(exc)))
 
             untracked: list[dict[str, Any]] = []
             async with self._lock:
@@ -316,7 +318,7 @@ class NetworkInspector:
                 await self._fire_hooks(stale)
 
         except Exception as exc:
-            logger.debug("network inspector request error: %s", exc)
+            logger.debug("network inspector request error: %s", quoted_for_log(str(exc)))
 
     def _request_content(self, request: "Request", method: str) -> tuple[str, bool, str | None, dict[str, str]]:
         """(scrubbed URL, whether anything was redacted, request body, masked headers) of a request."""
@@ -399,7 +401,7 @@ class NetworkInspector:
                 entry["pii_redacted"] = pii_hit
 
         except Exception as exc:
-            logger.debug("network inspector response error: %s", exc)
+            logger.debug("network inspector response error: %s", quoted_for_log(str(exc)))
 
     async def _handle_request_failed(self, request: "Request") -> None:
         try:
@@ -420,7 +422,7 @@ class NetworkInspector:
             await self._fire_hooks(entry)
 
         except Exception as exc:
-            logger.debug("network inspector requestfailed error: %s", exc)
+            logger.debug("network inspector requestfailed error: %s", quoted_for_log(str(exc)))
 
     async def _handle_request_finished(self, request: "Request") -> None:
         try:
@@ -438,7 +440,7 @@ class NetworkInspector:
             await self._fire_hooks(entry)
 
         except Exception as exc:
-            logger.debug("network inspector requestfinished error: %s", exc)
+            logger.debug("network inspector requestfinished error: %s", quoted_for_log(str(exc)))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -546,7 +548,9 @@ def scrub_url(url: str, scrubber: "PiiScrubber | None", max_bytes: int) -> tuple
     try:
         scrubbed, hits = scrubber.url(head if fragment_too_long else url)
     except Exception as exc:
-        logger.warning("network inspector could not scrub the query of %s: %s", url_origin(url), type(exc).__name__)
+        logger.warning(
+            "network inspector could not scrub the query of %s: %s", quoted_for_log(url_origin(url)), type(exc).__name__
+        )
         return path, True
     if not isinstance(scrubbed, str):
         return path, True
