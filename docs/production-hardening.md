@@ -239,8 +239,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     is Playwright's alone to check): a target the page has taken out of its layout by then (`hidden`,
     `display: none`), made invisible, or put something over is not pressed (`target_moved`, retryable; one that
     has left the page, or was made invisible before the pointer was placed, is waited for, as a click waits, and
-    ends the click when its time does), and neither is one with no box of its own, whose children are laid out
-    in its place (`display: contents`): where a press on it would land cannot be read, so the action answers
+    ends the click when its time does; a page that does not answer the question within a second ends the click
+    as a timeout, as at any step before it), and neither is one with no box of its own, whose children are laid
+    out in its place (`display: contents`): where a press on it would land cannot be read, so the action answers
     `target_has_no_box`, and the agent names an element inside it. A `type`, whose press only puts the caret,
     focuses its field with no press wherever that press ends as `target_moved`, here and below, as where
     Playwright refuses its own click; a field that has left the page is then waited for once more, up to

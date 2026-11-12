@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from playwright.async_api import ElementHandle, Frame, Locator
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import PAGE_NOT_RESPONDING, BrowserActionError
 from app.approvals import ApprovalRequiredError, held_for_execution
@@ -1877,6 +1878,39 @@ async def test_a_node_inside_a_button_or_a_link_is_pressed_where_another_piece_o
         assert await _title(env, session_id) == "PRESSED"
         # The shape the fixture stands for: the pointer at the middle of the node does not find the node.
         assert len(placed) == 1
+
+
+async def test_a_placed_click_whose_page_is_busy_at_its_last_question_ends_as_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Where the pointer was placed the page is asked once more whether the pointer finds the target, within a second.
+    # A page busy then did not answer, and the click ended as target_moved ("the pointer does not find the
+    # target") where a page busy one step earlier ended it as the timeout it is. The click has time to spare here,
+    # so a page that does not answer is told from a no by where it happens and not by what the click has left.
+    real = actions_module.BrowserActionService._receives_pointer_at
+    busy: dict[str, Any] = {}
+
+    async def asked_of_a_busy_page(*given: Any, **named: Any) -> Any:
+        if named.get("placed"):
+            async with busy["page"].expect_console_message(lambda message: message.text == "spinning"):
+                await busy["page"].evaluate("() => { setTimeout(() => { console.log('spinning'); spin(2500); }, 0); }")
+        return await real(*given, **named)
+
+    monkeypatch.setattr(actions_module.BrowserActionService, "_receives_pointer_at", staticmethod(asked_of_a_busy_page))
+    spin = (
+        "<script>window.spin = (ms) => { const end = performance.now() + ms; while (performance.now() < end) {} };"
+        "</script>"
+    )
+    async with browser_env(tmp_path, {"/": LAID_OVER_PAGE + LAID_OVER["a ::before over a button"] + spin}) as env:
+        # Time enough that the question's second is not what is left of the click.
+        env.manager.settings.action_timeout_ms = 8000
+        session_id = await env.create("/")
+        busy["page"] = env.page(session_id)
+        with pytest.raises(BrowserActionError) as ended:
+            await env.manager.execute_decision(session_id, _click("read", selector="#t"))
+        assert (ended.value.code, ended.value.retryable) == ("browser_action_failed", True)
+        assert isinstance(ended.value.__cause__, PlaywrightTimeoutError), ended.value.__cause__
+        assert await _title(env, session_id) == "start"
 
 
 async def test_only_a_placed_click_takes_its_target_for_the_button_or_link_it_is_in_and_never_a_field(

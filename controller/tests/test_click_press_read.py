@@ -165,7 +165,7 @@ def _locator(
     """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds (an
     exception is raised), the last one for good; ``each_step_takes`` is the time a step holds the click for (the
     clock is the real one); ``under_the_pointer`` is what the page answers when asked whether the pointer finds
-    the target."""
+    the target (an exception is raised)."""
     budgets: dict[str, Any] = {}
     looks = list(enabled)
 
@@ -197,6 +197,8 @@ def _locator(
         if script == _RECEIVES_POINTER_SCRIPT:
             given_budget("pointer", given)
             done.append(ASKED)
+            if isinstance(under_the_pointer, BaseException):
+                raise under_the_pointer
             return under_the_pointer
         assert script == _PRESS_PLACE_SCRIPT
         given_budget("place", given)
@@ -332,18 +334,35 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         assert done == ["click"] and 200 < locator.budgets["click"] <= 250, locator.budgets
 
 
-async def test_a_placed_click_whose_time_is_up_at_its_last_question_ends_as_a_timeout() -> None:
-    # The question asked with the pointer placed has what the click has left, a millisecond when nothing is, and a
-    # question that goes unanswered reads as a no. With the click's time spent the caller was told the target had
-    # moved (target_moved), where the click had run out of time, as any step before the question would have said.
+@pytest.mark.parametrize("time_left", [False, True], ids=["the click's time spent", "the click's time not spent"])
+async def test_a_placed_clicks_last_question_unanswered_in_its_time_ends_the_click_as_a_timeout(
+    time_left: bool,
+) -> None:
+    # The question asked with the pointer placed has what the click has left, a second at most, and a question that
+    # went unanswered read as a no: the caller was told the target had moved (target_moved, "the pointer does not
+    # find the target"), where the page had not answered, as any step before the question would have said. Told
+    # apart by the click's time alone, that held only where the time was spent; a page busy at the question with
+    # more than a second of the click left ended as target_moved after its second.
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
         service, session, done = _service(CLOSE)
-        late = _locator(done, each_step_takes=0.02, under_the_pointer=False)
+        unanswered = PlaywrightTimeoutError("Locator.evaluate: Timeout 1000ms exceeded.")
+        late = _locator(done, each_step_takes=0.0 if time_left else 0.02, under_the_pointer=unanswered)
         with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError) as ended:
-            await service.click_as_playwright_places_it(session, late, budget=_Budget(30))
-        assert "Timeout 30ms exceeded" in str(ended.value)
-        assert late.budgets["pointer"] == 1 and done[-1] == ASKED, (late.budgets, done)
+            await service.click_as_playwright_places_it(session, late, budget=_Budget(5000 if time_left else 30))
+        assert ended.value is unanswered
+        assert done[-1] == ASKED and "mouse down" not in done, done
+        assert late.budgets["pointer"] == (POINTER_CHECK_TIMEOUT_MS if time_left else 1), late.budgets
         service.manager.element_ids.evaluate.assert_not_awaited()
+
+
+async def test_a_no_where_the_pointer_was_placed_is_target_moved_whatever_the_click_has_left() -> None:
+    # A no is the page's answer, given in time: the target was taken away or covered once the hover had passed.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, done = _service(CLOSE)
+        refused = _locator(done, each_step_takes=0.02, under_the_pointer=False)
+        with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as ended:
+            await service.click_as_playwright_places_it(session, refused, budget=_Budget(30))
+        assert (ended.value.code, ended.value.retryable) == ("target_moved", True)
 
 
 @pytest.mark.parametrize("read", [False, True])

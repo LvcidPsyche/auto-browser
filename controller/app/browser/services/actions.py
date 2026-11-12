@@ -1365,14 +1365,9 @@ class BrowserActionService:
         y = float(box["y"] + place["border"][1] + position["y"])
         await session.page.mouse.move(x, y)
         asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+        # A question the page does not answer within its bound raises its timeout (_receives_pointer_at), and the
+        # click ends as that timeout, as at any step before this one: a no is the page's answer.
         if not await self._receives_pointer_at(locator, x, y, placed=True, timeout_ms=asked_within):
-            if budget.spent:
-                # The question had no time left, and a no and no answer are one here (_receives_pointer_at): the
-                # click ends as any step before this one ends it then, and says no more than that.
-                raise PlaywrightTimeoutError(
-                    f"Timeout {budget.timeout_ms:g}ms exceeded: the pointer was placed, and the click's time ran "
-                    "out at its last question, whether the pointer finds the target."
-                )
             raise _target_not_under_the_pointer()
         await self.press_mouse(session, x, y)
 
@@ -1418,7 +1413,10 @@ class BrowserActionService:
 
         ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the
         click has left where that is less. The first message had no bound given, so it waited by Playwright's
-        default, a whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed.
+        default, a whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed. Where
+        the click was placed, a wait that runs past it raises its timeout: the page did not answer, which is no
+        no. Taken for one, it ended a click as target_moved where the page was busy, with the click's time not
+        spent, and every step before the question ends a click as the timeout it is.
         """
         handles: list[Any] = []
         try:
@@ -1444,6 +1442,10 @@ class BrowserActionService:
                 node = await frame.frame_element()
                 handles.append(node)
             return placed
+        except PlaywrightTimeoutError:
+            if placed:
+                raise
+            return False
         except Exception:
             return False
         finally:
