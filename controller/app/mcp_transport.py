@@ -166,9 +166,9 @@ class McpHttpTransport:
             return self._json_error_response(None, -32600, "JSON-RPC batches are not supported", status_code=400)
         if not isinstance(payload, dict):
             return self._json_error_response(None, -32600, "JSON-RPC body must be an object", status_code=400)
-        # Before anything repeats it: every answer repeats the id whole, and one nested some hundreds of lists deep made
-        # an answer's walks give up (an unhandled 500). An id that cannot be read, or that an answer could not repeat
-        # as it was sent, is answered with id null, before the request runs.
+        # Before anything repeats it: each answer from here repeats the id whole, and one nested some hundreds of lists
+        # deep made an answer's walks give up (an unhandled 500). An id that cannot be read, or that an answer could
+        # not repeat as it was sent, is answered with id null, before the request runs.
         if not _is_a_json_rpc_id(payload.get("id")):
             return self._json_error_response(
                 None,

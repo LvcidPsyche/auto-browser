@@ -197,8 +197,9 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
                     f"CONTROLLER_ALLOWED_HOSTS lists {', '.join(repr(pattern) for pattern in wildcards)}, and this "
                     "controller has no API token (API_ALLOW_TOKENLESS_LOOPBACK=true): a wildcard admits a web page "
                     "that rebinds a name under it to 127.0.0.1. Set API_BEARER_TOKEN (or remove "
-                    "API_ALLOW_TOKENLESS_LOOPBACK so the controller uses its token), or list exact host names, "
-                    "whose DNS you control."
+                    "API_ALLOW_TOKENLESS_LOOPBACK: the controller then uses the token in API_TOKEN_FILE, and "
+                    "generates one there if the file holds none, and every client must send it), or list exact host "
+                    "names, whose DNS you control."
                 )
                 return
             report.warnings.append(

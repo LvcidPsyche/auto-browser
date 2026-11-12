@@ -518,13 +518,13 @@ All notable changes to auto-browser are documented here.
   call: an approve of it, and a call that presents one approved earlier, are refused with a message that says so,
   and the agent asks again. The key lies beside the records, so a reader of `APPROVAL_ROOT` itself can still guess:
   the change protects what the API, the MCP tools and a copy of the database alone show. See the upgrade note.
-- **A controller with no token no longer answers a DNS-rebound page through a wildcard in `CONTROLLER_ALLOWED_HOSTS`.**
-  With `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, `CONTROLLER_ALLOWED_HOSTS=*`, or a suffix such as
-  `*.example.com`, admitted a page whose name its owner points at 127.0.0.1: same-origin to the controller, it read
-  and drove the whole API, `/mcp` included. On a controller that requires no credential a wildcard now admits no
-  `Host`, for an HTTP request or a WebSocket, and such a controller does not start with one in the list (see the
-  upgrade note). Whether a credential is required is read for each request, from the policy the token gate reads:
-  with a token configured, the wildcard admits again. Exact names admit as before, and an empty list keeps its
+- **A controller with no token no longer answers a DNS-rebound page through a wildcard in
+  `CONTROLLER_ALLOWED_HOSTS`.** With `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, `CONTROLLER_ALLOWED_HOSTS=*`,
+  or a suffix such as `*.example.com`, admitted a page whose name its owner points at 127.0.0.1: same-origin to the
+  controller, it read and drove the whole API, `/mcp` included. On a controller that requires no credential a wildcard
+  now admits no `Host`, for an HTTP request or a WebSocket, and such a controller does not start with one in the list
+  (see the upgrade note). Whether a credential is required is read for each request, from the policy the token gate
+  reads: with a token configured, the wildcard admits again. Exact names admit as before, and an empty list keeps its
   loopback-only rule and its `/healthz` exception. An exact name is only as safe as its DNS: list only names whose DNS
   you control, or run with a token. Every spelling of a wildcard counts, case and brackets included, and two the Host
   check took are now refused at startup on any controller: brackets round anything but an IPv6 address (they were
@@ -1046,14 +1046,15 @@ All notable changes to auto-browser are documented here.
   a list, the worst shape measured, one write of the table at the cap now holds the event loop for about 0.3 s,
   where it held it for about 13 s (about 0.8 s for fields that each hold one long text); a small `initialize` and
   a `DELETE /mcp` at the cap take as long, as each writes the table. A `notifications/initialized` for a session
-  already initialized no longer writes it, where each one did; one whose write fails (a full disk) is answered
-  `500` and leaves the session not initialized, so that a retry writes it. A start reads such a table back before
-  the controller answers anything, and measures each field by the text it writes out of it once: on that host, at
-  the cap and for the shapes measured, in 6 to 22 s with Python 3.12 and 7 to 64 s with 3.11, the image's
-  (1 to 4 s and 1.5 to 11 s with 100 sessions, the most one token-verified operator keeps). Most of the slowest is
-  the JSON reader's: 53 of the 64 s, for fields of lists nested 30 deep side by side. A float
-  is now counted at the length it is written at, so a value of floats past the bound is refused without being
-  written out to be measured.
+  already initialized no longer writes it, where each one did: the last use it marks, which eviction goes by, is
+  saved with the next write of the table, as any other request's is, so a restart before that write reads back the
+  last use saved before it. One whose write fails (a full disk) is answered `500` and leaves the session not
+  initialized, so that a retry writes it. A start reads such a table back before the controller answers anything,
+  and measures each field by the text it writes out of it once: on that host, at the cap and for the shapes
+  measured, in 6 to 22 s with Python 3.12 and 7 to 64 s with 3.11, the image's (1 to 4 s and 1.5 to 11 s with 100
+  sessions, the most one token-verified operator keeps). Most of the slowest is the JSON reader's: 53 of the 64 s,
+  for fields of lists nested 30 deep side by side. A float is now counted at the length it is written at, so a
+  value of floats past the bound is refused without being written out to be measured.
   A session an older version stored past either bound is dropped when the file is read, with one WARNING that
   counts them and quotes none; see the upgrade note. A `POST /mcp` body nested past what the JSON reader goes down
   answers `400` `-32700`, as a body that is no JSON does, where it was an unhandled `500`. A session whose first
@@ -1073,17 +1074,19 @@ All notable changes to auto-browser are documented here.
   first) now leaves its `input` out and keeps its `type`, `loc`, `msg` and the rest; a shallower `input` is
   repeated as it was. A body nested past what the JSON reader goes down is still the reader's `400`.
 - **An MCP request whose JSON-RPC `id` is no string, number or `null` is refused, where one nested deep answered
-  `500`.** Every answer of `POST /mcp` repeats the request's `id` whole, and the walks of an answer go down it by
-  recursion: an `id` of lists nested around `NaN` or a lone surrogate was an unhandled `500` from about 600 levels
-  on Python 3.11, the image's Python, and at 1,200 on 3.12, whatever the request was (a `tools/call`, a `ping`, and
-  the refusals of a body that is not JSON-RPC 2.0 or names no method). JSON-RPC 2.0 allows a string, a number or
-  `null` (MCP a string or an integer); any other `id` (a list, an object, `true` or `false`) is now answered `400`
-  with `-32600` `JSON-RPC id must be a string (with no lone surrogate), a finite number or null` and `"id": null`,
-  before its `jsonrpc`, its method or its session is looked at. So is an `id` an answer could not repeat as it was
-  sent, which ran its request: `NaN`, `Infinity`, `-Infinity` and a number too large for a float such as `1e999`,
-  which the JSON reader takes and which are no JSON numbers (the answer said `"id": null`), and a string that holds
-  a lone surrogate (`"\ud800"`, which the answer wrote as U+FFFD). An `initialize` with one made a session whose
-  answer did not name its request. Any other string, number or `null` is answered as before.
+  `500`.** An answer of `POST /mcp` repeats the request's `id` whole (all but the refusals of an `Origin`, of a
+  body that is no JSON, of a batch and of a body that is no object, which answer `"id": null`), and the walks of an
+  answer go down it by recursion: an `id` of lists nested around `NaN` or a lone surrogate was an unhandled `500`
+  from about 600 levels on Python 3.11, the image's Python, and at 1,200 on 3.12, whatever the request was (a
+  `tools/call`, a `ping`, and the refusals of a body that is not JSON-RPC 2.0 or names no method). JSON-RPC 2.0
+  allows a string, a number or `null` (MCP a string or an integer); any other `id` (a list, an object, `true` or
+  `false`) is now answered `400` with `-32600` and `"id": null`, before its `jsonrpc`, its method or its session
+  is looked at, with the message `JSON-RPC id must be a string (with no lone surrogate), a finite number or null`.
+  So is an `id` an answer could not repeat as it was sent, which ran its request: `NaN`, `Infinity`, `-Infinity`
+  and a number too large for a float such as `1e999`, which the JSON reader takes and which are no JSON numbers
+  (the answer said `"id": null`), and a string that holds a lone surrogate (`"\ud800"`, which the answer wrote as
+  U+FFFD). An `initialize` with one made a session whose answer did not name its request. Any other string, number
+  or `null` is answered as before.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
