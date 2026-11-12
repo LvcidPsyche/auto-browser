@@ -449,7 +449,7 @@ class SessionCreation:
                 if isinstance(error, FileNotFoundError) or reported:
                     return
                 reported.append(error)
-                logger.warning("rollback could not remove %s: %s", directory, error)
+                logger.warning("rollback could not remove %s: %s", directory, error_text_for_log(error))
 
             try:
                 # onexc from Python 3.12, where onerror is deprecated; onerror on 3.11.
@@ -462,7 +462,7 @@ class SessionCreation:
                     logger.warning("rollback could not remove %s", directory)
             except OSError as exc:
                 if not reported:
-                    logger.warning("rollback could not remove %s: %s", directory, exc)
+                    logger.warning("rollback could not remove %s: %s", directory, error_text_for_log(exc))
 
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
         """Remove the directories a failed create made, and close the record it persisted, if it got that far.
@@ -482,6 +482,6 @@ class SessionCreation:
         except ValueError:
             pass  # a record that cannot be parsed is closed over (W8-2)
         except Exception as exc:
-            logger.warning("could not read the record of failed session %s: %s", session_id, exc)
+            logger.warning("could not read the record of failed session %s: %s", session_id, error_text_for_log(exc))
             return
         await self._persist_closed_without_summary(session, "create_failed")

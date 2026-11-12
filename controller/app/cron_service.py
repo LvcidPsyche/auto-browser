@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 from .auth_policy import credential_names_operator
 from .session_ownership import ANONYMOUS, acting_as, as_system, may_use, owner_identity, verified_operator
-from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, error_text_for_log
 
 if TYPE_CHECKING:
     from .models import WorkflowProfile
@@ -291,14 +291,14 @@ class CronService:
                             "cron job %s: %s, so its webhook refuses every key until the key is rotated; its "
                             "plaintext webhook key is removed from the store, and the job is otherwise left as it is",
                             job_id,
-                            exc,
+                            error_text_for_log(exc),
                         )
                         continue
                     logger.warning(
                         "cron job %s: %s, so its webhook refuses every key until the key is rotated; the job is left "
                         "as it is",
                         job_id,
-                        exc,
+                        error_text_for_log(exc),
                     )
                     continue
                 if job.get("webhook_key"):
@@ -315,7 +315,7 @@ class CronService:
                     "re-saved with their hashes: %s",
                     self._store_path,
                     len(legacy),
-                    exc,
+                    error_text_for_log(exc),
                 )
 
     def _warn_if_store_was_quarantined(self, jobs: dict[str, Any]) -> None:
@@ -576,7 +576,7 @@ class CronService:
             )
             logger.info("registered cron job %s: %s", job["id"], job["schedule"])
         except Exception as exc:
-            logger.warning("failed to register cron job %s: %s", job["id"], exc)
+            logger.warning("failed to register cron job %s: %s", job["id"], error_text_for_log(exc))
 
     def _unregister_job(self, job_id: str, *, during: str) -> None:
         """Take the job off the scheduler, if it is on it: one with no schedule, or a disabled one, never was."""
@@ -585,7 +585,7 @@ class CronService:
                 return
             self._scheduler.remove_job(job_id)
         except Exception as exc:
-            logger.warning("failed to remove cron job %s during " + during + ": %s", job_id, exc)
+            logger.warning("failed to remove cron job %s during " + during + ": %s", job_id, error_text_for_log(exc))
 
     async def _scheduled_run(self, job_id: str) -> None:
         """Called by APScheduler on cron trigger.
@@ -602,7 +602,7 @@ class CronService:
                     return
                 await self._run_job_now(job)
         except Exception as exc:
-            logger.error("cron job %s failed: %s", job_id, exc)
+            logger.error("cron job %s failed: %s", job_id, error_text_for_log(exc))
 
     async def _run_job_now(self, job: dict[str, Any]) -> dict[str, Any]:
         """Enqueue the job with the AgentJobQueue and update run metadata."""
@@ -717,7 +717,11 @@ class CronService:
                     record.pop(_REFUSAL_AUDITED, None)
                     self._save(jobs)
         except (CronStoreUnreadableError, OSError) as exc:
-            logger.error("cron job %s: its run is queued, but the run's metadata could not be saved: %s", job_id, exc)
+            logger.error(
+                "cron job %s: its run is queued, but the run's metadata could not be saved: %s",
+                job_id,
+                error_text_for_log(exc),
+            )
 
         return {
             "triggered": True,
@@ -765,7 +769,9 @@ class CronService:
                             job["last_status"] = OWNER_CREDENTIAL_REMOVED_STATUS
                             self._save(jobs)
             except (CronStoreUnreadableError, OSError) as exc:
-                logger.error("cron job %s: its refusal could not be saved in last_status: %s", job_id, exc)
+                logger.error(
+                    "cron job %s: its refusal could not be saved in last_status: %s", job_id, error_text_for_log(exc)
+                )
             if audited:
                 logger.debug("cron job %s refused again: no named credential proves its owner %s", job_id, owner_id)
                 return refused
@@ -823,14 +829,14 @@ class CronService:
                     "cron job %s: that its refusal's audit event is written could not be saved, so its next refused "
                     "fire writes the event again: %s",
                     job_id,
-                    exc,
+                    error_text_for_log(exc),
                 )
             else:
                 logger.error(
                     "cron job %s: its record could not be read or saved to end a refusal: if the job was in one and "
                     "this fire's run is not recorded either, its next refusal may write no audit event: %s",
                     job_id,
-                    exc,
+                    error_text_for_log(exc),
                 )
 
     async def _audit_quietly(self, job_id: str, *, event_type: str, status: str, action: str, details: dict) -> bool:
@@ -862,7 +868,9 @@ class CronService:
                         record["last_status"] = status
                         self._save(jobs)
         except (CronStoreUnreadableError, OSError) as exc:
-            logger.error("cron job %s: how run %s ended could not be saved: %s", job_id, agent_job_id, exc)
+            logger.error(
+                "cron job %s: how run %s ended could not be saved: %s", job_id, agent_job_id, error_text_for_log(exc)
+            )
         finally:
             await self._release_run(job_id, session_id)
 
@@ -871,7 +879,12 @@ class CronService:
         try:
             status = (await self.job_queue.store.get(agent_job_id)).status
         except (KeyError, OSError, ValueError) as exc:
-            logger.error("cron job %s: the record of agent job %s could not be read: %s", job_id, agent_job_id, exc)
+            logger.error(
+                "cron job %s: the record of agent job %s could not be read: %s",
+                job_id,
+                agent_job_id,
+                error_text_for_log(exc),
+            )
             return RUN_OUTCOME_UNKNOWN
         return status if status in _FINAL_JOB_STATUSES else RUN_OUTCOME_UNKNOWN
 
@@ -900,7 +913,7 @@ class CronService:
                 "cron job %s: failed to close session %s: %s",
                 job_id,
                 session_id,
-                exc,
+                error_text_for_log(exc),
             )
 
     def _load(self) -> dict[str, Any]:
@@ -913,7 +926,11 @@ class CronService:
         except OSError as exc:
             # Possibly passing (a sharing violation, a brief permission fault): a good, hand-edited store is
             # never moved aside for one. It stays where it is, and reads fail until it can be read.
-            logger.error("cron store %s could not be read (%s); it was left where it is", self._store_path, exc)
+            logger.error(
+                "cron store %s could not be read (%s); it was left where it is",
+                self._store_path,
+                error_text_for_log(exc),
+            )
             raise CronStoreUnreadableError from exc
         except (ValueError, RecursionError) as exc:  # json.JSONDecodeError, UnicodeDecodeError: the file is corrupt
             self._quarantine(exc)
@@ -938,11 +955,15 @@ class CronService:
             logger.error(
                 "cron store %s is unreadable (%s); moved to %s. Cron jobs are not loaded until this is resolved.",
                 self._store_path,
-                cause,
+                error_text_for_log(cause),
                 quarantine,
             )
         except Exception:
-            logger.exception("cron store %s is unreadable (%s) and could not be quarantined", self._store_path, cause)
+            logger.exception(
+                "cron store %s is unreadable (%s) and could not be quarantined",
+                self._store_path,
+                error_text_for_log(cause),
+            )
 
     def _save(self, data: dict[str, Any]) -> None:
         """Write the store whole; one the JSON writer gives up on raises CronStoreUnwritableError, and stays as it was.
@@ -962,7 +983,7 @@ class CronService:
                 "that value in the file",
                 self._store_path,
                 type(exc).__name__,
-                exc,
+                error_text_for_log(exc),
             )
             raise CronStoreUnwritableError from exc
         self._store_path.parent.mkdir(parents=True, exist_ok=True)

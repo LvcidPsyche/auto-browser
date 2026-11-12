@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .providers.base import allowlisted_environment
-from .utils import utc_now
+from .utils import error_text_for_log, utc_now
 
 
 def _is_bare_host(value: str) -> bool:
@@ -202,7 +202,9 @@ class IsolatedSessionTunnelBroker:
                             # Diagnostic only (W2-7): raised, it reached the handler below, which wrote
                             # provision_failed over autossh's tail and deleted the log, and the tail was lost.
                             logger.warning(
-                                "could not record the error status of session %s's tunnel: %s", session_id, exc
+                                "could not record the error status of session %s's tunnel: %s",
+                                session_id,
+                                error_text_for_log(exc),
                             )
                         self._close_stderr(tunnel)
                         last_error = tunnel.error
@@ -272,7 +274,11 @@ class IsolatedSessionTunnelBroker:
         try:
             self._write_metadata(tunnel, status="error")
         except Exception as exc:
-            logger.warning("could not record the error status of session %s's tunnel: %s", tunnel.session_id, exc)
+            logger.warning(
+                "could not record the error status of session %s's tunnel: %s",
+                tunnel.session_id,
+                error_text_for_log(exc),
+            )
         finally:
             try:
                 self._close_stderr(tunnel)
@@ -356,7 +362,9 @@ class IsolatedSessionTunnelBroker:
         try:
             self._close_stderr(tunnel)
         except OSError as exc:
-            logger.warning("could not close the log of session %s's tunnel: %s", tunnel.session_id, exc)
+            logger.warning(
+                "could not close the log of session %s's tunnel: %s", tunnel.session_id, error_text_for_log(exc)
+            )
         finally:
             tunnel.stderr_handle = None
             self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
@@ -371,7 +379,7 @@ class IsolatedSessionTunnelBroker:
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
-                logger.warning("could not remove %s for session %s: %s", path.name, session_id, exc)
+                logger.warning("could not remove %s for session %s: %s", path.name, session_id, error_text_for_log(exc))
 
     def describe(self, tunnel: IsolatedSessionTunnel | None) -> dict[str, Any] | None:
         if tunnel is None:

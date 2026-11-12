@@ -430,7 +430,7 @@ class BrowserSessionService(SessionCreation):
                 "could not mark the pre-request gate of session %s's browser as %s: %s",
                 session_id,
                 "ending" if ending else "still in use",
-                exc,
+                error_text_for_log(exc),
             )
 
     @staticmethod
@@ -595,7 +595,7 @@ class BrowserSessionService(SessionCreation):
             )
         except Exception as exc:
             # Chromium's text can name host paths, and over MCP this message reaches the agent: it is logged here.
-            logger.warning("shadow browse: the sandboxed headed Chromium did not start: %s", exc)
+            logger.warning("shadow browse: the sandboxed headed Chromium did not start: %s", error_text_for_log(exc))
             raise RuntimeError(
                 "Shadow browsing could not start its sandboxed headed Chromium. On Linux the sandbox needs "
                 "unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1, or an AppArmor profile "
@@ -666,7 +666,7 @@ class BrowserSessionService(SessionCreation):
                     self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
                 )
             except Exception as exc:  # the error to raise is the one that started the rollback (R5C-11)
-                logger.error("the rollback of shadow session %s failed: %s", shadow_session_id, exc)
+                logger.error("the rollback of shadow session %s failed: %s", shadow_session_id, error_text_for_log(exc))
             raise
 
         await manager.audit.append(
@@ -811,7 +811,10 @@ class BrowserSessionService(SessionCreation):
             await self.manager._persist_session(session, status="active")
         except Exception as exc:
             logger.warning(
-                "%s in session %s ran, but its session record could not be saved: %s", action, session.id, exc
+                "%s in session %s ran, but its session record could not be saved: %s",
+                action,
+                session.id,
+                error_text_for_log(exc),
             )
 
     def isolation_payload(self, session: "BrowserSession") -> dict[str, Any]:
@@ -859,7 +862,9 @@ class BrowserSessionService(SessionCreation):
         except Exception as exc:
             session.tunnel = None
             session.tunnel_error = "isolated tunnel provisioning failed"
-            logger.warning("failed to provision isolated tunnel for session %s: %s", session.id, exc)
+            logger.warning(
+                "failed to provision isolated tunnel for session %s: %s", session.id, error_text_for_log(exc)
+            )
 
     @staticmethod
     def auth_root_for(base_root: str, session_id: str) -> Path:

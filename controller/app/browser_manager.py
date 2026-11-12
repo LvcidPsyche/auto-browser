@@ -62,7 +62,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
-from .utils import quoted_for_log, spawn_background_task
+from .utils import error_text_for_log, quoted_for_log, spawn_background_task
 from .witness import (
     ReceiptList,
     WitnessActionContext,
@@ -351,7 +351,9 @@ class BrowserManager:
                 try:
                     await self.close_session(session_id)
                 except Exception as exc:  # pragma: no cover - best effort cleanup
-                    logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
+                    logger.warning(
+                        "failed to close session %s during shutdown: %s", session_id, error_text_for_log(exc)
+                    )
 
         await self.request_gates.release_all()
         await self.window_births.release_all()

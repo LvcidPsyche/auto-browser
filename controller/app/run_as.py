@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .utils import error_text_for_log
+
 logger = logging.getLogger(__name__)
 
 CONTROLLER_UID = 10002
@@ -531,7 +533,7 @@ def remove_marker(data_root: Path) -> None:
         os.unlink(MARKER_NAME, dir_fd=root_fd)  # unlink never follows a symlink
     except OSError as exc:
         if exc.errno not in (errno.ENOENT,):
-            logger.warning("Could not remove %s: %s", data_root / MARKER_NAME, exc)
+            logger.warning("Could not remove %s: %s", data_root / MARKER_NAME, error_text_for_log(exc))
     finally:
         os.close(root_fd)
 
@@ -556,7 +558,7 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
             st = os.stat(data_root, follow_symlinks=False)
             decision = decide_user(run_as, data_root=data_root, owner_uid=st.st_uid, owner_gid=st.st_gid)
     except ValueError as exc:
-        logger.error("%s", exc)
+        logger.error("%s", error_text_for_log(exc))
         return 64
     if run_as != "root" and st.st_uid == NOBODY_UID:
         # Root-squashed NFS shows root's files as nobody's, and root's chown cannot work there: running as 65534 is
@@ -602,7 +604,9 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
                 write_marker(data_root, decision.uid, decision.gid)
             except OSError as exc:
                 logger.warning(
-                    "Could not write %s (%s): the next start scans /data again", data_root / MARKER_NAME, exc
+                    "Could not write %s (%s): the next start scans /data again",
+                    data_root / MARKER_NAME,
+                    error_text_for_log(exc),
                 )
         logger.info(
             "controller runs as uid %s (%s); %d of %d entries under %s handed to it (from uids %s) in %.2fs",

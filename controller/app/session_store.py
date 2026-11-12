@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import SessionRecord
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_json, record_path, run_to_completion
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log, record_json, record_path, run_to_completion
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class FileSessionStore(_MarkInterruptedMixin):
             try:
                 records.append(SessionRecord.model_validate_json(path.read_text(encoding="utf-8")))
             except Exception as exc:
-                logger.warning("failed to read session record %s: %s", path, exc)
+                logger.warning("failed to read session record %s: %s", path, error_text_for_log(exc))
         records.sort(key=lambda item: (item.created_at, item.id), reverse=True)
         return records
 
@@ -129,7 +129,7 @@ class RedisSessionStore(_MarkInterruptedMixin):
             try:
                 records.append(SessionRecord.model_validate_json(payload))
             except Exception as exc:
-                logger.warning("failed to decode redis session record: %s", exc)
+                logger.warning("failed to decode redis session record: %s", error_text_for_log(exc))
         records.sort(key=lambda item: (item.created_at, item.id), reverse=True)
         return records
 
@@ -197,7 +197,7 @@ class DurableSessionStore:
         try:
             await self.redis_store.startup()
         except Exception as exc:
-            logger.warning("redis session store unavailable, using file store fallback: %s", exc)
+            logger.warning("redis session store unavailable, using file store fallback: %s", error_text_for_log(exc))
             self._primary = self.file_store
             return
         self._primary = self.redis_store
@@ -219,7 +219,7 @@ class DurableSessionStore:
         try:
             redis_records = await self._primary.list()
         except Exception as exc:
-            logger.warning("redis session listing failed, using file records: %s", exc)
+            logger.warning("redis session listing failed, using file records: %s", error_text_for_log(exc))
             redis_records = []
         for record in redis_records:
             kept = file_records.get(record.id)
@@ -244,7 +244,9 @@ class DurableSessionStore:
         except KeyError:
             return await self.file_store.get(session_id)
         except Exception as exc:
-            logger.warning("redis session read failed for %r, using file record: %s", session_id, exc)
+            logger.warning(
+                "redis session read failed for %r, using file record: %s", session_id, error_text_for_log(exc)
+            )
             return await self.file_store.get(session_id)
         # The file copy is written first, so a closed one is the session's newest record. A write whose Redis half
         # failed, with Redis down for the drop of its copy too, left an older copy in Redis (R5C-5): the record from
@@ -259,7 +261,11 @@ class DurableSessionStore:
         except (KeyError, ValueError):
             return None
         except OSError as exc:
-            logger.warning("could not read the file copy of session %r to check for a close: %s", session_id, exc)
+            logger.warning(
+                "could not read the file copy of session %r to check for a close: %s",
+                session_id,
+                error_text_for_log(exc),
+            )
             return None
         return record if record.status == "closed" else None
 
@@ -327,7 +333,9 @@ class DurableSessionStore:
                 pass  # no copy, or one that cannot be parsed: the closed record replaces it
             await self.redis_store.upsert(await self.file_store.get(session_id))
         except Exception as exc:
-            logger.warning("could not give redis the closed record of session %s: %s", session_id, exc)
+            logger.warning(
+                "could not give redis the closed record of session %s: %s", session_id, error_text_for_log(exc)
+            )
             return
         logger.info("gave redis the closed record of session %s, which it held as not closed", session_id)
 
@@ -337,7 +345,9 @@ class DurableSessionStore:
         try:
             await self.redis_store.delete(session_id)  # type: ignore[union-attr]
         except Exception as exc:
-            logger.warning("could not drop the redis copy of the closed session %s: %s", session_id, exc)
+            logger.warning(
+                "could not drop the redis copy of the closed session %s: %s", session_id, error_text_for_log(exc)
+            )
 
     async def _is_closed(self, session_id: str) -> bool | None:
         """Whether the durable (file) record says the session is closed, or None when that cannot be told.
@@ -363,7 +373,9 @@ class DurableSessionStore:
             if redis_primary:
                 return await self._redis_is_closed(session_id, f"cannot be parsed ({exc})")
             logger.warning(
-                "the stored record of session %s cannot be parsed, so this write replaces it: %s", session_id, exc
+                "the stored record of session %s cannot be parsed, so this write replaces it: %s",
+                session_id,
+                error_text_for_log(exc),
             )
             return False
         except Exception as exc:
@@ -391,7 +403,7 @@ class DurableSessionStore:
         logger.warning(
             "could not read the record of session %s before writing it, so it is not written this time: %s",
             session_id,
-            exc,
+            error_text_for_log(exc),
         )
 
     async def mark_all_active_interrupted(self) -> None:

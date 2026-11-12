@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
 from ..result_shaping import compact_session
+from ..utils import error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -558,14 +559,18 @@ class BaseProviderAdapter(ABC):
                 fallback = _private_cli_home()
             except RuntimeError:
                 if first:
-                    logger.warning("CLI_HOME %s cannot be created (%s), and no private CLI home either", cli_home, exc)
+                    logger.warning(
+                        "CLI_HOME %s cannot be created (%s), and no private CLI home either",
+                        cli_home,
+                        error_text_for_log(exc),
+                    )
                 raise
             if first:
                 logger.warning(
                     "CLI_HOME %s cannot be created (%s); provider CLI children start in, and get as HOME, %s, which "
                     "holds no CLI sign-in. CLI mode needs CLI_HOME set to a writable directory on host runs.",
                     cli_home,
-                    exc,
+                    error_text_for_log(exc),
                     fallback,
                 )
             return fallback

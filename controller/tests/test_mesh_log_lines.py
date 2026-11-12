@@ -260,8 +260,10 @@ def test_a_refused_urls_host_of_any_length_is_cut_in_the_line(mesh, caplog: pyte
     assert reply_status(response) == "rejected"
     messages = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
     (line,) = [message for message in messages if message.startswith("mesh.policy.denied")]
-    # Cut at 200 characters, the cut mark after the closing quote.
-    assert f"A URL of host '{'h' * 200}'... " in line, line[:300]
+    # Cut at 200 characters, the host in the refusal and then the refusal in the line, each cut mark after the
+    # closing quote: the line writes the error's text quoted and cut, as every line that logs an error does.
+    assert "reason=\"A URL of host 'hhhh" in line, line[:300]
+    assert re.search('h"[.][.][.] [(]cut from [0-9]+ characters[)]$', line), line[-80:]
     assert len(line) < 600, len(line)
 
 

@@ -8,7 +8,9 @@ made (str(KeyError(x)) is repr(x), and an object's repr can raise) raised out of
 from __future__ import annotations
 
 import ast
+import json
 import logging
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from app.browser import prefetch
 from app.browser.services.sessions import BrowserSessionService
+from app.session_store import FileSessionStore
 from app.startup import extensions
 
 _APP = Path(__file__).resolve().parents[1] / "app"
@@ -194,6 +197,102 @@ class NoLogArgumentMadeForTheLineTests(unittest.TestCase):
                     if _a_text_made_for_the_line(argument)
                 ]
         self.assertEqual(made, [], "pass the error to error_text_for_log, and any other text to quoted_for_log")
+
+
+# A parameter by one of these names, or annotated with a class whose name ends so, holds an error.
+_ERROR_PARAMETERS = frozenset({"exc", "error", "err", "cause", "failure"})
+_ERROR_CLASS_ENDINGS = ("Exception", "Error")
+
+
+def _error_names(scope: ast.AST) -> set[str]:
+    """The names that hold an error in ``scope``: an except clause's own, or a function's parameters that do."""
+    if isinstance(scope, ast.ExceptHandler):
+        return {scope.name} if scope.name else set()
+    if not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        return set()
+    names: set[str] = set()
+    for parameter in [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]:
+        annotation = ast.unparse(parameter.annotation).replace('"', "") if parameter.annotation else ""
+        classes = [part.strip() for part in annotation.split("|")]
+        if parameter.arg in _ERROR_PARAMETERS or any(name.endswith(_ERROR_CLASS_ENDINGS) for name in classes):
+            names.add(parameter.arg)
+    return names
+
+
+def _an_error_passed_whole(argument: ast.expr, errors: set[str]) -> bool:
+    """Whether a log argument is an error itself, which logging prints as it is: one of ``errors``, its .message or
+    its .args (or one of them), or a task's .exception()."""
+    if isinstance(argument, ast.Subscript):
+        argument = argument.value
+    if isinstance(argument, ast.Attribute) and argument.attr in {"message", "args"}:
+        argument = argument.value
+    if isinstance(argument, ast.Call) and isinstance(argument.func, ast.Attribute):
+        return argument.func.attr == "exception" and not argument.args
+    return isinstance(argument, ast.Name) and argument.id in errors
+
+
+def _log_arguments(node: ast.AST) -> list[ast.expr] | None:
+    """A log call's arguments after its message, or None for a call that is not a log call."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return None
+    if node.func.attr not in _LOG_CALLS or "log" not in ast.unparse(node.func.value).lower():
+        return None
+    return node.args[2:] if node.func.attr == "log" else node.args[1:]
+
+
+def errors_passed_whole(tree: ast.AST) -> list[int]:
+    """The lines of each log call in ``tree`` that is passed an error whole (see _an_error_passed_whole)."""
+    lines: list[int] = []
+
+    def visit(node: ast.AST, errors: set[str]) -> None:
+        arguments = _log_arguments(node)
+        if arguments is not None and any(_an_error_passed_whole(argument, errors) for argument in arguments):
+            lines.append(node.lineno)
+        for child in ast.iter_child_nodes(node):
+            visit(child, errors | _error_names(child))
+
+    visit(tree, set())
+    return sorted(set(lines))
+
+
+class NoErrorPassedWholeToALogCallTests(unittest.TestCase):
+    def test_no_log_call_is_passed_an_error_whole(self) -> None:
+        # logging writes such an error's text as it is: unquoted, uncut, and made outside any guard. A line break in
+        # it begins a line of the log, and a pydantic ValidationError prints the values it refused.
+        passed: list[str] = []
+        for path in sorted(_APP.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            passed += [f"{path.relative_to(_APP).as_posix()}:{line}" for line in errors_passed_whole(tree)]
+        self.assertEqual(passed, [], "pass the error to error_text_for_log")
+
+
+class AValidationErrorLoggedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_stored_session_record_that_does_not_validate_is_one_line_without_its_values(self) -> None:
+        # pydantic's text of the error is several lines, and repeats each value it refused: here a page's title.
+        record = {
+            "id": "s1",
+            "name": "s1",
+            "created_at": "2026-11-12T00:00:00Z",
+            "updated_at": "2026-11-12T00:00:00Z",
+            "status": "the page's own\nWARNING:app.main:forged by a page\x1b[2J",
+            "current_url": "https://example.test/",
+            "title": ["a page title\nWARNING:app.main:forged by a page"],
+            "artifact_dir": "a",
+            "takeover_url": "t",
+            "remote_access": {},
+        }
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "s1.json").write_text(json.dumps(record), encoding="utf-8")
+            with self.assertLogs("app.session_store", "WARNING") as logged:
+                self.assertEqual(await FileSessionStore(root).list(), [])
+
+        (written,) = _written(logged.records)
+        self.assertEqual(written.splitlines(), [written], ascii(written[:300]))
+        self.assertTrue(
+            written.endswith("s1.json: '2 refused by SessionRecord: status: literal_error; title: string_type'"),
+            ascii(written),
+        )
+        self.assertNotIn("forged", written)
 
 
 if __name__ == "__main__":

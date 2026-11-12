@@ -159,7 +159,7 @@ class RequestGates:
         try:
             await self.require(browser)
         except RequestGateUnavailable as exc:
-            logger.warning("%s", exc.message)
+            logger.warning("%s", error_text_for_log(exc))
         if not attach_mode:
             # The browser's preference, not the gate's: set even when this attach failed and a later one succeeds.
             await self._prefetch_off(browser)

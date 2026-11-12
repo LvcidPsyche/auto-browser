@@ -53,7 +53,7 @@ from .models import (
     BrowserActionDecision,
 )
 from .session_ownership import as_system, may_use, verified_operator
-from .utils import UTC, utc_now
+from .utils import UTC, error_text_for_log, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,9 @@ class ApprovalStore:
             try:
                 await self.sqlite_store.startup()
             except Exception as exc:
-                logger.warning("sqlite approval store unavailable, using file store fallback: %s", exc)
+                logger.warning(
+                    "sqlite approval store unavailable, using file store fallback: %s", error_text_for_log(exc)
+                )
             else:
                 try:
                     await self._catch_sqlite_up()
@@ -216,8 +218,10 @@ class ApprovalStore:
                     raise
                 except Exception as exc:
                     logger.warning(
-                        "sqlite approval store could not catch up with the file store, using file store fallback: %r",
-                        exc,
+                        "sqlite approval store could not catch up with the file store, using file store fallback: "
+                        "%s: %s",
+                        type(exc).__name__,
+                        error_text_for_log(exc),
                     )
                 else:
                     self._primary = self.sqlite_store
@@ -263,10 +267,11 @@ class ApprovalStore:
                 await self.file_store.upsert(kept)
             except Exception as exc:
                 logger.error(
-                    "approval %s: SQLite's %s record could not be written over the file store's: %r",
+                    "approval %s: SQLite's %s record could not be written over the file store's: %s: %s",
                     record.id,
                     kept.status,
-                    exc,
+                    type(exc).__name__,
+                    error_text_for_log(exc),
                 )
                 unrepaired.append(record.id)
         try:
@@ -1043,9 +1048,10 @@ class ApprovalStore:
         except Exception as exc:
             # The SQLite failure is still raised; the next start may catch this file record up.
             logger.error(
-                "approval %s: its SQLite write failed, and its file record could not be put back: %r",
+                "approval %s: its SQLite write failed, and its file record could not be put back: %s: %s",
                 approval_id,
-                exc,
+                type(exc).__name__,
+                error_text_for_log(exc),
                 exc_info=exc,
             )
 
@@ -1150,7 +1156,7 @@ class ApprovalStore:
                     "after a restart they are refused, and the agent asks again. Restart once it can be read, or "
                     "written where there is none; a file that holds no key has to be removed first",
                     self.file_store.root / DIGEST_KEY_FILE,
-                    exc,
+                    error_text_for_log(exc),
                 )
                 self._tool_call_key = secrets.token_bytes(32)
                 self._keyed_by_this_process_alone = True

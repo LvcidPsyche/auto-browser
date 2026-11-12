@@ -363,6 +363,13 @@ All notable changes to auto-browser are documented here.
   not scrub), a session's close steps, a page snapshot, a page the controller loaded that did not load, a page's
   settle, an accessibility snapshot, a bot challenge's probe, a session's extension hooks, an element's upload and
   marker clean-up, a page call sent again, a blocked action's roll-back, an error answer's entry that was left out.
+  So does every other line that took a caught error as one of logging's own arguments, some 160 of them (a store's, a
+  cron job's, an isolated session's, the harness's, the API token's among them): logging wrote the error's text as it
+  is, uncut, a line break in it beginning a line of the log, and of a pydantic `ValidationError` (a stored session
+  record that does not validate) each value it refused, a page's title among them. Each now writes the text quoted
+  and cut, a `ValidationError`'s as its fields and kinds of refusal alone
+  (`'2 refused by SessionRecord: status: literal_error; title: string_type'`), and one that wrote the error by `%r`
+  writes its class before it.
   Each of these that writes an error's whole text makes it where it quotes it: an error whose text cannot be made
   (a `KeyError` of a key whose `repr` raises) is named `<its text could not be made: RuntimeError>` and the line is
   written all the same, and a text that was cut is followed by its length (`'xyyy'... (cut from 5041 characters)`).

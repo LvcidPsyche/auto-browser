@@ -724,7 +724,9 @@ class BrowserActionPipeline:
             # ran, so it is reported and recorded the same way, without the image.
             if exc.code not in _UNOBSERVED:
                 raise
-            logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
+            logger.warning(
+                "post-action observation unavailable for session %s: %s", session.id, error_text_for_log(exc)
+            )
             return {"url": manager._shown_url(session.page), "observation_error": exc.message[:300]}
         try:
             await manager._settle(session.page)
@@ -740,7 +742,9 @@ class BrowserActionPipeline:
         except BrowserActionError as exc:
             if exc.code not in _UNOBSERVED:
                 raise
-            logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
+            logger.warning(
+                "post-action observation unavailable for session %s: %s", session.id, error_text_for_log(exc)
+            )
             return {"url": manager._shown_url(session.page), "observation_error": exc.message[:300]}
 
     def _approval(

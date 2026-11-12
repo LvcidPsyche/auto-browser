@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from ...audit import get_current_operator
 from ...session_ownership import may_use, verified_operator
-from ...utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, replace_retrying, utc_now
+from ...utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, error_text_for_log, replace_retrying, utc_now
 from ...witness import WitnessActionContext
 from ..page_read import title_or_blank
 
@@ -144,7 +144,7 @@ def _put_metadata_back(previous: str | None, metadata_path: Path) -> None:
             "could not put back the metadata of an auth profile's failed save, %s (%s): it names the saving "
             "operator as owner of the previous login",
             metadata_path,
-            exc,
+            error_text_for_log(exc),
         )
 
 
@@ -179,13 +179,15 @@ def _roll_back(previous: Path | None, state_path: Path) -> bool:
     except OSError as exc:
         if previous is None:
             logger.error(
-                "could not remove the new state of an auth profile's failed first save, %s (%s)", state_path, exc
+                "could not remove the new state of an auth profile's failed first save, %s (%s)",
+                state_path,
+                error_text_for_log(exc),
             )
         else:
             logger.error(
                 "could not put an auth profile's previous state back after a failed save; it is kept at %s (%s)",
                 previous,
-                exc,
+                error_text_for_log(exc),
             )
         return False
     return True
@@ -207,7 +209,7 @@ def _remove_quietly(path: Path, what: str) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
-        logger.warning("could not remove %s, %s: %s", what, path, exc)
+        logger.warning("could not remove %s, %s: %s", what, path, error_text_for_log(exc))
 
 
 class BrowserAuthProfileService:

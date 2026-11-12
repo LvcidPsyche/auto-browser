@@ -21,6 +21,7 @@ from ..action_records import write_record
 from ..approvals import held_tool_call_approval
 from ..browser.services.witness import BrowserWitnessService
 from ..network_inspector import url_origin
+from ..utils import error_text_for_log
 from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval, WitnessPolicyOutcome
 
 logger = logging.getLogger(__name__)
@@ -119,8 +120,15 @@ async def recorded_write(
         await record("ok")
     except Exception as failure:
         # The change was made, and the gateway answers some errors (a store's ValueError) without logging them: this
-        # line is then all the controller keeps of it. The failure's repr comes from the stores, not from the page.
-        logger.error("%s changed session %s, but its record could not be written: %r", tool, session.id, failure)
+        # line is then all the controller keeps of it. The failure comes from the stores, but a store's pydantic error
+        # prints the values it refused, a page's title among them: its class, and its text through the guard.
+        logger.error(
+            "%s changed session %s, but its record could not be written: %s: %s",
+            tool,
+            session.id,
+            type(failure).__name__,
+            error_text_for_log(failure),
+        )
         raise
 
 
@@ -150,7 +158,8 @@ async def _record_beside(recording: Any, tool: str, exc: BaseException) -> None:
     keeps it), so a cancelled job ends cancelled; one that lands while a cancellation is being recorded is absorbed, and
     the first goes on. The writes finish behind it either way (write_record shields them). These logs carry none of
     ``exc``'s text and no traceback: that text can hold a page's content, and a traceback prints an exception's whole
-    chain. A failed record is named by its own repr, which comes from the stores and not from the page.
+    chain. A failed record is named by its class and its text, quoted and cut (error_text_for_log): it comes from the
+    stores, whose pydantic errors print the values they refused, a page's among them.
     """
     try:
         await recording
@@ -162,4 +171,10 @@ async def _record_beside(recording: Any, tool: str, exc: BaseException) -> None:
             raise
         logger.warning("cancelled again while recording the interrupted %s; the record finishes behind it", tool)
     except Exception as failure:
-        logger.warning("could not record the %s that ended in %s: %r", tool, type(exc).__name__, failure)
+        logger.warning(
+            "could not record the %s that ended in %s: %s: %s",
+            tool,
+            type(exc).__name__,
+            type(failure).__name__,
+            error_text_for_log(failure),
+        )

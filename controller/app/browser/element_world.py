@@ -487,7 +487,8 @@ def _detach_when_attached(attaching: "asyncio.Future[CDPSession]") -> None:
     if attaching.cancelled():
         return
     if attaching.exception() is not None:
-        logger.debug("element ids: a late CDP attach failed: %r", attaching.exception())
+        error = attaching.exception()
+        logger.debug("element ids: a late CDP attach failed: %s: %s", type(error).__name__, error_text_for_log(error))
         return
     spawn_background_task(_detach(attaching.result()))
 
@@ -498,4 +499,6 @@ async def _detach(cdp: "CDPSession") -> None:
         await asyncio.wait_for(cdp.detach(), _DETACH_TIMEOUT_S)
     except (PlaywrightError, asyncio.TimeoutError) as exc:
         # A hung renderer may not answer this either; Playwright closes the session with the page.
-        logger.debug("element ids: a dropped CDP session was not detached: %r", exc)
+        logger.debug(
+            "element ids: a dropped CDP session was not detached: %s: %s", type(exc).__name__, error_text_for_log(exc)
+        )

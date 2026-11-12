@@ -516,7 +516,7 @@ class McpToolGateway:
             data = await asyncio.to_thread(_read_inline_image, path)
         except (OSError, ValueError) as exc:
             # A failure here is the image's, not the result's: the handler ran, and only the image is withheld.
-            logger.debug("could not inline screenshot %s: %s", path_value, exc)
+            logger.debug("could not inline screenshot %s: %s", path_value, error_text_for_log(exc))
             return None, "unreadable"
         if data is None:
             return None, "too_large"

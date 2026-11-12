@@ -8,6 +8,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from ...action_errors import BrowserActionError, SessionNotFoundError
 from ...browser_scripts import cap_title
+from ...utils import error_text_for_log
 from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..request_gate import block_summary, navigation_blocked_error, stopped_by_gate
 from ..request_gates import CHROME_ERROR_SCHEME
@@ -127,7 +128,7 @@ class BrowserTabService:
                 try:
                     await new_page.close()
                 except Exception as close_exc:
-                    logger.debug("could not close the failed new tab: %s", close_exc)
+                    logger.debug("could not close the failed new tab: %s", error_text_for_log(close_exc))
                 if isinstance(exc, PlaywrightError):
                     if stopped_here:
                         raise navigation_blocked_error(stopped[-1] if stopped else None, action="open_tab") from exc

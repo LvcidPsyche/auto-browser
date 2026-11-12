@@ -523,7 +523,10 @@ class RequestGate:
         if verdict.lookup_error is not None:
             logger.warning("pre-request gate: could not classify a paused request's frame: %s", verdict.lookup_error)
         if reply_error is not None:
-            logger.warning("pre-request gate: Chromium did not take the reply to a paused request: %s", reply_error)
+            logger.warning(
+                "pre-request gate: Chromium did not take the reply to a paused request: %s",
+                error_text_for_log(reply_error),
+            )
         if block is not None and self._on_block is not None:
             try:
                 self._on_block(block)

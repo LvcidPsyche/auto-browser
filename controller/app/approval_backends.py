@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from .models import ApprovalRecord, ApprovalStatus
 from .sqlite_utils import connect_sqlite
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log, record_path
 
 logger = logging.getLogger(__name__)
 
@@ -162,22 +162,27 @@ class FileApprovalStore:
             try:
                 arguments, record = self._arguments_path(approval_id), self._path(approval_id)
             except KeyError as exc:  # a stored id that names no file of this store
-                logger.warning("approval %s could not be removed: %r", approval_id, exc)
+                logger.warning(
+                    "approval %s could not be removed: %s: %s", approval_id, type(exc).__name__, error_text_for_log(exc)
+                )
                 continue
             try:
                 # The arguments first: with the record gone no later pass finds them, only a start's sweep.
                 arguments.unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning(
-                    "the arguments of approval %s could not be removed, so its record stays for the next pass: %r",
+                    "the arguments of approval %s could not be removed, so its record stays for the next pass: %s: %s",
                     approval_id,
-                    exc,
+                    type(exc).__name__,
+                    error_text_for_log(exc),
                 )
                 continue
             try:
                 record.unlink(missing_ok=True)
             except OSError as exc:
-                logger.warning("approval %s could not be removed: %r", approval_id, exc)
+                logger.warning(
+                    "approval %s could not be removed: %s: %s", approval_id, type(exc).__name__, error_text_for_log(exc)
+                )
                 continue
             removed.append(approval_id)
         return removed
@@ -192,7 +197,7 @@ class FileApprovalStore:
             try:
                 payload = path.read_text(encoding="utf-8")
             except (OSError, ValueError) as exc:  # gone since the glob, or not UTF-8
-                logger.debug("skipping unreadable approval file %s: %s", path.name, exc)
+                logger.debug("skipping unreadable approval file %s: %s", path.name, error_text_for_log(exc))
                 continue
             # As SQLite's listing: a warning naming the record, without what it holds.
             approval = _valid_record(path.stem, payload)

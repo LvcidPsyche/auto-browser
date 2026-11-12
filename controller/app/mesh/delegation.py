@@ -359,7 +359,11 @@ class DelegationManager:
                 envelope.nonce, stamped_at=envelope.timestamp, now=now, owner=sender_id
             )
         except MeshReplayCacheFull as exc:
-            logger.warning("mesh.delegation.replay_cache_full sender=%s: the envelope was refused: %s", sender_id, exc)
+            logger.warning(
+                "mesh.delegation.replay_cache_full sender=%s: the envelope was refused: %s",
+                sender_id,
+                error_text_for_log(exc),
+            )
             raise
         if not fresh:
             raise DelegationReplayError(f"nonce replay from sender={sender_id!r}")
@@ -370,7 +374,12 @@ class DelegationManager:
         except PolicyError as exc:
             # %r, here and below: the capability and the session id are the peer's own text, and a line break in
             # one must not start a log line. (The reason quotes the capability with repr already.)
-            logger.info("mesh.policy.denied peer=%s capability=%r reason=%s", sender_id, request.capability, exc)
+            logger.info(
+                "mesh.policy.denied peer=%s capability=%r reason=%s",
+                sender_id,
+                request.capability,
+                error_text_for_log(exc),
+            )
             return DelegationResponse(
                 request_id=request.request_id,
                 status="rejected",

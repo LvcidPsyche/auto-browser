@@ -52,6 +52,7 @@ from .pii_views import (
     merge_spans,
     replace_spans,
 )
+from .utils import error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +385,7 @@ def scrub_screenshot(
     except Exception as exc:
         # Returning the original bytes with the hits attached would read as a
         # successful redaction to the caller. Let it decide what to report.
-        logger.warning("screenshot PII redaction failed: %s", exc)
+        logger.warning("screenshot PII redaction failed: %s", error_text_for_log(exc))
         raise
 
 

@@ -102,7 +102,9 @@ class AgentJobStore:
                     with contextlib.suppress(asyncio.CancelledError):
                         await asyncio.wait([write])
                 if not write.cancelled() and write.exception() is not None:
-                    logger.error("agent job %s could not be written: %s", record.id, write.exception())
+                    logger.error(
+                        "agent job %s could not be written: %s", record.id, error_text_for_log(write.exception())
+                    )
                 raise
             return record
 
@@ -169,7 +171,7 @@ class AgentJobStore:
             try:
                 record = AgentJobRecord.model_validate_json(path.read_text(encoding="utf-8"))
             except Exception as exc:
-                logger.warning("failed to decode job record %s: %s", path, exc)
+                logger.warning("failed to decode job record %s: %s", path, error_text_for_log(exc))
                 continue
             if status is not None and record.status != status:
                 continue

@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..action_errors import BrowserActionError
 from ..models import ApprovalKind, BrowserActionDecision, RiskCategory
+from ..utils import error_text_for_log
 from .element_ids import target_element_id
 
 if TYPE_CHECKING:
@@ -894,7 +895,13 @@ async def read_click_target(
             decision.risk_category,
             type(exc).__name__,
         )
-        logger.debug("session %s: reading the target of a %s failed with: %r", session_id, decision.action, exc)
+        logger.debug(
+            "session %s: reading the target of a %s failed with: %s: %s",
+            session_id,
+            decision.action,
+            type(exc).__name__,
+            error_text_for_log(exc),
+        )
         return None
 
 
@@ -916,7 +923,11 @@ async def same_element_at(
             keep_session=True,
         )
     except Exception as exc:
-        logger.debug("the elements at a click's point and at its jittered point could not be compared: %r", exc)
+        logger.debug(
+            "the elements at a click's point and at its jittered point could not be compared: %s: %s",
+            type(exc).__name__,
+            error_text_for_log(exc),
+        )
         return False
     return same is True
 
@@ -1000,7 +1011,12 @@ async def refuse_press_not_asked_about(
             reading.label,
             type(exc).__name__,
         )
-        logger.debug("session %s: reading what is under the pointer failed with: %r", session_id, exc)
+        logger.debug(
+            "session %s: reading what is under the pointer failed with: %s: %s",
+            session_id,
+            type(exc).__name__,
+            error_text_for_log(exc),
+        )
         return
     kind = classified_risk(target, reading.label)
     if kind in CLICK_LABEL_PHRASES and kind != reading.approved:

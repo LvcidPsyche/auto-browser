@@ -73,7 +73,7 @@ def _init_curator(app) -> None:
         else:
             logger.info("startup.curator: no API key — degraded mode (raw-skill passthrough only)")
     except Exception as exc:
-        logger.warning("startup.curator: adapter init failed — %s", exc)
+        logger.warning("startup.curator: adapter init failed — %s", error_text_for_log(exc))
         app.state.curator_adapter = None
 
 
@@ -114,7 +114,7 @@ def _init_mesh(app) -> None:
         app.state.delegation_manager = mgr
         logger.info("startup.mesh: initialized node_id=%s", identity.node_id[:16])
     except Exception as exc:
-        logger.error("startup.mesh: initialization failed — %s", exc)
+        logger.error("startup.mesh: initialization failed — %s", error_text_for_log(exc))
         app.state.mesh_identity = None
         app.state.peer_registry = None
         app.state.delegation_manager = None
@@ -158,7 +158,7 @@ def _init_harness(app) -> None:
             gateway.harness_service = service
         logger.info("startup.harness: initialized root=%s signed=%s", root, bool(signer))
     except Exception as exc:
-        logger.error("startup.harness: initialization failed — %s", exc)
+        logger.error("startup.harness: initialization failed — %s", error_text_for_log(exc))
         app.state.harness_service = None
 
 

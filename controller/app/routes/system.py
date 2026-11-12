@@ -13,6 +13,7 @@ from ..audit import get_current_operator
 from ..browser_sandbox import browser_sandbox_status
 from ..readiness import run_readiness_checks
 from ..run_as import controller_user_status
+from ..utils import error_text_for_log
 
 # A readiness probe must answer within a probe interval, not within the
 # session-creation retry budget (CONNECT_RETRIES x CONNECT_RETRY_DELAY_SECONDS,
@@ -80,7 +81,10 @@ def _let_finish_in_background(connect: "asyncio.Future[Any]") -> None:
 
 def _log_unfinished_connect(connect: "asyncio.Future[Any]") -> None:
     if not connect.cancelled() and connect.exception() is not None:
-        logger.warning("browser connect that outlived a health or readiness probe failed: %s", connect.exception())
+        logger.warning(
+            "browser connect that outlived a health or readiness probe failed: %s",
+            error_text_for_log(connect.exception()),
+        )
 
 
 async def _wait_for_browser(manager: "BrowserManager") -> Any:
@@ -242,7 +246,8 @@ async def _close_context(context: Any) -> None:
 def _log_failed_close(closing: "asyncio.Future[Any]") -> None:
     if not closing.cancelled() and closing.exception() is not None:
         logger.warning(
-            "deep health probe: the browser context it gave up closing failed to close: %s", closing.exception()
+            "deep health probe: the browser context it gave up closing failed to close: %s",
+            error_text_for_log(closing.exception()),
         )
 
 
@@ -289,7 +294,7 @@ def create_system_router(
                 },
             )
         except Exception as exc:
-            logger.warning("deep health probe failed: %s", exc, exc_info=True)
+            logger.warning("deep health probe failed: %s", error_text_for_log(exc), exc_info=True)
             return JSONResponse(
                 status_code=503,
                 content={

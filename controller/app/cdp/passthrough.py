@@ -182,7 +182,7 @@ class CDPPassthrough:
         try:
             await self._cdp.detach()
         except Exception as exc:
-            logger.debug("cdp session detach failed (page likely closed): %s", exc)
+            logger.debug("cdp session detach failed (page likely closed): %s", error_text_for_log(exc))
 
     @contextlib.asynccontextmanager
     async def _css_agents(self) -> AsyncIterator[None]:
@@ -218,7 +218,7 @@ class CDPPassthrough:
         try:
             await self._send_bounded("CSS.disable")
         except Exception as exc:
-            logger.debug("cdp CSS.disable failed (page likely closed): %s", exc)
+            logger.debug("cdp CSS.disable failed (page likely closed): %s", error_text_for_log(exc))
         finally:
             self._agents_lock.release()
 

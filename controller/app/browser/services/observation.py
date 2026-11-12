@@ -90,7 +90,7 @@ def _prune_share_frames(directory: Path, *, keep: Path) -> None:
                 path.unlink(missing_ok=True)
     except OSError as exc:
         # Housekeeping: a failure must not take the viewer's frame down with it.
-        logger.warning("failed to prune share frames in %s: %s", directory, exc)
+        logger.warning("failed to prune share frames in %s: %s", directory, error_text_for_log(exc))
 
 
 def _staging_path(path: str) -> str:
@@ -525,7 +525,11 @@ class BrowserObservationService:
                 try:
                     Path(written["path"]).unlink(missing_ok=True)
                 except OSError as error:
-                    logger.warning("could not delete the part a failed capture wrote, %s: %s", written["path"], error)
+                    logger.warning(
+                        "could not delete the part a failed capture wrote, %s: %s",
+                        written["path"],
+                        error_text_for_log(error),
+                    )
                 read.refuse_raised()
             else:
                 _delete_when_done(capture, written["path"])
@@ -552,7 +556,7 @@ class BrowserObservationService:
             await session.context.tracing.stop(path=str(session.trace_path))
             session.trace_recording = False
         except Exception as exc:  # pragma: no cover - depends on external browser support
-            logger.warning("failed to stop tracing for session %s: %s", session.id, exc)
+            logger.warning("failed to stop tracing for session %s: %s", session.id, error_text_for_log(exc))
 
     async def page_summary(self, page: "Page", text_limit: int = 2000) -> dict[str, Any]:
         # One evaluate returns the text, outline, title and focused element, and
@@ -646,7 +650,7 @@ class BrowserObservationService:
             # The file on disk is still the unredacted capture. Say so in the
             # result, the way the OCR-unavailable path does, and audit a failure,
             # not a redaction.
-            logger.warning("screenshot PII redaction error for session %s: %s", session.id, exc)
+            logger.warning("screenshot PII redaction error for session %s: %s", session.id, error_text_for_log(exc))
             screenshot["pii_scrub_skipped"] = "redaction_failed"
             await self._audit_screenshot_scrub(
                 session, "failed", {"event": "pii_redaction", "layer": "screenshot", "reason": "redaction_failed"}
@@ -671,4 +675,4 @@ class BrowserObservationService:
                 details=details,
             )
         except Exception as exc:
-            logger.warning("screenshot PII audit error for session %s: %s", session.id, exc)
+            logger.warning("screenshot PII audit error for session %s: %s", session.id, error_text_for_log(exc))

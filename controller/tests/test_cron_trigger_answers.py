@@ -322,7 +322,7 @@ class CronRunRefusalAtTheOtherDoorsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [record.getMessage() for record in logged.records],
-            [f"cron job {self.job_id} failed: the stored job's max_steps is not a number"],
+            [f'cron job {self.job_id} failed: "the stored job\'s max_steps is not a number"'],
         )
         self.manager.create_session.assert_not_awaited()
 

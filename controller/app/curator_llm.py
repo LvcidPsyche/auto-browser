@@ -23,6 +23,7 @@ from urllib.parse import quote
 import httpx
 
 from .config import Settings, get_settings
+from .utils import error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ class CuratorLLMAdapter:
         try:
             adapter = cls(provider, model=model, settings=settings)
         except ValueError as exc:
-            logger.warning("curator: invalid provider %r — %s", provider, exc)
+            logger.warning("curator: invalid provider %r — %s", provider, error_text_for_log(exc))
             return None
         if not adapter.ready:
             logger.info(
@@ -216,7 +217,7 @@ class CuratorLLMAdapter:
                 # { "candidates":[{"content":{"parts":[{"text":"..."}]}}] }
                 return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
-            logger.warning("curator: malformed %s response: %s", self.provider, exc)
+            logger.warning("curator: malformed %s response: %s", self.provider, error_text_for_log(exc))
         return ""
 
 
@@ -225,5 +226,5 @@ def build_curator_adapter(settings: Any = None) -> Optional[CuratorLLMAdapter]:
     try:
         return CuratorLLMAdapter.from_env(settings)
     except Exception as exc:  # never let curator wiring break boot
-        logger.warning("curator: adapter build failed — %s", exc)
+        logger.warning("curator: adapter build failed — %s", error_text_for_log(exc))
         return None

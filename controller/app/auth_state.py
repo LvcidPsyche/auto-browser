@@ -11,7 +11,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,9 @@ class AuthStateManager:
                     plain.unlink(missing_ok=True)
                 except OSError as exc:
                     logger.warning(
-                        "could not remove the plaintext auth state %s beside its encrypted copy: %s", plain, exc
+                        "could not remove the plaintext auth state %s beside its encrypted copy: %s",
+                        plain,
+                        error_text_for_log(exc),
                     )
             return self.inspect(final_path)
 

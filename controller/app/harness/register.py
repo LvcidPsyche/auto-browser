@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..session_ownership import may_use
+from ..utils import error_text_for_log
 from .induce import SIGNED_SKILL_FILES, SkillCandidate
 from .trace import hash_payload
 
@@ -69,14 +70,14 @@ class SkillStagingRegistry:
             try:
                 candidate = SkillCandidate.model_validate_json(path.read_text(encoding="utf-8"))
             except Exception as exc:
-                logger.debug("skipping unreadable staged skill candidate %s: %s", path, exc)
+                logger.debug("skipping unreadable staged skill candidate %s: %s", path, error_text_for_log(exc))
                 continue
             if not may_use(candidate.owner):
                 continue
             try:
                 self._verify(candidate, path.parent)
             except PermissionError as exc:
-                logger.warning("skipping unverifiable staged skill candidate %s: %s", path, exc)
+                logger.warning("skipping unverifiable staged skill candidate %s: %s", path, error_text_for_log(exc))
                 continue
             candidates.append(_with_files_of(candidate, path.parent).model_dump())
         return candidates

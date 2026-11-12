@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from .session_ownership import may_use, verified_operator
-from .utils import PRIVATE_FILE_MODE, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ class ProxyPersonaStore:
         except FileNotFoundError:
             return {}
         except Exception as exc:
-            logger.error("failed to load proxy persona file %s: %s", self._path, exc)
+            logger.error("failed to load proxy persona file %s: %s", self._path, error_text_for_log(exc))
             raise ProxyPersonaFileError() from exc
         if not isinstance(data, dict):
             logger.error("proxy persona file is not a JSON object: %s", self._path)
@@ -124,7 +124,9 @@ class ProxyPersonaStore:
             try:
                 name, persona = self._normalize_persona(raw_name, raw_persona)
             except ValueError as exc:
-                logger.warning("skipping invalid proxy persona entry %r in %s: %s", raw_name, self._path, exc)
+                logger.warning(
+                    "skipping invalid proxy persona entry %r in %s: %s", raw_name, self._path, error_text_for_log(exc)
+                )
                 continue
             normalized[name] = persona
         return normalized

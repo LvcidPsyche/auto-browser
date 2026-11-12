@@ -21,6 +21,8 @@ import os
 import sys
 from collections.abc import Mapping
 
+from .utils import error_text_for_log
+
 PR_SET_DUMPABLE = 4
 # What the Playwright driver keeps of its environment besides the provider CLIs' base names (CLI_BASE_ENV_NAMES and
 # LC_*): Playwright's own variables (PW_*, PLAYWRIGHT_BROWSERS_PATH and the rest of PLAYWRIGHT_*), its debug logging,
@@ -53,7 +55,7 @@ def make_non_dumpable() -> bool:
         logger.warning(
             "process hardening: could not make the controller non-dumpable (%s); a process running as its uid "
             "can read its environment through /proc",
-            exc,
+            error_text_for_log(exc),
         )
         return False
     return True

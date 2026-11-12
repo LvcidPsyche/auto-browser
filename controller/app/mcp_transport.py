@@ -878,7 +878,7 @@ class McpHttpTransport:
         try:
             payload = json.loads(self._session_store_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("failed to load MCP sessions from %s: %s", self._session_store_path, exc)
+            logger.warning("failed to load MCP sessions from %s: %s", self._session_store_path, error_text_for_log(exc))
             return 0
         if not isinstance(payload, list):
             logger.warning("ignoring malformed MCP session store at %s", self._session_store_path)

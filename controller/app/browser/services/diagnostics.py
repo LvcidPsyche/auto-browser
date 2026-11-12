@@ -19,7 +19,7 @@ from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
 from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
-from ...utils import UTC, quoted_for_log, spawn_background_task
+from ...utils import UTC, error_text_for_log, quoted_for_log, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
 from ..page_read import REFUSED_NETWORK_LOG_DETAIL, locked_read
 from ..window_births import BirthVerdict
@@ -736,7 +736,7 @@ class BrowserDiagnosticsService:
                 logger.warning(
                     "failed to persist download metadata for session %s: %s",
                     session.id,
-                    exc,
+                    error_text_for_log(exc),
                 )
 
     async def screenshot_diff(self, session_id: str) -> dict[str, Any]:
@@ -820,7 +820,7 @@ class BrowserDiagnosticsService:
                 "height": img_a.height,
             }
         except Exception as exc:
-            logger.warning("screenshot diff failed: %s", exc)
+            logger.warning("screenshot diff failed: %s", error_text_for_log(exc))
             return {
                 "error": "screenshot_diff_failed",
                 "changed_pixels": -1,

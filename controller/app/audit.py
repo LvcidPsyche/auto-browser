@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .models import AuditEvent, OperatorIdentity
 from .sqlite_utils import connect_sqlite
-from .utils import atomic_write_text, utc_now, without_lone_surrogates
+from .utils import atomic_write_text, error_text_for_log, utc_now, without_lone_surrogates
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +328,7 @@ class AuditStore:
         try:
             await self.sqlite_store.startup()
         except Exception as exc:
-            logger.warning("sqlite audit store unavailable, using file store fallback: %s", exc)
+            logger.warning("sqlite audit store unavailable, using file store fallback: %s", error_text_for_log(exc))
             self._primary = self.file_store
             return
         self._primary = self.sqlite_store

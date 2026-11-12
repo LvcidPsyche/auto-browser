@@ -212,7 +212,9 @@ class BrowserRuntimeService:
         try:
             await asyncio.wait_for(browser.close(), timeout=PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS)
         except Exception as exc:
-            logger.warning("could not close the browser replaced by cdp_attach: %s", exc, exc_info=True)
+            logger.warning(
+                "could not close the browser replaced by cdp_attach: %s", error_text_for_log(exc), exc_info=True
+            )
 
     async def connect_browser(self, ws_target_factory, *, failure_context: str) -> Browser:
         manager = self.manager
@@ -274,7 +276,7 @@ class BrowserRuntimeService:
             runtime = await manager.runtime_provisioner.provision(session_id)
         except RuntimeError as exc:
             # A refusal under BROWSER_SANDBOX=on among them: the API answers a bare 409, so the reason is logged.
-            logger.warning("isolated session %s was not started: %s", session_id, exc)
+            logger.warning("isolated session %s was not started: %s", session_id, error_text_for_log(exc))
             raise
         try:
             browser = await self.connect_browser(
@@ -289,7 +291,9 @@ class BrowserRuntimeService:
             try:
                 await manager.runtime_provisioner.release(runtime)
             except Exception as exc:  # the connect failure is the one to raise; this one is logged
-                logger.warning("isolated runtime of session %s was not fully released: %s", session_id, exc)
+                logger.warning(
+                    "isolated runtime of session %s was not fully released: %s", session_id, error_text_for_log(exc)
+                )
             raise
 
     def gate_lost(self, gate: RequestGate) -> None:
@@ -305,7 +309,7 @@ class BrowserRuntimeService:
             logger.error(
                 "pre-request gate loss: no replacement gate attached (%s); closing the sessions, whose actions are "
                 "refused meanwhile",
-                exc.message,
+                error_text_for_log(exc),
             )
             return False
         return replacement is not None and replacement.live
@@ -378,7 +382,9 @@ class BrowserRuntimeService:
                 except SessionNotFoundError:
                     pass  # closed meanwhile by its own caller
                 except Exception as exc:
-                    logger.warning("could not close session %s after the gate detached: %s", session.id, exc)
+                    logger.warning(
+                        "could not close session %s after the gate detached: %s", session.id, error_text_for_log(exc)
+                    )
                     failed.append(session.id)
                     continue
                 # A context that did not really close (its close raised inside the teardown) stays owned, and

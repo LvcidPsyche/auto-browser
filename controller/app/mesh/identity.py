@@ -31,7 +31,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from ..utils import atomic_write_text
+from ..utils import atomic_write_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def _tighten_a_loose_key(path: Path) -> None:
                 "(%s); it is loaded and stays readable: run chmod 600 on it",
                 path,
                 mode,
-                exc,
+                error_text_for_log(exc),
             )
             return
     finally:

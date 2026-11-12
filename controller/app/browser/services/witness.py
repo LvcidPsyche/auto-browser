@@ -14,7 +14,7 @@ import httpx
 
 from ...audit import get_current_operator
 from ...models import READ_ONLY_ACTIONS, BrowserActionDecision, SessionRecord, WitnessRemoteState
-from ...utils import spawn_background_task, utc_now
+from ...utils import error_text_for_log, spawn_background_task, utc_now
 from ...witness import (
     WitnessActionContext,
     WitnessApproval,
@@ -268,7 +268,7 @@ class BrowserWitnessService:
                     "witness remote delivery failed for session %s action %s: %s",
                     item.session.id,
                     item.action,
-                    exc,
+                    error_text_for_log(exc),
                 )
                 return
             self._settle(item.session, item.seq, None, attempted_at=attempted_at)
@@ -330,7 +330,11 @@ class BrowserWitnessService:
         try:
             await self.manager.session_store.upsert(record.model_copy(update={"witness_remote": state.model_copy()}))
         except Exception as exc:  # the record keeps the state the close saved
-            logger.warning("could not save the hosted Witness delivery state of closed session %s: %s", session.id, exc)
+            logger.warning(
+                "could not save the hosted Witness delivery state of closed session %s: %s",
+                session.id,
+                error_text_for_log(exc),
+            )
 
     async def stop_delivery(self, *, timeout: float = SHUTDOWN_DELIVERY_WAIT_SECONDS) -> None:
         """Let queued receipts reach the service for up to ``timeout`` seconds, then stop the worker.

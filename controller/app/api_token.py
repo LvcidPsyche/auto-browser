@@ -32,7 +32,7 @@ from typing import Any
 
 from .auth_policy import BIND_SCOPE_LOOPBACK, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
 from .runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH
-from .utils import PRIVATE_FILE_MODE, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,7 @@ def ensure_takeover_token(settings: Any) -> None:
                     "Make it a file the controller's user can read, or set TAKEOVER_TOKEN; "
                     "GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
                     path,
-                    exc,
+                    error_text_for_log(exc),
                 )
                 return
             except OSError as exc:
@@ -183,7 +183,7 @@ def ensure_takeover_token(settings: Any) -> None:
                     "be tightened (%s). Make it owned by the controller's user with mode 0600 (or 0400), or set "
                     "TAKEOVER_TOKEN; GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
                     path,
-                    exc,
+                    error_text_for_log(exc),
                 )
                 return
             logger.info("Using the takeover token in %s (sha256 fingerprint %s)", path, _fingerprint(token))
@@ -191,7 +191,7 @@ def ensure_takeover_token(settings: Any) -> None:
         logger.warning(
             "No takeover token: %s. GET /sessions/{session_id}/takeover-link answers 503 until TAKEOVER_TOKEN is "
             "set or TAKEOVER_TOKEN_FILE %s holds a usable token (or can be written) and the controller restarts.",
-            exc,
+            error_text_for_log(exc),
             path,
         )
         return
@@ -402,7 +402,7 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         try:
             os.close(fd)
         except OSError as exc:
-            logger.warning("could not close %s %s after its mode check failed: %s", name, path, exc)
+            logger.warning("could not close %s %s after its mode check failed: %s", name, path, error_text_for_log(exc))
         raise
     os.close(fd)
     if kept is None:  # nothing to tighten
@@ -471,7 +471,7 @@ def _warn_about_an_open_link_target(path: Path, name: str) -> None:
             "%s %s is a symlink whose target's mode could not be checked (%s); the token already read from it is used.",
             name,
             path,
-            exc,
+            error_text_for_log(exc),
         )
         return
     if mode & _GROUP_OR_OTHER_BITS:
@@ -507,7 +507,7 @@ def _match_parent_owner(path: Path) -> None:
             path,
             path.parent,
             parent.st_uid,
-            exc,
+            error_text_for_log(exc),
         )
 
 

@@ -30,7 +30,7 @@ from .routes.sessions import TakeoverRefusalWindows, create_sessions_router, wri
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
 from .safe_json_response import SafeJSONResponse, safe_http_exception_handler, safe_validation_exception_handler
-from .utils import capped_for_log
+from .utils import capped_for_log, error_text_for_log
 from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -105,7 +105,7 @@ async def lifespan(application: FastAPI):
         register_extensions(application)
         maintenance.harness_service = getattr(application.state, "harness_service", None)
     except Exception as exc:
-        logger.error("v1.0 extensions init failed (non-fatal): %s", exc)
+        logger.error("v1.0 extensions init failed (non-fatal): %s", error_text_for_log(exc))
     try:
         yield
     finally:

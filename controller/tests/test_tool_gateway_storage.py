@@ -386,7 +386,8 @@ class GatewayWriteRecordTests(SpendBase):
         self.assertNotIn(CANARY, "\n".join(logs.output))
 
     async def test_a_line_break_in_the_stores_error_begins_no_line_of_that_log_line(self) -> None:
-        # The failure is written as its repr: a store's error text can quote what it was given (a path, a value).
+        # The failure is written by its class and its text, quoted and cut: a store's error text can quote what it was
+        # given (a path, a value).
         failure = OSError("disk full\nERROR forged line")
         self.manager.audit.append = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
         payload = SetCookiesInput(session_id=SESSION, cookies=[{"name": "sid", "value": "v", "domain": "example.com"}])
@@ -397,7 +398,7 @@ class GatewayWriteRecordTests(SpendBase):
 
         (message,) = (record.getMessage() for record in logs.records)
         self.assertNotIn("\n", message)
-        self.assertIn(repr(failure), message)
+        self.assertIn("OSError: 'disk full\\nERROR forged line'", message)
 
     async def test_a_governed_write_records_once(self) -> None:
         arguments = {
@@ -455,7 +456,7 @@ class GatewayWriteRecordTests(SpendBase):
 
         self.assert_logged_the_class_and_no_text(logs.records, "Error")
 
-    async def test_a_record_that_fails_logs_the_errors_class_and_its_own_repr_only(self) -> None:
+    async def test_a_record_that_fails_logs_the_errors_class_and_its_own_class_and_text_only(self) -> None:
         # A traceback here would print the recording's failure and whatever chain it holds, so none is logged.
         self.context.add_cookies = AsyncMock(side_effect=PlaywrightError(f"rejected: {CANARY}"))
         self.manager.audit.append = AsyncMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
@@ -468,7 +469,7 @@ class GatewayWriteRecordTests(SpendBase):
                 await self.gateway._set_cookies(payload)
 
         self.assert_logged_the_class_and_no_text(logs.records, "Error")
-        self.assertIn(repr(OSError("disk full")), logs.output[0])
+        self.assertIn("OSError: 'disk full'", logs.output[0])
 
     async def test_a_second_cancellation_while_a_cancellation_is_recorded_is_absorbed(self) -> None:
         reached, hang = asyncio.Event(), asyncio.Event()
