@@ -629,6 +629,19 @@ class McpSessionTableStartTests(_Transport):
         (record, _) = self.stored()
         self.assertEqual((record["client_info"], record["client_capabilities"]), kept)
 
+    def test_a_start_searches_no_ascii_field_for_a_lone_surrogate(self) -> None:
+        # A text that holds one is not ASCII, which the text says at no cost: the search of each field took some
+        # 0.4 s a start at the table's cap. A field that is not ASCII is still searched.
+        ascii_only, accented = {"a": [0] * 1000}, {"name": "caf" + chr(0xE9)}
+        self.store.write_text(json.dumps([_record("s0", ascii_only, accented)]), encoding="utf-8")
+
+        with patch.object(mcp_transport, "holds_lone_surrogate", wraps=mcp_transport.holds_lone_surrogate) as search:
+            self.transport = self.transport_over_the_store()
+
+        searched = [call.args[0] for call in search.call_args_list if isinstance(call.args[0], str)]
+        self.assertEqual(searched, [mcp_transport._compact_json(accented)])
+        self.assertEqual(list(self.transport._sessions), ["s0"])
+
     def test_a_record_whose_other_fields_hold_a_lone_surrogate_is_passed_over(self) -> None:
         # No version wrote one there, nor can an initialize make one: kept, it failed every later write of the table
         # as a client field's did.

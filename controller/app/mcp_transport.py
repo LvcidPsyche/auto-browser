@@ -1150,7 +1150,9 @@ def _stored_client_object(value: dict[str, Any]) -> tuple[dict[str, Any], str] |
     has written it as UTF-8: kept as it was read, it failed every later write of the table.
     """
     written = _stored_client_json(value)
-    if written is not None and holds_lone_surrogate(written):
+    # isascii() reads a flag the text carries, at no cost, and a text holding a lone surrogate is not ASCII: the
+    # search alone took some 0.4 s a start for a table at its cap of 500 sessions, both fields at 64 KiB.
+    if written is not None and not written.isascii() and holds_lone_surrogate(written):
         value = without_lone_surrogates(value)
         written = _stored_client_json(value)
     return None if written is None else (value, written)
