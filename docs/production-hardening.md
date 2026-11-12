@@ -273,10 +273,16 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     that lies over the target, the click ends as `target_moved` with nothing pressed. A click that has to be
     placed on an element inside a frame asks the element's document where it saw the pointer arrive, and asks the
     element there: the browser gives a document the pointer's point through every border, padding and turn of
-    the frames around it. That point is the pointer's only while the frame stays where it was: where the
-    element's box has moved or changed its size since the click was placed (a page that moves the frame once the
-    pointer has arrived, or scales one that runs in the page's process), the click ends as `target_moved` with
-    nothing pressed. Where the document saw nothing, the pointer
+    the frames around it, so a frame of another process that is turned, bordered or padded is handled exactly
+    while it stays so. That point is the pointer's only while the frame stays as it was: where the element's box
+    has moved or changed its size since the click was placed (a page that moves the frame once the pointer has
+    arrived, or scales one that runs in the page's process), the click ends as `target_moved` with nothing
+    pressed. The box is Playwright's, which in a frame of another process is counted from the corner of the box
+    round the frame as if the frame were not turned or scaled and had no border or padding. So a page whose own
+    script, or a style in motion, turns or reshapes the frame as the pointer arrives and leaves that box as it
+    was (a frame of another process given a half turn, or scaled about its top-left corner, or its padding grown
+    inside the same border box) is a page that changes what is under the pointer, which is not caught (below):
+    the click presses what the change put under the pointer. Where the document saw nothing, the pointer
     is over another document (or a listener of the page's on the window stopped both the pointermove and the
     mousemove before the controller's heard them), and the click ends as `target_moved`, unless a frame inside
     the element (a video in a card) lies at the point carried into the frame by the element's two boxes: that is
@@ -362,7 +368,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     by text that CSS or a canvas draws; look-alike characters (a Cyrillic "е" in "Delete"); and a page whose own
     script falsifies the read of a selector's element, or where a script or a style in motion (an animation that
     shows a button for a few milliseconds) changes what is under the pointer between the read at the press and the
-    press, which are one message to the browser apart. A page built for that can as well name its button
+    press, which are one message to the browser apart, or turns or reshapes the frame of a placed click's element
+    as the pointer arrives (above). A page built for that can as well name its button
     "Continue": the read answers text that steers the model, not a site that is itself hostile.
   - It asks more than it must where a harmless label starts with a phrase and no exception lists it: `Transfer
     files`, "Send feedback", "Pay monthly", "Buy again", "Post a job", a cart's "Remove item", "Deactivate dark

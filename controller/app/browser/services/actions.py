@@ -1538,7 +1538,12 @@ class BrowserActionService:
         size, to PLACED_BOX_MOVED_PX each way; else no (target_moved). A frame of the page's own process scaled
         about the target's corner keeps the corner, and the press went down where the scale had put the pointer.
         The box read again is the one the two boxes carry the point by where there is no record, and they carry
-        it as the frame is now.
+        it as the frame is now. Not seen: Playwright counts a box in a frame of another process as if the frame
+        were not turned or scaled and had no border or padding, so a page that turns such a frame (a half turn),
+        scales it about its top-left corner or grows its padding inside the same border box as the pointer arrives
+        keeps the box, and the press goes down where the change put the pointer. That is a page that changes what
+        is under the pointer, which click_target.py's "Not caught" lists; a guard of every frame's geometry read in
+        the page's own world, which such a page can answer for itself, would not stop it.
 
         ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the
         click has left where that is less. The first message had no bound given, so it waited by Playwright's

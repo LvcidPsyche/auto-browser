@@ -37,9 +37,12 @@ drag, and a select's option; a clickable element that is not a button (_BUTTON_R
 option, a tab and a switch are not), and a link in no button or menu item; a button in a closed shadow root; a
 label given only by aria-labelledby, an image with no alt text, or text that CSS or a canvas draws; a name past
 the cut of a label (_LABEL_CUT) or below its third line; look-alike characters; a page where a script, or a style
-in motion, changes what is under the pointer between the read at the press and the press. An action the agent
-itself labels with a kind of the table is approved as labelled and never read. docs/production-hardening.md lists
-the table and these, and a test keeps its list the table's (tests/test_click_target_doc.py).
+in motion, changes what is under the pointer between the read at the press and the press, or turns or reshapes the
+frame of a placed click's target as the pointer arrives and leaves the target's box as Playwright counts it (a frame
+of another process turned, scaled about its corner, or its padding grown: _receives_pointer_at's ``placed_by``),
+which then presses what the change put under the pointer. An action the agent itself labels with a kind of the
+table is approved as labelled and never read. docs/production-hardening.md lists the table and these, and a test
+keeps its list the table's (tests/test_click_target_doc.py).
 """
 
 from __future__ import annotations

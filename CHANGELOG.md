@@ -607,10 +607,15 @@ All notable changes to auto-browser are documented here.
   taken on what the screen shows of the element (also through a frame that runs off the screen, or one CSS draws
   at another size), and the element and its frames are asked again where the press goes down: the element where
   its own document saw the pointer arrive, which the browser gives through every border, padding and turn of the
-  frames around it, and a frame inside another at a point carried by its boxes. Where the element's box has moved
-  or changed its size since the click was placed (a page that moves the frame once the pointer has arrived, or
+  frames around it (a frame of another process that is turned, bordered or padded is handled exactly while it
+  stays so), and a frame inside another at a point carried by its boxes. Where the element's box has moved or
+  changed its size since the click was placed (a page that moves the frame once the pointer has arrived, or
   scales one that runs in the page's process), that point is no longer the pointer's, and the click ends as
-  `target_moved` with nothing pressed. Three limits stay. Playwright does
+  `target_moved` with nothing pressed. Not caught: a page whose own script, or a style in motion, turns or
+  reshapes the frame as the pointer arrives and leaves the element's box as Playwright counts it, which in a
+  frame of another process is as if the frame were not turned or scaled and had no border or padding (a half
+  turn, a scale about the frame's top-left corner, its padding grown inside the same border box): the click then
+  presses what the change put under the pointer. Three limits stay. Playwright does
   not look through a frame that CSS transforms, or that stands inside anything CSS transforms (a dialog centred
   with a transform is one), so its own click, which a click that is not read still is, presses what is at the
   point it picks and ends as done: what the page has put over such a frame, or has beside it where the element
