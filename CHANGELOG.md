@@ -333,8 +333,11 @@ All notable changes to auto-browser are documented here.
   peer's signed request asks for, and the session id it names, were logged as sent: a line break in either ended the
   line. Both are logged quoted now, in the `mesh.policy.denied`, `mesh.policy: PERMIT`,
   `mesh.delegation.approval_required`, `mesh.delegation.approval_denied` and `mesh.delegation.session_verb` lines,
-  where `capability=tool:browser.observe` now reads `capability='tool:browser.observe'`. An envelope that fails
-  verification needs no key, only the id of a registered peer, and its `mesh.delegation.envelope_invalid` warning
+  where `capability=tool:browser.observe` now reads `capability='tool:browser.observe'`, and cut at 200 characters:
+  each was as long as the peer's signed body let it be (a capability of some 60,000 characters, a line of 60,132),
+  and so was the reason `mesh.policy.denied` gives, which quotes the capability, now quoted and cut too. An
+  envelope that fails verification needs no key, only the id of a registered peer, and its
+  `mesh.delegation.envelope_invalid` warning
   quoted the envelope's own fields whole: that line is now written once in 60 seconds for the peer named, the next
   one with the count of those between, and its error text is cut at 200 characters. The `mesh.policy.denied` line
   also quoted a URL a grant's `url_allowlist` refused, as the peer sent it: a URL with userinfo is refused for
@@ -394,6 +397,13 @@ All notable changes to auto-browser are documented here.
   classify, and of a Docker daemon whose `docker info` failed at startup. The `503` of a session whose window-birth
   watcher could not read its new context, or whose pre-request gate could not attach or read the new context,
   repeated the browser's error whole: each now cuts it at 300 characters, as a watcher that could not attach did.
+  The lines that wrote a caller's, a page's or a browser's value whole, escaped by `%r` or as it came, now quote and
+  cut it: the path of an event stream still open at a shutdown, an operator header that conflicts with the
+  credential, a perception preset that is none, the id of a session whose runtime directory is no plain name and of
+  one Redis or its file copy could not read, a proxy persona entry passed over or named twice, an awaitable that
+  failed while its caller was cancelled (whose repr can hold the error), and the prefetch preference a launched
+  browser read back. A `%r` in a log line now writes only the controller's own values and what the operator
+  configured.
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,

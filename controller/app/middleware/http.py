@@ -142,34 +142,37 @@ class EventStreamShutdownMiddleware:
                 raise
             path = scope.get("path", "")
             if ended:
-                logger.info("the event stream on %r had ended and was still closing at the shutdown limit", path)
+                logger.info(
+                    "the event stream on %s had ended and was still closing at the shutdown limit",
+                    quoted_for_log(path),
+                )
                 return
             closing: Message = {"type": "http.response.body", "body": b"", "more_body": False}
             try:
                 await asyncio.wait_for(send(closing), STREAM_CLOSING_SEND_SECONDS)
             except asyncio.TimeoutError:  # ahead of OSError, which it is a kind of
                 logger.info(
-                    "the event stream on %r was still open at the shutdown limit, and its client took nothing more "
+                    "the event stream on %s was still open at the shutdown limit, and its client took nothing more "
                     "in %g s: left unfinished",
-                    path,
+                    quoted_for_log(path),
                     STREAM_CLOSING_SEND_SECONDS,
                 )
             except asyncio.CancelledError:
                 # The loop's own cancel at its end (see STREAM_CLOSING_SEND_SECONDS). Nothing is left to stop here
                 # but this wait, and it has stopped: raised, the cancel would be uvicorn's traceback after all.
                 logger.info(
-                    "the event stream on %r was still open at the shutdown limit, and was cancelled again before "
+                    "the event stream on %s was still open at the shutdown limit, and was cancelled again before "
                     "its client took anything more: left unfinished",
-                    path,
+                    quoted_for_log(path),
                 )
             except OSError as gone:
                 logger.info(
-                    "the event stream on %r was still open at the shutdown limit, and its client had gone (%s)",
-                    path,
+                    "the event stream on %s was still open at the shutdown limit, and its client had gone (%s)",
+                    quoted_for_log(path),
                     type(gone).__name__,
                 )
             else:
-                logger.info("the event stream on %r was still open at the shutdown limit: ended", path)
+                logger.info("the event stream on %s was still open at the shutdown limit: ended", quoted_for_log(path))
 
 
 class SessionNetworkPeerMiddleware:
@@ -371,10 +374,11 @@ def install_controller_http_middleware(
             source = "token"
             conflicting = asserted_id if asserted_id and asserted_id != operator_id else None
             if conflicting:
+                # The header is the caller's text, quoted and cut; the operator id (%r) is a configured credential's.
                 logger.warning(
-                    "operator header %s=%r conflicts with the authenticated operator %r; using the credential",
+                    "operator header %s=%s conflicts with the authenticated operator %r; using the credential",
                     settings.operator_id_header,
-                    conflicting,
+                    quoted_for_log(conflicting),
                     operator_id,
                 )
         else:

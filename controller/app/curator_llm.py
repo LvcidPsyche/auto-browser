@@ -87,6 +87,7 @@ class CuratorLLMAdapter:
         try:
             adapter = cls(provider, model=model, settings=settings)
         except ValueError as exc:
+            # %r: the operator's own CURATOR_PROVIDER, no caller's text.
             logger.warning("curator: invalid provider %r — %s", provider, error_text_for_log(exc))
             return None
         if not adapter.ready:

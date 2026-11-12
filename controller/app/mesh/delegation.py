@@ -14,7 +14,7 @@ from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
-from ..utils import RefusalLogWindows, error_text, error_text_for_log, held_back_note
+from ..utils import RefusalLogWindows, error_text, error_text_for_log, held_back_note, quoted_for_log
 from .identity import NodeIdentity
 from .models import (
     DelegationRequest,
@@ -372,12 +372,12 @@ class DelegationManager:
         try:
             grant = self._policy.evaluate(peer, request)
         except PolicyError as exc:
-            # %r, here and below: the capability and the session id are the peer's own text, and a line break in
-            # one must not start a log line. (The reason quotes the capability with repr already.)
+            # Quoted and cut, here and below: the capability and the session id are the peer's own text, as long as
+            # its body, and a line break in one must not start a log line. (The reason quotes the capability too.)
             logger.info(
-                "mesh.policy.denied peer=%s capability=%r reason=%s",
+                "mesh.policy.denied peer=%s capability=%s reason=%s",
                 sender_id,
-                request.capability,
+                quoted_for_log(request.capability),
                 error_text_for_log(exc),
             )
             return DelegationResponse(
@@ -399,9 +399,9 @@ class DelegationManager:
                 )
             approval_id = str(uuid.uuid4())
             logger.info(
-                "mesh.delegation.approval_required peer=%s capability=%r approval_id=%s",
+                "mesh.delegation.approval_required peer=%s capability=%s approval_id=%s",
                 sender_id,
-                request.capability,
+                quoted_for_log(request.capability),
                 approval_id,
             )
             try:
@@ -425,9 +425,9 @@ class DelegationManager:
                 )
             if approval_status != "approved":
                 logger.info(
-                    "mesh.delegation.approval_denied peer=%s capability=%r approval_id=%s status=%s",
+                    "mesh.delegation.approval_denied peer=%s capability=%s approval_id=%s status=%s",
                     sender_id,
-                    request.capability,
+                    quoted_for_log(request.capability),
                     approval_id,
                     approval_status,
                 )
@@ -480,7 +480,11 @@ class DelegationManager:
         # session:<verb> → session handler stub
         if cap.startswith("session:"):
             verb = cap[8:]
-            logger.info("mesh.delegation.session_verb verb=%r session_id=%r", verb, request.session_id)
+            logger.info(
+                "mesh.delegation.session_verb verb=%s session_id=%s",
+                quoted_for_log(verb),
+                quoted_for_log(request.session_id),
+            )
             return {"_mesh_error": True, "error": "session delegation not yet wired", "verb": verb}
 
         return {"_mesh_error": True, "error": f"Unknown capability kind: {cap!r}"}

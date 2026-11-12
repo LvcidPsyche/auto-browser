@@ -14,6 +14,7 @@ from .utils import (
     PRIVATE_FILE_MODE,
     atomic_write_text,
     error_text_for_log,
+    quoted_for_log,
     record_json,
     record_path,
     run_to_completion,
@@ -252,7 +253,9 @@ class DurableSessionStore:
             return await self.file_store.get(session_id)
         except Exception as exc:
             logger.warning(
-                "redis session read failed for %r, using file record: %s", session_id, error_text_for_log(exc)
+                "redis session read failed for %s, using file record: %s",
+                quoted_for_log(session_id),
+                error_text_for_log(exc),
             )
             return await self.file_store.get(session_id)
         # The file copy is written first, so a closed one is the session's newest record. A write whose Redis half
@@ -269,8 +272,8 @@ class DurableSessionStore:
             return None
         except OSError as exc:
             logger.warning(
-                "could not read the file copy of session %r to check for a close: %s",
-                session_id,
+                "could not read the file copy of session %s to check for a close: %s",
+                quoted_for_log(session_id),
                 error_text_for_log(exc),
             )
             return None

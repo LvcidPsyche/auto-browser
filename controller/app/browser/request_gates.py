@@ -15,7 +15,7 @@ import weakref
 from typing import Any, Callable
 
 from ..action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
-from ..utils import error_text_for_log, spawn_background_task
+from ..utils import error_text_for_log, quoted_for_log, spawn_background_task
 from .prefetch import PREFETCH_OFF, turn_prefetch_off
 from .request_gate import GateBlock, RequestGate, RequestGateUnavailable
 
@@ -171,8 +171,8 @@ class RequestGates:
         if value != PREFETCH_OFF:
             logger.warning(
                 "pre-request gate: speculation-rules prefetch could not be turned off in a launched browser (read "
-                "back %r): a prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused.",
-                value,
+                "back %s): a prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused.",
+                quoted_for_log(value),
             )
 
     async def bypass_service_workers(self, page: Any) -> None:

@@ -21,7 +21,7 @@ from fastapi import HTTPException
 from .action_errors import BrowserActionError, SessionNotFoundError
 from .approval_display import shown_approval
 from .models import ApprovalDecider, ApprovalOrigin, ApprovalRecord, ApprovalStatus
-from .utils import error_text_for_log
+from .utils import error_text_for_log, quoted_for_log
 
 # The attribute a refusal carries the notes of the approvals given back with it in.
 _GIVEN_BACK_NOTES = "approvals_given_back"
@@ -390,8 +390,8 @@ async def _run_through(awaitable: Awaitable[_T]) -> tuple[_T, bool]:
             if not cancelled:
                 raise
             logger.warning(
-                "%r failed while its caller was cancelled: %s: %s",
-                awaitable,
+                "%s failed while its caller was cancelled: %s: %s",
+                quoted_for_log(awaitable),
                 type(exc).__name__,
                 error_text_for_log(exc),
                 exc_info=exc,

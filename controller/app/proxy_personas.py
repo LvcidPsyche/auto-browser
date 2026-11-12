@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from .session_ownership import may_use, verified_operator
-from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,10 @@ class ProxyPersonaStore:
                 name, persona = self._normalize_persona(raw_name, raw_persona)
             except ValueError as exc:
                 logger.warning(
-                    "skipping invalid proxy persona entry %r in %s: %s", raw_name, self._path, error_text_for_log(exc)
+                    "skipping invalid proxy persona entry %s in %s: %s",
+                    quoted_for_log(raw_name),
+                    self._path,
+                    error_text_for_log(exc),
                 )
                 continue
             normalized[name] = persona
@@ -158,11 +161,11 @@ class ProxyPersonaStore:
                 keys.append(raw_name)
         if len(keys) > 1:
             logger.error(
-                "proxy persona file %s holds %d entries for %r: %r; remove all but one",
+                "proxy persona file %s holds %d entries for %s: %s; remove all but one",
                 self._path,
                 len(keys),
-                name,
-                keys,
+                quoted_for_log(name),
+                quoted_for_log(keys),
             )
             raise ProxyPersonaDuplicateError()
         return raw, (keys[0] if keys else None)

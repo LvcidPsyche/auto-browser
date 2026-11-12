@@ -31,7 +31,7 @@ from .browser_sandbox import (
     refusal,
     verified_on,
 )
-from .utils import error_text, error_text_for_log, spawn_background_task
+from .utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -1056,7 +1056,10 @@ class DockerBrowserNodeProvisioner:
         """
         if not _SESSION_DIR_NAME.fullmatch(session_id or "") or session_id in {".", ".."}:
             # One plain path component only: an id like 'a/../b' resolves inside the runtime root, but names b.
-            logger.warning("Refusing to remove the runtime dir of session %r: not a plain directory name", session_id)
+            logger.warning(
+                "Refusing to remove the runtime dir of session %s: not a plain directory name",
+                quoted_for_log(session_id),
+            )
             return
         runtime_root = self._local_runtime_root(session_id)
         try:

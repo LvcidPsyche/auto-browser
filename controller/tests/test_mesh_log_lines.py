@@ -2,8 +2,8 @@
 
 A registered peer signs its request, and the capability and the session id in it are the peer's text: the capability
 whole when no grant matches it, and past the prefix under a wildcard grant (``tool:*``). Logged with %s, a line break in
-either began a line of the peer's choosing. Each of these log calls writes them with %r now, as the refused request's
-path is (tests/test_http_middleware.py).
+either began a line of the peer's choosing. Each of these log calls writes them quoted and cut now (quoted_for_log), as
+the refused request's path is (tests/test_http_middleware.py): %r escaped them, but wrote them as long as the body.
 """
 
 from __future__ import annotations
@@ -376,6 +376,59 @@ def test_the_two_approval_lines_are_one_line_each(tmp_path: Path, caplog: pytest
     assert response.status == "rejected"
     _the_line(caplog, "app.mesh.delegation", "mesh.delegation.approval_required")
     _the_line(caplog, "app.mesh.delegation", "mesh.delegation.approval_denied")
+
+
+# A peer's text as long as its signed body lets it be: %r escaped it, and wrote it whole.
+LONG = "y" * 60_000
+
+
+@pytest.mark.parametrize(
+    ("grants", "capability", "session_id", "logger_name", "starts"),
+    [
+        ((), "tool:x" + LONG, "", "app.mesh.delegation", "mesh.policy.denied"),
+        (("tool:*",), "tool:x" + LONG, "", "app.mesh.policy", "mesh.policy: PERMIT"),
+        (("session:*",), "session:close" + LONG, "", "app.mesh.delegation", "mesh.delegation.session_verb"),
+        (("session:close",), "session:close", "s1" + LONG, "app.mesh.delegation", "mesh.delegation.session_verb"),
+    ],
+    ids=["no grant", "a wildcard grant", "a session verb", "a session id"],
+)
+def test_a_peers_text_of_60000_characters_is_cut(
+    mesh, caplog: pytest.LogCaptureFixture, grants, capability, session_id, logger_name, starts
+) -> None:
+    add_legit_peer(mesh, *grants)
+    caplog.set_level(logging.INFO)
+
+    _post(mesh, capability, session_id=session_id)
+
+    messages = [record.getMessage() for record in caplog.records if record.name == logger_name]
+    (message,) = [message for message in messages if message.startswith(starts)]
+    # Each text quoted and cut at 200 characters, the denial's reason too (it quotes the capability).
+    assert len(message) < 800, (len(message), message[:300])
+    assert "'tool:xyyy" in message or "'closeyyy" in message or "'s1yyy" in message, message[:300]
+
+
+def test_the_two_approval_lines_cut_a_peers_text_of_60000_characters(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    server, legit = NodeIdentity(tmp_path / "server"), NodeIdentity(tmp_path / "legit")
+    peers = PeerRegistryFile(tmp_path / "peers.json")
+    grant = CapabilityGrant(capability="tool:*", require_approval=True)
+    peers.add(PeerRecord(node_id=legit.node_id, pubkey_b64=legit.pubkey_b64, grants=[grant]))
+
+    async def denied(approval_id: str, request: dict) -> dict:
+        return {"status": "denied"}
+
+    manager = DelegationManager(identity=server, peers=peers, approval_fn=denied)
+    manager._started_at -= manager._timestamp_window + 1  # up for longer than one window
+    envelope = make_envelope(legit, {"capability": "tool:x" + LONG}, recipient_node_id=server.node_id)
+    caplog.set_level(logging.INFO)
+
+    assert asyncio.run(manager.receive_inbound(envelope)).status == "rejected"
+
+    lines = [record.getMessage() for record in caplog.records if record.name == "app.mesh.delegation"]
+    for starts in ("mesh.delegation.approval_required", "mesh.delegation.approval_denied"):
+        (message,) = [line for line in lines if line.startswith(starts)]
+        assert len(message) < 500 and "capability='tool:xyyy" in message, (len(message), message[:300])
 
 
 def test_a_session_id_that_names_no_record_is_logged_on_one_line_at_debug(

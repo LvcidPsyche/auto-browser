@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -376,6 +377,53 @@ class NoTextMadeFromAnErrorOutsideTheGuardTests(unittest.TestCase):
             guards = _TEXT_GUARDS.get(relative, frozenset())
             made += [f"{relative}:{line}" for line in texts_made_from_an_error(tree, guards)]
         self.assertEqual(made, [], "take the error's text with error_text, or error_text_for_log for a log line")
+
+
+_CONVERSION = re.compile(r"%(?:\([^)]*\))?[-#0 +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?([diouxXeEfFgGcrsa%])")
+# The %r arguments a log line keeps, by file and argument: none is a caller's, a peer's, a page's or a browser's text.
+_KEPT_REPR = {
+    ("cdp/passthrough.py", "method"): "one of _ALLOWED_CDP_COMMANDS, past the allowlist check",
+    ("compliance.py", "normalized"): "an alias of _DEPRECATED_ALIASES",
+    ("compliance.py", "target"): "the preset that alias names",
+    ("compliance.py", "value"): "a preset's own value",
+    ("compliance.py", "current"): "the operator's setting the preset replaces",
+    ("curator_llm.py", "provider"): "the operator's CURATOR_PROVIDER",
+    ("middleware/http.py", "operator_id"): "a configured credential's operator id",
+    ("tool_gateway/selection.py", "value"): "the operator's MCP_TOOL_PROFILE",
+}
+
+
+def reprs_in_log_formats(tree: ast.AST) -> list[tuple[int, str]]:
+    """Each %r in a log call's format in ``tree``: the line, and the source of the argument it writes."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        arguments = _log_arguments(node)
+        if arguments is None:
+            continue
+        message = node.args[1] if node.func.attr == "log" else node.args[0]
+        if not (isinstance(message, ast.Constant) and isinstance(message.value, str)):
+            continue
+        conversions = [match.group(1) for match in _CONVERSION.finditer(message.value) if match.group(1) != "%"]
+        for conversion, argument in zip(conversions, arguments, strict=False):
+            if conversion == "r":
+                found.append((node.lineno, ast.unparse(argument)))
+    return found
+
+
+class NoCallersTextWrittenByReprTests(unittest.TestCase):
+    def test_a_log_format_writes_by_repr_only_what_no_caller_chose(self) -> None:
+        # %r escapes a control character but writes the value whole: a peer's capability of 60,000 characters was a
+        # record of 60,069. quoted_for_log quotes it the same way, and cuts it.
+        written: list[str] = []
+        for path in sorted(_APP.rglob("*.py")):
+            relative = path.relative_to(_APP).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            written += [
+                f"{relative}:{line} {argument}"
+                for line, argument in reprs_in_log_formats(tree)
+                if (relative, argument) not in _KEPT_REPR
+            ]
+        self.assertEqual(written, [], "write a caller's value with %s and quoted_for_log")
 
 
 class AValidationErrorLoggedTests(unittest.IsolatedAsyncioTestCase):

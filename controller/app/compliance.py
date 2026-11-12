@@ -46,6 +46,7 @@ def apply_compliance_template(settings: Any, template_name: str) -> dict[str, An
     normalized = raw if raw in _DEPRECATED_ALIASES else raw.lower()
     if normalized in _DEPRECATED_ALIASES:
         target = _DEPRECATED_ALIASES[normalized]
+        # %r, here and below: an alias of _DEPRECATED_ALIASES and a preset's own values, and the operator's settings.
         logger.warning(
             "compliance: %r is a deprecated alias and will be removed in a future release; use %r",
             normalized,

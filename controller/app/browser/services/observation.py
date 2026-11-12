@@ -14,7 +14,7 @@ from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...artifacts import in_thread_writing
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
 from ...pii_scrub import pii_words
-from ...utils import error_text_for_log
+from ...utils import error_text_for_log, quoted_for_log
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
 
@@ -265,7 +265,7 @@ class BrowserObservationService:
         if preset is None:
             preset = self.manager.settings.perception_preset_default
         if preset not in ("text", "fast", "normal", "rich"):
-            logger.warning("unknown perception preset %r; falling back to 'normal'", preset)
+            logger.warning("unknown perception preset %s; falling back to 'normal'", quoted_for_log(preset))
             preset = "normal"
 
         if preset == "fast":
