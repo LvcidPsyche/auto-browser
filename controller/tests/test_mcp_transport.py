@@ -24,6 +24,16 @@ from app.mcp_transport import (
 from app.models import McpToolCallContent, McpToolCallResponse
 from tests.test_mcp_resource_ownership import mcp_request
 
+# The answer to a request whose id cannot be read, or cannot be repeated as it was sent.
+ID_REFUSED = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32600,
+        "message": "JSON-RPC id must be a string (with no lone surrogate), a finite number or null",
+    },
+}
+
 
 def _stream_request(session_id: str, protocol_version: str) -> Request:
     """A GET /mcp: the TestClient would buffer the endless stream."""
@@ -709,11 +719,6 @@ class McpTransportTests(unittest.TestCase):
         # deep around NaN or a lone surrogate answered an unhandled 500 (Python 3.11 from about 600 levels, 3.12 at
         # 1,200), on each path below, the refusals of the envelope included.
         headers = {**self._ready_headers(), "content-type": "application/json"}
-        refused = {
-            "jsonrpc": "2.0",
-            "id": None,
-            "error": {"code": -32600, "message": "JSON-RPC id must be a string, a number or null"},
-        }
         ids = {"a list": "[1]", "an object": '{"a":1}', "true": "true", "200 lists deep": "[" * 200 + "NaN" + "]" * 200}
         bodies = {
             "tools/call": '{"jsonrpc":"2.0","id":ID,"method":"tools/call","params":{"name":1}}',
@@ -726,11 +731,44 @@ class McpTransportTests(unittest.TestCase):
                 with self.subTest(id=label, body=path):
                     response = self.client.post("/mcp", content=body.replace("ID", value).encode(), headers=headers)
 
-                    self.assertEqual((response.status_code, response.json()), (400, refused))
+                    self.assertEqual((response.status_code, response.json()), (400, ID_REFUSED))
+
+    def test_an_id_an_answer_cannot_repeat_as_sent_is_refused_before_the_request_runs(self) -> None:
+        # NaN, the infinities and 1e999, which reads as one, are no JSON numbers: an answer wrote each as null. A lone
+        # surrogate, which UTF-8 does not carry, it wrote as U+FFFD. Each initialize made a session (200) whose answer
+        # named no request, or another one.
+        ids = {
+            "NaN": "NaN",
+            "Infinity": "Infinity",
+            "-Infinity": "-Infinity",
+            "1e999": "1e999",
+            "-1e999": "-1e999",
+            "a lone surrogate": '"\\ud800"',
+            "a lone surrogate in text": '"a\\udfffb"',
+        }
+        initialize = (
+            '{"jsonrpc":"2.0","id":ID,"method":"initialize","params":{"protocolVersion":"2025-11-25",'
+            '"clientInfo":{"name":"pytest","version":"1.0.0"},"capabilities":{}}}'
+        )
+        ping = '{"jsonrpc":"2.0","id":ID,"method":"ping"}'
+        ready = self._ready_headers()
+        sessions = sorted(self.transport._sessions)
+        for label, value in ids.items():
+            for path, body, headers in (("initialize", initialize, {}), ("ping", ping, ready)):
+                with self.subTest(id=label, body=path):
+                    response = self.client.post(
+                        "/mcp",
+                        content=body.replace("ID", value).encode("ascii"),
+                        headers={**headers, "content-type": "application/json"},
+                    )
+
+                    self.assertEqual((response.status_code, response.json()), (400, ID_REFUSED))
+                    self.assertNotIn(MCP_SESSION_HEADER, response.headers)
+                    self.assertEqual(sorted(self.transport._sessions), sessions)
 
     def test_an_id_that_is_a_string_a_number_or_null_is_answered_as_before(self) -> None:
         headers = self._ready_headers()
-        for value in ("abc", 7, 1.5, None):
+        for value in ("abc", "caf" + chr(0xE9) + chr(0x1F600), 7, 10**30, 1.5, -2.5e-300, None):
             with self.subTest(id=value):
                 response = self.client.post(
                     "/mcp",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import InitVar, dataclass, field, fields
 from itertools import chain
 from pathlib import Path
@@ -166,10 +167,14 @@ class McpHttpTransport:
         if not isinstance(payload, dict):
             return self._json_error_response(None, -32600, "JSON-RPC body must be an object", status_code=400)
         # Before anything repeats it: every answer repeats the id whole, and one nested some hundreds of lists deep made
-        # an answer's walks give up (an unhandled 500). An id that cannot be read is answered with id null.
+        # an answer's walks give up (an unhandled 500). An id that cannot be read, or that an answer could not repeat
+        # as it was sent, is answered with id null, before the request runs.
         if not _is_a_json_rpc_id(payload.get("id")):
             return self._json_error_response(
-                None, -32600, "JSON-RPC id must be a string, a number or null", status_code=400
+                None,
+                -32600,
+                "JSON-RPC id must be a string (with no lone surrogate), a finite number or null",
+                status_code=400,
             )
         if payload.get("jsonrpc") != JSONRPC_VERSION:
             return self._json_error_response(
@@ -998,8 +1003,18 @@ class McpHttpTransport:
 
 
 def _is_a_json_rpc_id(value: object) -> bool:
-    """Whether ``value`` is an id JSON-RPC 2.0 allows: a string, a number or null (true and false are no numbers)."""
-    return value is None or isinstance(value, str) or (isinstance(value, int | float) and not isinstance(value, bool))
+    """Whether ``value`` is an id JSON-RPC 2.0 allows and an answer can repeat as it was sent: a string, a number or
+    null (true and false are no numbers).
+
+    The JSON reader takes NaN, Infinity and -Infinity, and a number too large for a float (1e999) as one of these,
+    which are no JSON numbers: an answer wrote each as null. A lone surrogate (JSON's "\\ud800") UTF-8 does not carry,
+    and an answer wrote it as U+FFFD.
+    """
+    if isinstance(value, str):
+        return not holds_lone_surrogate(value)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return value is None or (isinstance(value, int) and not isinstance(value, bool))
 
 
 def _compact_json(value: Any) -> str:
