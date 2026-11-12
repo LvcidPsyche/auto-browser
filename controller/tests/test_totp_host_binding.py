@@ -63,8 +63,16 @@ class TotpHostResolutionTests(unittest.TestCase):
 
 class TotpAutofillTests(unittest.TestCase):
     def run_autofill(
-        self, url: str, *, hosts: tuple[str, ...], refused: bool = False, shown: str | None = None
+        self,
+        url: str,
+        *,
+        hosts: tuple[str, ...],
+        refused: bool = False,
+        shown: str | None = None,
+        leaves_during: str | None = None,
     ) -> tuple[object, AsyncMock]:
+        """``leaves_during``: the step ("search" for the field, "focus" for its click) during which the page goes
+        to another host."""
         typed = AsyncMock()
         locator = SimpleNamespace(fill=AsyncMock(), press=AsyncMock())
         manager = SimpleNamespace(
@@ -73,10 +81,24 @@ class TotpAutofillTests(unittest.TestCase):
             _shown_url=lambda page: shown if shown is not None else page.url,
         )
         service = BrowserActionService(manager)
-        service._find_one_time_code_field = AsyncMock(return_value=(locator, 'input[name*="code" i]'))
-        service.focus_verified = AsyncMock()
-        service.type_text_human_like = typed
         session = SimpleNamespace(page=SimpleNamespace(url=url), totp_secret=SECRET, totp_hosts=hosts)
+
+        def leave_during(step: str) -> None:
+            if leaves_during == step:
+                session.page.url = "https://evil.test/collect"
+
+        async def find_the_field(_page: object) -> tuple[object, str]:
+            leave_during("search")
+            return locator, 'input[name*="code" i]'
+
+        async def focus(*_args: object, **_named: object) -> None:
+            self.focus_clicks += 1
+            leave_during("focus")
+
+        service._find_one_time_code_field = find_the_field
+        service.focus_verified = focus
+        service.type_text_human_like = typed
+        self.pressed, self.focus_clicks = locator.press, 0
         return asyncio.run(service.maybe_handle_totp(session)), typed
 
     def test_types_the_code_on_a_named_host(self) -> None:
@@ -104,6 +126,26 @@ class TotpAutofillTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         typed.assert_not_awaited()
+
+    def test_a_page_that_leaves_the_named_host_while_its_field_is_looked_for_gets_nothing(self) -> None:
+        # Looking for the field awaits the page: no test held the check made after it, which keeps the focus click
+        # off the other host's page as well.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="search"
+        )
+        self.assertIsNone(result)
+        typed.assert_not_awaited()
+        self.assertEqual(self.focus_clicks, 0)
+
+    def test_a_page_that_leaves_the_named_host_during_the_focus_click_gets_nothing(self) -> None:
+        # The focus click (the pointer's moves, a pause, the press) awaits the page as well, and nothing was checked
+        # after it: a page the press sent to another host was given the live code, and Enter.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="focus"
+        )
+        self.assertIsNone(result)
+        typed.assert_not_awaited()
+        self.pressed.assert_not_awaited()
 
     def test_totp_unavailable_names_the_page_as_it_is_shown(self) -> None:
         with patch("app.browser.services.actions.pyotp", None), self.assertRaises(BrowserActionError) as raised:

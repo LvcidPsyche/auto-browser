@@ -11,6 +11,7 @@ field at all, a scroll typed the code into "Promo code" and clicked
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -116,6 +117,82 @@ def _autofill(html: str) -> dict:
                 await browser.close()
 
     return asyncio.run(main())
+
+
+OTHER_HOST = "collect.example.net"
+# A named host's one-time-code field that sends the page to another host when it is pressed, and that host's field,
+# which the autofill's selector matches too.
+LEAVES_ON_PRESS = f"""<!doctype html>
+<form onsubmit="event.preventDefault(); document.title='SUBMITTED ON THE NAMED HOST:' + this.otp.value">
+  <input name="otp" autocomplete="one-time-code" inputmode="numeric" maxlength="6"
+         onmousedown="location.href='https://{OTHER_HOST}/collect'">
+  <button type="submit">Verify</button>
+</form>"""
+COLLECTS = """<!doctype html>
+<form onsubmit="event.preventDefault(); document.title='RECEIVED:' + this.otp.value">
+  <input name="otp" autocomplete="one-time-code" autofocus>
+</form>"""
+
+
+async def _fulfil(body: str, route) -> None:
+    await route.fulfill(body=body, content_type="text/html")
+
+
+def _autofill_where_the_press_leaves(runs: int) -> list[dict]:
+    """The autofill on LEAVES_ON_PRESS, ``runs`` times in one browser, each on a page of its own."""
+    from playwright.async_api import async_playwright
+
+    async def main() -> list[dict]:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(executable_path=chromium_executable())
+            try:
+                return [await one(browser) for _ in range(runs)]
+            finally:
+                await browser.close()
+
+    async def one(browser) -> dict:
+        page = await browser.new_page()
+        page.set_default_timeout(3000)
+        for host, body in ((HOST, LEAVES_ON_PRESS), (OTHER_HOST, COLLECTS)):
+            await page.route(f"https://{host}/**", partial(_fulfil, body))
+        await page.goto(f"https://{HOST}/2fa")
+
+        async def settle(_page) -> None:
+            await asyncio.sleep(0.3)
+
+        manager = SimpleNamespace(
+            settings=SimpleNamespace(
+                human_typing_min_delay_ms=40,
+                human_typing_max_delay_ms=80,
+                default_viewport_width=1280,
+                default_viewport_height=720,
+            ),
+            _settle=settle,
+            _page_refused=lambda _page: False,
+            _shown_url=lambda page: page.url,
+        )
+        session = SimpleNamespace(
+            page=page, totp_secret="JBSWY3DPEHPK3PXP", totp_hosts=(HOST,), mouse_position=(5.0, 5.0)
+        )
+        result = await BrowserActionService(manager).maybe_handle_totp(session)
+        await asyncio.sleep(0.5)
+        field = await page.input_value("input[name=otp]") if OTHER_HOST in page.url else None
+        seen = {"result": result, "url": page.url, "title": await page.title(), "other_host_field": field}
+        await page.close()
+        return seen
+
+    return asyncio.run(main())
+
+
+@requires_chromium
+def test_a_page_that_leaves_the_named_host_as_its_field_is_pressed_gets_no_code() -> None:
+    # The host was checked before the field was looked for and after, and not after the click that focuses it: the
+    # press sent the page to another host, whose field the code was typed into and submitted, every time once the
+    # browser was warm (10 of 10). A fresh browser's first click can run out of its time before the press and focus
+    # the field without one, so the page never moves (and the code goes into the named host's field, as it should):
+    # the runs share one browser, and every one must hold.
+    for seen in _autofill_where_the_press_leaves(3):
+        assert not seen["title"].startswith("RECEIVED:") and not seen["other_host_field"], seen
 
 
 @requires_chromium

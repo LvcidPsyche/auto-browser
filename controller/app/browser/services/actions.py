@@ -1600,6 +1600,9 @@ class BrowserActionService:
             return None
         code = pyotp.TOTP(session.totp_secret).now()
         await self.focus_verified(session, locator, action="totp_fill")
+        # So did the focus click: the pointer's moves, the pause and the press, whose navigation a click waits for.
+        if not self._may_fill_totp(session):
+            return None
         try:
             await locator.fill("")
         except Exception:
