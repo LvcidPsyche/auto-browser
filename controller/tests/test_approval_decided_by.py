@@ -27,6 +27,7 @@ from app.models import BrowserActionDecision, OperatorIdentity
 from app.runtime_policy import (
     MIN_SHORT_TOKEN_RUN_NOT_PRINTED,
     MIN_TOKEN_RUN_NOT_PRINTED,
+    _case_free,
     validate_runtime_policy,
 )
 from app.session_ownership import acting_as
@@ -256,6 +257,10 @@ class RefuseSelfApprovalTests(StoreBase):
 # Two letters whose case fold is longer than they are, by their names: sharp s folds to "ss", the ligature to "fi".
 SHARP_S = "\N{LATIN SMALL LETTER SHARP S}"
 FI = "\N{LATIN SMALL LIGATURE FI}"
+# And one more, which folds to "i" and a combining dot above.
+DOTTED_I = "\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}"
+# The one code point casefold() leaves apart from its upper case: 'I', which folds to 'i'.
+DOTLESS_I = "\N{LATIN SMALL LETTER DOTLESS I}"
 
 
 def kept_back(entries: int) -> str:
@@ -502,22 +507,54 @@ class ListedOperatorTests(unittest.TestCase):
             [f"lists '{SHARP_S}12', which no credential"],
         ),
         "such a token after Bearer, in upper case": ("Bearer SS123", f"alice:{SHARP_S}123", None, [kept_back(1)]),
+        # A run is of the token's characters as configured. Windows of its fold of that length stood for fewer of
+        # them where a fold is longer: each of these holds three or four of a token's five or six, and was kept back.
+        **{
+            f"fewer of a token's characters than the run, where {name}": (
+                listed,
+                f"alice:{token}",
+                None,
+                [f"lists '{listed}', which no credential"],
+            )
+            for name, listed, token in (
+                ("sharp s folds longer", f"{SHARP_S}12", f"{SHARP_S}1234"),
+                ("the ligature fi folds longer", f"{FI}ab", f"{FI}abcd"),
+                ("I with a dot above folds longer", f"{DOTTED_I}ab", f"{DOTTED_I}abcd"),
+                ("an id holds the letters the ligature fi folds to", "wifi123", f"{FI}12345"),
+                ("an id holds the letters sharp s folds to", "boss123", f"{SHARP_S}12345"),
+            )
+        },
+        # The token in another case is the token: the upper case of dotless i folds to 'i', not to dotless i.
+        f"a token of {DOTLESS_I} in upper case": ("IIIIIIIII", f"alice:{DOTLESS_I * 9}", None, [kept_back(1)]),
+        f"{DOTLESS_I} in upper case, cut short by one": (
+            "Bearer IIIIIIII",
+            f"alice:{DOTLESS_I * 9}",
+            None,
+            [kept_back(1)],
+        ),
     }
 
-    def test_a_case_fold_makes_no_text_shorter(self) -> None:
-        # What a token's run is counted from rests on this. Its length is taken from the token as it is configured
-        # and its parts from the token's fold, which holds the fold of each run of k of the token's characters, of
-        # k characters or more: so whatever holds such a run, in any case, holds one of those parts.
-        shorter = [point for point in range(sys.maxunicode + 1) if not chr(point).casefold()]
-        self.assertEqual(shorter, [])
-        for token in (f"{SHARP_S}1234567", f"{FI}1234567", f"ab{SHARP_S}c{FI}d{SHARP_S}"):
-            folded = token.casefold()
-            self.assertGreater(len(folded), len(token))
-            for length in range(1, len(token) + 1):
-                for start in range(len(token) - length + 1):
-                    part = token[start : start + length].casefold()
-                    self.assertGreaterEqual(len(part), length, (token, start, length))
-                    self.assertIn(part, folded, (token, start, length))
+    def test_the_fold_a_run_is_looked_for_in_joins_every_case_a_character_at_a_time(self) -> None:
+        # What a run is looked for in rests on this. Each run is k of the token's characters as configured, folded:
+        # an entry that holds those k in any case holds their fold, as the fold of the entry is the folds of its
+        # characters one after another, and each character's fold is that of each of its cases. casefold() alone
+        # leaves dotless i apart from its upper case, 'I', which folds to 'i': the fold is of the upper case.
+        apart = []
+        for point in range(sys.maxunicode + 1):
+            if 0xD800 <= point <= 0xDFFF:
+                continue
+            character = chr(point)
+            cases = {character, character.upper(), character.lower(), character.title(), character.casefold()}
+            if len({_case_free(case) for case in cases}) != 1:
+                apart.append(hex(point))
+        self.assertEqual(apart, [])
+        self.assertEqual(_case_free(DOTLESS_I * 3), _case_free("III"))
+        for text in (
+            f"{SHARP_S}1234567",
+            f"{FI}abc{DOTTED_I}",
+            f"ab{SHARP_S}c{FI}d{DOTLESS_I}\N{GREEK CAPITAL LETTER SIGMA}",
+        ):
+            self.assertEqual(_case_free(text), "".join(_case_free(character) for character in text), ascii(text))
 
     def test_no_warning_holds_eight_characters_in_a_row_of_a_token(self) -> None:
         for shape, (listed, named, shared, expected) in self.SHAPES.items():
@@ -540,9 +577,26 @@ class ListedOperatorTests(unittest.TestCase):
                         # Too short a run to tell from an id's letters: only the token itself is not named.
                         self.assertNotIn(f"'{token}'".upper(), said.upper(), (token, warnings))
                         continue
+                    # Each run of the token as configured, as it is and in upper case: the upper case of the token
+                    # cut to the run is fewer of its characters where a character's upper case is longer.
                     for start in range(len(token) - run + 1):
                         self.assertNotIn(token[start : start + run], said, (token, warnings))
-                    self.assertNotIn(token.upper()[:run], said.upper(), (token, warnings))
+                        self.assertNotIn(token[start : start + run].upper(), said.upper(), (token, warnings))
+
+    def test_an_operator_id_is_kept_back_only_for_a_whole_token_of_eight_as_configured(self) -> None:
+        # Decided on the fold's length, a token of seven with a sharp s (eight once folded) kept back an operator id
+        # that holds it, where its ASCII twin let the id be named. A token of eight whole in the id keeps it back.
+        named = "It differs from 'bss123456' only by case"
+        for token, listed, operator, expected in (
+            (f"{SHARP_S}123456", "Bss123456", "bss123456", named),
+            ("s123456", "Bss123456", "bss123456", named),
+            (f"{SHARP_S}1234567", "Bss1234567", "bss1234567", kept_back(1)),
+            ("ss123456", "Bss123456", "bss123456", kept_back(1)),
+        ):
+            with self.subTest(token=token):
+                [warning] = self._warnings(listed, tokens=f"alice:{token},{operator}:{self.A}")
+
+                self.assertIn(expected, warning)
 
     def test_an_id_its_own_token_begins_with_is_still_named(self) -> None:
         # An operator id of API_BEARER_TOKENS is no secret, though ten characters of a token are that id: a slip of

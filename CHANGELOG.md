@@ -406,7 +406,9 @@ All notable changes to auto-browser are documented here.
   `developer` and `dev2` are named). A part of a token that
   stands in its own operator's id as well is not counted (with `alice-prod:alice-prod-9f8a...`, `alice-prod2` is
   named), and an operator id of `API_BEARER_TOKENS`, in whatever case, is still named where its letters are also a
-  token's, unless it holds a whole token of eight characters or more. (AUTH-36)
+  token's, unless it holds a whole token of eight characters or more. Each length and each run is of the token's
+  characters as it is configured, though a sharp s or the ligature fi folds to two (`boss123` is named beside a
+  token of a sharp s and `12345`), and a token of dotless i (U+0131) is kept back in upper case too. (AUTH-36)
 - **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read`,
   `write` or `upload` asked for no approval, and that label is written by a model reading the page, which text on
   the page can steer. Before the approval decision the target of such a click is now read, found as the click will

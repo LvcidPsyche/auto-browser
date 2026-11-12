@@ -254,7 +254,7 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
 
 def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_id: bool) -> bool:
     """Whether printing ``text`` would show a bearer token of the deployment, whole or in part. Compared without
-    regard to case: a token of hexadecimal digits in upper case is the same secret.
+    regard to case (_case_free): a token of hexadecimal digits in upper case is the same secret.
 
     In part is MIN_TOKEN_RUN_NOT_PRINTED of a token's characters in a row, and for a token no longer than that all
     but one of them, down to MIN_SHORT_TOKEN_RUN_NOT_PRINTED: below it an id holds a token's letters by chance, and
@@ -264,30 +264,41 @@ def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_
 
     An operator id of API_BEARER_TOKENS shows a token only where it holds one of MIN_TOKEN_RUN_NOT_PRINTED
     characters or more whole.
+
+    Every length is the token's as it is configured, and each run is that many of its characters, folded: a fold can
+    be longer than what it folds (a sharp s folds to 'ss', the ligature fi to 'fi'), and runs or lengths of the fold
+    stood for fewer of the token's characters: 'boss123' was kept back for a token of a sharp s and '12345', and an
+    operator id for a token of seven. The fold of a text is the folds of its characters one after another, so
+    whatever holds a run in any case holds the run's fold.
     """
-    folded = text.casefold()
+    folded = _case_free(text)
     for credential in credentials:
-        token = credential.token.casefold()
+        configured = credential.token
+        token = _case_free(configured)
         if an_operator_id:
-            if len(token) >= MIN_TOKEN_RUN_NOT_PRINTED and token in folded:
+            if len(configured) >= MIN_TOKEN_RUN_NOT_PRINTED and token in folded:
                 return True
             continue
-        # From the token as it is configured: its fold can be longer (a sharp s folds to 'ss'), and counted from the
-        # fold, all but one of a token of five to eight was printed. A fold makes no text shorter, so the fold of a
-        # run of that many of its characters holds a run of the fold that long, which is what is looked for.
-        run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(credential.token) - 1)
+        run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(configured) - 1)
         if run < MIN_SHORT_TOKEN_RUN_NOT_PRINTED:
             if _holds_as_a_word(folded, token):
                 return True
             continue
         if token in folded:
             return True
-        own_id = (credential.operator_id or "").casefold()
-        for start in range(len(token) - run + 1):
-            part = token[start : start + run]
+        own_id = _case_free(credential.operator_id or "")
+        for start in range(len(configured) - run + 1):
+            part = _case_free(configured[start : start + run])
             if part in folded and part not in own_id:
                 return True
     return False
+
+
+def _case_free(text: str) -> str:
+    """``text`` folded so that each of its characters is one with its every case: casefold() of its upper case.
+    casefold() alone leaves dotless i (U+0131) apart from its upper case 'I', which folds to 'i', so a token of it
+    was printed in upper case."""
+    return text.upper().casefold()
 
 
 def _holds_as_a_word(text: str, word: str) -> bool:
