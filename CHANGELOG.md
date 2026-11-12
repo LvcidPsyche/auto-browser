@@ -547,16 +547,17 @@ All notable changes to auto-browser are documented here.
   focus click, before the code is typed. A page that moves by itself while the six digits are typed is not caught.
   The order is the same in every release since the autofill was bound to the session's hosts, 1.8.1 to 1.17.0 (by
   their code; the probe ran on this release's).
-- **A type into a field whose attributes could not be read keeps no preview of its text.** A `type` by selector
-  decides from its field's attributes whether the text is secret, and attributes it could not read were taken to
+- **A type into a field whose attributes could not be read keeps no preview of its text.** A `type` decides from
+  its field's attributes whether the text is secret, and by selector attributes it could not read were taken to
   say "not secret". A password field that came in after that read had timed out (`ACTION_TIMEOUT_MS`) and before
   the scroll's wait had the typed text kept as the action's `text_preview` (its first 80 characters) in the
   answer, `actions.jsonl`, the session's audit log and the witness receipt, and another operator under named
   credentials (`API_BEARER_TOKENS`) read it in `GET /audit/events`. A type that failed, its field never there, kept
-  the text it was to type in its failure record the same way, nothing typed. Attributes that cannot be read are
-  now taken to say the field is secret: the preview is withheld (`text_redacted: true`), and what is typed does not
-  change. Every release from 0.1.0 is affected (the function was `BrowserManager._locator_is_sensitive_input`
-  before 1.1.0).
+  the text it was to type in its failure record the same way, nothing typed; so did a type by `element_id` whose
+  read failed (its element gone from the page), and a type cancelled while it read them, each under a `standard`
+  receipt. The preview is now withheld (`text_redacted: true`) as the type begins, and given back only once the
+  attributes have been read and say the field is not secret; what is typed does not change. The selector's case
+  is in every release from 0.1.0 (the function was `BrowserManager._locator_is_sensitive_input` before 1.1.0).
 - **A field a type finds secret as it runs now restricts the type's witness receipt.** The Witness policy was asked
   once, before the action ran, when only the caller's `sensitive` flag could say the text was secret: a type into
   a password field the caller did not mark withheld its preview, and its receipt was still `standard`, with no

@@ -372,6 +372,9 @@ _NOT_A_ONE_TIME_CODE = re.compile(
     r"phone|\btel\b|currency|locale|lang|product|sku|order|track|captcha|cvv|cvc|csc|card|cc-",
     re.IGNORECASE,
 )
+# What a type's target says of its text where the text is shown (text_target_payload), and is withheld until the
+# field is known not to be secret (withhold_text_preview, give_back_text_preview).
+_TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
 _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   type: el.getAttribute('type') || '',
   name: el.getAttribute('name') || '',
@@ -579,18 +582,23 @@ class BrowserActionService:
             preview_chars=80,
             scrubber=self.manager.pii_scrubber,
         )
+        preview = {key: payload[key] for key in _TEXT_PREVIEW_KEYS if key in payload}
 
         async def operation() -> None:
+            # Withheld until a read of the field's attributes has said it is not secret. Withheld only once one
+            # said it was, the preview stayed in every record of a type whose read failed by element_id, or was
+            # cancelled by selector (a cancellation is no Exception), and the receipt stayed standard.
+            self.withhold_text_preview(payload)
             element = None
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
-                if self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
-                    self.withhold_text_preview(payload)
+                if not self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
+                    self.give_back_text_preview(payload, preview)
                 await self.elements.focus(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
-                if await self.locator_is_sensitive_input(locator):
-                    self.withhold_text_preview(payload)
+                if not await self.locator_is_sensitive_input(locator):
+                    self.give_back_text_preview(payload, preview)
                 await locator.scroll_into_view_if_needed()
                 await self.focus_verified(session, locator, action="type")
             if clear_first:
@@ -1143,10 +1151,19 @@ class BrowserActionService:
 
     @staticmethod
     def withhold_text_preview(payload: dict[str, Any]) -> None:
-        """For a field found secret once typing starts: its preview goes, and the mark that the preview was cut."""
-        payload.pop("text_preview", None)
-        payload.pop("text_truncated", None)
+        """For a field not yet known not to be secret: its preview goes, and the mark that the preview was cut."""
+        for key in _TEXT_PREVIEW_KEYS:
+            payload.pop(key, None)
         payload["text_redacted"] = True
+
+    @staticmethod
+    def give_back_text_preview(payload: dict[str, Any], preview: dict[str, Any]) -> None:
+        """For a field read and found not secret: the preview withheld until then comes back. A text the caller
+        marked sensitive has none to give back, and stays redacted."""
+        if not preview:
+            return
+        payload.pop("text_redacted", None)
+        payload.update(preview)
 
     async def locator_is_sensitive_input(self, locator: Any) -> bool:
         """Whether the field ``locator`` names is to be taken as secret: by its own attributes, and so where they

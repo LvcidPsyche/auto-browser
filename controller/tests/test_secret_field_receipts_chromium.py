@@ -124,3 +124,27 @@ async def test_a_type_into_a_field_that_never_comes_records_no_preview(tmp_path:
         assert line["status"] == "failed"
         for kept in (line["target"], event["details"]["target"], receipt.target):
             assert "text_preview" not in kept and kept.get("text_redacted") is True, kept
+
+
+async def test_a_type_by_element_id_whose_field_left_the_page_records_no_preview(tmp_path: Path) -> None:
+    # By element_id the field's attributes are read first, and a read that failed (the element gone) raised before
+    # the preview was withheld: the failure record kept the text it was to type, under a standard receipt.
+    async with browser_env(tmp_path, {"/login": LOGIN}) as env:
+        env.manager.settings.witness_enabled = True
+        session_id = await env.create("/login")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+        items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+        (field,) = [item for item in items if item.get("label") == "Password"]
+        await session.page.evaluate("() => document.getElementById('pw').remove()")
+
+        with pytest.raises(BrowserActionError):
+            await env.manager.type(session_id, element_id=field["element_id"], text=TEXT)
+
+        (line,) = _type_lines(session)
+        (event,) = _type_events(spy)
+        receipt = await _type_receipt(env, session_id)
+        assert line["status"] == "failed"
+        for kept in (line["target"], event["details"]["target"], receipt.target):
+            assert "text_preview" not in kept and kept.get("text_redacted") is True, kept
+        assert receipt.evidence_mode == "restricted"

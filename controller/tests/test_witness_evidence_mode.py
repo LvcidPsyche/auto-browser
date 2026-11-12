@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from app.action_errors import BrowserActionError
+from app.action_records import wait_for_pending_record
 from app.approvals import ApprovalRequiredError
 from app.audit import reset_current_operator, set_current_operator
 from app.browser.services.witness import BrowserWitnessService
@@ -522,3 +526,110 @@ async def test_a_type_into_a_password_field_restricts_its_receipt(tmp_path: Path
     assert receipt.evidence_mode == "restricted"
     assert "sensitive_input" in [concern.code for concern in receipt.concerns]
     assert (receipt.evidence.before, receipt.evidence.after) == (None, None)
+
+
+ELEMENT_ID = "op-" + "a" * 24
+NOT_SECRET = {"type": "text", "name": "note", "id": "note", "placeholder": "", "aria-label": "", "autocomplete": ""}
+
+
+async def _type_targets_and_receipt(manager: BrowserManager) -> tuple[list[dict[str, Any]], Any]:
+    """The type's target in its actions.jsonl line and its audit entry, and its receipt."""
+    lines = [call.args[1]["target"] for call in manager._append_jsonl.await_args_list]
+    events = [
+        call.kwargs["details"]["target"]
+        for call in manager.audit.append.await_args_list
+        if call.kwargs.get("event_type") == "browser_action"
+    ]
+    assert lines and events
+    (receipt,) = [r for r in await manager.witness.list("s1") if r.event_type == "browser_action"]
+    return [*lines, *events], receipt
+
+
+def _assert_withheld_and_restricted(targets: list[dict[str, Any]], receipt: Any) -> None:
+    for target in (*targets, receipt.target):
+        assert "text_preview" not in target and target.get("text_redacted") is True, target
+    assert receipt.evidence_mode == "restricted"
+    assert "sensitive_input" in [concern.code for concern in receipt.concerns]
+
+
+@pytest.mark.parametrize("read", ["fails", "says-not-secret"])
+async def test_a_type_by_element_id_keeps_its_preview_only_once_its_field_is_read_not_secret(
+    tmp_path: Path, read: str
+) -> None:
+    # By element_id the preview was withheld only where the field's attributes said secret, and a read of them that
+    # failed (the element gone from the page, a page that did not answer) raised before that: the failure record
+    # kept the text's first 80 characters, under a standard receipt. The preview is withheld first, and comes back
+    # once a read has said the field is not secret.
+    manager = _typing_manager(tmp_path)
+    manager.settings.witness_enabled = True
+    if read == "fails":
+        gone = BrowserActionError("named an element that is no longer on the page", code="stale_element_id")
+        answer = AsyncMock(side_effect=gone)
+    else:
+        answer = AsyncMock(return_value=NOT_SECRET)
+    manager.element_ids.element = Mock(return_value=SimpleNamespace(evaluate=answer))
+    manager.actions.elements.focus = AsyncMock()
+    manager.actions.elements.require_focus = AsyncMock()
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        if read == "fails":
+            with pytest.raises(BrowserActionError, match="no longer on the page"):
+                await manager.type("s1", element_id=ELEMENT_ID, text="hunter2-secret")
+        else:
+            await manager.type("s1", element_id=ELEMENT_ID, text="hunter2-secret")
+
+    targets, receipt = await _type_targets_and_receipt(manager)
+    if read == "fails":
+        _assert_withheld_and_restricted(targets, receipt)
+        return
+    for target in (*targets, receipt.target):
+        assert target.get("text_preview") == "hunter2-secret" and "text_redacted" not in target, target
+    assert receipt.evidence_mode == "standard"
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_text_the_caller_marked_sensitive_stays_withheld_in_a_field_read_not_secret(
+    tmp_path: Path, by: str
+) -> None:
+    # The preview withheld as the type begins comes back once the field reads not secret. A text the caller marked
+    # sensitive has none to come back, and its mark stays.
+    manager = _typing_manager(tmp_path)
+    manager.settings.witness_enabled = True
+    manager.sessions["s1"].page.locators["#note"] = FakeLocator("#note", attributes={"type": "text", "name": "note"})
+    manager.element_ids.element = Mock(return_value=SimpleNamespace(evaluate=AsyncMock(return_value=NOT_SECRET)))
+    manager.actions.elements.focus = AsyncMock()
+    manager.actions.elements.require_focus = AsyncMock()
+    named = {"selector": "#note"} if by == "selector" else {"element_id": ELEMENT_ID}
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.type("s1", text="hunter2-secret", sensitive=True, **named)
+
+    targets, receipt = await _type_targets_and_receipt(manager)
+    _assert_withheld_and_restricted([result["target"], *targets], receipt)
+
+
+async def test_a_type_cancelled_while_it_reads_its_fields_attributes_keeps_no_preview(tmp_path: Path) -> None:
+    # A cancellation is no Exception: it went past the selector read's "what cannot be read is secret", and the record
+    # the pipeline writes for an action cancelled once begun kept the preview, under a standard receipt.
+    manager = _typing_manager(tmp_path)
+    manager.settings.witness_enabled = True
+    session = manager.sessions["s1"]
+    reading = asyncio.Event()
+
+    async def never_answers(_name: str) -> str | None:
+        reading.set()
+        await asyncio.Event().wait()
+        return None
+
+    field = FakeLocator("#field")
+    field.get_attribute = AsyncMock(side_effect=never_answers)
+    session.page.locators["#field"] = field
+
+    typing = asyncio.create_task(manager.type("s1", selector="#field", text="hunter2-secret"))
+    await asyncio.wait_for(reading.wait(), 5)
+    typing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await typing
+    await wait_for_pending_record(session)
+
+    _assert_withheld_and_restricted(*await _type_targets_and_receipt(manager))
