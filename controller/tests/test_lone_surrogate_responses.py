@@ -65,7 +65,7 @@ class McpLoneSurrogateTests(unittest.IsolatedAsyncioTestCase):
             manager=self.manager,
         )
         self.transport._sessions["m1"] = McpSession(
-            id="m1", protocol_version=PROTOCOL, client_info={}, client_capabilities={}, initialized=True
+            id="m1", protocol_version=PROTOCOL, client_info="{}", client_capabilities="{}", initialized=True
         )
 
     async def post(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

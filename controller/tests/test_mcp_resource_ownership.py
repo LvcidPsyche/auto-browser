@@ -90,7 +90,7 @@ class McpResourceOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session_ids(await self.list_as(BOB)), {"one", "two"})
 
     async def test_cannot_subscribe_to_another_operators_session_resource(self) -> None:
-        mcp_session = McpSession(id="m1", protocol_version=PROTOCOL, client_info={}, client_capabilities={})
+        mcp_session = McpSession(id="m1", protocol_version=PROTOCOL, client_info="{}", client_capabilities="{}")
 
         async def subscribe(operator: OperatorIdentity, uri: str) -> dict:
             with acting_as(operator):
@@ -120,8 +120,8 @@ class McpResourceOwnershipTests(unittest.IsolatedAsyncioTestCase):
         mcp_session = McpSession(
             id="m1",
             protocol_version=PROTOCOL,
-            client_info={},
-            client_capabilities={},
+            client_info="{}",
+            client_capabilities="{}",
             initialized=True,
             resource_subscriptions=sorted(subscribed),
         )

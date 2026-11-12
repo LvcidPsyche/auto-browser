@@ -112,6 +112,13 @@ def _record(session_id: str, client_info: dict, capabilities: dict) -> dict:
     }
 
 
+def _as_stored(session: mcp_transport.McpSession) -> dict:
+    """``session``'s record as the table holds it: its fields as asdict gives them, each client field the value its
+    text is."""
+    texts = {name: json.loads(getattr(session, name)) for name in ("client_info", "client_capabilities")}
+    return {**asdict(session), **texts}
+
+
 TOO_DEEP = f"is nested deeper than {DEPTH_BOUND} levels"
 TOO_LARGE = f"is larger than {BYTES_BOUND} bytes as JSON"
 # What is kept at each bound, what is refused one past it, and the words of the refusal.
@@ -556,7 +563,7 @@ class McpSessionTableStartTests(_Transport):
         self.assertEqual(answer.status_code, 200, answer.text[:300])
         if "error" in answer.json():
             return None
-        return self.transport._sessions[answer.headers[MCP_SESSION_HEADER]].client_json[0]
+        return self.transport._sessions[answer.headers[MCP_SESSION_HEADER]].client_info
 
     def test_a_start_keeps_what_an_initialize_keeps_and_drops_what_it_refuses(self) -> None:
         cases = _start_cases()
@@ -581,8 +588,9 @@ class McpSessionTableStartTests(_Transport):
         empty = mcp_transport._compact_json({})
         for name in kept:
             with self.subTest(name=name):
-                self.assertEqual(restored[f"info: {name}"].client_json, (walked[name], empty))
-                self.assertEqual(restored[f"capabilities: {name}"].client_json, (empty, walked[name]))
+                info, capabilities = restored[f"info: {name}"], restored[f"capabilities: {name}"]
+                self.assertEqual((info.client_info, info.client_capabilities), (walked[name], empty))
+                self.assertEqual((capabilities.client_info, capabilities.client_capabilities), (empty, walked[name]))
 
     def test_a_stored_field_the_writer_cannot_go_down_is_dropped_and_counted(self) -> None:
         # How deep the JSON writer goes is the interpreter's own, so it is stood in for: a field the reader went down
@@ -617,8 +625,8 @@ class McpSessionTableStartTests(_Transport):
 
         session = self.transport._sessions["by-hand"]
         kept = (_with(CLIENT_INFO, LONE, REPLACEMENT), _with(CAPABILITIES, LONE, REPLACEMENT))
-        self.assertEqual((session.client_info, session.client_capabilities), kept)
-        self.assertEqual(session.client_json, tuple(mcp_transport._compact_json(value) for value in kept))
+        texts = (session.client_info, session.client_capabilities)
+        self.assertEqual(texts, tuple(mcp_transport._compact_json(value) for value in kept))
         headers = {MCP_SESSION_HEADER: "by-hand", MCP_PROTOCOL_HEADER: PROTOCOL}
         listed = self.client.post(
             "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
@@ -674,7 +682,7 @@ class McpSessionTableStartTests(_Transport):
 
         (line,) = logs.output
         self.assertIn("1 MCP sessions", line)
-        self.assertEqual(self.stored(), [json.loads(json.dumps(asdict(self.transport._sessions["within"])))])
+        self.assertEqual(self.stored(), [json.loads(json.dumps(_as_stored(self.transport._sessions["within"])))])
         # A start that drops none writes nothing.
         with (
             patch.object(mcp_transport, "atomic_write_text", wraps=mcp_transport.atomic_write_text) as writes,
@@ -712,13 +720,27 @@ class McpSessionTableStartTests(_Transport):
         self.assertEqual([record["id"] for record in self.stored()], ["within"])
 
 
+def _lists_and_objects_held(value: object) -> list:
+    """``value`` and each list and object it holds, at any depth (in a tuple too), as the cyclic collector goes through
+    them, ``value`` first."""
+    held, parts = [], [value]
+    while parts:
+        part = parts.pop()
+        if isinstance(part, dict | list):
+            held.append(part)
+        if isinstance(part, dict | list | tuple):
+            parts += gc.get_referents(part)
+    return held
+
+
 class McpSessionTableStartCollectorTests(_Transport):
     """A start reads and measures the table with the cyclic garbage collector off, and gives it back as it found it.
 
     The read makes a list or an object for each one in the file, tens of millions at the table's cap, and no cycle:
     each collection it set off went through all of them, which none could free. On Python 3.11, the image's, a table
     of 500 sessions whose fields each held 1,000 lists nested 30 deep, side by side, was read in 50 to 68 s with the
-    collector on and in 3.4 s with it off.
+    collector on and in 3.4 s with it off. A session keeps the text of its client fields alone, so the collections
+    after the start have none of the read's lists to go through.
     """
 
     TABLE = [_record("s0", {"a": [0]}, {"b": [[]]})]
@@ -779,6 +801,23 @@ class McpSessionTableStartCollectorTests(_Transport):
                     self.assertTrue(noted)
                     self.assertEqual([on for _, on in noted], [False] * len(noted))
                     gc.enable()
+
+    def test_a_session_holds_its_client_fields_as_their_text_alone(self) -> None:
+        # Kept as the read made them, the fields of a table at its cap of 500 sessions, each of 1,000 lists nested 30
+        # deep side by side, were some 30 million lists: the collections after the read went through them all, some
+        # 30 s on Python 3.11 and 3.12 up to the first full collection.
+        (record,) = self.TABLE
+        info, capabilities = record["client_info"], record["client_capabilities"]
+        made = self.transport._sessions[self.assert_an_ordinary_answer(self.initialize(info, capabilities))]
+        self.store.write_text(json.dumps(self.TABLE), encoding="utf-8")
+        restored = self.transport_over_the_store()._sessions["s0"]
+
+        texts = (mcp_transport._compact_json(info), mcp_transport._compact_json(capabilities))
+        for how, session in (("made by an initialize", made), ("restored at a start", restored)):
+            with self.subTest(how):
+                # Of the lists and objects it holds, its resource subscriptions alone.
+                self.assertEqual(_lists_and_objects_held(vars(session))[1:], [session.resource_subscriptions])
+                self.assertEqual((session.client_info, session.client_capabilities), texts)
 
 
 NOTIFIED = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
@@ -841,7 +880,7 @@ class McpSessionTableJoinTests(_Transport):
         self.assertEqual(self.client.post("/mcp", headers=self.headers(plain), json=SUBSCRIBED).status_code, 200)
 
         sessions = list(self.transport._sessions.values())
-        whole = json.dumps([asdict(session) for session in sessions], ensure_ascii=False, separators=(",", ":"))
+        whole = json.dumps([_as_stored(session) for session in sessions], ensure_ascii=False, separators=(",", ":"))
         self.assertEqual(self.store.read_text(encoding="utf-8"), whole)
         self.assertEqual(list(self.transport_over_the_store()._sessions.values()), sessions)
 
@@ -861,7 +900,7 @@ class McpSessionTableJoinTests(_Transport):
         self.assert_an_ordinary_answer(self.initialize())
 
         record = self.stored()[0]
-        self.assertEqual(record, json.loads(json.dumps(asdict(session))))
+        self.assertEqual(record, json.loads(json.dumps(_as_stored(session))))
         written = (record["initialized"], record["resource_subscriptions"], record["last_used_at"], record["owner"])
         self.assertEqual(written, (True, ["browser://sessions"], "2026-11-11T00:00:00Z", "operator-a"))
 

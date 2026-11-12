@@ -97,8 +97,8 @@ class McpEventStreamTests(unittest.IsolatedAsyncioTestCase):
         session = McpSession(
             id=session_id,
             protocol_version=PROTOCOL,
-            client_info={},
-            client_capabilities={},
+            client_info="{}",
+            client_capabilities="{}",
             initialized=True,
             owner=owner,
             last_used_at=last_used_at,

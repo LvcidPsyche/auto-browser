@@ -510,7 +510,7 @@ async def test_mcp_dom_and_screenshot_resources_refuse_a_disallowed_page(tmp_pat
     async with browser_env(tmp_path, {}) as env:
         session_id, _ = await off_list_session(env, monkeypatch)
         transport = McpHttpTransport(tool_gateway=None, server_name="t", server_version="1", manager=env.manager)
-        mcp_session = McpSession(id="m", protocol_version="2025-11-25", client_info={}, client_capabilities={})
+        mcp_session = McpSession(id="m", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}")
 
         for resource in ("dom", "screenshot"):
             response = await transport._handle_resource_read(

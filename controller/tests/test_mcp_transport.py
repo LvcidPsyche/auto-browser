@@ -4,7 +4,6 @@ import asyncio
 import json
 import tempfile
 import unittest
-from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -163,9 +162,9 @@ class McpTransportTests(unittest.TestCase):
         """A session from before this version was dropped, restored from the store. Its id is returned."""
         store = Path(f"{self.tempdir.name}/mcp-sessions.json")
         session = McpSession(
-            id="restored", protocol_version=version, client_info={}, client_capabilities={}, initialized=True
+            id="restored", protocol_version=version, client_info="{}", client_capabilities="{}", initialized=True
         )
-        store.write_text(json.dumps([asdict(session)]), encoding="utf-8")
+        store.write_text(f"[{session.table_record()}]", encoding="utf-8")
         self.transport = McpHttpTransport(
             tool_gateway=self.gateway,
             server_name="auto-browser",
@@ -537,8 +536,8 @@ class McpTransportTests(unittest.TestCase):
             f"session-{index}": McpSession(
                 id=f"session-{index}",
                 protocol_version="2025-11-25",
-                client_info={},
-                client_capabilities={},
+                client_info="{}",
+                client_capabilities="{}",
                 initialized=bool(index % 2),
                 created_at=f"2026-04-17T00:00:{index:02d}Z",
             )
@@ -569,15 +568,15 @@ class McpTransportTests(unittest.TestCase):
             f"session-{index}": McpSession(
                 id=f"session-{index}",
                 protocol_version="2025-11-25",
-                client_info={},
-                client_capabilities={},
+                client_info="{}",
+                client_capabilities="{}",
                 created_at=f"2026-04-17T00:{index // 60:02d}:{index % 60:02d}Z",
             )
             for index in range(500)
         }
         transport._sessions["session-0"].last_used_at = "2026-04-18T00:00:00Z"
         transport._sessions["new"] = McpSession(
-            id="new", protocol_version="2025-11-25", client_info={}, client_capabilities={}
+            id="new", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}"
         )
         transport._persist_sessions()
 
@@ -1023,8 +1022,8 @@ def _owned_sessions(owner: str | None, count: int, *, minute: int) -> dict[str, 
         f"{owner}-{index}": McpSession(
             id=f"{owner}-{index}",
             protocol_version="2025-11-25",
-            client_info={},
-            client_capabilities={},
+            client_info="{}",
+            client_capabilities="{}",
             created_at=f"2026-04-17T00:{minute:02d}:00.{index:06d}Z",
             owner=owner,
         )
@@ -1083,7 +1082,7 @@ class McpGetStreamTests(unittest.IsolatedAsyncioTestCase):
             server_version="0.2.0",
             manager=None,
         )
-        session = McpSession(id="m1", protocol_version="2025-11-25", client_info={}, client_capabilities={})
+        session = McpSession(id="m1", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}")
         transport._sessions["m1"] = session
 
         refused = await transport.handle_get_request(mcp_request("GET", "m1"))

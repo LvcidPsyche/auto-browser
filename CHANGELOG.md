@@ -1131,15 +1131,17 @@ All notable changes to auto-browser are documented here.
   saved with the next write of the table, as any other request's is, so a restart before that write reads back the
   last use saved before it. One whose write fails (a full disk) is answered `500` and leaves the session not
   initialized, so that a retry writes it. A start reads such a table back before the controller answers anything, with
-  Python's cyclic garbage collector off, and measures each field by the text it writes out of it once: on that host,
-  at the cap, for fields of small numbers and of lists nested 30 deep side by side, in 8.7 to 15.7 s with Python 3.12
-  and 7.4 to 15.4 s with 3.11, the image's (1.7 to 3.2 s and 1.4 to 3.1 s with 100 sessions, the most one
-  token-verified operator keeps). With the collector on, 3.11 collected again and again during the read of the second
-  shape, each time through the tens of millions of lists the read had made, none of which it could free: its start
-  took 59 to 61 s. The lists the sessions keep are still gone through by the collections that follow, once the
-  controller makes objects again: some 30 s for that shape at the cap, on 3.11 and 3.12 alike, up to the first full
-  collection (6 s with 100 sessions). A float is now counted at the length it is written at, so a value of floats
-  past the bound is refused without being written out to be measured.
+  Python's cyclic garbage collector off, measures each field by the text it writes out of it once, and keeps that
+  text alone, so that all the read made is freed as the read ends. On that host, at the cap, for fields of small
+  numbers and of lists nested 30 deep side by side, the start takes 8.8 to 18.6 s with Python 3.12 and 8.1 to 17.7 s
+  with 3.11, the image's (1.8 to 3.5 s and 1.5 to 3.5 s with 100 sessions, the most one token-verified operator
+  keeps), and the collections that follow it, up to the first full one, under 0.1 s more: that is the time the table
+  adds before the controller answers. With the collector on, 3.11 collected again and again during the read of the
+  second shape, each time through the tens of millions of lists the read had made, none of which it could free: its
+  start took 59 to 61 s. Each session kept its fields as they were read, some 30 million lists for that shape at the
+  cap, and the collections that followed the read went through them all: 29 to 34 s more on 3.11 and 3.12 alike, up
+  to the first full collection (5.9 to 6.5 s with 100 sessions). A float is now counted at the length it is written
+  at, so a value of floats past the bound is refused without being written out to be measured.
   A session an older version stored past either bound is dropped when the file is read, with one WARNING that counts
   them and quotes none, and the file is then written once without them, so that the next start does not read and
   measure them again; a write that fails is a WARNING of its own, and the start goes on with the file as it was. A

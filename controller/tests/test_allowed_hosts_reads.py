@@ -693,7 +693,7 @@ async def test_the_dom_resource_is_refused_when_its_page_moved_while_it_was_read
         server_version="0",
         manager=manager,
     )
-    mcp_session = McpSession(id="m", protocol_version="2025-11-25", client_info={}, client_capabilities={})
+    mcp_session = McpSession(id="m", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}")
 
     response = await transport._handle_resource_read(1, mcp_session, {"uri": "browser://s1/dom"})
 

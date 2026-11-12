@@ -50,7 +50,7 @@ class McpResourceReadTests(unittest.IsolatedAsyncioTestCase):
             manager=self.manager,
         )
         self.transport._sessions["m1"] = McpSession(
-            id="m1", protocol_version=PROTOCOL, client_info={}, client_capabilities={}, initialized=True
+            id="m1", protocol_version=PROTOCOL, client_info="{}", client_capabilities="{}", initialized=True
         )
 
     async def read(self, uri: str) -> dict:
