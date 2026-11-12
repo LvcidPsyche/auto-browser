@@ -264,8 +264,9 @@ class _Budget:
 
     It bounds the click's waits for its target, and nothing else. A page that stops answering holds a click
     still: the pointer's moves and the questions asked of a handle wait for the page, with no bound to give
-    them. A page busy for 6 seconds once the checks had passed held a click for 7.4 under a budget of 3, and
-    the click then pressed.
+    them. A page busy for 6 seconds once the checks had passed held a click for 7 under a budget of 3, and the
+    click then ended as a timeout with nothing pressed; one busy for 7 seconds from the mouse going down held it
+    for 8, and the click pressed.
     """
 
     def __init__(self, timeout_ms: float) -> None:

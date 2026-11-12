@@ -110,9 +110,11 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   `element_id` or a point is read in the controller's isolated world, a point through open shadow roots and into
   frames of the page's own origin (an `iframe`, a `frame`, or a document that an `object` or an `embed` holds;
   three deep). An `embed` is entered where it is among the first 256 frames of its page; one that comes later
-  is read as the element, which is no button. A selector is resolved by Playwright, as the click resolves it
-  (CSS through open shadow roots, `text=`, `role=`, `xpath=`, `>>` chains), and its element is described where
-  the page's script runs.
+  is read as the element, which is no button. Looking through that many takes time: behind 255 frames, the read
+  at the press of an embed of the page's own took 0.35 seconds on an idle machine and ran past its half second on
+  a loaded one, and the press then went on unread (the read at the press, below). A selector is resolved by
+  Playwright, as the click resolves it (CSS through open shadow roots, `text=`, `role=`, `xpath=`, `>>` chains),
+  and its element is described where the page's script runs.
   - A button (`button`, an `input` of type `button`, `submit`, `image` or `reset`, `role=button`, or
     `role=menuitem`, which is a menu's command) asks for a kind's approval, as an honest label does, when one of
     its names starts, as whole words, with a phrase of that kind in `controller/app/browser/click_target.py`. An

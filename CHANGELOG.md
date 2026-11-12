@@ -617,8 +617,9 @@ All notable changes to auto-browser are documented here.
   waits now share the one limit, counted from where the click begins, as the steps of Playwright's own click
   share its timeout: the same target ends the click after 3.3 seconds. Older than this release. The limit is
   on the click's waits for its target. A page that stops answering holds a click still: the pointer's moves,
-  and the questions asked of the target once it is found, wait for the page, and a page busy for 6 seconds
-  once the checks had passed held a click for 7.4 seconds under a limit of 3, which then pressed. Where a read
+  and the questions asked of the target once it is found, wait for the page. A page busy for 6 seconds once the
+  checks had passed held a click for 7 seconds under a limit of 3, and the click then ended as a timeout with
+  nothing pressed; one busy for 7 seconds from the mouse going down held it for 8, and the click pressed. Where a read
   click was placed, the page is asked once more, within a second, whether the pointer finds the target: a page
   that did not answer was taken to say no, and with the click's time not spent the click ended as `target_moved`
   (409, "the pointer does not find the target") where a page busy one step earlier ended it as the timeout it is
