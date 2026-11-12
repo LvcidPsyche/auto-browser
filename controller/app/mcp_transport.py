@@ -165,6 +165,12 @@ class McpHttpTransport:
             return self._json_error_response(None, -32600, "JSON-RPC batches are not supported", status_code=400)
         if not isinstance(payload, dict):
             return self._json_error_response(None, -32600, "JSON-RPC body must be an object", status_code=400)
+        # Before anything repeats it: every answer repeats the id whole, and one nested some hundreds of lists deep made
+        # an answer's walks give up (an unhandled 500). An id that cannot be read is answered with id null.
+        if not _is_a_json_rpc_id(payload.get("id")):
+            return self._json_error_response(
+                None, -32600, "JSON-RPC id must be a string, a number or null", status_code=400
+            )
         if payload.get("jsonrpc") != JSONRPC_VERSION:
             return self._json_error_response(
                 payload.get("id"),
@@ -993,6 +999,11 @@ class McpHttpTransport:
     @staticmethod
     def _session_headers(session: McpSession) -> dict[str, str]:
         return {MCP_PROTOCOL_HEADER: session.protocol_version}
+
+
+def _is_a_json_rpc_id(value: object) -> bool:
+    """Whether ``value`` is an id JSON-RPC 2.0 allows: a string, a number or null (true and false are no numbers)."""
+    return value is None or isinstance(value, str) or (isinstance(value, int | float) and not isinstance(value, bool))
 
 
 def _compact_json(value: Any) -> str:

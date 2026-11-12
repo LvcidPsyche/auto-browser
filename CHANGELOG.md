@@ -1049,6 +1049,14 @@ All notable changes to auto-browser are documented here.
   from about 990 for `tools/call`. An error whose `input` is nested more than 100 levels deep (the value itself the
   first) now leaves its `input` out and keeps its `type`, `loc`, `msg` and the rest; a shallower `input` is
   repeated as it was. A body nested past what the JSON reader goes down is still the reader's `400`.
+- **An MCP request whose JSON-RPC `id` is no string, number or `null` is refused, where one nested deep answered
+  `500`.** Every answer of `POST /mcp` repeats the request's `id` whole, and the walks of an answer go down it by
+  recursion: an `id` of lists nested around `NaN` or a lone surrogate was an unhandled `500` from about 600 levels
+  on Python 3.11, the image's Python, and at 1,200 on 3.12, whatever the request was (a `tools/call`, a `ping`, and
+  the refusals of a body that is not JSON-RPC 2.0 or names no method). JSON-RPC 2.0 allows a string, a number or
+  `null` (MCP a string or an integer); any other `id` (a list, an object, `true` or `false`) is now answered `400`
+  with `-32600` `JSON-RPC id must be a string, a number or null` and `"id": null`, before its `jsonrpc`, its
+  method or its session is looked at. A string, a number or `null` is answered as before.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,

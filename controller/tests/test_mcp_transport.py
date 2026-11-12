@@ -704,6 +704,43 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], -32600)
         self.assertEqual(body["error"]["message"], "JSON-RPC method is required")
 
+    def test_an_id_that_is_no_string_number_or_null_is_refused_before_anything_repeats_it(self) -> None:
+        # Every answer repeats the id whole, and its walks go down it by recursion: an id of lists nested some hundreds
+        # deep around NaN or a lone surrogate answered an unhandled 500 (Python 3.11 from about 600 levels, 3.12 at
+        # 1,200), on each path below, the refusals of the envelope included.
+        headers = {**self._ready_headers(), "content-type": "application/json"}
+        refused = {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "JSON-RPC id must be a string, a number or null"},
+        }
+        ids = {"a list": "[1]", "an object": '{"a":1}', "true": "true", "200 lists deep": "[" * 200 + "NaN" + "]" * 200}
+        bodies = {
+            "tools/call": '{"jsonrpc":"2.0","id":ID,"method":"tools/call","params":{"name":1}}',
+            "ping": '{"jsonrpc":"2.0","id":ID,"method":"ping"}',
+            "not JSON-RPC 2.0": '{"jsonrpc":"1.0","id":ID,"method":"ping"}',
+            "no method": '{"jsonrpc":"2.0","id":ID}',
+        }
+        for label, value in ids.items():
+            for path, body in bodies.items():
+                with self.subTest(id=label, body=path):
+                    response = self.client.post("/mcp", content=body.replace("ID", value).encode(), headers=headers)
+
+                    self.assertEqual((response.status_code, response.json()), (400, refused))
+
+    def test_an_id_that_is_a_string_a_number_or_null_is_answered_as_before(self) -> None:
+        headers = self._ready_headers()
+        for value in ("abc", 7, 1.5, None):
+            with self.subTest(id=value):
+                response = self.client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": value, "method": "tools/call", "params": {"name": 1}},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual((response.json()["id"], response.json()["error"]["code"]), (value, -32602))
+
     def test_resources_list_and_read_sessions_work_after_initialization(self) -> None:
         session_id, protocol_version = self._initialize()
         init_response = self.client.post(
