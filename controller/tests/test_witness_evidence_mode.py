@@ -633,3 +633,32 @@ async def test_a_type_cancelled_while_it_reads_its_fields_attributes_keeps_no_pr
     await wait_for_pending_record(session)
 
     _assert_withheld_and_restricted(*await _type_targets_and_receipt(manager))
+
+
+@pytest.mark.parametrize("refusal", ["policy-block", "page-off-allowed-hosts"])
+async def test_a_type_refused_before_its_operation_runs_keeps_no_preview(tmp_path: Path, refusal: str) -> None:
+    # A policy block, or a page ALLOWED_HOSTS refuses, refuses a type before its operation runs, and the operation is
+    # where the preview was withheld: the blocked record kept the text's first 80 characters in actions.jsonl, the
+    # audit entry and a standard receipt, no attribute read and nothing typed. It is withheld before the pipeline.
+    manager = _typing_manager(tmp_path)
+    manager.settings.witness_enabled = True
+    if refusal == "policy-block":
+        decide = manager.witness_policy.evaluate_action
+
+        def blocking(**given: Any) -> WitnessPolicyOutcome:
+            return decide(**given).model_copy(update={"should_block": True, "block_reason": "not here"})
+
+        manager.witness_policy.evaluate_action = blocking  # type: ignore[method-assign]
+    else:
+        manager.settings.allowed_hosts = "other.example"
+    page = manager.sessions["s1"].page
+
+    with pytest.raises(BrowserActionError) as refused:
+        await manager.type("s1", selector="#pw", text="hunter2-secret")
+
+    assert refused.value.code == "browser_action_blocked"
+    page.locators["#pw"].get_attribute.assert_not_awaited()
+    page.keyboard.type.assert_not_awaited()
+    targets, receipt = await _type_targets_and_receipt(manager)
+    assert receipt.status == "blocked"
+    _assert_withheld_and_restricted(targets, receipt)

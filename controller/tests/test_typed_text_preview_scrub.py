@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -55,20 +54,6 @@ def test_scrubbing_off_leaves_the_preview_as_typed() -> None:
     assert _preview("alice@example.com", None) == "alice@example.com"
 
 
-async def test_type_stores_the_scrubbed_preview_in_the_action_target() -> None:
-    manager = SimpleNamespace(
-        get_session=AsyncMock(return_value=SimpleNamespace(id="s1")),
-        _run_action=AsyncMock(return_value={}),
-        pii_scrubber=PiiScrubber(),
-    )
-    service = BrowserActionService(manager)
-
-    await service.type("s1", text="alice@example.com", selector="#note")
-
-    target = manager._run_action.await_args.args[2]
-    assert target["text_preview"] == "[REDACTED]"
-
-
 def _typing_manager(tmp_path: Path, field: FakeLocator) -> tuple[BrowserManager, FakePage]:
     """The real type through the real pipeline, on a fake page whose ``#pw`` is ``field``; the records are mocks."""
     manager = BrowserManager(_settings(tmp_path))
@@ -94,6 +79,23 @@ def _recorded_targets(manager: BrowserManager) -> list[dict]:
     receipts = [call.kwargs["target"] for call in manager._record_witness_receipt.await_args_list]
     assert lines and events and receipts
     return [*lines, *events, *receipts]
+
+
+async def _typed_email_target(tmp_path: Path) -> tuple[BrowserManager, dict]:
+    """A type of an email into a field that reads not secret, through the real pipeline, and its result's target.
+    The preview is withheld as the type begins; the one given back once the field reads not secret is scrubbed."""
+    manager, _ = _typing_manager(tmp_path, FakeLocator("#pw", attributes={"type": "text", "name": "note"}))
+    manager.pii_scrubber = PiiScrubber()
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.type("s1", selector="#pw", text="alice@example.com")
+    return manager, result["target"]
+
+
+async def test_type_stores_the_scrubbed_preview_in_the_action_target(tmp_path: Path) -> None:
+    manager, target = await _typed_email_target(tmp_path)
+
+    for kept in (target, *_recorded_targets(manager)):
+        assert kept["text_preview"] == "[REDACTED]", kept
 
 
 async def test_a_field_whose_attributes_could_not_be_read_keeps_no_preview(tmp_path: Path) -> None:
@@ -135,17 +137,10 @@ async def test_a_type_into_a_field_that_never_came_records_no_preview(tmp_path: 
         assert "text_preview" not in target and target.get("text_redacted") is True, target
 
 
-async def test_the_export_of_a_typed_email_fills_the_redaction() -> None:
+async def test_the_export_of_a_typed_email_fills_the_redaction(tmp_path: Path) -> None:
     from app.playwright_export import _action_to_code
 
-    manager = SimpleNamespace(
-        get_session=AsyncMock(return_value=SimpleNamespace(id="s1")),
-        _run_action=AsyncMock(return_value={}),
-        pii_scrubber=PiiScrubber(),
-    )
-    await BrowserActionService(manager).type("s1", text="alice@example.com", selector="#note")
-
-    target = manager._run_action.await_args.args[2]
+    _, target = await _typed_email_target(tmp_path)
 
     assert "fill('[REDACTED]')" in _action_to_code("type", {"target": target})
     assert "alice" not in _action_to_code("type", {"target": target})

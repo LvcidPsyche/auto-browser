@@ -542,12 +542,11 @@ class BrowserActionPipeline:
 
     @staticmethod
     def _receipt_outcome(context: ActionRunContext, witness_state: ActionWitnessState) -> Any:
-        """The policy outcome a receipt is written with: that of the action as it ran. A field the operation found
-        secret, or ended before it had read as not secret (text_redacted: BrowserActionService.withhold_text_preview),
-        is sensitive input, and restricts the receipt as the caller's sensitive flag does; what the run was decided
-        by (_prepare's outcome) stays."""
-        if not context.target.get("text_redacted"):
-            return witness_state.outcome
+        """The policy outcome a receipt is written with: that of the action as it ran, the policy asked again of the
+        target the run left. A type's text is withheld (text_redacted: BrowserActionService.withhold_text_preview)
+        from before the run until a read of its field says it is not secret: withheld, it is sensitive input and
+        restricts the receipt as the caller's sensitive flag does; given back, it does not, though _prepare saw it
+        withheld. What the run was decided by (_prepare's outcome) stays."""
         manager = context.manager
         return manager.witness_policy.evaluate_action(
             session=manager._witness_session_context(context.session),

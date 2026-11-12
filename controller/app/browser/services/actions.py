@@ -600,12 +600,12 @@ class BrowserActionService:
             scrubber=self.manager.pii_scrubber,
         )
         preview = {key: payload[key] for key in _TEXT_PREVIEW_KEYS if key in payload}
+        # Withheld until a read of the field's attributes has said it is not secret, from before the pipeline: a type
+        # it refuses before the operation runs (a policy block, a page ALLOWED_HOSTS refuses) reads no field, and
+        # withheld only as the operation began, its blocked record kept the preview under a standard receipt.
+        self.withhold_text_preview(payload)
 
         async def operation() -> None:
-            # Withheld until a read of the field's attributes has said it is not secret. Withheld only once one
-            # said it was, the preview stayed in every record of a type whose read failed by element_id, or was
-            # cancelled by selector (a cancellation is no Exception), and the receipt stayed standard.
-            self.withhold_text_preview(payload)
             element = None
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
