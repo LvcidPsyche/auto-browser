@@ -494,7 +494,9 @@ class AgentJobQueue:
             payload,
             parent_job_id=source.id,
         )
-        await self._audit("agent_job_resumed", "queued", await self.store.get(resumed["id"]))
+        # Quiet: _enqueue admitted the job (its audit decides whether it runs), so this one is about something already
+        # in effect. Raised, the caller was told a resume had failed while its job ran, and a retry ran it again.
+        await self._audit_quietly("agent_job_resumed", "queued", await self.store.get(resumed["id"]))
         return resumed
 
     async def discard_job(self, job_id: str) -> dict:
@@ -786,7 +788,13 @@ class AgentJobQueue:
         await self._audit_quietly(event_type, record.status, record)
 
     async def _audit_quietly(self, event_type: str, status: str, record: AgentJobRecord) -> None:
-        """Audit a cancellation or interruption that has already taken effect: a failure is logged, never raised."""
+        """Audit something that has already taken effect (a cancellation, an interruption, a resume's own event): a
+        failure is logged, never raised.
+
+        The rule for the queue's audit: the `agent_job_enqueued` audit in _enqueue admits a job, and a job whose
+        admission cannot be written does not run. An audit written after that describes what happened, and cannot
+        undo it.
+        """
         try:
             await self._audit(event_type, status, record)
         except Exception:

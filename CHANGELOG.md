@@ -1519,6 +1519,11 @@ All notable changes to auto-browser are documented here.
   `/actions/upload` answer one, so another operator's id and an unknown one read alike. A session the controller
   does not know is still `404` `Unknown session`. A job queued with such an id is not looked up and fails when it
   runs, as before.
+- **A resume whose own audit event cannot be written answers `queued`, where it failed while its job ran.**
+  `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` queue the resumed job and then write
+  `agent_job_resumed`. When that write failed (a full disk) the call failed, `500` over REST, with the job queued and
+  running, and a caller who tried the resume again ran the run twice. The failure is now logged and the resume
+  answers as it does when the write succeeds.
 
 ### Changed
 
