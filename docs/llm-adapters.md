@@ -65,8 +65,9 @@ controller also starts the CLI in a sandbox: of `/data` it can open only `CLI_HO
 call, so it cannot read `data/api-token`, `data/takeover-token` or the mesh and witness keys, though it runs as the
 controller's uid. Where the sandbox is not in use the controller says so in one warning, and
 `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI instead ("The CLI sandbox" in docs/deployment.md, which also lists
-what it does not stop). Known limit: the bridge's Codex runs as the bridge's uid on the host, outside that sandbox,
-so it can still read that user's files. Page content shown to the model can prompt-inject a CLI into trying. On
+what it does not stop). `CLI_SANDBOX_ENABLED=false` turns the sandbox off, for a CLI that cannot run under it. Known
+limit: the bridge's Codex runs as the bridge's uid on the host, outside that sandbox, so it can still read that
+user's files. Page content shown to the model can prompt-inject a CLI into trying. On
 macOS and Windows there is no sandbox and the controller and the bridge do not make themselves non-dumpable, and
 whether a process of the same user can read their environment depends on the system.
 

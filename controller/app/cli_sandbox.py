@@ -5,8 +5,9 @@ A provider CLI runs as the controller's user, and a page the model was shown can
 can: the API token, the takeover token, the auth profiles, the witness and mesh keys. Started under the launcher it
 can open nothing in PROTECTED_ROOT but its own home and the screenshot of its call.
 
-Three things leave a secret open to it all the same:
+Four things leave a secret open to it all the same:
 
+- CLI_SANDBOX_ENABLED is false: the CLI is started without the launcher, and no probe is run.
 - the launcher cannot restrict a process here: this is not Linux, the kernel has no Landlock, or a probe of the
   launcher failed. The CLI is started as it always was, without the launcher. The launcher's own answer is kept for
   the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
@@ -167,8 +168,11 @@ async def launch_command(
     ``env`` is the CLI's, which the probe is started with too. SandboxRequired where a secret would stay open and
     CLI_SANDBOX_REQUIRED is set.
     """
-    asked = _asked if _asked is not None else _landlock_missing(env)
-    missing = asked.result() if asked.done() else await asyncio.wrap_future(asked)
+    if not settings.cli_sandbox_enabled:
+        missing = "CLI_SANDBOX_ENABLED is false"
+    else:
+        asked = _asked if _asked is not None else _landlock_missing(env)
+        missing = asked.result() if asked.done() else await asyncio.wrap_future(asked)
     if missing is None and _within(PROTECTED_ROOT, os.path.realpath(cli_home)):
         missing = "CLI_HOME is %s or holds it, which the launcher refuses" % PROTECTED_ROOT
     if missing:

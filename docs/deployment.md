@@ -517,11 +517,15 @@ differences: it cannot list `/` itself or make an entry directly in it, and it r
 program it starts gains nothing. Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`,
 `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a CA bundle, the CLI's own binary) has to be inside `CLI_HOME`. On a kernel
 older than 5.19 Landlock also refuses a sandboxed process every rename or link from one directory to another
-(`EXDEV`), in `CLI_HOME` as anywhere.
+(`EXDEV`), in `CLI_HOME` as anywhere. A CLI that cannot run under the ruleset (it needs something under `/data` that
+cannot move into `CLI_HOME`, or it fails there) can be started without it: `CLI_SANDBOX_ENABLED=false` (default
+`true`) starts every provider CLI without the launcher, and a CLI then reads what the controller's user can, as
+before 1.18.0.
 
 Where the sandbox would leave a secret open, the controller writes a warning, once in the life of the process for
 each distinct line, which names the condition or the settings and never a setting's value, and runs the CLI:
 
+- **`CLI_SANDBOX_ENABLED=false`.** The CLI starts without the launcher, and no probe runs.
 - **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
   seccomp profile refuses Landlock's system calls (Docker's default profile allows them), or the launcher's probe
   failed for another reason: at the first CLI call the controller runs the launcher in a mode that applies the
@@ -537,8 +541,9 @@ each distinct line, which names the condition or the settings and never a settin
   holds none of them. The CLI starts under the launcher, which closes `/data` and not that place. A Linux host run
   that keeps its data elsewhere gets this warning, with the name of each of them it sets.
 
-`CLI_SANDBOX_REQUIRED=true` refuses instead: with any of the three no provider CLI is started, the step fails with
-`Provider request failed` (`502`), and the log names the condition in one error line. `GET /agent/providers` still
+`CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
+with `Provider request failed` (`502`), and the log names the condition in one error line. So
+`CLI_SANDBOX_ENABLED=false` with `CLI_SANDBOX_REQUIRED=true` runs no provider CLI at all. `GET /agent/providers` still
 reports such a provider as configured. A launcher that cannot apply its ruleset at a real start, after its probe
 passed, fails that call the same way, and the CLI is never started without it.
 

@@ -360,6 +360,9 @@ class Settings(BaseSettings):
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
     # Extra environment variable names (comma-separated) handed to provider CLI children as-is.
     cli_provider_env_passthrough: str = Field("", alias="CLI_PROVIDER_ENV_PASSTHROUGH")
+    # false: provider CLIs start without their Landlock sandbox (app/cli_sandbox.py), as before 1.18.0, with one
+    # warning; with CLI_SANDBOX_REQUIRED=true no provider CLI runs at all.
+    cli_sandbox_enabled: bool = Field(True, alias="CLI_SANDBOX_ENABLED")
     # true: no provider CLI is run where its Landlock sandbox would leave one of the controller's secrets open to it
     # (app/cli_sandbox.py). false: one warning, and the CLI runs.
     cli_sandbox_required: bool = Field(False, alias="CLI_SANDBOX_REQUIRED")

@@ -155,6 +155,7 @@ def test_every_secret_setting_that_has_a_default_has_it_in_the_protected_root() 
         assert PurePosixPath(default).is_relative_to(cli_sandbox.PROTECTED_ROOT), name
     assert cli_sandbox.PROTECTED_ROOT == "/data"
     assert settings.cli_sandbox_required is False
+    assert settings.cli_sandbox_enabled is True
 
 
 def test_the_launcher_is_the_file_beside_the_module() -> None:
@@ -347,6 +348,55 @@ async def test_with_cli_sandbox_required_and_nothing_wrong_the_cli_starts_under_
 
     assert command == _under_the_launcher(data, "--ro-file", str(data.shot))
     assert _written(caplog) == _written(caplog, logging.ERROR) == []
+
+
+# ---- CLI_SANDBOX_ENABLED ----
+
+
+@pytest.mark.parametrize("enabled", [None, "true"], ids=["by default", "set to true"])
+async def test_the_sandbox_is_on_by_default_and_with_cli_sandbox_enabled_true(data, monkeypatch, enabled) -> None:
+    _probe_says(monkeypatch, None)
+    changed = {} if enabled is None else {"CLI_SANDBOX_ENABLED": enabled}
+
+    assert await _launch(_settings(data, **changed), data) == _under_the_launcher(data)
+
+
+async def test_with_the_sandbox_turned_off_the_cli_starts_as_it_is_and_no_probe_is_started(
+    data, monkeypatch, caplog
+) -> None:
+    # The way out for a CLI that cannot run under the ruleset: it reads what the controller's user can, as before.
+    calls = _the_probe_runs(monkeypatch, AssertionError("a probe was started"))
+    settings = _settings(data, CLI_SANDBOX_ENABLED="false")
+
+    with caplog.at_level(logging.WARNING):
+        commands = [await _launch(settings, data) for _ in range(3)]
+
+    assert commands == [COMMAND] * 3
+    assert calls == [] and cli_sandbox._asked is None, "no probe was started, and no thread for one"
+    (line,) = _written(caplog)
+    assert "without the Landlock sandbox" in line and "CLI_SANDBOX_ENABLED is false" in line
+
+
+async def test_with_the_sandbox_turned_off_and_required_no_cli_runs_and_one_error_says_why(
+    data, monkeypatch, caplog
+) -> None:
+    calls = _the_probe_runs(monkeypatch, AssertionError("a probe was started"))
+    settings = _settings(data, CLI_SANDBOX_ENABLED="false", CLI_SANDBOX_REQUIRED="true")
+    adapter = ClaudeAdapter(settings)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            with pytest.raises(cli_sandbox.SandboxRequired):
+                await _launch(settings, data)
+        with _spawning(_child()) as spawn, pytest.raises(ProviderAPIError) as caught:
+            await adapter.run_cli(command=COMMAND, env=CLI_ENV, cwd=str(data.home))
+
+    spawn.assert_not_awaited()
+    assert caught.value.message == cli_sandbox.REQUIRED_MESSAGE
+    (line,) = _written(caplog, logging.ERROR)
+    assert "CLI_SANDBOX_REQUIRED" in line and "CLI_SANDBOX_ENABLED is false" in line
+    assert _written(caplog) == [], "the one line is the error"
+    assert calls == []
 
 
 # ---- the probe ----
