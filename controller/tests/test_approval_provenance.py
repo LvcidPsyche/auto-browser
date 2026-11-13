@@ -550,7 +550,6 @@ class LegitimateTakeoverTests(ApprovalBindingBase):
             goal="g",
             observation={},
             provider_decision=ProviderDecision(provider="openai", model="m", decision=decision),
-            upload_approved=False,
             approval_id=None,
             workflow_profile="governed",
         )

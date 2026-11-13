@@ -1503,6 +1503,12 @@ All notable changes to auto-browser are documented here.
   stores still grow with approvals nobody decides. Nothing is deleted while SQLite is configured and unavailable; an
   approval whose record or arguments cannot be removed is logged and stays in both stores for the next pass, and a
   pass that fails is logged and leaves the rest for the next. See the upgrade note. (AUTH-33)
+- **`upload_approved` on the agent step and run requests is deprecated, and nothing reads it.** The orchestrator
+  took the field and handed it down to a function that never looked at it. The request models still accept it, so a
+  client that sends it is not refused, and the schema (the OpenAPI document and the `request` of
+  `browser.queue_agent_step` and `browser.queue_agent_run`) marks it deprecated and says it is ignored. A request that
+  sets it to `true` logs one warning per process. An upload that needs an approval gets one through the approval
+  queue: pass its `approval_id`. (STORE-26)
 
 ## [1.17.0] — 2026-11-08
 

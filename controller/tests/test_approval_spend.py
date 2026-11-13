@@ -752,7 +752,6 @@ class NestedHoldTests(SpendBase):
                 goal="pay",
                 observation={},
                 provider_decision=ProviderDecision(provider="openai", model="m", decision=decision),
-                upload_approved=False,
                 approval_id=approval_id,
                 workflow_profile="governed",
             )

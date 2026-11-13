@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+import logging
 import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -7,6 +9,8 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .url_safety import refuse_another_navigation_host
+
+logger = logging.getLogger(__name__)
 
 ProtectionMode = Literal["normal", "confidential"]
 WitnessRemoteStatus = Literal["disabled", "idle", "healthy", "delivered", "failed"]
@@ -493,6 +497,15 @@ class BrowserActionDecision(StrictInputModel):
 CONTEXT_HINTS_MAX_CHARS = 4000
 
 
+@functools.cache
+def warn_upload_approved_is_ignored() -> None:
+    """Log once per process that a request set `upload_approved`, which nothing reads."""
+    logger.warning(
+        "a request set upload_approved, which is deprecated and ignored: an upload that needs an approval "
+        "gets one through the approval queue (approval_id)"
+    )
+
+
 class AgentStepRequest(StrictInputModel):
     provider: ProviderName
     goal: str = Field(min_length=1, max_length=4000)
@@ -506,13 +519,27 @@ class AgentStepRequest(StrictInputModel):
     )
     observation_limit: int = Field(default=40, ge=1, le=100)
     context_hints: str | None = Field(default=None, max_length=CONTEXT_HINTS_MAX_CHARS)
-    upload_approved: bool = False
+    upload_approved: bool = Field(
+        default=False,
+        deprecated=True,
+        description=(
+            "Deprecated and ignored. An upload that needs an approval gets one through the approval queue: "
+            "pass its approval_id."
+        ),
+    )
     approval_id: str | None = Field(default=None, min_length=1, max_length=120)
 
     @field_validator("provider_model")
     @classmethod
     def _provider_model_is_a_model_name(cls, value: str | None) -> str | None:
         return check_model_name(value)
+
+    @field_validator("upload_approved")
+    @classmethod
+    def _upload_approved_is_ignored(cls, value: bool) -> bool:
+        if value:
+            warn_upload_approved_is_ignored()
+        return value
 
 
 AGENT_RUN_MAX_STEPS = 20

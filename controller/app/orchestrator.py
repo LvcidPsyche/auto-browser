@@ -40,7 +40,6 @@ class BrowserOrchestrator:
         goal: str,
         observation_limit: int = 40,
         context_hints: str | None = None,
-        upload_approved: bool = False,
         approval_id: str | None = None,
         provider_model: str | None = None,
         workflow_profile: WorkflowProfile = "fast",
@@ -94,7 +93,6 @@ class BrowserOrchestrator:
                 goal=goal,
                 observation=observation,
                 provider_decision=provider_decision,
-                upload_approved=upload_approved,
                 workflow_profile=workflow_profile,
             )
             try:
@@ -189,7 +187,6 @@ class BrowserOrchestrator:
         max_steps: int,
         observation_limit: int = 40,
         context_hints: str | None = None,
-        upload_approved: bool = False,
         approval_id: str | None = None,
         provider_model: str | None = None,
         workflow_profile: WorkflowProfile = "fast",
@@ -209,7 +206,6 @@ class BrowserOrchestrator:
                 goal=goal,
                 observation_limit=observation_limit,
                 context_hints=context_hints,
-                upload_approved=upload_approved,
                 approval_id=approval_id,
                 provider_model=provider_model,
                 workflow_profile=workflow_profile,
@@ -287,7 +283,6 @@ class BrowserOrchestrator:
         goal: str,
         observation: dict[str, Any],
         provider_decision: ProviderDecision,
-        upload_approved: bool,
         approval_id: str | None,
         workflow_profile: WorkflowProfile,
     ) -> AgentStepResult:
