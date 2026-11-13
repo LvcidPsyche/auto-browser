@@ -717,6 +717,8 @@ curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq
 
 `/readiness` answers `503` when a check fails, so `-f` prints nothing; drop `-f` to see which check.
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
+With `API_ADMIN_OPERATORS` set, `/readiness` and `/maintenance/status` answer `403` to the shared token: send a
+listed operator's named token (see [production hardening](./production-hardening.md)).
 
 ## Stopping the controller
 
@@ -1461,6 +1463,8 @@ curl -s http://127.0.0.1:8000/maintenance/cleanup \
   -H "Authorization: Bearer ${API_BEARER_TOKEN:-$(cat data/api-token)}" \
   -H 'X-Operator-Id: ops' | jq
 ```
+
+With `API_ADMIN_OPERATORS` set, only a listed operator's named token may run it; the shared token is answered `403`.
 
 ## Credential handoff checklist
 

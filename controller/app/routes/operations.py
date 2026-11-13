@@ -17,6 +17,7 @@ from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, CronJobIdInput, TriggerCronJobInput
 from ..utils import capped_for_log, error_text, quoted_for_log
 from ._utils import (
+    ADMIN_ONLY,
     bounded_limit,
     cron_store_errors,
     log_hidden_cause,
@@ -145,12 +146,12 @@ def create_operations_router(
         with typed_route_errors(logger, "pii scrubber status failed"):
             return manager.get_pii_scrubber_status()
 
-    @router.get("/proxy-personas")
+    @router.get("/proxy-personas", dependencies=ADMIN_ONLY)
     async def list_proxy_personas() -> list[Any]:
         with persona_file_errors():
             return proxy_store.list_personas()
 
-    @router.post("/proxy-personas")
+    @router.post("/proxy-personas", dependencies=ADMIN_ONLY)
     async def set_proxy_persona(payload: CreateProxyPersonaInput) -> dict[str, Any]:
         # Another operator's persona is the conflict; a ValueError is typed_route_errors' own 400.
         message = "set proxy persona failed for persona %s"
@@ -168,7 +169,7 @@ def create_operations_router(
                 log_hidden_cause(logger, 400, cause, message, payload.name)
                 raise HTTPException(status_code=400, detail="Invalid request") from None
 
-    @router.get("/proxy-personas/{name}")
+    @router.get("/proxy-personas/{name}", dependencies=ADMIN_ONLY)
     async def get_proxy_persona(name: str) -> dict[str, Any]:
         with persona_file_errors():
             try:
@@ -176,7 +177,7 @@ def create_operations_router(
             except KeyError:
                 raise HTTPException(status_code=404, detail="Not found") from None
 
-    @router.delete("/proxy-personas/{name}")
+    @router.delete("/proxy-personas/{name}", dependencies=ADMIN_ONLY)
     async def delete_proxy_persona(name: str) -> dict[str, Any]:
         with persona_file_errors():
             deleted = proxy_store.delete_persona(name)

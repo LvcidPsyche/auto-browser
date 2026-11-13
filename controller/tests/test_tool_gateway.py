@@ -113,6 +113,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 require_approval_for_uploads=True,
                 force_governed_approvals=False,
                 action_timeout_ms=15000,
+                api_admin_operator_ids=frozenset(),
             ),
             memory=SimpleNamespace(
                 save=AsyncMock(

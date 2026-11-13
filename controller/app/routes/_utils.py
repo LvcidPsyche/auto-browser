@@ -6,9 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from logging import ERROR, WARNING, Logger
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserActionError, BrowserUnreachableError
+from ..admin_operators import ADMIN_OPERATOR_REQUIRED, AdminOperatorRequired, require_admin_operator
 from ..approvals import CONTROLLER_SCOPE
 from ..auth_policy import is_bearer_exempt_path
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
@@ -71,6 +72,25 @@ async def require_session_access(request: Request) -> None:
         return
     if session_id and manager is not None and not listing_controller:
         await manager.ensure_session_accessible(session_id)
+
+
+async def require_admin(request: Request) -> None:
+    """Refuse, with 403, a caller API_ADMIN_OPERATORS does not list, on the routes that carry this dependency.
+
+    The check is admin_operators.require_admin_operator, which the tool handlers that reach the same operations call
+    too. The settings are the app's own (app_factory); an app that has none, a bare one in a test, lists nobody.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return
+    try:
+        require_admin_operator(settings)
+    except AdminOperatorRequired:
+        raise HTTPException(status_code=403, detail=ADMIN_OPERATOR_REQUIRED) from None
+
+
+# What a route of the admin set passes as its ``dependencies``.
+ADMIN_ONLY = [Depends(require_admin)]
 
 
 # Fixed texts for a page or tab ALLOWED_HOSTS refuses. The PermissionError behind

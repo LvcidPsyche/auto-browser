@@ -22,6 +22,7 @@ from ..action_errors import (
     BrowserUnreachableError,
     SessionNotFoundError,
 )
+from ..admin_operators import require_admin_operator
 from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
@@ -1086,7 +1087,9 @@ class McpToolGateway:
         return self.manager.get_remote_access_info(payload.session_id)
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
-        # The same report as GET /readiness, the pre-request gate's and the window-birth watcher's states included.
+        # The same report as GET /readiness, the pre-request gate's and the window-birth watcher's states included,
+        # for the callers that route answers (routes/_utils.require_admin makes the same check).
+        require_admin_operator(self.manager.settings)
         report = run_readiness_checks(
             self.manager.settings,
             mode=payload.mode,
@@ -1395,12 +1398,17 @@ class McpToolGateway:
     async def _enable_shadow_browse(self, payload: ShadowBrowseInput) -> dict[str, Any]:
         return await self.manager.enable_shadow_browse(payload.session_id)
 
+    # The proxy persona tools are the /proxy-personas routes' operations, for the callers those routes answer: each
+    # makes the check their dependency makes (routes/_utils.require_admin) before it reads or changes the store.
+
     async def _list_proxy_personas(self, _: EmptyInput) -> list[dict[str, Any]]:
+        require_admin_operator(self.manager.settings)
         if self.proxy_store is None:
             return []
         return self.proxy_store.list_personas()
 
     async def _create_proxy_persona(self, payload: CreateProxyPersonaInput) -> dict[str, Any]:
+        require_admin_operator(self.manager.settings)
         if self.proxy_store is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured")
         return self.proxy_store.set_persona(
@@ -1412,6 +1420,7 @@ class McpToolGateway:
         )
 
     async def _delete_proxy_persona(self, payload: ProxyPersonaNameInput) -> dict[str, Any]:
+        require_admin_operator(self.manager.settings)
         if self.proxy_store is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured")
         deleted = self.proxy_store.delete_persona(payload.name)

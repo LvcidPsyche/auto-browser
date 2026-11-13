@@ -75,6 +75,7 @@ class RoutesExtensionsTests(unittest.TestCase):
         app.state.settings = SimpleNamespace(
             operator_id_header="X-Operator-Id",
             operator_name_header="X-Operator-Name",
+            api_admin_operator_ids=frozenset(),
         )
         app.state.network_inspectors = {"session-1": FakeInspector()}
         # The CDP routes read the session's active page under its lock, and only while it is allowed.

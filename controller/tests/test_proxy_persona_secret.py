@@ -45,8 +45,10 @@ class ProxyPersonaPasswordTests(unittest.IsolatedAsyncioTestCase):
             create_operations_router(manager=MagicMock(), proxy_store=self.store, cron_service=MagicMock())
         )
         self.client = TestClient(app)
+        manager = MagicMock()
+        manager.settings.api_admin_operator_ids = frozenset()  # API_ADMIN_OPERATORS lists nobody
         self.gateway = McpToolGateway(
-            manager=MagicMock(),
+            manager=manager,
             orchestrator=MagicMock(),
             job_queue=MagicMock(),
             proxy_store=self.store,

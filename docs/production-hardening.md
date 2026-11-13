@@ -52,6 +52,18 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   approval's id, kind, origin and tool, and its decision's comment, included), and
   the takeover desktop is shared by every session on a browser node; use
   `docker_ephemeral` isolation to give each session its own.
+- Some surfaces belong to no operator, so every credential can use them: the maintenance sweep and its status
+  (`POST /maintenance/cleanup`, `GET /maintenance/status`), the readiness report (`GET /readiness`,
+  `browser.readiness_check`), the proxy personas (the `/proxy-personas` routes and the `browser.list_proxy_personas`,
+  `browser.create_proxy_persona` and `browser.delete_proxy_persona` tools) and the mesh peer list
+  (`GET /mesh/peers`). `API_ADMIN_OPERATORS=alice,ops` leaves them to the operators it lists, each proven by a named
+  credential. Anyone else is answered `403` with a fixed text over REST and a tool error (`code: not_permitted`) over
+  MCP, and nothing is read or changed. Unset, every credential may use them. Once it is set, the shared
+  `API_BEARER_TOKEN` is refused there, whatever its `X-Operator-Id` header says, because it proves no operator: a
+  script, a dashboard tab (its Mesh Peers table) or an MCP client that uses these surfaces needs a listed operator's
+  named token. Ids are compared exactly, case included, and an id that no credential in `API_BEARER_TOKENS` proves
+  admits nobody. Among the listed operators a proxy persona still belongs to the one who saved it, and opening a
+  session with a persona is not one of these surfaces.
 - Each approval decision records `decided_by`, the operator a named credential proved (for an agent's decision, the
   operator it acts for), in the record, `GET /approvals`, the decision's audit event and its witness receipt's
   `metadata`; it is `null` without named credentials. `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS=alice,ci-bot`

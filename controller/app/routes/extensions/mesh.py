@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-from .._utils import internal_error
+from .._utils import ADMIN_ONLY, internal_error
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ async def mesh_receive(request: Request):
     return reply_envelope.model_dump()
 
 
-@mesh_router.get("/peers")
+@mesh_router.get("/peers", dependencies=ADMIN_ONLY)
 async def mesh_list_peers(request: Request):
     peers = getattr(request.app.state, "peer_registry", None)
     if peers is None:

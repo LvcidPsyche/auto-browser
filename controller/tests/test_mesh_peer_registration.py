@@ -47,7 +47,9 @@ def mesh(tmp_path: Path):
         return {"tool": tool_name}
 
     app = FastAPI()
-    app.state.settings = SimpleNamespace(operator_id_header="X-Operator-Id", operator_name_header="X-Operator-Name")
+    app.state.settings = SimpleNamespace(
+        operator_id_header="X-Operator-Id", operator_name_header="X-Operator-Name", api_admin_operator_ids=frozenset()
+    )
     app.state.mesh_identity = server
     app.state.peer_registry = peers
     app.state.delegation_manager = DelegationManager(identity=server, peers=peers, tool_gateway=tool_gateway)

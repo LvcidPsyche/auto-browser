@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # self-asserted X-Operator-Id header. The shared API_BEARER_TOKEN above
     # still works and still leaves identity unverified.
     api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS", repr=False, exclude=True)
+    # Operator ids, comma-separated, of the named credentials above that may use the surfaces no operator owns:
+    # the maintenance sweep and its status, the readiness report, the proxy personas and the mesh peer list, over
+    # REST and MCP alike. Empty leaves them to every credential. See app/admin_operators.py.
+    api_admin_operators: str = Field("", alias="API_ADMIN_OPERATORS")
     # Where the controller keeps its own token when neither setting above is set.
     # A loopback controller generates one here on first start and demands it, and
     # a token placed here is used in any scope. Compose pins it to /data/api-token,
@@ -621,6 +625,10 @@ class Settings(BaseSettings):
     @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def api_admin_operator_ids(self) -> frozenset[str]:
+        return frozenset(item.strip() for item in self.api_admin_operators.split(",") if item.strip())
 
     @property
     def approval_refuse_self_approval_operator_ids(self) -> frozenset[str]:

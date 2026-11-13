@@ -331,6 +331,14 @@ All notable changes to auto-browser are documented here.
   provider and keeps its data outside `/data` gets that warning at its first CLI call, and so does one on macOS or
   Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI sandbox" in
   docs/deployment.md. (N1)
+- **`API_ADMIN_OPERATORS` is new, and once set it refuses the shared token on the admin surfaces.** Nothing changes
+  until you set it. Set (`API_ADMIN_OPERATORS=alice,ops`), the maintenance sweep and its status, `GET /readiness`,
+  the `/proxy-personas` routes, `GET /mesh/peers`, and the `browser.readiness_check` and proxy persona tools answer
+  only an operator it lists, proven by a named credential of `API_BEARER_TOKENS`. The shared `API_BEARER_TOKEN`
+  proves no operator, whatever its `X-Operator-Id` says, so every caller on it is answered `403` there, or a tool
+  error over MCP: before you set it, move the scripts, dashboard tabs and MCP clients that use these surfaces to a
+  listed operator's named token. Ids are compared exactly, and an id no named credential proves admits nobody.
+  (AUTH-32)
 
 ### Security
 
@@ -883,6 +891,17 @@ All notable changes to auto-browser are documented here.
   failed answers the polls of its window too. A viewer that goes away does not cancel the capture the others wait
   for. The token is checked and the session looked up for every poll before a frame is reused, so a poll of a
   revoked link or of a closed session is refused and never answered a frame taken earlier. (AUTH-23)
+- **The surfaces that belong to no operator can be left to listed operators.** Named credentials keep each
+  operator's sessions, approvals and jobs apart, but any credential could run the maintenance sweep and read its
+  status, read the readiness report, use the proxy persona routes and tools, and list the mesh peers.
+  `API_ADMIN_OPERATORS` lists the operator ids that may. A caller passes when a named credential of
+  `API_BEARER_TOKENS` proved its id and the id is listed, compared exactly; anyone else is answered `403` with a
+  fixed text that names no operator. The REST routes (`/maintenance/status`, `/maintenance/cleanup`, `/readiness`,
+  the four `/proxy-personas` routes, `/mesh/peers`) and the MCP tools that reach the same operations
+  (`browser.readiness_check`, `browser.list_proxy_personas`, `browser.create_proxy_persona`,
+  `browser.delete_proxy_persona`) make one check, so a refused tool call is a tool error (`code: not_permitted`)
+  that reads and changes nothing. Unset, every credential may use them as before. See the upgrade note and
+  docs/production-hardening.md. (AUTH-32)
 
 ### Fixed
 

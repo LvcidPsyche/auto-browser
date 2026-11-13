@@ -263,8 +263,10 @@ def test_http_routes_apply_the_same_rule(store) -> None:
 
 async def test_mcp_tools_apply_the_same_rule(store) -> None:
     save_alice_persona(store)
+    manager = MagicMock()
+    manager.settings.api_admin_operator_ids = frozenset()  # API_ADMIN_OPERATORS lists nobody
     gateway = McpToolGateway(
-        manager=MagicMock(), orchestrator=MagicMock(), job_queue=MagicMock(), proxy_store=store, tool_profile="full"
+        manager=manager, orchestrator=MagicMock(), job_queue=MagicMock(), proxy_store=store, tool_profile="full"
     )
 
     with acting_as(BOB):

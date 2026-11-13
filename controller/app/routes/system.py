@@ -13,6 +13,7 @@ from ..browser_sandbox import browser_sandbox_status
 from ..readiness import run_readiness_checks
 from ..run_as import controller_user_status
 from ..utils import error_text_for_log
+from ._utils import ADMIN_ONLY
 
 # A readiness probe must answer within a probe interval, not within the
 # session-creation retry budget (CONNECT_RETRIES x CONNECT_RETRY_DELAY_SECONDS,
@@ -320,7 +321,7 @@ def create_system_router(
         payload, content_type = metrics.render()
         return Response(content=payload, media_type=content_type)
 
-    @router.get("/maintenance/status")
+    @router.get("/maintenance/status", dependencies=ADMIN_ONLY)
     async def get_maintenance_status() -> dict[str, Any]:
         return {
             "cleanup_on_startup": settings.cleanup_on_startup,
@@ -331,11 +332,11 @@ def create_system_router(
             "last_report": maintenance.last_report,
         }
 
-    @router.post("/maintenance/cleanup")
+    @router.post("/maintenance/cleanup", dependencies=ADMIN_ONLY)
     async def run_maintenance_cleanup() -> dict[str, Any]:
         return await maintenance.run_cleanup()
 
-    @router.get("/readiness")
+    @router.get("/readiness", dependencies=ADMIN_ONLY)
     async def get_readiness(mode: str = "normal") -> JSONResponse:
         if mode not in {"normal", "confidential"}:
             raise HTTPException(status_code=400, detail="mode must be 'normal' or 'confidential'")
