@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app import providers
 from app.config import Settings
 from app.providers.base import CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
@@ -24,6 +25,18 @@ from app.providers.openai_adapter import OpenAIAdapter
 
 # What the one error says, wherever the private CLI home failed; never a server path.
 UNUSABLE = "set CLI_HOME to a writable directory"
+
+
+@pytest.fixture(autouse=True)
+def _each_test_is_a_process_that_has_logged_nothing():
+    """Each failure of the private CLI home is logged once per process (D1-8): a test that looks for the line needs
+    it not to have been written by an earlier one."""
+    base = providers.base
+    base._LOGGED_HOME_FAILURES.clear()
+    base._LOGGED_NO_HOME_ERRORS.clear()
+    yield
+    base._LOGGED_HOME_FAILURES.clear()
+    base._LOGGED_NO_HOME_ERRORS.clear()
 
 
 def _finished_stream(data: bytes) -> asyncio.StreamReader:
@@ -372,3 +385,55 @@ async def test_a_per_call_directory_that_cannot_be_made_raises_one_error_that_na
         # The path is in the log, where the operator reads it.
         assert "/data/cli-home/tmpx1" in caplog.text
         adapter.run_cli.assert_not_awaited()
+
+
+def _a_home_that_cannot_hold_the_directory(tmp: str) -> dict[str, str]:
+    """An environment whose home is a file, so that no candidate directory can be made, for root as for anyone."""
+    home = Path(tmp) / "home-is-a-file"
+    home.write_text("x", encoding="utf-8")
+    return _private_env(str(home))
+
+
+async def test_a_private_home_that_stays_unusable_is_logged_once_and_still_refused_every_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # D1-8: it is checked on every provider call, and wrote its warning and its error on each of them.
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        patch.dict(os.environ, _a_home_that_cannot_hold_the_directory(tmp), clear=True),
+    ):
+        adapter = _adapter()
+        with caplog.at_level(logging.WARNING, "app.providers.base"):
+            with pytest.raises(RuntimeError) as first:
+                adapter.effective_cli_home()
+            written = len(caplog.records)
+            assert written >= 2, "a warning for the candidate and the error that follows it"
+
+            for _ in range(3):
+                with pytest.raises(RuntimeError) as again:
+                    adapter.effective_cli_home()
+                assert UNUSABLE in str(again.value)
+
+        assert UNUSABLE in str(first.value)
+        assert len(caplog.records) == written, "the later calls wrote nothing"
+
+
+async def test_a_private_home_that_fails_for_another_reason_is_logged_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, _a_home_that_cannot_hold_the_directory(tmp), clear=True):
+            with caplog.at_level(logging.WARNING, "app.providers.base"), pytest.raises(RuntimeError):
+                _adapter().effective_cli_home()
+            before = len(caplog.records)
+
+        # Another place and another failure: no home at all.
+        with (
+            patch.dict(os.environ, {"CLI_HOME": ""}, clear=True),
+            patch("app.providers.base.Path.home", side_effect=RuntimeError("Could not determine home directory.")),
+            caplog.at_level(logging.WARNING, "app.providers.base"),
+            pytest.raises(RuntimeError),
+        ):
+            _adapter().effective_cli_home()
+
+    assert len(caplog.records) > before

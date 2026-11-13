@@ -121,6 +121,10 @@ def allowlisted_environment(extra_names=(), extra_prefixes=()) -> dict[str, str]
 
 # Each CLI_HOME that could not be created, warned about once.
 _UNUSABLE_CLI_HOMES: set[str] = set()
+# The private CLI home is checked on every provider call, and one that stays unusable would write the same lines on
+# each: each (candidate, why) and each final error is logged once per process, and the check goes on silently.
+_LOGGED_HOME_FAILURES: set[tuple[str, str]] = set()
+_LOGGED_NO_HOME_ERRORS: set[str] = set()
 
 
 # The one error a caller gets when no private CLI home can be used. It names no server path (it can reach agent
@@ -224,13 +228,18 @@ def _private_cli_home() -> str:
                     if isinstance(exc, _Refused)
                     else f"{type(exc).__name__}: {error_text_for_log(exc)}"
                 )
-                logger.warning("the private CLI home %s cannot be used: %s", path, why)
+                if (str(path), why) not in _LOGGED_HOME_FAILURES:
+                    _LOGGED_HOME_FAILURES.add((str(path), why))
+                    logger.warning("the private CLI home %s cannot be used: %s", path, why)
                 reasons.append(f"{path}: {why}")
                 continue
             return str(path)
     except (OSError, RuntimeError) as exc:  # Path.home() with no HOME and no passwd entry, for one
         reasons.append(f"{type(exc).__name__}: {error_text_for_log(exc)}")
-    logger.error("no private CLI home can be used: %s", "; ".join(reasons) or "no candidate")
+    final = "; ".join(reasons) or "no candidate"
+    if final not in _LOGGED_NO_HOME_ERRORS:
+        _LOGGED_NO_HOME_ERRORS.add(final)
+        logger.error("no private CLI home can be used: %s", final)
     raise RuntimeError(PRIVATE_CLI_HOME_ERROR)
 
 

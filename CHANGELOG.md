@@ -1501,6 +1501,11 @@ All notable changes to auto-browser are documented here.
   write) the OS error, with the path in its text, was what the call raised. It now raises the error the CLI home's own
   failures raise (`set CLI_HOME to a writable directory`), and the path and the cause are in the log, on a line of
   their own. (D1-7)
+- **A private CLI home that cannot be used is logged once per process, not on every provider call.** With
+  `CLI_HOME` unset, or a `CLI_HOME` that cannot be made, a CLI provider checks its private home on each call, and a
+  home that stayed unusable wrote its warning and its error each time. Each warning and the final error are now
+  written once, and the check goes on without a word, so the call still fails with the same error each time. A home
+  that fails for another reason is logged when it does. (D1-8)
 
 ### Changed
 
