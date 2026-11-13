@@ -329,7 +329,7 @@ async def test_the_codex_per_call_directory_is_made_under_the_cli_home() -> None
         adapter = OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex"))
         seen: list[str | None] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):
+        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
             seen.append(cwd)
             output = Path(command[command.index("--output-last-message") + 1])
             output.write_text('{"action":"done","reason":"x","risk_category":"read"}', encoding="utf-8")

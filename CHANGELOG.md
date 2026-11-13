@@ -319,6 +319,18 @@ All notable changes to auto-browser are documented here.
   longer matched the models the controller is set up for. It now uses `CLAUDE_MODEL`, `OPENAI_MODEL` or `GEMINI_MODEL`
   for `CURATOR_PROVIDER`, so a deployment that relied on the old defaults changes model, and its cost with it. Set
   `CURATOR_MODEL` to keep a specific model. (STORE-31)
+- **On Linux, a provider CLI (`*_AUTH_MODE=cli`) can no longer open the controller's data directory, except `CLI_HOME`
+  and the screenshot of its call.** Where the kernel has Landlock (5.13 or later), `codex`, `claude` and `gemini` now
+  start under a Landlock ruleset: under `/data` each can read and write `CLI_HOME` and read the screenshot its own
+  call names, and everything else there answers `EACCES`. Move whatever your CLI reads or writes under `/data` into
+  `CLI_HOME`: a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME` set elsewhere under `/data`, a CA bundle, the
+  CLI's own binary. A CLI now runs with `no_new_privs` too, cannot list `/` itself, and on a kernel older than 5.19
+  cannot rename a file from one directory to another. Where the sandbox would leave a secret open (no Landlock, a
+  `CLI_HOME` that is `/data` or holds it, or a secret's path set outside `/data` or inside `CLI_HOME`) the controller
+  logs one warning per process that names the condition, and still runs the CLI: a host run that uses a `cli`
+  provider and keeps its data outside `/data` gets that warning at its first CLI call, and so does one on macOS or
+  Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI sandbox" in
+  docs/deployment.md. (N1)
 
 ### Security
 
@@ -813,6 +825,22 @@ All notable changes to auto-browser are documented here.
   (one raised outside the provider call, such as a log file that could not be written) recorded the error's class
   and text, a path among them, in the record that anyone who lists the jobs reads: it records `Agent job failed`
   now. See the upgrade note. (STORE-27)
+- **A provider CLI is started under a Landlock sandbox that closes the controller's data directory to it.** A `cli`
+  provider's CLI ran as the controller's user with nothing between it and the controller's files, and a page shown to
+  the model could prompt-inject it into reading `data/api-token`, `data/takeover-token`, an auth profile or the
+  witness and mesh keys: 1.17.0 recorded that as a known limit. On Linux with Landlock the controller now starts the
+  CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a ruleset, sets `no_new_privs` and
+  execs the CLI, so the process, its group and the way it is stopped are what they were. The ruleset allows every
+  entry beside `/data` and, in `/data`, `CLI_HOME` to read and write and the one screenshot the call names to read:
+  another session's screenshot, a listing of `/data` and every secret there are refused, to root too. It handles only
+  the rights the running kernel knows, and it never execs without its ruleset: a kernel call that fails ends it with
+  status `125` and a line that names the call. The controller runs it once, to apply a ruleset and exit, at its first
+  CLI call: where that fails, where the host is not Linux, or where a secret is kept where the ruleset does not
+  reach, one warning says so and the CLI runs, and `CLI_SANDBOX_REQUIRED=true` refuses to run it instead (see the
+  upgrade note). A launcher that fails at a real start after that fails the call, and the CLI is never started
+  without it. The sandbox does not stop `stat` and other metadata calls on a file under `/data`, one CLI call
+  reaching another's files in `CLI_HOME`, or signals and TCP connections to the controller: docs/deployment.md lists
+  these and the rest. The Codex host bridge's Codex runs outside it. (N1)
 
 ### Fixed
 

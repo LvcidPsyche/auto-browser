@@ -99,7 +99,7 @@ class ResumeCheckpointsPromptTests(unittest.IsolatedAsyncioTestCase):
     async def _cli_prompt(self, adapter: Any, pick, *, resume: bool) -> str:
         seen: list[Any] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):
+        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
             seen.append(pick(command, input_text))
             if "--output-last-message" in command:
                 Path(command[command.index("--output-last-message") + 1]).write_text(_DECISION, encoding="utf-8")

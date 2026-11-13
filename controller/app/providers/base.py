@@ -20,11 +20,12 @@ from typing import Any, Iterator
 import httpx
 from pydantic import ValidationError
 
+from ..cli_sandbox import NOT_APPLIED_MESSAGE, REQUIRED_MESSAGE, SandboxRequired, launch_command, launcher_refused
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName, ResumeCheckpoint
 from ..process_tree import GROUP_SPAWN_KWARGS, OutputTooLarge, exchange, kill_and_drain
 from ..result_shaping import compact_session
-from ..utils import error_text, error_text_for_log
+from ..utils import error_text, error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -722,8 +723,13 @@ class BaseProviderAdapter(ABC):
         input_text: str | None = None,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        image_path: str | None = None,
     ) -> CLIResult:
         """Run a provider CLI to its end, in a process group of its own, and return what it printed.
+
+        Where Landlock works the CLI is started under the launcher of app.cli_sandbox: of the controller's data
+        directory it can open its home, and ``image_path`` to read (the screenshot its command names, if any). The
+        launcher execs the CLI, so the child is one process either way.
 
         Stdout past CLI_STDOUT_LIMIT_BYTES is an error and the start of stderr is kept (CLI_STDERR_KEEP_BYTES). On a
         timeout, on that error and on a cancel the whole group is killed and the child reaped, bounded by the drain of
@@ -731,13 +737,19 @@ class BaseProviderAdapter(ABC):
         """
         # Encoded before the child exists: a prompt that cannot be (a page's lone surrogate) must leave none behind.
         stdin_bytes = input_text.encode("utf-8") if input_text is not None else None
+        child_env = env or self.cli_environment()
+        home = self.effective_cli_home()
+        try:
+            spawned = await launch_command(self.settings, command, cli_home=home, image_path=image_path, env=child_env)
+        except SandboxRequired as exc:
+            raise ProviderAPIError(provider=self.provider, message=REQUIRED_MESSAGE, retryable=False) from exc
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *spawned,
             stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=env or self.cli_environment(),
-            cwd=cwd or self.effective_cli_home(),
+            env=child_env,
+            cwd=cwd or home,
             **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
         label = f"{self.provider} CLI"
@@ -768,6 +780,14 @@ class BaseProviderAdapter(ABC):
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
+        if spawned != command and launcher_refused(process.returncode, stderr):
+            # The call fails. It is never started again without the launcher.
+            logger.error(
+                "%s CLI was not run: the launcher could not apply its sandbox: %s",
+                self.provider,
+                quoted_for_log(stderr.strip()),
+            )
+            raise ProviderAPIError(provider=self.provider, message=NOT_APPLIED_MESSAGE, retryable=False)
         if process.returncode != 0:
             detail = stderr.strip() or stdout.strip() or f"CLI exited with code {process.returncode}"
             raise ProviderAPIError(

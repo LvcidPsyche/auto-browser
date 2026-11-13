@@ -356,6 +356,9 @@ class Settings(BaseSettings):
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
     # Extra environment variable names (comma-separated) handed to provider CLI children as-is.
     cli_provider_env_passthrough: str = Field("", alias="CLI_PROVIDER_ENV_PASSTHROUGH")
+    # true: no provider CLI is run where its Landlock sandbox would leave one of the controller's secrets open to it
+    # (app/cli_sandbox.py). false: one warning, and the CLI runs.
+    cli_sandbox_required: bool = Field(False, alias="CLI_SANDBOX_REQUIRED")
 
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults

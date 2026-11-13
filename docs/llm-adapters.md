@@ -60,11 +60,15 @@ Unix socket (`scripts/codex_host_bridge.py`, which gives Codex an allowlisted en
 `--pass-env NAME`; see docs/deployment.md). `GET /agent/providers` reports the mode each provider is in.
 
 A `cli` provider's CLI gets an allowlisted environment, and on Linux the controller (and the bridge) is
-non-dumpable, so the CLI cannot read the controller's environment through `/proc`. Known limit: the CLI runs as the
-controller's uid (the bridge's Codex as the bridge's), so it can still read the controller's files: `data/api-token`,
-`data/takeover-token`, the mesh and witness keys. Page content shown to the model can prompt-inject the CLI into
-doing so. On macOS and Windows the controller and the bridge do not change this, and whether a process of the same
-user can read their environment depends on the system.
+non-dumpable, so the CLI cannot read the controller's environment through `/proc`. On Linux with Landlock the
+controller also starts the CLI in a sandbox: of `/data` it can open only `CLI_HOME` and the screenshot of its own
+call, so it cannot read `data/api-token`, `data/takeover-token` or the mesh and witness keys, though it runs as the
+controller's uid. Where the sandbox is not in use the controller says so in one warning, and
+`CLI_SANDBOX_REQUIRED=true` refuses to run the CLI instead ("The CLI sandbox" in docs/deployment.md, which also lists
+what it does not stop). Known limit: the bridge's Codex runs as the bridge's uid on the host, outside that sandbox,
+so it can still read that user's files. Page content shown to the model can prompt-inject a CLI into trying. On
+macOS and Windows there is no sandbox and the controller and the bridge do not make themselves non-dumpable, and
+whether a process of the same user can read their environment depends on the system.
 
 ### OpenAI
 Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:

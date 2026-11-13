@@ -246,7 +246,9 @@ class OpenAIAdapter(BaseProviderAdapter):
                 ]
             )
 
-            result = await self.run_cli(command=command, input_text=prompt, cwd=tempdir)
+            result = await self.run_cli(
+                command=command, input_text=prompt, cwd=tempdir, image_path=observation.get("screenshot_path")
+            )
             raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else result.stdout
             decision = self.parse_decision_text(raw_text)
             return ProviderDecision(

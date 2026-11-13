@@ -385,7 +385,7 @@ What per-session networks do not change:
   takeover token stops agents without file access to the controller's host, and only those:
   under compose `./data` belongs to the host user, so an agent running as that user on the
   host (a local MCP setup) can read `data/takeover-token`, and so can the controller's own
-  `cli` providers, which run as the controller's uid (see the known limit under the CLI
+  `cli` providers wherever their sandbox is not in use (see "The CLI sandbox" under the CLI
   providers); so can anything that reads the session container's own copy of the password.
   Open the dashboard and the takeover link in a browser no agent drives: such an agent can
   read the dashboard's sessionStorage, where the tokens are kept. That link carries
@@ -504,10 +504,63 @@ shadow browse's headed browser), and Tesseract, which screenshot redaction's OCR
 also makes itself non-dumpable at startup, so a process of its uid cannot read the controller's own environment
 through `/proc/PID/environ`.
 
-Known limit: a child running as the controller's uid can still read the controller's files: `data/api-token`,
-`data/takeover-token`, the mesh and witness keys. The CLI providers (`OPENAI_AUTH_MODE=cli` and the others) and the
-Codex host bridge's Codex are such children, and page content they are shown can prompt-inject them. Use `api` mode
-where that matters. The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
+#### The CLI sandbox
+
+A provider CLI (`OPENAI_AUTH_MODE=cli` and the others) runs as the controller's user, and page content it is shown
+can prompt-inject it. On Linux with Landlock (kernel 5.13 or later, with Landlock enabled) the controller starts each
+provider CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a Landlock ruleset and then
+execs the CLI. Of `/data` the CLI can then open only `CLI_HOME`, to read and write, and the screenshot its own call
+names (Codex's `--image`), to read. `data/api-token`, `data/takeover-token`, the auth profiles, the witness and mesh
+keys, the tunnel key, another session's screenshots and everything else under `/data` answer `EACCES`, to a CLI that
+runs as root as to any other, and so does listing `/data`. Outside `/data` a CLI reaches what it did before, with two
+differences: it cannot list `/` itself or make an entry directly in it, and it runs with `no_new_privs`, so a setuid
+program it starts gains nothing. Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`,
+`CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a CA bundle, the CLI's own binary) has to be inside `CLI_HOME`. On a kernel
+older than 5.19 Landlock also refuses a sandboxed process every rename or link from one directory to another
+(`EXDEV`), in `CLI_HOME` as anywhere.
+
+Where the sandbox would leave a secret open, the controller writes one warning per process, which names the
+condition or the settings and never a setting's value, and runs the CLI:
+
+- **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
+  seccomp profile refuses Landlock's system calls (Docker's default profile allows them), or the launcher's probe
+  failed for another reason: at the first CLI call the controller runs the launcher once in a mode that applies the
+  ruleset and exits. The CLI starts without the launcher, as it did before 1.18.0.
+- **`CLI_HOME` is `/data` or a directory that holds it.** The CLI starts without the launcher.
+- **A secret is kept outside `/data`, or inside `CLI_HOME`.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`,
+  `WITNESS_ROOT`, `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and
+  `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so a `/data` that is a symbolic link to another place
+  holds none of them. The CLI starts under the launcher, which closes `/data` and not that place. A Linux host run
+  that keeps its data elsewhere gets this warning, with the name of each of them it sets.
+
+`CLI_SANDBOX_REQUIRED=true` refuses instead: with any of the three no provider CLI is started, the step fails with
+`Provider request failed` (`502`), and the log names the condition in one error line. `GET /agent/providers` still
+reports such a provider as configured. A launcher that cannot apply its ruleset at a real start, after its probe
+passed, fails that call the same way, and the CLI is never started without it.
+
+What the sandbox does not stop:
+
+- **Metadata.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or extended attributes: to a file under
+  `/data` whose path it knows, a CLI can do whatever of those the file's own permissions allow. It cannot list a
+  directory there to learn a name.
+- **Another CLI call's files.** Every call's CLI reads and writes all of `CLI_HOME`: the sign-in state, and the
+  per-call directory of a call that runs at the same time.
+- **Signals and connections.** The ruleset handles files and nothing of the network. A CLI is a process of the
+  controller's user with the container's network: it can signal the controller, and it can open a TCP connection to
+  the controller's port (a local client like any other, which lacks the API token wherever the controller demands
+  one) and to whatever else the container reaches.
+- **What the controller's user can open outside `/data`.** With the isolation overlay that includes the Docker
+  socket.
+- **Truncation, on a kernel older than 6.2.** Landlock could not deny `truncate` before its third ABI. There a CLI
+  can empty a file under `/data` that the controller's user may write, though it can neither read nor write it.
+- **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
+  part of it, is mounted at a second path of the container too, that path is allowed like any other beside `/data`,
+  and what is mounted there is open to the CLI. Mount it once, as the compose files do.
+- **The Codex host bridge's Codex.** It runs on the host as the bridge's user and not under this launcher, so it can
+  read what that user can: `data/api-token`, `data/takeover-token` and the mesh and witness keys when the checkout
+  is that user's. Use `api` mode where that matters.
+
+The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
 processes of the controller's user: their environment holds none of the controller's own tokens or keys (a proxy
 setting that carries credentials excepted), but their memory holds page content and what is typed into pages, which
 a command one of them runs could read where the host lets a process ptrace another of the same user

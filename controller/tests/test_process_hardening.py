@@ -432,8 +432,9 @@ _SPAWN_APIS = {
 _SPAWN_METHODS = {"subprocess_exec", "subprocess_shell", "create_subprocess_exec", "create_subprocess_shell", "Popen"}
 # os.exec* replaces the process and os.fork copies it: neither starts a child with an environment of its own, so
 # they are allowed only where that is the point. drop_caps.py execs the container entrypoint's own command after
-# dropping capabilities; run_as.py forks a child that becomes the data user to write its marker, then _exits.
-_EXEC_ALLOWED = {"drop_caps.py", "run_as.py"}
+# dropping capabilities; run_as.py forks a child that becomes the data user to write its marker, then _exits;
+# cli_sandbox_launcher.py execs the provider CLI it was started in place of, with the environment run_cli gave it.
+_EXEC_ALLOWED = {"cli_sandbox_launcher.py", "drop_caps.py", "run_as.py"}
 # The forms that can take no environment at all (a shell command line, or a copy of this process).
 _NO_ENV_FORM = {"system", "popen", "getoutput", "getstatusoutput", "fork"}
 
