@@ -11,7 +11,6 @@ import re
 import socket
 import stat
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,9 +36,6 @@ logger = logging.getLogger(__name__)
 _PARSE_ERRORS = (ValidationError, ValueError, RecursionError)
 # Longest a provider's Retry-After may hold one retry.
 MAX_RETRY_AFTER_SECONDS = 30.0
-# Transport failures that retrying cannot mend: the request is wrong in itself and fails the same way every time (a URL
-# with no scheme, a header value httpx refuses to send).
-_REQUEST_WRONG_IN_ITSELF = (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
 # What a provider CLI's stdout may hold: its answer is one decision, a small JSON object, so more is a runaway (the UV
 # verifier's cap).
 CLI_STDOUT_LIMIT_BYTES = 1024 * 1024
@@ -274,11 +270,6 @@ class ProviderAPIError(RuntimeError):
         return f"{self.provider} provider error ({self.status_code}): {self.message}"
 
 
-def is_retryable_status(status_code: int) -> bool:
-    """A rate limit or a server error: the provider may answer the same request next time."""
-    return status_code == 429 or status_code >= 500
-
-
 class BaseProviderAdapter(ABC):
     provider: ProviderName
     # Variables this provider's own CLI reads (its key, config directory, endpoint), passed to the child.
@@ -352,59 +343,42 @@ class BaseProviderAdapter(ABC):
         payload: dict[str, Any],
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=timeout or self.settings.model_request_timeout_seconds) as client:
-            response = await self._send_retrying(
-                lambda: client.post(url, headers=headers, json=payload),
-                network_failure="provider network request failed",
-            )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            error_payload = self._safe_json(response)
-            raise ProviderAPIError(
-                provider=self.provider,
-                message=self._extract_error_message(error_payload) or response.text[:300],
-                status_code=response.status_code,
-                retryable=is_retryable_status(response.status_code),
-                raw_error=error_payload,
-            ) from exc
-        return response.json()
-
-    async def _send_retrying(
-        self, send: Callable[[], Awaitable[httpx.Response]], *, network_failure: str
-    ) -> httpx.Response:
-        """Send a request to a provider, trying again after a failure that may pass: the one retry loop of the API
-        adapters and of the host bridge.
-
-        Retried, MODEL_MAX_RETRIES times with MODEL_RETRY_BACKOFF_SECONDS doubling between: any httpx.TransportError (a
-        timeout, a refused or dropped connection, a broken HTTP exchange, a proxy that refused), and a 429 or 5xx
-        answer, which waits as long as its Retry-After says (_retry_delay). Not retried: a request that is wrong in
-        itself, which fails the same way each time (a URL with no scheme, a header httpx refuses).
-
-        Returns the answer of the last attempt, whatever its status, for the caller to read. A transport failure that
-        outlasts the retries is a ProviderAPIError(retryable=True) that names `network_failure`.
-        """
         max_attempts = max(1, self.settings.model_max_retries + 1)
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                response = await send()
-            except _REQUEST_WRONG_IN_ITSELF:
-                raise
-            except httpx.TransportError as exc:
-                if attempt >= max_attempts:
+        async with httpx.AsyncClient(timeout=timeout or self.settings.model_request_timeout_seconds) as client:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await client.post(url, headers=headers, json=payload)
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
+                        continue
                     raise ProviderAPIError(
-                        provider=self.provider, message=network_failure, status_code=None, retryable=True
+                        provider=self.provider,
+                        message="provider network request failed",
+                        status_code=None,
+                        retryable=True,
                     ) from exc
-                await asyncio.sleep(self._backoff_seconds(attempt))
-                continue
-            if attempt >= max_attempts or not is_retryable_status(response.status_code):
-                return response
-            await asyncio.sleep(self._retry_delay(attempt, response))
 
-    def _backoff_seconds(self, attempt: int) -> float:
-        return self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(self._retry_delay(attempt, response))
+                        continue
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    payload = self._safe_json(response)
+                    raise ProviderAPIError(
+                        provider=self.provider,
+                        message=self._extract_error_message(payload) or response.text[:300],
+                        status_code=response.status_code,
+                        retryable=response.status_code == 429 or response.status_code >= 500,
+                        raw_error=payload if isinstance(payload, dict) else None,
+                    ) from exc
+
+                return response.json()
+
+        raise ProviderAPIError(provider=self.provider, message="request failed without a response")
 
     def _retry_delay(self, attempt: int, response: httpx.Response) -> float:
         """Backoff before retrying a 429/5xx, honouring the provider's Retry-After.
@@ -413,7 +387,7 @@ class BaseProviderAdapter(ABC):
         provider named, so every retry was spent on another 429 and the step
         failed anyway. Capped so one header cannot park a step for minutes.
         """
-        delay = self._backoff_seconds(attempt)
+        delay = self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
         retry_after = (response.headers.get("retry-after") or "").strip()
         if retry_after:
             try:

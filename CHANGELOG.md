@@ -1479,15 +1479,6 @@ All notable changes to auto-browser are documented here.
   `No agent job with id nope123. List agent jobs to find one.` and
   `No auth profile named nope123. List auth profiles to find one.` A job in a session the caller may not use, and
   another operator's auth profile, read as one that never was, as before. The REST routes' `404`s are unchanged.
-- **A provider request that fails in transport is retried whatever the failure, and then a retryable error.** Both
-  retry loops (the API providers' and the Codex host bridge's) caught only a timeout or a network error, so a server
-  that dropped the connection without an answer (`RemoteProtocolError`) or a proxy that refused (`ProxyError`)
-  failed the step at once, unretried, as an unexplained failure. Any `httpx.TransportError` is now retried
-  (`MODEL_MAX_RETRIES`, `MODEL_RETRY_BACKOFF_SECONDS`) and, if it outlasts the retries, is a provider error that
-  answers `503`, as a network error did. A request that is wrong in itself and fails the same way every time (a base
-  URL with no scheme, a header value `httpx` refuses) is not retried and still fails the step at once. The two loops
-  are one now, so the host bridge's retry of a `429` or a `5xx` also waits as long as a `Retry-After` header says,
-  up to 30 seconds, as the API providers' does. (STORE-28)
 - **A provider CLI is stopped whole, and its output is read with a cap.** `claude`, `codex` and `gemini` were started
   in the controller's own process group, and a timeout or a cancelled job killed only that process, then waited for
   its pipes with no limit: a helper it had started that kept them open held the call, the worker and the job for as
