@@ -923,21 +923,28 @@ class WindowBirths:
         In two passes. Nothing waits before the first one's removal, so a release cancelled at a later wait (a
         teardown step's bound, its caller's cancel) has forgotten the browser all the same; and it ends a re-attach
         in progress, which holds the lock on a browser that is going. The second is under the lock, so after an
-        attach in flight: what that attach registered goes too, with a re-attach that a loss started in between."""
+        attach in flight: what that attach registered goes too, with a re-attach that a loss started in between.
+
+        A watcher that a pass removed is detached by a task the pass starts with the removal: no registry holds it
+        any more, so no later release could detach it. A release that is cancelled ends at once and leaves that task
+        to end by itself (within DETACH_TIMEOUT_SECONDS); one that is not returns once the watcher is detached."""
         await self._drop(browser)
         async with self._lock:
             await self._drop(browser)
 
     async def _drop(self, browser: Any) -> None:
-        """One pass of release(): the removals and the cancels come before its first wait."""
+        """One pass of release(): the removals and the cancels come before its first wait, and so does the start of
+        the detach, a task of its own. The wait is asyncio.wait, which a cancel of the release ends without ending
+        what it waits for (gather would cancel the detach too)."""
         self._attach_failures.pop(id(browser), None)
         entry = self._watchers.pop(id(browser), None)
-        reattaching = [task for task, its_browser in self._reattaching.items() if its_browser is browser]
-        for task in reattaching:
+        ending = [task for task, its_browser in self._reattaching.items() if its_browser is browser]
+        for task in ending:
             task.cancel()
-        await asyncio.gather(*reattaching, return_exceptions=True)
         if entry is not None:
-            await entry[1].detach()
+            ending.append(spawn_background_task(entry[1].detach()))
+        if ending:
+            await asyncio.wait(ending)
 
     async def release_all(self) -> None:
         """Every browser a registry or a re-attach names: one whose watcher never attached has no watcher to go by."""

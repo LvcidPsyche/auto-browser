@@ -7,7 +7,8 @@ the attach backoff, and only while the browser still has the lost watcher and a 
 made on those terms too: a loss with no watched session left, or beside a release of the browser, attaches nothing.
 
 A release of the browser ends them, and forgets the browser before it waits for anything: one that is cancelled at a
-wait has forgotten it all the same.
+wait has forgotten it all the same, and the watcher it removed is detached all the same, by a task the release starts
+with the removal.
 
 No real browser. The clock is the test's too (time.monotonic and asyncio.sleep, as window_births sees them), so a
 wait ends when the test says; the last test runs on the real clock.
@@ -19,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -32,6 +33,7 @@ A_RETRY_LATER = BACKOFF * 1.1
 # The founder's decision for 1.18.0: three more attaches after the one the loss itself starts.
 RETRIES = 3
 REFUSED = "could not re-attach after a loss"
+LOSS = "its browser session closed"
 IDLE = {"state": "idle", "watchers": []}
 
 
@@ -152,6 +154,40 @@ def assert_forgotten(w: Watched) -> None:
     assert id(w.browser) not in w.births._watchers
     assert id(w.browser) not in w.births._attach_failures
     assert w.births.status() == IDLE
+
+
+async def a_live_watcher_beside_an_older_retry(w: Watched, clock: Clock) -> FakeCdp:
+    """A new session's watch attached a replacement while the first loss's retry still waits out its backoff.
+    Returns the replacement's browser session."""
+    await w.lose(refuse=1)
+    await clock.advance(BACKOFF * 1.02)  # past the backoff, and before the retry
+    newcomer = FakeSession(w.browser, "s2")
+    await w.births.watch(newcomer, context=object(), page=object(), context_id=OTHER_CTX)
+    assert w.attached() and len(w.left_running()) == 1
+    return w.browser.cdp
+
+
+def detach_answers_when_told(cdp: FakeCdp) -> tuple[asyncio.Event, asyncio.Event]:
+    """The session's detach answers when the test says. Returns (it was asked, let it answer)."""
+    asked, answer = asyncio.Event(), asyncio.Event()
+    detach = cdp.detach
+
+    async def answers_late() -> None:
+        asked.set()
+        await answer.wait()
+        await detach()
+
+    cdp.detach = answers_late
+    return asked, answer
+
+
+async def turns_until(holds: Callable[[], bool]) -> None:
+    """Loop turns, one at a time, as far as the turn a schedule is about."""
+    for _ in range(500):
+        if holds():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the schedule never got that far")
 
 
 # ── the retry ────────────────────────────────────────────────────────────────
@@ -339,6 +375,7 @@ async def test_a_release_cancelled_while_it_waits_for_a_retry_to_end_has_forgott
         await release
 
     assert_forgotten(w)
+    await settle()  # the detach the release started goes on a few turns past the cancel (Python 3.11's wait_for)
     assert w.left_running() == set()
     await clock.advance(A_RETRY_LATER * 5)
     assert w.attaches.asked == 1
@@ -404,6 +441,133 @@ async def test_a_release_forgets_the_watcher_of_a_retry_that_attached_although_i
     await asyncio.wait_for(w.births.release(w.browser), timeout=5)
 
     assert w.left_running() == set()
+    assert_forgotten(w)
+
+
+# ── the watcher a release removed is detached, whether or not the release is cancelled ───────────────────────────────
+# The release forgets the watcher before it waits for anything, so nothing but the release itself can still detach it:
+# no registry holds it, and no later release finds it. The detach is a task the release starts with the removal.
+
+
+async def test_a_release_cancelled_while_it_waits_for_a_retry_to_end_has_detached_the_live_watcher(
+    w: Watched, clock: Clock
+) -> None:
+    live = await a_live_watcher_beside_an_older_retry(w, clock)
+
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await asyncio.sleep(0)  # as far as its first wait
+    assert not release.done()
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    await settle()
+
+    assert live.detached is True
+    assert_forgotten(w)
+    assert w.left_running() == set()
+
+
+async def test_a_release_cancelled_at_its_wait_under_the_lock_has_detached_what_an_attach_in_flight_registered(
+    w: Watched,
+) -> None:
+    """The second pass removes the watcher a new session's attach registered while the release waited for the lock,
+    and waits for a re-attach to end: here one that a loss reported for the browser's earlier watcher started, which
+    waits for the lock behind the release."""
+    earlier = w.watcher
+    await w.births.release(w.browser)
+    before = asyncio.all_tasks()
+    answer = asyncio.Event()
+    attach = w.browser.new_browser_cdp_session
+
+    async def answers_late() -> FakeCdp:
+        await answer.wait()
+        return await attach()
+
+    w.browser.new_browser_cdp_session = answers_late
+    newcomer = FakeSession(w.browser, "s2")
+    watching = asyncio.ensure_future(w.births.watch(newcomer, context=object(), page=object(), context_id=OTHER_CTX))
+    await settle()
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await settle()
+    w.births._lost(earlier)
+    await settle()
+    assert not watching.done() and not release.done()
+    assert len(w.births._reattaching) == 1
+
+    answer.set()
+    # The attach has registered its watcher, and the release, with the lock now, has removed it.
+    await turns_until(lambda: watching.done() and id(w.browser) not in w.births._watchers)
+    registered = w.browser.cdp
+    assert not release.done()  # at its wait, under the lock
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    await settle()
+
+    assert w.attaches.asked == 1
+    assert registered.detached is True
+    assert_forgotten(w)
+    assert not w.births._lock.locked()
+    assert asyncio.all_tasks() - before == set()
+
+
+async def test_a_release_cancelled_while_the_detach_is_in_flight_leaves_the_detach_to_end(w: Watched) -> None:
+    """The cancel ends the release at once, as a teardown step's bound must; the detach it started goes on."""
+    cdp = w.browser.cdp
+    asked, answer = detach_answers_when_told(cdp)
+    before = asyncio.all_tasks()
+
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await asyncio.wait_for(asked.wait(), timeout=5)
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    assert cdp.detached is False
+    assert asyncio.all_tasks() - before != set()  # the detach, which the cancelled release left running
+
+    answer.set()
+    await settle()
+
+    assert cdp.detached is True
+    assert asyncio.all_tasks() - before == set()
+    assert_forgotten(w)
+
+
+async def test_a_release_that_is_not_cancelled_returns_once_the_watcher_is_detached_and_no_sooner(w: Watched) -> None:
+    cdp = w.browser.cdp
+    asked, answer = detach_answers_when_told(cdp)
+
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await asyncio.wait_for(asked.wait(), timeout=5)
+    await settle()
+    assert not release.done()
+
+    answer.set()
+    await asyncio.wait_for(release, timeout=5)
+
+    assert cdp.detached is True
+    assert_forgotten(w)
+
+
+async def test_a_loss_reported_between_the_removal_and_the_start_of_the_detach_starts_no_attach(
+    w: Watched, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The detach begins a loop turn after the removal. A session that closes in that turn is still reported as a
+    loss, since nothing has detached the watcher on purpose yet, and its re-attach finds no lost watcher of the
+    browser to replace."""
+    caplog.set_level(logging.WARNING, logger=wb.logger.name)
+    removed = w.watcher
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await asyncio.sleep(0)  # the release's first turn: the removal, and the detach started
+    assert id(w.browser) not in w.births._watchers and removed.live
+
+    await w.lose()
+
+    assert [record.getMessage() for record in caplog.records if LOSS in record.getMessage()] != []
+    await release
+    assert w.left_running() == set()
+    assert w.attaches.asked == 0
+    assert w.browser.cdp.detached is True
     assert_forgotten(w)
 
 
