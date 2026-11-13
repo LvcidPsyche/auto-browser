@@ -849,11 +849,12 @@ All notable changes to auto-browser are documented here.
   started is run again at the next call): where that fails, where the host is not Linux, or where a secret is kept
   where the ruleset does not reach, a warning says so, once for each distinct line, and the CLI runs, and
   `CLI_SANDBOX_REQUIRED=true` refuses to run it instead; `CLI_SANDBOX_ENABLED=false` turns the sandbox off (see the
-  upgrade note). A launcher that fails at a real start
-  after that fails the call, and the CLI is never started without it. The sandbox does not stop `stat` and other
-  metadata calls on a file under `/data`, one CLI call reaching another's files in `CLI_HOME`, or signals and TCP
-  connections to the controller: docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs
-  outside it. (N1)
+  upgrade note). A launcher that fails at a real start after that fails the call, and the CLI is never started
+  without it. The controller takes Codex's `decision.json` only as a regular file of at most 1 MiB and not through a
+  link, and makes the call's schema file rather than write through what is at its name, so a CLI cannot have the
+  controller read a closed file for it, or write one. The sandbox does not stop `stat` and other metadata calls on a
+  file under `/data`, one CLI call reaching another's files in `CLI_HOME`, or signals and TCP connections to the
+  controller: docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
   can: the checkout's `.env`, `data/api-token`, `data/takeover-token` and the keys under `data/`.

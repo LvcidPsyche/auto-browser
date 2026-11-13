@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import os
+import stat
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -12,13 +15,60 @@ import httpx
 from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision, ResumeCheckpoint
 from ..utils import error_text_for_log, quoted_for_log
-from .base import PAGE_DATA_NOTICE, PRIVATE_CLI_HOME_ERROR, BaseProviderAdapter, ProviderAPIError, ProviderDecision
+from .base import (
+    CLI_STDOUT_LIMIT_BYTES,
+    PAGE_DATA_NOTICE,
+    PRIVATE_CLI_HOME_ERROR,
+    BaseProviderAdapter,
+    ProviderAPIError,
+    ProviderDecision,
+)
 
 logger = logging.getLogger(__name__)
 
 # A codex config can name a /home/<user>/.codex home from another machine or container; that one place outside the CLI
 # home is worth linking to the real one. Anything else is skipped.
 _HOME_ROOT_PARTS = 4  # ("/", "home", "<user>", ".codex")
+# How the controller opens what a Codex call left at its decision file's name: never through a link, never waiting for
+# a writer, and as bytes on Windows too. One code path everywhere: a flag the platform lacks is 0.
+_DECISION_FILE_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+)
+
+
+def _decision_file_bytes(path: Path) -> tuple[bytes | None, str]:
+    """What is at ``path`` and "", where it is a regular file of at most CLI_STDOUT_LIMIT_BYTES that is itself there;
+    (None, "") where nothing is there; otherwise (None, what is there instead), for the log.
+
+    The call's directory is the CLI's to write, and the controller is not under the CLI sandbox: a link there could
+    name a file the CLI cannot open, and a FIFO would hold the event loop until something writes to it.
+    """
+    try:
+        fd = os.open(path, _DECISION_FILE_FLAGS)
+    except FileNotFoundError:
+        return None, ""
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "a link"
+        return None, "something that cannot be opened (%s)" % errno.errorcode.get(exc.errno or 0, exc.errno)
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISFIFO(mode):
+            return None, "a FIFO"
+        if stat.S_ISDIR(mode):
+            return None, "a directory"
+        if not stat.S_ISREG(mode):
+            return None, "no regular file"
+        chunks: list[bytes] = []
+        size = 0
+        while size <= CLI_STDOUT_LIMIT_BYTES and (chunk := os.read(fd, CLI_STDOUT_LIMIT_BYTES + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    if size > CLI_STDOUT_LIMIT_BYTES:
+        return None, "larger than %d bytes" % CLI_STDOUT_LIMIT_BYTES
+    return b"".join(chunks), ""
 
 
 def _codex_root_allowed(expected: PurePosixPath, cli_home: PurePosixPath) -> bool:
@@ -214,7 +264,14 @@ class OpenAIAdapter(BaseProviderAdapter):
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
-            schema_path.write_text(json.dumps(self.strict_action_schema, ensure_ascii=False), encoding="utf-8")
+            try:
+                # Made, never written through: the CLI of a call that runs at the same time can write in this
+                # directory, and what it put at this name could be a link to a file of its choosing.
+                with schema_path.open("x", encoding="utf-8") as schema:
+                    schema.write(json.dumps(self.strict_action_schema, ensure_ascii=False))
+            except FileExistsError:
+                logger.warning("something was at the schema file's name in a new Codex call's directory: no call made")
+                raise RuntimeError("the Codex call's working directory was changed before the call") from None
             self._ensure_codex_config_path_compatibility()
             config_overrides = [
                 "project_doc_fallback_filenames=[]",
@@ -249,7 +306,12 @@ class OpenAIAdapter(BaseProviderAdapter):
             result = await self.run_cli(
                 command=command, input_text=prompt, cwd=tempdir, image_path=observation.get("screenshot_path")
             )
-            raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else result.stdout
+            written, instead = _decision_file_bytes(output_path)
+            if instead:
+                logger.warning("the Codex call's decision file is %s, and is not read", instead)
+                # As a reply that cannot be parsed fails, naming no path and nothing of what is there.
+                raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object")
+            raw_text = result.stdout if written is None else written.decode("utf-8")
             decision = self.parse_decision_text(raw_text)
             return ProviderDecision(
                 provider=self.provider,
