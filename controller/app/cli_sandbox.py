@@ -3,11 +3,12 @@ launcher cannot keep it from the controller's files.
 
 A provider CLI runs as the controller's user, and a page the model was shown can talk it into reading what that user
 can: the API token, the takeover token, the auth profiles, the witness and mesh keys. Started under the launcher it
-can open nothing in PROTECTED_ROOT but its own home and the screenshot of its call. Outside the root it reads, lists
-and runs what it did before, and writes only the directories _writable gives it: its home, its HOME, the temp
-directories, /dev, and what CLI_SANDBOX_WRITABLE names. The controller is not under the launcher, and what a CLI
-could leave in the controller's own home (a Python user site, an ssh config) the controller would run at its next
-start.
+can open, list and run nothing in PROTECTED_ROOT but its own home and the screenshot of its call; a stat, an inotify
+watch and a connection to a Unix socket there are not refused (docs/deployment.md, "The CLI sandbox", lists what the
+sandbox does not stop). Outside the root it reads, lists and runs what it did before, and writes only the directories
+_writable gives it: its home, its HOME, the temp directories, /dev, and what CLI_SANDBOX_WRITABLE names. The
+controller is not under the launcher, and what a CLI could leave in the controller's own home (a Python user site,
+an ssh config) the controller would run at its next start.
 
 Each of these is reported:
 
@@ -26,9 +27,10 @@ Each of these is reported:
   is started under the launcher, which does not close that place.
 
 Each is one WARNING for the process (one for each distinct text) that names the condition, and the CLI runs: a
-secret's setting by its name and never its value, a home or a directory by its path. With CLI_SANDBOX_REQUIRED=true
-each is one ERROR and SandboxRequired: no CLI runs. An entry of CLI_SANDBOX_WRITABLE that is not given is one
-WARNING too, and refuses nothing.
+secret's setting by its name and never its value, a home or a directory by its path. Where several hold, only the
+first in this list is named: no Landlock, for one, hides an open setting until Landlock is there. With
+CLI_SANDBOX_REQUIRED=true each is one ERROR and SandboxRequired: no CLI runs. An entry of CLI_SANDBOX_WRITABLE that
+is not given is one WARNING too, and refuses nothing.
 """
 
 from __future__ import annotations

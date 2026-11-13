@@ -385,8 +385,9 @@ What per-session networks do not change:
   takeover token stops agents without file access to the controller's host, and only those:
   under compose `./data` belongs to the host user, so an agent running as that user on the
   host (a local MCP setup) can read `data/takeover-token`, and so can the controller's own
-  `cli` providers wherever their sandbox is not in use (see "The CLI sandbox" under the CLI
-  providers); so can anything that reads the session container's own copy of the password.
+  `cli` providers wherever their sandbox is off, cannot be used, or leaves that file open (see
+  "The CLI sandbox" under the CLI providers); so can anything that reads the session
+  container's own copy of the password.
   Open the dashboard and the takeover link in a browser no agent drives: such an agent can
   read the dashboard's sessionStorage, where the tokens are kept. That link carries
   the password in its fragment, `#password=…`, so noVNC connects without asking; a
@@ -510,9 +511,11 @@ A provider CLI (`OPENAI_AUTH_MODE=cli` and the others) runs as the controller's 
 can prompt-inject it. On Linux with Landlock (kernel 5.13 or later, with Landlock enabled) the controller starts each
 provider CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a Landlock ruleset and then
 execs the CLI. Of `/data` the CLI can then open only `CLI_HOME`, to read and write, and the screenshot its own call
-names (Codex's `--image`), to read. `data/api-token`, `data/takeover-token`, the auth profiles, the witness and mesh
-keys, the tunnel key, another session's screenshots and everything else under `/data` answer `EACCES`, to a CLI that
-runs as root as to any other, and so does listing `/data`.
+names (Codex's `--image`), to read. Kept in their default places, `data/api-token`, `data/takeover-token`, the auth
+profiles, the witness and mesh keys and the tunnel key cannot be opened, and neither can another session's
+screenshots or anything else under `/data`; nothing there can be listed or run. Each answers `EACCES`, to a CLI that
+runs as root as to any other. A `stat`, an inotify watch and a connection to a Unix socket under `/data` are not
+refused (below), and the conditions below say where a secret is left open.
 
 Outside `/data` a CLI can read, list and run what it could before, and write only in its home (wherever that is),
 the temp directories (`/tmp`, `/var/tmp`, and those its own `TMPDIR`, `TEMP` and `TMP` name where they lie outside
@@ -528,19 +531,26 @@ for the controller and its children already; on a Linux host run it is new. On a
 also refuses a sandboxed process every rename or link from one directory to another (`EXDEV`), in `CLI_HOME` as
 anywhere.
 
-Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a CA
-bundle, the CLI's own binary) has to be inside `CLI_HOME`. Whatever it writes outside its home, the temp directories
-and `/dev` (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory elsewhere, which the adapters pass on; a
-directory a tool of yours writes) has to be named in `CLI_SANDBOX_WRITABLE`, comma-separated absolute paths. `/data`
-and a directory that holds it are refused when the settings are read. An entry under `/data` is yours to choose (a
-secret kept in it is reported, below), and one that is not a directory when a call is made is passed over with one
-warning. A CLI that cannot run under the ruleset (it needs something under `/data` that cannot move into `CLI_HOME`,
-or it fails there) can be started without it: `CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI
-without the launcher, and a CLI then reads and writes what the controller's user can, as before 1.18.0.
+Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a
+`TMPDIR`, the file `GOOGLE_APPLICATION_CREDENTIALS` names, a CA bundle, the CLI's own binary) has to be inside
+`CLI_HOME`, or, where it cannot move, the CLI started without the sandbox (`CLI_SANDBOX_ENABLED=false`, below). A
+binary that `which` finds under `/data` outside `CLI_HOME` cannot be run under the ruleset: the step then fails as
+`Provider request failed`, with the launcher's `126` or `127` line in the log, where a binary that cannot be run when
+the CLI is started directly fails the step as `Agent step failed` (`502` either way). Whatever a CLI writes outside
+its home, the temp directories and `/dev` (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory elsewhere, which
+the adapters pass on; a directory a tool of yours writes) has to be named in `CLI_SANDBOX_WRITABLE`, comma-separated
+absolute paths. `/data` and a directory that holds it are refused when the settings are read. An entry under `/data`
+is yours to choose (a secret kept in it is reported, below), and one that is not a directory when a call is made is
+passed over with one warning. A CLI that cannot run under the ruleset (it needs something under `/data` that cannot
+move into `CLI_HOME`, or it fails there) can be started without it: `CLI_SANDBOX_ENABLED=false` (default `true`)
+starts every provider CLI without the launcher, and a CLI then reads and writes what the controller's user can, as
+before 1.18.0.
 
 Where the sandbox would leave a secret open, or would not hold, the controller writes a warning, once in the life of
 the process for each distinct line, which names the condition (a secret's setting by its name and never its value, a
-directory by its path), and runs the CLI:
+directory by its path), and runs the CLI: without the sandbox, or under it with something left open, or under it
+without its home. Where several conditions hold, only the first in this list is named (no Landlock hides an open
+setting until Landlock is there):
 
 - **`CLI_SANDBOX_ENABLED=false`.** The CLI starts without the launcher, and no probe runs.
 - **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
@@ -565,7 +575,11 @@ directory by its path), and runs the CLI:
   holds none of them. "In a directory a CLI may write" (`CLI_HOME`, or an entry of `CLI_SANDBOX_WRITABLE` under
   `/data`) is as written or once resolved: a path written there counts wherever it resolves, since the CLI can replace
   a link there with a file of its own. The CLI starts under the launcher, which closes `/data` and not that place. A
-  Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it sets.
+  Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it sets. Only these
+  eight are checked: any other store kept outside `/data` (`APPROVAL_ROOT`, which holds the approvals' digest key,
+  `STATE_DB_PATH`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `AUDIT_ROOT`, `MEMORY_ROOT`, `HARNESS_ROOT`,
+  `MESH_PEERS_PATH`, the tunnel's `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`, `ISOLATED_TUNNEL_INFO_ROOT` and
+  `REMOTE_ACCESS_INFO_PATH`) is readable by a CLI, with no warning.
 
 `CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
 with `Provider request failed` (`502`), and the log names the condition in one error line. So
@@ -575,15 +589,26 @@ passed, fails that call the same way, and the CLI is never started without it.
 
 What the sandbox does not stop, and what does not work under it:
 
-- **Metadata.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or extended attributes: to a file under
-  `/data` whose path it knows, a CLI can do whatever of those the file's own permissions allow. It cannot list a
-  directory there to learn a name.
+- **Metadata, and names learnt by watching.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or
+  extended attributes: to a file under `/data` whose path it knows, a CLI can do whatever of those the file's own
+  permissions allow. Outside its home it cannot list a directory there, but it can place an inotify watch on one
+  (Landlock has no hook for a watch) and read the names of the entries made in it afterwards.
 - **Another CLI call's files.** Every call's CLI reads and writes all of `CLI_HOME`: the sign-in state, and the
-  per-call directory of a call that runs at the same time.
-- **Signals and connections.** The ruleset handles files and nothing of the network. A CLI is a process of the
-  controller's user with the container's network: it can signal the controller, and it can open a TCP connection to
-  the controller's port (a local client like any other, which lacks the API token wherever the controller demands
-  one) and to whatever else the container reaches.
+  per-call directory of a call that runs at the same time. So a CLI can write a regular `decision.json` into the
+  directory of another Codex call that runs at the same time, and the controller takes it as that call's decision.
+- **What an earlier call left.** The sandbox closes paths. A copy of a secret, or a hard link to one, that a process
+  made before the sandbox was on (a CLI under 1.17.0, a call while Landlock could not be used or the sandbox was
+  off) is open to a CLI where it lies: inside `CLI_HOME`, which is the CLI's own; anywhere beside `/data` that a CLI
+  can open, such as `/tmp`; or, where `/data` is no mount of its own (an image run with no volume), as a hard link
+  beside it. A sandboxed CLI cannot make such a link itself (`EXDEV`). Where a CLI may have been prompt-injected
+  before, rotate the secrets.
+- **Signals and connections.** The ruleset handles files and nothing of the network, and Landlock's file rights name
+  no connect. A CLI is a process of the controller's user with the container's network: it can signal the
+  controller, it can open a TCP connection to the controller's port (a local client like any other, which lacks the
+  API token wherever the controller demands one) and to whatever else the container reaches, and it can connect to a
+  listening Unix socket under `/data` and talk over it (measured). `data/host-bridge/codex.sock` is one: where the
+  Codex host bridge runs beside a `cli` provider and the socket's permissions let the controller's user connect, a
+  sandboxed `claude` or `gemini` can ask the bridge's Codex, which runs outside the sandbox.
 - **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the
   next CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller
   takes only as a regular file of at most 1 MiB and never through a link, and Codex's `config.toml`, which the
@@ -603,8 +628,9 @@ What the sandbox does not stop, and what does not work under it:
   none: the page goes in on stdin, the screenshot as `--image`. Claude Code's and Gemini's own sandboxes are not
   tested under this one.
 - **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
-  part of it, is mounted at a second path of the container too, that path is allowed like any other beside `/data`,
-  and what is mounted there is open to the CLI. Mount it once, as the compose files do.
+  part of it, is mounted at a second path of the container too, what is mounted there is open to the CLI: to read
+  like anything else beside `/data`, and to write as well where that path lies in a directory a CLI may write (inside
+  `CLI_HOME`, through the home's rule). Mount it once, as the compose files do.
 - **The Codex host bridge's Codex.** It runs on the host as the bridge's user and not under this launcher, so it can
   read what that user can: `data/api-token`, `data/takeover-token` and the mesh and witness keys when the checkout
   is that user's. The bridge's unit has an option that closes those to it ("Closing the checkout's secrets to the

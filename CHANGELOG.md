@@ -322,24 +322,24 @@ All notable changes to auto-browser are documented here.
 - **On Linux, a provider CLI (`*_AUTH_MODE=cli`) can no longer open the controller's data directory, except `CLI_HOME`
   and the screenshot of its call, and outside it writes only its own directories.** Where the kernel has Landlock
   (5.13 or later), `codex`, `claude` and `gemini` now start under a Landlock ruleset: under `/data` each can read and
-  write `CLI_HOME` and read the screenshot its own call names, and everything else there answers `EACCES`; outside
-  `/data` it reads, lists and runs what it did before, and writes only in its home, the temp directories, `/dev` and
-  the directories the new `CLI_SANDBOX_WRITABLE` names. Move whatever your CLI reads or writes under `/data` into
-  `CLI_HOME`: a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME` set elsewhere under `/data`, a CA bundle, the
-  CLI's own binary. A CLI that keeps state outside its home (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory
-  elsewhere, which the adapters pass on; a directory a tool of yours writes) needs that directory in
-  `CLI_SANDBOX_WRITABLE`. With the sandbox on, Codex cannot run a command its model asks for, in any
+  write `CLI_HOME` and read the screenshot its own call names, and opening, listing or running anything else there
+  answers `EACCES` (docs/deployment.md lists what is not refused: a `stat`, a watch, a socket connection); outside
+  `/data` it reads, lists and runs what it did before, and writes only in its home, wherever that is, the temp
+  directories, `/dev` and the directories the new `CLI_SANDBOX_WRITABLE` names. Move whatever your CLI reads or writes
+  under `/data` into `CLI_HOME`: a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME` set elsewhere under `/data`,
+  a CA bundle, the CLI's own binary. A CLI that keeps state outside its home (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR`
+  set to a directory elsewhere, which the adapters pass on; a directory a tool of yours writes) needs that directory
+  in `CLI_SANDBOX_WRITABLE`. With the sandbox on, Codex cannot run a command its model asks for, in any
   `CODEX_SANDBOX_MODE` (measured with codex-cli 0.114.0): its own sandbox does not work beneath this one. The decision
   the controller asks Codex for needs no command. Where any of this cannot be done, or a CLI fails under the ruleset,
   `CLI_SANDBOX_ENABLED=false` starts provider CLIs without it, as 1.17.0 did, which also gives a CLI `/data` again. A
   CLI cannot list `/` itself, on a Linux host run now runs with `no_new_privs` (the image already set it), and on a
-  kernel older than 5.19 cannot rename or link a file from one directory to another. Where the sandbox would leave a
-  secret open (no Landlock, a `CLI_HOME` that is `/data` or holds it, a CLI that may write the controller's own home,
-  as with a blank `CLI_HOME`, or a secret's path set outside `/data` or in a directory a CLI may write) the controller
-  logs a warning that names the condition, once per process for each distinct line, and still runs the CLI: a host
-  run that uses a `cli` provider and keeps its data outside `/data` gets that warning at its first CLI call, and so
-  does one on macOS or Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI
-  sandbox" in docs/deployment.md. (N1)
+  kernel older than 5.19 cannot rename or link a file from one directory to another. Where the sandbox is off or
+  cannot be used, or would leave something open (the list is the Security entry's), the controller logs a warning that
+  names the condition, once per process for each distinct line, and still runs the CLI: a host run that uses a `cli`
+  provider and keeps its data outside `/data` gets that warning at its first CLI call, and so does one on macOS or
+  Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI sandbox" in
+  docs/deployment.md. (N1)
 - **`API_ADMIN_OPERATORS` is new, and once set it refuses the shared token on the admin surfaces.** Nothing changes
   until you set it. Set (`API_ADMIN_OPERATORS=alice,ops`), the maintenance sweep and its status, `GET /readiness`,
   the `/proxy-personas` routes, `GET /mesh/peers`, and the `browser.readiness_check` and proxy persona tools answer
@@ -849,24 +849,28 @@ All notable changes to auto-browser are documented here.
   witness and mesh keys: 1.17.0 recorded that as a known limit. On Linux with Landlock the controller now starts the
   CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a ruleset, sets `no_new_privs` and
   execs the CLI, so the process, its group and the way it is stopped are what they were. The ruleset allows every
-  entry beside `/data` to read, list and run, the CLI's home, the temp directories, `/dev` and what
-  `CLI_SANDBOX_WRITABLE` names to write as well, and in `/data` `CLI_HOME` to read and write and the one screenshot
-  the call names to read: another session's screenshot, a listing of `/data` and every secret there are refused, to
-  root too. A CLI writes nowhere else because the controller is not sandboxed: what a CLI could leave in the
-  controller's own home (a `usercustomize.py` in its Python user site, an ssh config) ran at the controller's next
-  start, outside the sandbox. It handles only
-  the rights the running kernel knows, and it never execs without its ruleset: a kernel call that fails ends it with
+  entry beside `/data` to read, list and run, and only the CLI's home (wherever that is), the temp directories, `/dev`
+  and what `CLI_SANDBOX_WRITABLE` names to write as well; of `/data` it allows only the CLI's home, where that lies
+  there, to read and write, and the one screenshot the call names to read. Another session's screenshot, a listing of
+  `/data` and every secret kept in its default place there are refused, to root too. A CLI writes nowhere else because
+  the controller is not sandboxed: what a CLI could leave in the controller's own home (a `usercustomize.py` in its
+  Python user site, an ssh config) ran at the controller's next start, outside the sandbox. The ruleset handles only
+  the rights the running kernel knows, and the launcher never execs without it: a kernel call that fails ends it with
   status `125` and a line that names the call. The controller runs it to apply a ruleset and exit at its first CLI
   call, and keeps that answer for the process where the launcher gave it (a probe that timed out or could not be
-  started is run again at the next call): where that fails, where the host is not Linux, or where a secret is kept
-  where the ruleset does not reach, a warning says so, once for each distinct line, and the CLI runs, and
-  `CLI_SANDBOX_REQUIRED=true` refuses to run it instead; `CLI_SANDBOX_ENABLED=false` turns the sandbox off (see the
-  upgrade note). A launcher that fails at a real start after that fails the call, and the CLI is never started
-  without it. The controller takes Codex's `decision.json` only as a regular file of at most 1 MiB and not through a
-  link, and makes the call's schema file rather than write through what is at its name, so a CLI cannot have the
-  controller read a closed file for it, or write one. The sandbox does not stop `stat` and other metadata calls on a
-  file under `/data`, one CLI call reaching another's files in `CLI_HOME`, or signals and TCP connections to the
-  controller: docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs outside it. (N1)
+  started is run again at the next call). Each of these is a warning, once for each distinct line: with
+  `CLI_SANDBOX_ENABLED=false`, where the host is not Linux or that probe fails, and where `CLI_HOME` is `/data` or
+  holds it, the CLI runs without the sandbox; where `CLI_HOME` only resolves into `/data` or to what holds it, it runs
+  under the sandbox without its home; where a CLI may write the controller's own home (as with a blank `CLI_HOME`), or
+  a secret's setting names a place outside `/data` or in a directory a CLI may write, it runs under the sandbox with
+  that left open. With `CLI_SANDBOX_REQUIRED=true` it runs under none of them (see the upgrade note). A launcher that
+  fails at a real start after that fails the call, and the CLI is never started without it. The controller takes
+  Codex's `decision.json` only as a regular file of at most 1 MiB and not through a link, and makes the call's schema
+  file rather than write through what is at its name, so a CLI cannot have the controller read a closed file for it,
+  or write one. The sandbox does not stop `stat` and other metadata calls on a file under `/data`, an inotify watch
+  there, one CLI call reaching another's files in `CLI_HOME`, signals and TCP connections to the controller, or a
+  connection to a Unix socket under `/data`, the Codex host bridge's among them: docs/deployment.md lists these and
+  the rest. The Codex host bridge's Codex runs outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
   can: the checkout's `.env`, `data/api-token`, `data/takeover-token`, the keys under `data/` and the sign-ins of the
