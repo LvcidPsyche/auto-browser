@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -25,9 +26,20 @@ from app.providers.openai_adapter import OpenAIAdapter
 UNUSABLE = "set CLI_HOME to a writable directory"
 
 
+def _finished_stream(data: bytes) -> asyncio.StreamReader:
+    stream = asyncio.StreamReader()
+    stream.feed_data(data)
+    stream.feed_eof()
+    return stream
+
+
 async def _spawn_cwd(adapter, **kwargs) -> str | None:
+    # What run_cli reads of a child: its two pipes, and wait() for its exit.
     process = SimpleNamespace(
-        communicate=AsyncMock(return_value=(b"ok", b"")),
+        stdin=None,
+        stdout=_finished_stream(b"ok"),
+        stderr=_finished_stream(b""),
+        wait=AsyncMock(return_value=0),
         returncode=0,
     )
     with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn:

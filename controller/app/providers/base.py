@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName, ResumeCheckpoint
+from ..process_tree import GROUP_SPAWN_KWARGS, OutputTooLarge, exchange, kill_and_drain
 from ..result_shaping import compact_session
 from ..utils import error_text, error_text_for_log
 
@@ -39,6 +40,12 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 # Transport failures that retrying cannot mend: the request is wrong in itself and fails the same way every time (a URL
 # with no scheme, a header value httpx refuses to send).
 _REQUEST_WRONG_IN_ITSELF = (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
+# What a provider CLI's stdout may hold: its answer is one decision, a small JSON object, so more is a runaway (the UV
+# verifier's cap).
+CLI_STDOUT_LIMIT_BYTES = 1024 * 1024
+# Only the start of a CLI's stderr is kept (a failure's detail is its first 1200 characters); the rest is read and
+# dropped, so the child never blocks on a full pipe.
+CLI_STDERR_KEEP_BYTES = 16 * 1024
 
 # Every planner's prompt carries it (NAV-12): the Claude, OpenAI and OpenAI-compatible API system prompts, and, as they
 # have none, the Gemini API request's text and build_cli_prompt for the CLI planners and the host bridge. The
@@ -733,34 +740,48 @@ class BaseProviderAdapter(ABC):
         env: dict[str, str] | None = None,
         cwd: str | None = None,
     ) -> CLIResult:
+        """Run a provider CLI to its end, in a process group of its own, and return what it printed.
+
+        Stdout past CLI_STDOUT_LIMIT_BYTES is an error and the start of stderr is kept (CLI_STDERR_KEEP_BYTES). On a
+        timeout, on that error and on a cancel the whole group is killed and the child reaped, bounded by the drain of
+        its pipes (process_tree.kill_and_drain): what it started that holds them does not keep this call.
+        """
+        # Encoded before the child exists: a prompt that cannot be (a page's lone surrogate) must leave none behind.
+        stdin_bytes = input_text.encode("utf-8") if input_text is not None else None
         process = await asyncio.create_subprocess_exec(
             *command,
-            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
+            stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env or self.cli_environment(),
             cwd=cwd or self.effective_cli_home(),
+            **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
+        label = f"{self.provider} CLI"
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(input_text.encode("utf-8") if input_text is not None else None),
+                exchange(process, stdin_bytes, stdout_limit=CLI_STDOUT_LIMIT_BYTES, stderr_keep=CLI_STDERR_KEEP_BYTES),
                 timeout=self.settings.model_request_timeout_seconds,
             )
-        except asyncio.CancelledError:
-            # A cancelled agent job (the operator pressed cancel) left the CLI
-            # running to completion in the background, still spending tokens.
-            if process.returncode is None:
-                process.kill()
-                await asyncio.shield(process.wait())
-            raise
         except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.communicate()
+            await kill_and_drain(process, label=label)
             raise ProviderAPIError(
                 provider=self.provider,
                 message=f"CLI command timed out after {self.settings.model_request_timeout_seconds:.0f}s",
                 retryable=True,
             ) from exc
+        except OutputTooLarge as exc:
+            await kill_and_drain(process, label=label)
+            raise ProviderAPIError(
+                provider=self.provider,
+                message=f"CLI output exceeded {CLI_STDOUT_LIMIT_BYTES} bytes",
+                retryable=False,
+            ) from exc
+        except BaseException:
+            # A cancelled agent job (the operator pressed cancel) left the CLI running to completion in the background,
+            # still spending tokens. Shielded, so that a second cancel meanwhile does not leave it unreaped.
+            await asyncio.shield(kill_and_drain(process, label=label))
+            raise
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")

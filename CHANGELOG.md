@@ -1486,6 +1486,16 @@ All notable changes to auto-browser are documented here.
   URL with no scheme, a header value `httpx` refuses) is not retried and still fails the step at once. The two loops
   are one now, so the host bridge's retry of a `429` or a `5xx` also waits as long as a `Retry-After` header says,
   up to 30 seconds, as the API providers' does. (STORE-28)
+- **A provider CLI is stopped whole, and its output is read with a cap.** `claude`, `codex` and `gemini` were started
+  in the controller's own process group, and a timeout or a cancelled job killed only that process, then waited for
+  its pipes with no limit: a helper it had started that kept them open held the call, the worker and the job for as
+  long as it lived, and whatever the CLI printed was buffered whole. The CLI now leads a process group of its own
+  (where there are none, as on Windows, only the CLI itself is killed), and a timeout, a cancel or too much output
+  kills the group. The call then waits for the pipes at most 5 seconds before it gives up on them, with a warning.
+  Stdout past 1 MiB fails the step (`CLI output exceeded 1048576 bytes`, not retryable), and of stderr only the first
+  16 KiB is kept, which holds the failure's text (its first 1,200 characters). A prompt that cannot be encoded (a
+  page's lone surrogate) now fails before the CLI is started: it was started first, and then given up on without
+  being stopped or reaped. (STORE-34)
 
 ### Changed
 
