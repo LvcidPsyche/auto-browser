@@ -8,21 +8,33 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
+from ..rate_limits import SlidingWindowRateLimiter
 from ..session_ownership import as_system
 from ..session_share import (
     ShareRevocationStoreError,
     ensure_links_revocable,
     mint_share_token,
     revoke_share_links,
+    token_digest,
 )
 from ..utils import error_text
 from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, log_hidden_cause, require_safe_segment
 
 logger = logging.getLogger(__name__)
 
+# Anyone who holds a link can poll it, with no API token: a link is answered this many polls in a window, and 429
+# until the window has room again. The page polls every five seconds, so this is ten pages open on one link; their
+# polls share the session's frames (observation.share_snapshot).
+SHARE_POLL_LIMIT = 120
+SHARE_POLL_WINDOW_SECONDS = 60
+SHARE_POLL_LIMIT_DETAIL = "This share link is polled too often. Try again shortly."
+
 
 def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> APIRouter:
     router = APIRouter()
+    # Asked by the token's digest, for a token that is good: the limiter holds its keys for a window, and never a
+    # token.
+    poll_limiter = SlidingWindowRateLimiter(limit=SHARE_POLL_LIMIT, window_seconds=SHARE_POLL_WINDOW_SECONDS)
 
     def _shared_session_id(token: str) -> str:
         info = share_manager.token_info(token)
@@ -80,6 +92,13 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
     @router.get("/share/{token}/observe")
     async def shared_observe(token: str) -> dict[str, Any]:
         session_id = _shared_session_id(token)
+        polls = await poll_limiter.evaluate(token_digest(token))
+        if polls.exceeded:
+            raise HTTPException(
+                status_code=429,
+                detail=SHARE_POLL_LIMIT_DETAIL,
+                headers={"Retry-After": str(polls.retry_after_seconds)},
+            )
         try:
             # The token is the credential, issued by someone who could use the
             # session; the viewer is no operator, so this reads as the system.

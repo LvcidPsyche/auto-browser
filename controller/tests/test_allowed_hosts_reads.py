@@ -178,6 +178,7 @@ def read_session(manager, kind: str, tmp_path: Path, *, evaluated: object = LEAK
         downloads=[],
         artifact_dir=tmp_path,
         last_action=None,
+        share_frame=None,
         **witness_session_fields(),
     )
     page.move = lambda: MOVES[kind](manager, session, page)

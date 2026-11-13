@@ -42,6 +42,7 @@ from .browser.services import (
     BrowserUploadService,
     BrowserWitnessService,
 )
+from .browser.services.observation import ShareFrame
 from .browser.window_births import WindowBirths
 from .config import Settings
 from .downloads import DownloadCaptureService
@@ -152,6 +153,8 @@ class BrowserSession:
     last_auth_state_path: Path | None = None
     # The last screenshot a checked read returned (see capture_session_screenshot).
     last_screenshot: dict[str, str] | None = None
+    # The frame the share page's polls are being answered from (observation.share_snapshot).
+    share_frame: ShareFrame | None = None
     auth_profile_name: str | None = None
     tunnel_error: str | None = None
     mouse_position: tuple[float, float] | None = None

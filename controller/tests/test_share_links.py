@@ -20,7 +20,14 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app import session_share
 from app.models import McpToolCallRequest
-from app.routes.share import create_share_router
+from app.rate_limits import SlidingWindowRateLimiter
+from app.routes import share as share_routes
+from app.routes.share import (
+    SHARE_POLL_LIMIT,
+    SHARE_POLL_LIMIT_DETAIL,
+    SHARE_POLL_WINDOW_SECONDS,
+    create_share_router,
+)
 from app.session_share import SHARE_MINTED_EVENT, SHARE_VIEWED_EVENT, SessionShareManager, token_digest
 from app.tool_gateway import McpToolGateway
 
@@ -363,6 +370,83 @@ class ViewerIdentityTests(unittest.TestCase):
         operator = self.view(api_bearer_tokens="bob:" + "b" * 40)["operator"]
 
         self.assertEqual((operator.id, operator.source), ("bob", "token"))
+
+
+class _RecordingLimiter(SlidingWindowRateLimiter):
+    """The router's limiter, with the keys it was asked about."""
+
+    made: list["_RecordingLimiter"] = []
+
+    def __init__(self, **settings: Any) -> None:
+        super().__init__(**settings)
+        self.keys: list[str] = []
+        self.made.append(self)
+
+    async def evaluate(self, key: str, **kwargs: Any) -> Any:
+        self.keys.append(key)
+        return await super().evaluate(key, **kwargs)
+
+
+class PollLimitTests(_Links):
+    """The poll of a link is open to anyone who holds it: each link is answered so many polls in a window."""
+
+    LIMIT = 3
+
+    def setUp(self) -> None:
+        _RecordingLimiter.made.clear()
+        for name, value in (("SHARE_POLL_LIMIT", self.LIMIT), ("SlidingWindowRateLimiter", _RecordingLimiter)):
+            patcher = patch.object(share_routes, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        super().setUp()
+        (self.limiter,) = _RecordingLimiter.made
+
+    def poll(self, token: str) -> Any:
+        return self.client.get(f"/share/{token}/observe")
+
+    def fill(self, token: str) -> None:
+        self.assertEqual([self.poll(token).status_code for _ in range(self.LIMIT)], [200] * self.LIMIT)
+
+    def test_a_link_is_answered_its_polls_of_a_window_and_then_429_before_anything_is_read(self) -> None:
+        token = self.mint()
+        self.fill(token)
+
+        refused = self.poll(token)
+
+        self.assertEqual((refused.status_code, refused.json()), (429, {"detail": SHARE_POLL_LIMIT_DETAIL}))
+        self.assertTrue(1 <= int(refused.headers["Retry-After"]) <= SHARE_POLL_WINDOW_SECONDS, refused.headers)
+        self.assertEqual(self.manager.share_snapshot.await_count, self.LIMIT)
+        self.assertEqual((self.limiter.limit, self.limiter.window_seconds), (self.LIMIT, SHARE_POLL_WINDOW_SECONDS))
+
+    def test_the_limit_is_each_links_own_and_the_page_and_its_images_are_not_counted(self) -> None:
+        first, second = self.mint(), self.mint()
+        self.fill(first)
+
+        self.assertEqual(self.poll(first).status_code, 429)
+        self.assertEqual(self.poll(second).status_code, 200)
+        self.assertEqual(self.client.get(f"/share/{first}").status_code, 200)
+        self.assertEqual(self.client.get(f"/share/{first}/screenshots/{self.frame.name}").status_code, 200)
+
+    def test_the_limiter_is_asked_by_the_tokens_digest_and_only_for_a_token_that_is_good(self) -> None:
+        token = self.mint()
+
+        self.poll(token)
+        self.assertEqual({self.poll("not-a-token").status_code for _ in range(self.LIMIT + 2)}, {403})
+
+        self.assertEqual(self.limiter.keys, [token_digest(token)])
+
+    def test_a_revoked_link_is_refused_as_revoked_though_its_polls_are_spent(self) -> None:
+        token = self.mint()
+        self.fill(token)
+        self.assertEqual(self.client.delete(f"/sessions/{SESSION_ID}/share").status_code, 200)
+
+        self.assertEqual(self.poll(token).status_code, 403)
+
+    def test_the_limit_leaves_room_for_several_pages_open_on_one_link(self) -> None:
+        # The page asks for a frame every five seconds (setInterval(refresh, 5000) in the page's script).
+        one_page = SHARE_POLL_WINDOW_SECONDS / 5
+        self.assertGreaterEqual(SHARE_POLL_LIMIT / one_page, 5)
+        self.assertIn("setInterval(refresh, 5000)", self.client.get(f"/share/{self.mint()}").text)
 
 
 if __name__ == "__main__":

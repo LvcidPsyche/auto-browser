@@ -80,6 +80,56 @@ ARIA_SNAPSHOT_TIMEOUT_MS = 5000
 # frame right after the response that names it, so a minute is ample.
 SHARE_FRAME_LABEL = "share-frame"
 SHARE_FRAME_KEEP_SECONDS = 60.0
+# One frame answers every poll of a session that arrives within this long of its capture's end, and every poll that
+# arrives while it is being taken: a session costs one capture in this long, however many pages watch it, and less
+# than the five seconds between one page's polls, so each of those is a new frame.
+SHARE_FRAME_REUSE_SECONDS = 3.0
+
+
+class ShareFrame:
+    """One capture for the share page and when it ended, kept on its session (BrowserSession.share_frame) for the
+    polls that are answered from it (share_snapshot). It goes with the session."""
+
+    def __init__(self, capture: asyncio.Future[dict[str, Any]]) -> None:
+        self.capture = capture
+        self._ended_at: float | None = None
+        capture.add_done_callback(self._ended)
+
+    def _ended(self, capture: asyncio.Future[dict[str, Any]]) -> None:
+        self._ended_at = time.monotonic()
+        if not capture.cancelled():
+            # Read here: the polls that waited for it may all have gone, and a failure nobody read is reported as
+            # the task is collected.
+            capture.exception()
+
+    def spent(self) -> bool:
+        """Whether a poll that arrives now needs a capture of its own: this one was cancelled, or ended too long ago.
+        A capture that failed answers the polls of its window too, so a page that cannot be captured is not tried
+        once for every poll."""
+        if self._ended_at is None:
+            return False
+        return self.capture.cancelled() or time.monotonic() - self._ended_at >= SHARE_FRAME_REUSE_SECONDS
+
+    async def result(self) -> dict[str, Any]:
+        """The capture's snapshot, or its failure, once it has ended. The capture is every waiting poll's: a poll
+        that is cancelled here stops waiting, and the capture goes on for the rest.
+
+        Not asyncio.shield: from Python 3.13 that reports a capture's failure to the loop's exception handler
+        whenever a poll that waited for it was cancelled first, though the other polls are answered it.
+        """
+        if not self.capture.done():
+            ended: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+            def wake(_capture: asyncio.Future[dict[str, Any]]) -> None:
+                if not ended.done():
+                    ended.set_result(None)
+
+            self.capture.add_done_callback(wake)
+            try:
+                await ended
+            finally:
+                self.capture.remove_done_callback(wake)
+        return dict(self.capture.result())
 
 
 def _prune_share_frames(directory: Path, *, keep: Path) -> None:
@@ -181,8 +231,19 @@ class BrowserObservationService:
         waited on the viewer and its artifact directory filled with PNGs. This
         holds the lock for one redacted capture and two reads, and keeps only
         recent frames. It does not emit an observe event or touch the audit log.
+
+        Anyone who holds a link can poll, and several pages can be open on one session: one capture answers every
+        poll that arrives while it is taken or within SHARE_FRAME_REUSE_SECONDS of its end (ShareFrame). The session
+        is looked up for every poll first, so a closed session, or one that is not the caller's, is answered as that
+        and never from a frame.
         """
         session = await self.manager.get_session(session_id)
+        frame = session.share_frame
+        if frame is None or frame.spent():
+            frame = session.share_frame = ShareFrame(asyncio.ensure_future(self._take_share_frame(session)))
+        return await frame.result()
+
+    async def _take_share_frame(self, session: "BrowserSession") -> dict[str, Any]:
         async with session.lock:
             # The title is read after the frame, so it is checked after its read too.
             read = start_read(self.manager, session)

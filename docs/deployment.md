@@ -1414,6 +1414,13 @@ does not.
   something the controller did not write can no longer say which links were revoked: the controller logs an error,
   revokes every link minted before that moment, and writes the file again.
 
+Anyone who holds a link can poll it, so two bounds apply beside the general rate limit, which counts each client
+apart. A link is answered 120 polls a minute, what ten open pages ask for, and `429` with `Retry-After` past that.
+And one capture answers every poll of a session that arrives while it is taken or within three seconds of its end,
+whichever link the poll came by: a watched session costs one capture in that time however many pages watch it. The
+token is checked and the session looked up for every poll first, so a poll of a revoked link or of a closed session
+is refused, never answered from a frame taken earlier.
+
 The audit log records a link's mint, its first view and a revoke. It names a link by `token_sha256`, the SHA-256 of
 the token as the link carries it, never by the token: the digest ties a view to its mint and opens nothing.
 
