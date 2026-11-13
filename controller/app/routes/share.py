@@ -25,9 +25,10 @@ from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, log_hidden_cause, requ
 logger = logging.getLogger(__name__)
 
 # Anyone who holds a link can poll it, with no API token: a link is answered this many polls in a window, and 429
-# until the window has room again. The page polls every five seconds, so this is ten pages open on one link; their
-# polls share the session's frames (observation.share_snapshot).
-SHARE_POLL_LIMIT = 120
+# until the window has room again. The page polls every five seconds, so this leaves room for ten pages open on one
+# link: they ask for 120 a minute, and more in one window when their polls arrive late. Their polls share the
+# session's frames (observation.share_snapshot).
+SHARE_POLL_LIMIT = 150
 SHARE_POLL_WINDOW_SECONDS = 60
 SHARE_POLL_LIMIT_DETAIL = "This share link is polled too often. Try again shortly."
 # PII_SCRUB_SCREENSHOT_STRICT kept back a frame that could not be scrubbed. The viewer holds no API token: told that

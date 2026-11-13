@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -442,11 +443,39 @@ class PollLimitTests(_Links):
 
         self.assertEqual(self.poll(token).status_code, 403)
 
-    def test_the_limit_leaves_room_for_several_pages_open_on_one_link(self) -> None:
+    def test_the_limit_leaves_room_for_ten_pages_open_on_one_link(self) -> None:
         # The page asks for a frame every five seconds (setInterval(refresh, 5000) in the page's script).
-        one_page = SHARE_POLL_WINDOW_SECONDS / 5
-        self.assertGreaterEqual(SHARE_POLL_LIMIT / one_page, 5)
-        self.assertIn("setInterval(refresh, 5000)", self.client.get(f"/share/{self.mint()}").text)
+        self.assertIn(
+            f"setInterval(refresh, {POLL_PERIOD_SECONDS * 1000})", self.client.get(f"/share/{self.mint()}").text
+        )
+        # Each poll reaches the controller late by its own amount (a timer, the network), up to a second.
+        for late_by in (0.0, 0.005, 0.3, 1.0):
+            for seed in range(5):
+                with self.subTest(late_by=late_by, seed=seed):
+                    self.assertEqual(_polls_refused(TEN_PAGES, late_by=late_by, seed=seed), 0)
+
+
+TEN_PAGES = 10
+POLL_PERIOD_SECONDS = 5
+POLLED_MINUTES = 30
+
+
+def _polls_refused(pages: int, *, late_by: float, seed: int) -> int:
+    """How many polls of ``pages`` pages open on one link are refused over POLLED_MINUTES, by a limiter made as the
+    route makes it and driven on its own clock (``now=``): each page polls every POLL_PERIOD_SECONDS from a start of
+    its own, and each poll arrives up to ``late_by`` seconds after its time."""
+    rng = random.Random(seed)  # noqa: S311 (seeded, so each run polls the same times)
+    starts = [rng.uniform(0, POLL_PERIOD_SECONDS) for _ in range(pages)]
+    polls = POLLED_MINUTES * 60 // POLL_PERIOD_SECONDS
+    arrivals = sorted(
+        start + number * POLL_PERIOD_SECONDS + rng.uniform(0, late_by) for start in starts for number in range(polls)
+    )
+    limiter = SlidingWindowRateLimiter(limit=SHARE_POLL_LIMIT, window_seconds=SHARE_POLL_WINDOW_SECONDS)
+
+    async def poll() -> int:
+        return sum([(await limiter.evaluate("link", now=at)).exceeded for at in arrivals])
+
+    return asyncio.run(poll())
 
 
 if __name__ == "__main__":

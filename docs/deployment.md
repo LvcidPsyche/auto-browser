@@ -1519,7 +1519,8 @@ does not.
   revokes every link minted before that moment, and writes the file again.
 
 Anyone who holds a link can poll it, so two bounds apply beside the general rate limit, which counts each client
-apart. A link is answered 120 polls a minute, what ten open pages ask for, and `429` with `Retry-After` past that.
+apart. A link is answered 150 polls a minute, room for ten open pages (they ask for 120, and more in one minute when
+their polls arrive late), and `429` with `Retry-After` past that.
 And one capture answers every poll of a session that arrives while it is taken or within three seconds of its end,
 whichever link the poll came by: a watched session costs one capture in that time however many pages watch it. The
 token is checked and the session looked up for every poll first, so a poll of a revoked link or of a closed session

@@ -912,13 +912,14 @@ All notable changes to auto-browser are documented here.
 - **A share link's polls are bounded, and a watched session costs one capture however many pages watch it.**
   `GET /share/{token}/observe` needs no API token, and every poll took a capture of its own under the session lock,
   which the session's agent waits for: only the general rate limit, which counts each client address apart, stood
-  between one link in many hands and a capture per request. A link is now answered 120 polls a minute, what ten
-  open pages ask for, and `429` with `Retry-After` past that, counted under a digest of the token whether or not
-  the general limit is on. And one capture answers every poll of a session that arrives while it is taken or within
-  3 seconds of its end, whichever link the poll came by: a slow capture is waited for and not stacked, and one that
-  failed answers the polls of its window too. A viewer that goes away does not cancel the capture the others wait
-  for. The token is checked and the session looked up for every poll before a frame is reused, so a poll of a
-  revoked link or of a closed session is refused and never answered a frame taken earlier. (AUTH-23)
+  between one link in many hands and a capture per request. A link is now answered 150 polls a minute, room for ten
+  open pages even when their polls arrive late, and `429` with `Retry-After` past that, counted under a digest of
+  the token whether or not the general limit is on. And one capture answers every poll of a session that arrives
+  while it is taken or within 3 seconds of its end, whichever link the poll came by: a slow capture is waited for
+  and not stacked, and one that failed answers the polls of its window too. A viewer that goes away does not cancel
+  the capture the others wait for. The token is checked and the session looked up for every poll before a frame is
+  reused, so a poll of a revoked link or of a closed session is refused and never answered a frame taken earlier.
+  (AUTH-23)
 - **The surfaces that belong to no operator can be left to listed operators.** Named credentials keep each
   operator's sessions, approvals and jobs apart, but any credential could run the maintenance sweep and read its
   status, read the readiness report, use the proxy persona routes and tools, and list the mesh peers.
