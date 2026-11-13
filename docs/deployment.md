@@ -512,18 +512,35 @@ provider CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that 
 execs the CLI. Of `/data` the CLI can then open only `CLI_HOME`, to read and write, and the screenshot its own call
 names (Codex's `--image`), to read. `data/api-token`, `data/takeover-token`, the auth profiles, the witness and mesh
 keys, the tunnel key, another session's screenshots and everything else under `/data` answer `EACCES`, to a CLI that
-runs as root as to any other, and so does listing `/data`. Outside `/data` a CLI reaches what it did before, with two
-differences: it cannot list `/` itself or make an entry directly in it, and it runs with `no_new_privs`, so a setuid
-program it starts gains nothing. Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`,
-`CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a CA bundle, the CLI's own binary) has to be inside `CLI_HOME`. On a kernel
-older than 5.19 Landlock also refuses a sandboxed process every rename or link from one directory to another
-(`EXDEV`), in `CLI_HOME` as anywhere. A CLI that cannot run under the ruleset (it needs something under `/data` that
-cannot move into `CLI_HOME`, or it fails there) can be started without it: `CLI_SANDBOX_ENABLED=false` (default
-`true`) starts every provider CLI without the launcher, and a CLI then reads what the controller's user can, as
-before 1.18.0.
+runs as root as to any other, and so does listing `/data`.
 
-Where the sandbox would leave a secret open, the controller writes a warning, once in the life of the process for
-each distinct line, which names the condition or the settings and never a setting's value, and runs the CLI:
+Outside `/data` a CLI can read, list and run what it could before, and write only in its home (wherever that is),
+the temp directories (`/tmp`, `/var/tmp`, and those its own `TMPDIR`, `TEMP` and `TMP` name where they lie outside
+`/data`), `/dev`, and the directories `CLI_SANDBOX_WRITABLE` names: root too, since the ruleset binds root as it
+binds anyone. That is what the list is for: the controller is not under the sandbox, and what a CLI could leave in
+the controller's own home (a `usercustomize.py` in its Python user site, an ssh config with a `ProxyCommand`) ran at
+the controller's next start, outside it. Each directory is given as its resolved path, and one written outside
+`/data` that resolves into it is not given. Beyond that a CLI cannot list `/` itself or make, remove or rename an
+entry directly in it, and an entry made directly in `/` after the CLI started has no rule and stays closed to it. It
+cannot mount or unmount anything (Landlock refuses that to every process it restricts). It runs with `no_new_privs`,
+so a setuid program it starts gains nothing: in the image that is no change, since the entrypoint and compose set it
+for the controller and its children already; on a Linux host run it is new. On a kernel older than 5.19 Landlock
+also refuses a sandboxed process every rename or link from one directory to another (`EXDEV`), in `CLI_HOME` as
+anywhere.
+
+Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a CA
+bundle, the CLI's own binary) has to be inside `CLI_HOME`. Whatever it writes outside its home, the temp directories
+and `/dev` (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory elsewhere, which the adapters pass on; a
+directory a tool of yours writes) has to be named in `CLI_SANDBOX_WRITABLE`, comma-separated absolute paths. `/data`
+and a directory that holds it are refused when the settings are read. An entry under `/data` is yours to choose (a
+secret kept in it is reported, below), and one that is not a directory when a call is made is passed over with one
+warning. A CLI that cannot run under the ruleset (it needs something under `/data` that cannot move into `CLI_HOME`,
+or it fails there) can be started without it: `CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI
+without the launcher, and a CLI then reads and writes what the controller's user can, as before 1.18.0.
+
+Where the sandbox would leave a secret open, or would not hold, the controller writes a warning, once in the life of
+the process for each distinct line, which names the condition (a secret's setting by its name and never its value, a
+directory by its path), and runs the CLI:
 
 - **`CLI_SANDBOX_ENABLED=false`.** The CLI starts without the launcher, and no probe runs.
 - **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
@@ -534,14 +551,21 @@ each distinct line, which names the condition or the settings and never a settin
   after 30 seconds, or could not be started) is run again at the next CLI call; the calls that started while it ran
   take its answer. The probe runs outside the call's own timeout, so on a host where it keeps timing out every CLI
   call waits 30 seconds before it starts, and then runs without the launcher.
-- **`CLI_HOME` is `/data` or a directory that holds it.** The CLI starts without the launcher.
-- **A secret is kept outside `/data`, or inside `CLI_HOME`.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`,
-  `WITNESS_ROOT`, `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and
+- **`CLI_HOME` is `/data` or a directory that holds it,** as written. The CLI starts without the launcher.
+- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it:** a link, which a CLI that may
+  write where the home is written can have made (a home in `/tmp`, swapped for a link to `/data/approvals` or to
+  `/`). The CLI starts under the launcher without it, and cannot write its home. The warning names `CLI_HOME`, its
+  path and where it resolves; a `CLI_HOME` linked into `/data` on purpose is to be set to its real path.
+- **A CLI may write the controller's own home.** `CLI_HOME` is blank (the CLI's `HOME` is then the controller's), it
+  is the controller's home or holds it, or `CLI_SANDBOX_WRITABLE` names the controller's home or a directory that
+  holds it. The CLI starts under the launcher, and what it leaves there the controller can run at its next start.
+- **A secret is kept outside `/data`, or in a directory a CLI may write.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`,
+  `AUTH_ROOT`, `WITNESS_ROOT`, `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and
   `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so a `/data` that is a symbolic link to another place
-  holds none of them. "Inside `CLI_HOME`" is as written or once resolved: a path written there counts wherever it
-  resolves, since the CLI can replace a link in its home with a file of its own. The CLI starts under the launcher,
-  which closes `/data` and not that place. A Linux host run
-  that keeps its data elsewhere gets this warning, with the name of each of them it sets.
+  holds none of them. "In a directory a CLI may write" (`CLI_HOME`, or an entry of `CLI_SANDBOX_WRITABLE` under
+  `/data`) is as written or once resolved: a path written there counts wherever it resolves, since the CLI can replace
+  a link there with a file of its own. The CLI starts under the launcher, which closes `/data` and not that place. A
+  Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it sets.
 
 `CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
 with `Provider request failed` (`502`), and the log names the condition in one error line. So
@@ -549,7 +573,7 @@ with `Provider request failed` (`502`), and the log names the condition in one e
 reports such a provider as configured. A launcher that cannot apply its ruleset at a real start, after its probe
 passed, fails that call the same way, and the CLI is never started without it.
 
-What the sandbox does not stop:
+What the sandbox does not stop, and what does not work under it:
 
 - **Metadata.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or extended attributes: to a file under
   `/data` whose path it knows, a CLI can do whatever of those the file's own permissions allow. It cannot list a
@@ -560,10 +584,24 @@ What the sandbox does not stop:
   controller's user with the container's network: it can signal the controller, and it can open a TCP connection to
   the controller's port (a local client like any other, which lacks the API token wherever the controller demands
   one) and to whatever else the container reaches.
-- **What the controller's user can open outside `/data`.** With the isolation overlay that includes the Docker
-  socket.
+- **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the
+  next CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller
+  takes only as a regular file of at most 1 MiB and never through a link, and Codex's `config.toml`, which the
+  controller reads for the paths it names. The temp directories are shared with the controller's own children: the
+  OCR's input image is there while it runs.
+- **What the controller's user can read outside `/data`, and the sockets it can connect to.** With the isolation
+  overlay that includes the Docker socket.
 - **Truncation, on a kernel older than 6.2.** Landlock could not deny `truncate` before its third ABI. There a CLI
-  can empty a file under `/data` that the controller's user may write, though it can neither read nor write it.
+  can empty a file under `/data` that the controller's user may write, though it can neither read nor write it, and
+  so a file outside `/data` that the controller's user may write.
+- **A tool that builds its own mount namespace.** Landlock refuses mounting to every process it restricts.
+- **Codex's own sandbox.** Codex wraps each command its model asks for in a sandbox of its own, whose helper opens
+  `/` for reading before it makes its rules. This sandbox refuses that open (`/` itself has no rule, and a rule there
+  would make every name under `/data` listable), the helper goes on without its rule on `/`, and the command ends with
+  `Failed to execvp sh: Permission denied`. So with the CLI sandbox on, Codex (measured with codex-cli 0.114.0)
+  cannot run a command of its model's, in any `CODEX_SANDBOX_MODE`. The decision the controller asks Codex for needs
+  none: the page goes in on stdin, the screenshot as `--image`. Claude Code's and Gemini's own sandboxes are not
+  tested under this one.
 - **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
   part of it, is mounted at a second path of the container too, that path is allowed like any other beside `/data`,
   and what is mounted there is open to the CLI. Mount it once, as the compose files do.

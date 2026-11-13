@@ -9,10 +9,16 @@ like. Standard library only, and nothing of the app: it runs under -I -S.
 
 Landlock only allows, so the ruleset names what stays open:
 
-- every entry beside ROOT, and beside each directory that holds ROOT, from / down, with every right (on a file,
-  every right a file's rule can carry);
-- each --rw directory with every right (the CLI home, which lies in ROOT);
+- every entry beside ROOT, and beside each directory that holds ROOT, from / down, to read, to list and to run, and
+  no more (a file: to read and to run). The controller is not under this ruleset, and what a CLI could write there
+  it could leave for the controller to run or read: in its home, a Python user site or an ssh config;
+- each --rw directory with every right: what app.cli_sandbox lets a CLI write (its home, wherever that is, the temp
+  directories, /dev). Each is opened following links and must then be the path given: the controller gives resolved
+  paths, so a link on the way means the path changed since, and its rule is not made;
 - each --ro-file to read, and no more (the screenshot of this call).
+
+So outside ROOT a CLI reads, lists and runs what it did before, and writes only in the --rw directories: as root
+too, since the ruleset binds root as it binds anyone.
 
 No rule goes on ROOT or on a directory that holds it, so what is in ROOT and has no rule of its own is closed, to
 root as to anyone, and so is listing / itself. A symbolic link gets no rule: the place it names has one, or is in
@@ -61,6 +67,9 @@ IOCTL_DEV = 1 << 15
 _RIGHTS_SINCE_ABI = {2: REFER, 3: TRUNCATE, 5: IOCTL_DEV}
 # What a rule on anything but a directory may carry: the kernel answers any other right there with EINVAL.
 FILE_RIGHTS = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV
+# What an entry beside the root keeps: to read, to list and to run, and nothing that writes. All three are the first
+# ABI's, so every ruleset handles them.
+READ_AND_RUN = EXECUTE | READ_FILE | READ_DIR
 
 # The same numbers on x86-64 and arm64.
 _SYS_LANDLOCK_CREATE_RULESET = 444
@@ -128,7 +137,7 @@ def _add_rule(kernel, ruleset: int, fd: int, rights: int, path: str) -> None:
         raise NotApplied(f"{refused.call} on {path}", refused.detail) from None
 
 
-def _allow_beside(kernel, ruleset: int, path: str, handled: int) -> None:
+def _allow_beside(kernel, ruleset: int, path: str) -> None:
     try:
         fd = kernel.open_path(path, follow=False)
     except OSError:
@@ -136,7 +145,7 @@ def _allow_beside(kernel, ruleset: int, path: str, handled: int) -> None:
     try:
         kind = kernel.mode(fd)
         if not stat.S_ISLNK(kind):
-            _add_rule(kernel, ruleset, fd, handled if stat.S_ISDIR(kind) else handled & FILE_RIGHTS, path)
+            _add_rule(kernel, ruleset, fd, READ_AND_RUN if stat.S_ISDIR(kind) else READ_AND_RUN & FILE_RIGHTS, path)
     finally:
         kernel.close(fd)
 
@@ -155,6 +164,10 @@ def _grant(kernel, ruleset: int, option: str, path: str, rights: int, *, directo
             raise NotApplied(asked, "not a directory")
         if not directory and not stat.S_ISREG(kind):
             raise NotApplied(asked, "not a regular file")
+        # The controller gives each directory as its resolved path: a link on the way means that the path changed
+        # since, and the rule is made on this very descriptor, so it is judged by what the descriptor is.
+        if directory and kernel.path_of(fd) != path:
+            raise NotApplied(asked, "reached through a link")
         _add_rule(kernel, ruleset, fd, rights, path)
     finally:
         kernel.close(fd)
@@ -171,7 +184,7 @@ def apply(kernel, root: str, writable: list[str], readable_files: list[str]) -> 
     ruleset = kernel.create_ruleset(handled)
     try:
         for path in beside_the_root(root, kernel.listdir):
-            _allow_beside(kernel, ruleset, path, handled)
+            _allow_beside(kernel, ruleset, path)
         real_root = kernel.realpath(root)
         for path in writable:
             if _holds(kernel.realpath(path), real_root):
@@ -240,6 +253,11 @@ class _Linux:
     @staticmethod
     def mode(fd: int) -> int:
         return os.fstat(fd).st_mode
+
+    @staticmethod
+    def path_of(fd: int) -> str:
+        # The real path of what the descriptor was opened for, whatever link the open went through.
+        return os.readlink(f"/proc/self/fd/{fd}")
 
 
 def started_with() -> dict[bytes, bytes]:

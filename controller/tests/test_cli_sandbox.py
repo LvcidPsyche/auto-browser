@@ -30,7 +30,7 @@ from app.providers.base import CLIResult, ProviderAPIError
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
-from tests.test_cli_sandbox_launcher import STAND_IN, needs_landlock
+from tests.test_cli_sandbox_launcher import LANDLOCK_ABI, STAND_IN, needs_landlock
 from tests.test_harness_uv_output_cap import _is_running
 from tests.test_run_cli import _HOLDER as HOLDS_THE_PIPES
 from tests.test_run_cli import _LAUNCHER as STARTS_A_GRANDCHILD
@@ -69,7 +69,22 @@ def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         shot.parent.mkdir(parents=True)
         shot.write_text("content of shot.png", encoding="utf-8")
     monkeypatch.setattr(cli_sandbox, "PROTECTED_ROOT", str(root))
-    return SimpleNamespace(root=root, home=home, shot=shots[0], other_shot=shots[1], outside=root.parent / "outside")
+    # The temp and device directories every CLI may write are this host's: the tests that are about them stand in
+    # for them in tmp_path, and the others go without.
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ())
+    # The controller's own home, outside every directory a CLI is given unless a test puts it there.
+    controller_home = root.parent / "homes" / "controller"
+    controller_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(controller_home))
+    monkeypatch.setenv("USERPROFILE", str(controller_home))
+    return SimpleNamespace(
+        root=root,
+        home=home,
+        shot=shots[0],
+        other_shot=shots[1],
+        outside=root.parent / "outside",
+        controller_home=controller_home,
+    )
 
 
 def _settings(data: SimpleNamespace, **changed: str | None) -> Settings:
@@ -102,19 +117,39 @@ def _probe_says(monkeypatch: pytest.MonkeyPatch, answer: str | None) -> list[dic
     return runs
 
 
-async def _launch(settings: Settings, data: SimpleNamespace, *, home: Path | None = None, image: Path | None = None):
+async def _launch(
+    settings: Settings,
+    data: SimpleNamespace,
+    *,
+    home: Path | None = None,
+    image: Path | None = None,
+    env: dict[str, str] | None = None,
+):
     return await cli_sandbox.launch_command(
         settings,
         COMMAND,
         cli_home=str(home or data.home),
         image_path=str(image) if image else None,
-        env=CLI_ENV,
+        env=CLI_ENV if env is None else env,
     )
 
 
 def _under_the_launcher(data: SimpleNamespace, *grants: str) -> list[str]:
     protect = ["--protect", str(data.root), "--rw", str(data.home)]
     return [sys.executable, "-I", "-S", cli_sandbox.LAUNCHER, *protect, *grants, "--", *COMMAND]
+
+
+def _given_to_write(command: list[str]) -> list[str]:
+    """The --rw directories of a launcher command."""
+    assert command[3] == cli_sandbox.LAUNCHER, "not under the launcher"
+    own = command[: command.index("--")]
+    return [own[index + 1] for index, option in enumerate(own) if option == "--rw"]
+
+
+def _directories(*paths: Path) -> list[str]:
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+    return [str(path) for path in paths]
 
 
 def _written(caplog: pytest.LogCaptureFixture, level: int = logging.WARNING) -> list[str]:
@@ -424,6 +459,202 @@ async def test_with_the_sandbox_turned_off_and_required_no_cli_runs_and_one_erro
     assert "CLI_SANDBOX_REQUIRED" in line and "CLI_SANDBOX_ENABLED is false" in line
     assert _written(caplog) == [], "the one line is the error"
     assert calls == []
+
+
+# ---- what a CLI may write: its home, the temp directories, /dev and CLI_SANDBOX_WRITABLE ----
+
+
+def test_besides_its_home_a_cli_may_write_the_temp_directories_and_dev() -> None:
+    assert cli_sandbox.SHARED_WRITABLE == ("/tmp", "/var/tmp", "/dev")
+    assert cli_sandbox.TEMP_VARIABLES == ("TMPDIR", "TEMP", "TMP")
+
+
+async def test_the_shared_directories_that_are_there_are_given_each_as_its_resolved_path(data, monkeypatch) -> None:
+    _probe_says(monkeypatch, None)
+    temp, devices, real_var_temp = _directories(
+        data.outside / "tmp", data.outside / "dev", data.outside / "real-var-tmp"
+    )
+    _link_to_directory(data.outside / "var-tmp", Path(real_var_temp))
+    shared = (temp, str(data.outside / "var-tmp"), str(data.outside / "not-there"), devices)
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", shared)
+
+    command = await _launch(_settings(data), data)
+
+    assert _given_to_write(command) == [str(data.home), temp, real_var_temp, devices]
+
+
+@pytest.mark.parametrize("variable", ["TMPDIR", "TEMP", "TMP"])
+@pytest.mark.parametrize("where", ["outside the root", "in the root outside the home", "inside the home"])
+async def test_a_temp_directory_of_the_clis_environment_is_given_outside_the_root_and_once(
+    data, monkeypatch, variable: str, where: str
+) -> None:
+    # One under the root outside the home stays closed, as it always was; one inside the home is the home's.
+    _probe_says(monkeypatch, None)
+    place = {
+        "outside the root": data.outside / "temp",
+        "in the root outside the home": data.root / "temp",
+        "inside the home": data.home / "temp",
+    }[where]
+    _directories(place)
+
+    command = await _launch(_settings(data), data, env={**CLI_ENV, variable: str(place)})
+
+    expected = [str(data.home), str(place)] if where == "outside the root" else [str(data.home)]
+    assert _given_to_write(command) == expected
+
+
+async def test_the_clis_home_variable_is_given_once_where_it_is_the_cli_home(data, monkeypatch) -> None:
+    # As it is wherever CLI_HOME is set: here a home outside the root, as a host-subscriptions compose has it.
+    _probe_says(monkeypatch, None)
+    (home,) = _directories(data.outside / "botuser")
+
+    command = await _launch(_settings(data, CLI_HOME=home), data, home=Path(home), env={**CLI_ENV, "HOME": home})
+
+    assert command == [*_under_the_launcher(data)[:6], "--rw", home, "--", *COMMAND]
+
+
+async def test_a_directory_cli_sandbox_writable_names_is_given(data, monkeypatch, caplog) -> None:
+    _probe_says(monkeypatch, None)
+    (state,) = _directories(data.outside / "codex-state")
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, CLI_SANDBOX_WRITABLE=f" {state} ,"), data)
+
+    assert _given_to_write(command) == [str(data.home), state]
+    assert _written(caplog) == []
+
+
+async def test_an_entry_of_cli_sandbox_writable_that_is_no_directory_is_passed_over_with_one_warning(
+    data, monkeypatch, caplog
+) -> None:
+    _probe_says(monkeypatch, None)
+    missing = data.outside / "not-there"
+    settings = _settings(data, CLI_SANDBOX_WRITABLE=str(missing))
+
+    with caplog.at_level(logging.WARNING):
+        commands = [await _launch(settings, data) for _ in range(3)]
+
+    assert commands == [_under_the_launcher(data)] * 3
+    (line,) = _written(caplog)
+    assert "CLI_SANDBOX_WRITABLE" in line and str(missing) in line
+
+
+async def test_an_entry_of_cli_sandbox_writable_in_the_root_is_given_and_a_secret_in_it_is_open(
+    data, monkeypatch, caplog
+) -> None:
+    # The operator's to choose; but what the CLI may write there it can replace, a secret's file among it.
+    _probe_says(monkeypatch, None)
+    (shared,) = _directories(data.root / "shared")
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(
+            _settings(data, CLI_SANDBOX_WRITABLE=shared, WITNESS_ROOT=str(data.root / "shared" / "witness")), data
+        )
+
+    assert _given_to_write(command) == [str(data.home), shared]
+    (line,) = _written(caplog)
+    assert "WITNESS_ROOT" in line and "AUTH_ROOT" not in line
+
+
+async def test_of_two_directories_one_inside_the_other_only_the_outer_is_given(data, monkeypatch) -> None:
+    # The outer rule covers the inner, and the inner is the one a CLI could swap for a link.
+    _probe_says(monkeypatch, None)
+    outer, inner = _directories(data.outside / "outer", data.outside / "outer" / "inner")
+    real = Path(_directories(data.outside / "real")[0])
+    _link_to_directory(data.outside / "outer" / "to-real", real)
+    entries = ",".join([inner, outer, str(data.outside / "outer" / "to-real"), str(real)])
+
+    command = await _launch(_settings(data, CLI_SANDBOX_WRITABLE=entries), data)
+
+    # to-real lies in outer as written: no rule of its own, and real itself is given as written.
+    assert _given_to_write(command) == [str(data.home), outer, str(real)]
+
+
+@pytest.mark.parametrize(
+    "entry", ["relative/dir", "/", "/data", "/data/", "/data/../", "//", "/./data"], ids=lambda entry: repr(entry)
+)
+def test_cli_sandbox_writable_refuses_a_relative_path_and_the_data_directory_or_what_holds_it(entry: str) -> None:
+    with pytest.raises(ValueError, match="CLI_SANDBOX_WRITABLE") as refused:
+        Settings(_env_file=None, CLI_SANDBOX_WRITABLE=entry)
+
+    assert repr(entry) in str(refused.value)
+
+
+def test_cli_sandbox_writable_takes_absolute_paths_in_the_data_directory_and_outside_it(tmp_path: Path) -> None:
+    # Absolute as this platform has it: Windows takes /data/shared for one from Python 3.13 on.
+    entries = [str(tmp_path / "state"), str(tmp_path / "data")] if os.name == "nt" else ["/srv/state", "/data/shared"]
+
+    settings = Settings(_env_file=None, CLI_SANDBOX_WRITABLE=" , ".join(entries))
+
+    assert settings.cli_sandbox_writable_paths == entries
+    assert Settings(_env_file=None).cli_sandbox_writable_paths == []
+
+
+@pytest.mark.parametrize("swap", ["a directory in the root", "what holds the root"])
+async def test_a_home_a_cli_swapped_for_a_link_is_not_given_and_the_cli_still_starts_under_the_launcher(
+    data, monkeypatch, caplog, swap: str
+) -> None:
+    # CLI_HOME lies in a directory the CLI may write: it moves its home aside and puts a link in its place. Resolved,
+    # the home is then a directory of the root, or a directory that holds the root (/ in production).
+    _probe_says(monkeypatch, None)
+    (temp,) = _directories(data.outside / "tmp")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (temp,))
+    approvals = Path(_directories(data.root / "approvals")[0])
+    target = approvals if swap == "a directory in the root" else data.root.parent
+    home = Path(temp) / "cli-home"
+    _link_to_directory(home, target)
+    settings = _settings(data, CLI_HOME=str(home))
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(settings, data, home=home)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_HOME=str(home), CLI_SANDBOX_REQUIRED="true"), data, home=home)
+
+    assert _given_to_write(command) == [temp], "neither the home's place nor anything holding the root"
+    (line,) = _written(caplog)
+    assert "CLI_HOME" in line and str(home) in line and str(target) in line
+
+
+@pytest.mark.parametrize("how", ["CLI_HOME is blank", "CLI_HOME is the controller's home", "CLI_SANDBOX_WRITABLE"])
+async def test_where_a_cli_may_write_the_controllers_home_one_warning_says_so_and_required_refuses(
+    data, monkeypatch, caplog, how: str
+) -> None:
+    # What a CLI leaves in the controller's home (a Python user site, an ssh config) the controller, which is not
+    # under the sandbox, runs at its next start.
+    _probe_says(monkeypatch, None)
+    private = data.controller_home / ".cache" / "auto-browser" / "cli-home"
+    _directories(private)
+    env, home, changed = CLI_ENV, data.home, {}
+    if how == "CLI_HOME is blank":  # the CLI's HOME is then the controller's, and its home a directory in it
+        env, home, changed = {**CLI_ENV, "HOME": str(data.controller_home)}, private, {"CLI_HOME": ""}
+    elif how == "CLI_HOME is the controller's home":
+        home, changed = data.controller_home, {"CLI_HOME": str(data.controller_home)}
+    else:
+        changed = {"CLI_SANDBOX_WRITABLE": str(data.controller_home.parent)}
+
+    with caplog.at_level(logging.WARNING):
+        commands = [await _launch(_settings(data, **changed), data, home=home, env=env) for _ in range(2)]
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data, home=home, env=env)
+
+    assert commands[0] == commands[1] and commands[0][3] == cli_sandbox.LAUNCHER, "it runs, under the launcher"
+    (line,) = _written(caplog)
+    assert str(data.controller_home) in line and "next start" in line
+    (refusal,) = _written(caplog, logging.ERROR)
+    assert str(data.controller_home) in refusal
+
+
+async def test_where_the_controllers_home_and_a_secret_are_both_open_the_home_is_named(
+    data, monkeypatch, caplog
+) -> None:
+    _probe_says(monkeypatch, None)
+    settings = _settings(data, CLI_SANDBOX_WRITABLE=str(data.controller_home), AUTH_ROOT=str(data.outside / "auth"))
+
+    with caplog.at_level(logging.WARNING):
+        await _launch(settings, data)
+
+    (line,) = _written(caplog)
+    assert str(data.controller_home) in line and "AUTH_ROOT" not in line
 
 
 # ---- the probe ----
@@ -896,6 +1127,53 @@ async def test_a_cli_that_run_cli_started_reads_its_home_and_its_screenshot_and_
     expected = [*["EACCES"] * len(SECRET_SETTINGS), "EACCES", "content of shot.png", "EACCES", "ok"]
     assert json.loads(result.stdout)["results"] == expected
     assert (data.home / "written-by-the-cli").is_file()
+
+
+@needs_landlock
+async def test_under_the_list_launch_command_builds_a_cli_writes_its_own_directories_and_nothing_beside_the_root(
+    data, monkeypatch
+) -> None:
+    # Wherever tmp_path lies under /tmp, /tmp holds this test's root and is given to no CLI: a directory beside the
+    # root stands in for it. /dev is the real one.
+    (temp,) = _directories(data.outside / "tmp")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (temp, "/dev"))
+    beside = Path(_directories(data.outside / "beside")[0])
+    note, program = beside / "note.txt", beside / "program"
+    note.write_text("content of note.txt", encoding="utf-8")
+    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    program.chmod(0o755)
+    works = [
+        ["create", str(Path(temp) / "made")],
+        ["write", "/dev/null"],
+        ["pty"],
+        ["create", str(data.home / "made")],
+        ["read", str(note)],
+        ["list", str(beside)],
+        ["run", str(program)],
+    ]
+    refused = [
+        ["create", str(beside / "new")],
+        ["append", str(note)],
+        ["remove", str(note)],
+        ["rename", str(note), str(beside / "renamed")],
+        ["mkdir", str(beside / "new-directory")],
+    ]
+    if LANDLOCK_ABI >= 3:
+        refused.append(["truncate", str(note)])
+    cli = [sys.executable, "-c", STAND_IN, json.dumps(works + refused)]
+
+    command = await cli_sandbox.launch_command(
+        _settings(data), cli, cli_home=str(data.home), image_path=None, env=CLI_ENV
+    )
+    done = subprocess.run(  # noqa: S603 - the launcher and this interpreter
+        command, env=CLI_ENV, cwd=data.home, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120
+    )
+
+    assert _given_to_write(command) == [str(data.home), temp, "/dev"]
+    assert done.returncode == 0, done.stderr[-2000:]
+    results = json.loads(done.stdout)["results"]
+    assert results == ["ok"] * 4 + ["content of note.txt", "ok", "ok"] + ["EACCES"] * len(refused)
+    assert note.read_text(encoding="utf-8") == "content of note.txt"
 
 
 @needs_landlock

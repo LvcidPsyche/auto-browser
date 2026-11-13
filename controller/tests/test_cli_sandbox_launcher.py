@@ -95,6 +95,10 @@ class FakeKernel:
     def mode(self, fd: int) -> int:
         return {"dir": stat.S_IFDIR, "file": stat.S_IFREG, "link": stat.S_IFLNK}[self.tree[self._open[fd]]]
 
+    def path_of(self, fd: int) -> str:
+        # What /proc/self/fd says of a descriptor: the real path of what it was opened for.
+        return self.realpath(self._open[fd])
+
     def add_rule(self, ruleset: int, fd: int, rights: int) -> None:
         self._call("add_rule")
         assert ruleset == 3 and fd not in self.closed
@@ -197,12 +201,17 @@ def test_a_root_whose_holder_is_reached_through_a_link_is_refused_before_any_rul
     assert fake.rules == {} and "create_ruleset" not in fake.calls
 
 
-def test_a_directory_beside_the_root_gets_every_right_and_a_file_only_file_rights() -> None:
-    fake = _applied()
+@pytest.mark.parametrize("abi", [1, 2, 3, 4, 5, 8])
+def test_an_entry_beside_the_root_gets_the_rights_to_read_list_and_run_and_no_other(abi: int) -> None:
+    # The controller is not under the ruleset: what a CLI could write beside the root, it could leave there for the
+    # controller to run (a usercustomize.py in its Python user site, an ssh config) or to read.
+    fake = _applied(abi=abi)
 
-    assert fake.rules["/etc"] == fake.rules["/usr"] == fake.rules["/proc"] == ALL_RIGHTS
-    assert fake.rules["/.dockerenv"] == launcher.FILE_RIGHTS
-    assert fake.handled == ALL_RIGHTS
+    read_and_run = launcher.EXECUTE | launcher.READ_FILE
+    assert fake.rules["/etc"] == fake.rules["/usr"] == fake.rules["/proc"] == read_and_run | launcher.READ_DIR
+    assert fake.rules["/.dockerenv"] == read_and_run
+    assert fake.handled == launcher.handled_rights(abi)
+    assert fake.rules["/data/cli-home"] == launcher.handled_rights(abi), "the home keeps every right"
 
 
 def test_no_rule_goes_on_the_protected_root_or_on_what_holds_it() -> None:
@@ -240,9 +249,27 @@ def test_the_cli_home_gets_every_right_and_the_screenshot_only_a_read() -> None:
     assert fake.rules["/data/cli-home"] == ALL_RIGHTS
     assert fake.rules["/data/artifacts/s1.png"] == launcher.READ_FILE
     assert "/data/artifacts" not in fake.rules, "the grant is the file, not the directory that holds it"
-    # The home may be reached through a link; the file is opened as itself, so a link in its place is refused.
+    # The home is opened following links, and the descriptor's own path then shows any link on the way; the file is
+    # opened as itself, so a link in its place is refused.
     assert fake.followed["/data/cli-home"] is True
     assert fake.followed["/data/artifacts/s1.png"] is False
+
+
+@pytest.mark.parametrize("swapped", ["/tmp/x", "/tmp/x/y"], ids=["the directory", "a directory on its way"])
+def test_a_writable_directory_reached_through_a_link_is_refused_and_gets_no_rule(swapped: str) -> None:
+    # The controller resolves each --rw path. A link on the way means the path changed since: a CLI of another call
+    # removed /tmp/x and put a link to a directory of the root there, which a rule made by the path would open.
+    tree = {**IMAGE_ROOT, "/tmp": "dir", "/tmp/x": "dir", "/tmp/x/y": "dir", "/data/auth": "dir"}
+    fake = FakeKernel(tree)
+    fake.real[swapped] = "/data/auth"
+
+    with pytest.raises(launcher.NotApplied) as refused:
+        launcher.apply(fake, "/data", ["/data/cli-home", swapped], [])
+
+    assert (refused.value.call, refused.value.detail) == (f"--rw {swapped}", "reached through a link")
+    assert swapped not in fake.rules and "/data/auth" not in fake.rules
+    assert "restrict_self" not in fake.calls
+    assert sorted(fake.closed) == sorted(fake._open)
 
 
 def test_an_older_abi_puts_no_right_it_does_not_know_in_the_ruleset_or_in_a_rule() -> None:
@@ -251,7 +278,7 @@ def test_an_older_abi_puts_no_right_it_does_not_know_in_the_ruleset_or_in_a_rule
     later = launcher.REFER | launcher.TRUNCATE | launcher.IOCTL_DEV
     assert fake.handled == (1 << 13) - 1
     assert not any(rights & later for rights in fake.rules.values())
-    assert fake.rules["/.dockerenv"] == launcher.EXECUTE | launcher.WRITE_FILE | launcher.READ_FILE
+    assert fake.rules["/.dockerenv"] == launcher.EXECUTE | launcher.READ_FILE
 
 
 def test_the_rules_come_first_then_no_new_privs_then_the_restriction() -> None:
@@ -567,7 +594,7 @@ needs_landlock = pytest.mark.skipif(LANDLOCK_ABI < 1, reason="needs Linux with L
 CHILD_ENV = {"PATH": os.environ.get("PATH", "")}
 # The CLI stand-in: tries each [operation, path...] of its first argument and prints what came of each.
 STAND_IN = r"""
-import errno, json, os, sys
+import errno, json, os, subprocess, sys
 
 def attempt(operation, *paths):
     try:
@@ -579,6 +606,11 @@ def attempt(operation, *paths):
             open(paths[0], "x").close()
         elif operation == "append":
             open(paths[0], "a").close()
+        elif operation == "write":
+            with open(paths[0], "w") as target:
+                target.write("written")
+        elif operation == "truncate":
+            os.truncate(paths[0], 0)
         elif operation == "stat":
             os.stat(paths[0])
         elif operation == "mkdir":
@@ -587,6 +619,12 @@ def attempt(operation, *paths):
             os.rename(paths[0], paths[1])
         elif operation == "remove":
             os.remove(paths[0])
+        elif operation == "run":
+            done = subprocess.run(list(paths), stdin=subprocess.DEVNULL, capture_output=True)
+            return "ok" if done.returncode == 0 else "exit %d" % done.returncode
+        elif operation == "pty":
+            for fd in os.openpty():
+                os.close(fd)
     except OSError as exc:
         return errno.errorcode.get(exc.errno, str(exc.errno))
     return "ok"
@@ -725,15 +763,46 @@ def test_the_cli_writes_in_its_home_and_renames_across_two_directories_of_it(lay
 
 
 @needs_landlock
-def test_the_cli_reaches_what_lies_outside_the_protected_root_as_before(layout) -> None:
-    steps = [
-        ["read", str(layout.base / "outside" / "note.txt")],
-        ["create", str(layout.base / "outside" / "new.txt")],
-        ["stat", "/proc/self/status"],
-        ["list", "/proc/self"],
+def test_beside_the_root_the_cli_reads_lists_and_runs_and_writes_nothing(layout) -> None:
+    # What the controller, which is not under the ruleset, could later read or run is no CLI's to leave there.
+    outside = layout.base / "outside"
+    note, program = outside / "note.txt", outside / "program"
+    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    program.chmod(0o755)
+    works = [["read", str(note)], ["list", str(outside)], ["run", str(program)], ["list", "/proc/self"]]
+    refused = [
+        ["create", str(outside / "new.txt")],
+        ["append", str(note)],
+        ["write", str(note)],
+        ["remove", str(note)],
+        ["rename", str(note), str(outside / "renamed.txt")],
+        ["mkdir", str(outside / "new-directory")],
     ]
+    if LANDLOCK_ABI >= 3:
+        refused.append(["truncate", str(note)])  # the third ABI's right: below it, Landlock cannot refuse it
 
-    assert _stand_in(layout, steps)["results"] == ["content of note.txt", "ok", "ok", "ok"]
+    report = _stand_in(layout, works + refused)
+
+    assert report["results"] == ["content of note.txt", "ok", "ok", "ok", *["EACCES"] * len(refused)]
+    assert note.read_text(encoding="utf-8") == "content of note.txt"
+    assert sorted(path.name for path in outside.iterdir()) == ["note.txt", "program"]
+
+
+@needs_landlock
+def test_a_writable_directory_swapped_for_a_link_into_the_root_ends_the_launcher_and_the_cli_does_not_run(
+    layout,
+) -> None:
+    # A CLI of another call removed the directory the controller resolved and put a link to the root's auth there.
+    swapped = layout.base / "outside" / "swapped"
+    swapped.symlink_to(layout.root / "auth", target_is_directory=True)
+    marker = layout.home / "ran"
+    run = [sys.executable, "-c", "open(r'%s', 'w')" % marker]
+
+    done = _run([*_launcher_command(layout, "--rw", str(swapped)), "--", *run], layout)
+
+    assert done.returncode == launcher.EXIT_NOT_APPLIED
+    assert done.stderr == f"{launcher.MARKER}--rw {swapped}: reached through a link\n"
+    assert not marker.exists(), "the CLI ran"
 
 
 @needs_landlock

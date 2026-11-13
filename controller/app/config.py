@@ -1,7 +1,10 @@
 import math
+import os
+import posixpath
 import random
 import re
 from functools import lru_cache
+from pathlib import PurePosixPath
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -28,6 +31,8 @@ MESH_TIMESTAMP_WINDOW_MAX_SECONDS = 250.0
 # How long one OCR run may take before pytesseract kills tesseract (ACT-27): OCR runs under the session lock, for an
 # observation and, with screenshots redacted, before and after every action.
 OCR_TIMEOUT_SECONDS = 20.0
+# The controller's data directory, as the image and compose have it: what the CLI sandbox closes (app/cli_sandbox.py).
+CLI_SANDBOX_PROTECTED_ROOT = "/data"
 
 
 class Settings(BaseSettings):
@@ -366,6 +371,9 @@ class Settings(BaseSettings):
     # true: no provider CLI is run where its Landlock sandbox would leave one of the controller's secrets open to it
     # (app/cli_sandbox.py). false: one warning, and the CLI runs.
     cli_sandbox_required: bool = Field(False, alias="CLI_SANDBOX_REQUIRED")
+    # Directories (comma-separated, absolute) a sandboxed provider CLI may write besides its home, the temp
+    # directories and /dev: a CODEX_HOME or CLAUDE_CONFIG_DIR kept elsewhere, a directory a tool of yours writes.
+    cli_sandbox_writable: str = Field("", alias="CLI_SANDBOX_WRITABLE")
 
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
@@ -583,6 +591,21 @@ class Settings(BaseSettings):
             raise ValueError(f"OCR_TIMEOUT_SECONDS must be more than 0 seconds, got {value!r}")
         return value
 
+    @field_validator("cli_sandbox_writable")
+    @classmethod
+    def _cli_sandbox_writable_entries(cls, value: str) -> str:
+        # A rule on the data directory, or on one that holds it, would open the controller's files to every CLI.
+        for entry in (item.strip() for item in value.split(",") if item.strip()):
+            written = PurePosixPath(posixpath.normpath("/" + entry.lstrip("/")))
+            if entry.startswith("/") and PurePosixPath(CLI_SANDBOX_PROTECTED_ROOT).is_relative_to(written):
+                raise ValueError(
+                    f"CLI_SANDBOX_WRITABLE must not name {CLI_SANDBOX_PROTECTED_ROOT} or a directory that holds it, "
+                    f"got {entry!r}"
+                )
+            if not os.path.isabs(entry):
+                raise ValueError(f"CLI_SANDBOX_WRITABLE takes absolute paths, got {entry!r}")
+        return value
+
     @field_validator("cdp_connect_url", mode="before")
     @classmethod
     def _cdp_connect_url_stripped(cls, value: object) -> object:
@@ -624,6 +647,10 @@ class Settings(BaseSettings):
     @property
     def cli_provider_env_passthrough_names(self) -> list[str]:
         return [item.strip() for item in self.cli_provider_env_passthrough.split(",") if item.strip()]
+
+    @property
+    def cli_sandbox_writable_paths(self) -> list[str]:
+        return [item.strip() for item in self.cli_sandbox_writable.split(",") if item.strip()]
 
     @property
     def allowed_host_patterns(self) -> list[str]:

@@ -320,18 +320,26 @@ All notable changes to auto-browser are documented here.
   for `CURATOR_PROVIDER`, so a deployment that relied on the old defaults changes model, and its cost with it. Set
   `CURATOR_MODEL` to keep a specific model. (STORE-31)
 - **On Linux, a provider CLI (`*_AUTH_MODE=cli`) can no longer open the controller's data directory, except `CLI_HOME`
-  and the screenshot of its call.** Where the kernel has Landlock (5.13 or later), `codex`, `claude` and `gemini` now
-  start under a Landlock ruleset: under `/data` each can read and write `CLI_HOME` and read the screenshot its own
-  call names, and everything else there answers `EACCES`. Move whatever your CLI reads or writes under `/data` into
+  and the screenshot of its call, and outside it writes only its own directories.** Where the kernel has Landlock
+  (5.13 or later), `codex`, `claude` and `gemini` now start under a Landlock ruleset: under `/data` each can read and
+  write `CLI_HOME` and read the screenshot its own call names, and everything else there answers `EACCES`; outside
+  `/data` it reads, lists and runs what it did before, and writes only in its home, the temp directories, `/dev` and
+  the directories the new `CLI_SANDBOX_WRITABLE` names. Move whatever your CLI reads or writes under `/data` into
   `CLI_HOME`: a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME` set elsewhere under `/data`, a CA bundle, the
-  CLI's own binary. Where that cannot be done, or a CLI fails under the ruleset, `CLI_SANDBOX_ENABLED=false` starts
-  provider CLIs without it, as 1.17.0 did. A CLI now runs with `no_new_privs` too, cannot list `/` itself, and on a
-  kernel older than 5.19 cannot rename a file from one directory to another. Where the sandbox would leave a secret
-  open (no Landlock, a `CLI_HOME` that is `/data` or holds it, or a secret's path set outside `/data` or inside
-  `CLI_HOME`) the controller logs a warning that names the condition, once per process for each distinct line, and
-  still runs the CLI: a host run that uses a `cli` provider and keeps its data outside `/data` gets that warning at
-  its first CLI call, and so does one on macOS or Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there
-  instead. See "The CLI sandbox" in docs/deployment.md. (N1)
+  CLI's own binary. A CLI that keeps state outside its home (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory
+  elsewhere, which the adapters pass on; a directory a tool of yours writes) needs that directory in
+  `CLI_SANDBOX_WRITABLE`. With the sandbox on, Codex cannot run a command its model asks for, in any
+  `CODEX_SANDBOX_MODE` (measured with codex-cli 0.114.0): its own sandbox does not work beneath this one. The decision
+  the controller asks Codex for needs no command. Where any of this cannot be done, or a CLI fails under the ruleset,
+  `CLI_SANDBOX_ENABLED=false` starts provider CLIs without it, as 1.17.0 did, which also gives a CLI `/data` again. A
+  CLI cannot list `/` itself, on a Linux host run now runs with `no_new_privs` (the image already set it), and on a
+  kernel older than 5.19 cannot rename or link a file from one directory to another. Where the sandbox would leave a
+  secret open (no Landlock, a `CLI_HOME` that is `/data` or holds it, a CLI that may write the controller's own home,
+  as with a blank `CLI_HOME`, or a secret's path set outside `/data` or in a directory a CLI may write) the controller
+  logs a warning that names the condition, once per process for each distinct line, and still runs the CLI: a host
+  run that uses a `cli` provider and keeps its data outside `/data` gets that warning at its first CLI call, and so
+  does one on macOS or Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI
+  sandbox" in docs/deployment.md. (N1)
 - **`API_ADMIN_OPERATORS` is new, and once set it refuses the shared token on the admin surfaces.** Nothing changes
   until you set it. Set (`API_ADMIN_OPERATORS=alice,ops`), the maintenance sweep and its status, `GET /readiness`,
   the `/proxy-personas` routes, `GET /mesh/peers`, and the `browser.readiness_check` and proxy persona tools answer
@@ -841,8 +849,12 @@ All notable changes to auto-browser are documented here.
   witness and mesh keys: 1.17.0 recorded that as a known limit. On Linux with Landlock the controller now starts the
   CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a ruleset, sets `no_new_privs` and
   execs the CLI, so the process, its group and the way it is stopped are what they were. The ruleset allows every
-  entry beside `/data` and, in `/data`, `CLI_HOME` to read and write and the one screenshot the call names to read:
-  another session's screenshot, a listing of `/data` and every secret there are refused, to root too. It handles only
+  entry beside `/data` to read, list and run, the CLI's home, the temp directories, `/dev` and what
+  `CLI_SANDBOX_WRITABLE` names to write as well, and in `/data` `CLI_HOME` to read and write and the one screenshot
+  the call names to read: another session's screenshot, a listing of `/data` and every secret there are refused, to
+  root too. A CLI writes nowhere else because the controller is not sandboxed: what a CLI could leave in the
+  controller's own home (a `usercustomize.py` in its Python user site, an ssh config) ran at the controller's next
+  start, outside the sandbox. It handles only
   the rights the running kernel knows, and it never execs without its ruleset: a kernel call that fails ends it with
   status `125` and a line that names the call. The controller runs it to apply a ruleset and exit at its first CLI
   call, and keeps that answer for the process where the launcher gave it (a probe that timed out or could not be

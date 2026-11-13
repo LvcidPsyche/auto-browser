@@ -3,22 +3,32 @@ launcher cannot keep it from the controller's files.
 
 A provider CLI runs as the controller's user, and a page the model was shown can talk it into reading what that user
 can: the API token, the takeover token, the auth profiles, the witness and mesh keys. Started under the launcher it
-can open nothing in PROTECTED_ROOT but its own home and the screenshot of its call.
+can open nothing in PROTECTED_ROOT but its own home and the screenshot of its call. Outside the root it reads, lists
+and runs what it did before, and writes only the directories _writable gives it: its home, its HOME, the temp
+directories, /dev, and what CLI_SANDBOX_WRITABLE names. The controller is not under the launcher, and what a CLI
+could leave in the controller's own home (a Python user site, an ssh config) the controller would run at its next
+start.
 
-Four things leave a secret open to it all the same:
+Each of these is reported:
 
 - CLI_SANDBOX_ENABLED is false: the CLI is started without the launcher, and no probe is run.
 - the launcher cannot restrict a process here: this is not Linux, the kernel has no Landlock, or a probe of the
   launcher failed. The CLI is started as it always was, without the launcher. The launcher's own answer is kept for
   the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
-- the CLI home is PROTECTED_ROOT or holds it: a rule on that home would open the root, and the launcher refuses it.
-  The CLI is started without the launcher.
+- the CLI home is PROTECTED_ROOT or holds it, as written: a rule on that home would open the root, and the launcher
+  refuses it. The CLI is started without the launcher.
+- the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it: a link, which a CLI that may write
+  where the home is written may have made. The CLI is started under the launcher without it, and cannot write its
+  home: closed, not open.
+- the controller's own home is, or lies in, a directory the CLI may write. The CLI is started under the launcher.
 - a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT, or a path that lies
-  in the CLI home as written or once resolved (the CLI can replace a link written there). The CLI is started under
-  the launcher, which does not close that place.
+  in a directory the CLI may write, as written or once resolved (the CLI can replace a link written there). The CLI
+  is started under the launcher, which does not close that place.
 
-Each is one WARNING for the process (one for each distinct text) that names the condition or the settings, never a
-value, and the CLI runs. With CLI_SANDBOX_REQUIRED=true each is one ERROR and SandboxRequired: no CLI runs.
+Each is one WARNING for the process (one for each distinct text) that names the condition, and the CLI runs: a
+secret's setting by its name and never its value, a home or a directory by its path. With CLI_SANDBOX_REQUIRED=true
+each is one ERROR and SandboxRequired: no CLI runs. An entry of CLI_SANDBOX_WRITABLE that is not given is one
+WARNING too, and refuses nothing.
 """
 
 from __future__ import annotations
@@ -33,14 +43,18 @@ import threading
 from pathlib import Path
 
 from .cli_sandbox_launcher import EXIT_NOT_APPLIED, MARKER
-from .config import Settings
+from .config import CLI_SANDBOX_PROTECTED_ROOT, Settings
 from .utils import error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
-# The controller's data directory, as the image and compose have it.
-PROTECTED_ROOT = "/data"
+PROTECTED_ROOT = CLI_SANDBOX_PROTECTED_ROOT
 LAUNCHER = str(Path(__file__).with_name("cli_sandbox_launcher.py"))
+# What a CLI may write besides its home, its own temp directories and what CLI_SANDBOX_WRITABLE names: the shared temp
+# directories, and /dev for /dev/null, /dev/shm and a pty. Each is given where it is a directory.
+SHARED_WRITABLE = ("/tmp", "/var/tmp", "/dev")  # noqa: S108 - directories a CLI may write, no file made in them
+# The variables of the CLI's environment that name its temp directories.
+TEMP_VARIABLES = ("TMPDIR", "TEMP", "TMP")
 # The settings that say where a secret of the controller's is kept, by the name each has in the environment.
 SECRET_PATH_SETTINGS = {
     "api_token_file": "API_TOKEN_FILE",
@@ -64,8 +78,9 @@ _probe_lock = threading.Lock()
 # probe that timed out or could not be started says nothing of either. The calls that start together wait on this
 # one future, and not in a thread each.
 _asked: concurrent.futures.Future[str | None] | None = None
-# What has been written already, so that each thing found is one line for the process.
-_reported: set[tuple[bool, str]] = set()
+# What has been written already, so that each thing found is one line for the process: by whether
+# CLI_SANDBOX_REQUIRED refused for it (None: a warning that refuses nothing), and its text.
+_reported: set[tuple[bool | None, str]] = set()
 
 
 class SandboxRequired(Exception):
@@ -144,20 +159,84 @@ def _ways(path: str) -> tuple[str, str]:
     return os.path.abspath(path), os.path.realpath(path)
 
 
-def _open_settings(settings: Settings, cli_home: str) -> list[str]:
+def _lies_in(place: tuple[str, str], directory: tuple[str, str]) -> bool:
+    """Whether ``place`` is ``directory`` or lies in it, each as written or once resolved."""
+    return any(Path(mine).is_relative_to(theirs) for mine in place for theirs in directory)
+
+
+def _not_given(kind: str, written: str, real: str) -> str:
+    """Why a directory (as written, and once resolved) is not given to a CLI to write; "" where it is.
+
+    Never PROTECTED_ROOT or what holds it, and only a directory. In PROTECTED_ROOT ``kind`` "home" (the CLI home) and
+    "setting" (an entry of CLI_SANDBOX_WRITABLE) are given only where they are written there too: one that only
+    resolves there is a link that the CLI may have made. The others ("shared": HOME, the temp directories, /dev) never
+    are: in the CLI home they are the home's, and elsewhere in the root they stay closed.
+    """
+    if not os.path.isdir(real):
+        return "is not a directory"
+    if Path(PROTECTED_ROOT).is_relative_to(real):
+        return "resolves to %s, which is %s or holds it" % (real, PROTECTED_ROOT)
+    if Path(real).is_relative_to(PROTECTED_ROOT) and (
+        kind == "shared" or not Path(written).is_relative_to(PROTECTED_ROOT)
+    ):
+        return "resolves to %s, in %s" % (real, PROTECTED_ROOT)
+    return ""
+
+
+def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[list[tuple[str, str]], str]:
+    """The directories a CLI under the launcher may write, each as written and once resolved: its home, its HOME,
+    SHARED_WRITABLE and the temp directories of its environment, and the entries of CLI_SANDBOX_WRITABLE. Only those
+    that _not_given passes, none twice and none that lies in another (whose rule covers it, and which a CLI could
+    swap for a link). And why the CLI home is not among them, where _not_given refuses it ("" elsewhere)."""
+    shared = [env.get("HOME", ""), *SHARED_WRITABLE, *(env.get(name, "") for name in TEMP_VARIABLES)]
+    candidates = [
+        ("home", os.path.abspath(cli_home)),
+        *(("shared", path) for path in shared if os.path.isabs(path)),
+        *(("setting", path) for path in settings.cli_sandbox_writable_paths),
+    ]
+    given: list[tuple[str, str]] = []
+    home_refused = ""
+    for kind, path in candidates:
+        entry = _ways(path)
+        why = _not_given(kind, *entry)
+        if why and kind == "home":
+            home_refused = (
+                "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox without a home "
+                "they can write (a CLI_HOME linked into %s on purpose is to be set to its real path)"
+            ) % (path, why, PROTECTED_ROOT)
+        elif why and kind == "setting":
+            _warn_once("CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write" % (path, why))
+        if why or any(_lies_in(entry, other) for other in given):
+            continue
+        given = [other for other in given if not _lies_in(other, entry)] + [entry]
+    return given, home_refused
+
+
+def _controllers_home_open(given: list[tuple[str, str]]) -> str:
+    """Why the CLI may write the controller's own home, for the log; "" where it may not."""
+    home = os.path.expanduser("~")
+    if not os.path.isabs(home):
+        return ""
+    for entry in given:
+        if _lies_in(_ways(home), entry):
+            return (
+                "provider CLIs may write %s under the Landlock sandbox, and the controller's own home %s lies there: "
+                "what a CLI leaves in it, the controller, which is not under the sandbox, can run at its next start "
+                "(a Python user site, an ssh config). Keep CLI_HOME and CLI_SANDBOX_WRITABLE out of it"
+            ) % (entry[1], home)
+    return ""
+
+
+def _open_settings(settings: Settings, given: list[tuple[str, str]]) -> list[str]:
     """The names of the settings whose secret the ruleset leaves open: each one that is set and resolves to a place
     outside PROTECTED_ROOT as it is written (a root that is a link holds nothing itself), or whose path, as written or
-    once resolved, lies in the CLI home as written or once resolved. A path written there is the CLI's to replace,
-    wherever it resolves now."""
-    homes = _ways(cli_home)
+    once resolved, lies in a directory the CLI may write as written or once resolved. A path written there is the
+    CLI's to replace, wherever it resolves now."""
     return [
         name
         for attribute, name in SECRET_PATH_SETTINGS.items()
         if (value := getattr(settings, attribute))
-        and (
-            not _within(value, PROTECTED_ROOT)
-            or any(Path(place).is_relative_to(home) for place in _ways(value) for home in homes)
-        )
+        and (not _within(value, PROTECTED_ROOT) or any(_lies_in(_ways(value), entry) for entry in given))
     ]
 
 
@@ -171,36 +250,46 @@ def _report(required: bool, found: str) -> None:
         logger.warning("%s. The CLI runs all the same: CLI_SANDBOX_REQUIRED=true refuses to run it instead", found)
 
 
+def _warn_once(found: str) -> None:
+    if (None, found) not in _reported:
+        _reported.add((None, found))
+        logger.warning(found)
+
+
 async def launch_command(
     settings: Settings, command: list[str], *, cli_home: str, image_path: str | None, env: dict[str, str]
 ) -> list[str]:
     """``command`` as run_cli is to start it: under the launcher wherever the launcher can restrict a process, with
-    ``cli_home`` to read and write and ``image_path``, where the call has one, to read; ``command`` itself elsewhere.
+    the directories of _writable to read and write and ``image_path``, where the call has one, to read; ``command``
+    itself elsewhere.
 
     ``env`` is the CLI's, which the probe is started with too. SandboxRequired where a secret would stay open and
-    CLI_SANDBOX_REQUIRED is set.
+    CLI_SANDBOX_REQUIRED is set. Where several conditions hold, the first is named.
     """
     if not settings.cli_sandbox_enabled:
         missing = "CLI_SANDBOX_ENABLED is false"
     else:
         asked = _asked if _asked is not None else _landlock_missing(env)
         missing = asked.result() if asked.done() else await asyncio.wrap_future(asked)
-    if missing is None and _within(PROTECTED_ROOT, os.path.realpath(cli_home)):
+    # As written: a home that only resolves to the root or above it is a link a CLI may have made (_writable).
+    if missing is None and Path(PROTECTED_ROOT).is_relative_to(os.path.abspath(cli_home)):
         missing = "CLI_HOME is %s or holds it, which the launcher refuses" % PROTECTED_ROOT
+    given: list[tuple[str, str]] = []
     if missing:
         found = "provider CLIs start without the Landlock sandbox and can read the controller's files: %s" % missing
-    elif names := _open_settings(settings, cli_home):
-        found = "the Landlock sandbox of provider CLIs does not close what these settings name, which lies outside "
-        found += "%s or inside CLI_HOME: %s" % (PROTECTED_ROOT, ", ".join(names))
     else:
-        found = ""
+        given, found = _writable(settings, cli_home, env)
+        found = found or _controllers_home_open(given)
+        if not found and (names := _open_settings(settings, given)):
+            found = "the Landlock sandbox of provider CLIs does not close what these settings name, which lies "
+            found += "outside %s or in a directory the CLIs may write: %s" % (PROTECTED_ROOT, ", ".join(names))
     if found:
         _report(settings.cli_sandbox_required, found)
         if settings.cli_sandbox_required:
             raise SandboxRequired
     if missing:
         return command
-    grants = ["--rw", os.path.abspath(cli_home)]
+    grants = [option for _, directory in given for option in ("--rw", directory)]
     if image_path:
         grants += ["--ro-file", os.path.abspath(image_path)]
     return [sys.executable, "-I", "-S", LAUNCHER, "--protect", PROTECTED_ROOT, *grants, "--", *command]
