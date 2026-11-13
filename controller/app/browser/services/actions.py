@@ -479,9 +479,13 @@ def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
 
 
 async def _answered_soon(call: Awaitable[Any]) -> Any:
-    """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own (a
-    page that stops answering would hold the type, and its session, with it), and the reads of a field for its
-    approval are bounded one by one, not together."""
+    """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own, and
+    a page that stops answering would hold the type, and its session, with it.
+
+    The bound is this one call's. Steps that must answer within it together are either awaited as one call (an
+    approval's read of the fields its text could go to, _named_fields: finding the element and asking it) or share
+    one end (a take's, through _arrives_by and _left_until); steps bounded one by one can take the bound each (a
+    give-back's)."""
     return await asyncio.wait_for(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
 
 
@@ -555,9 +559,10 @@ class _TypedField:
     either path every call after the take answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
 
     A type by selector that clears its field first finds the selector's element earlier, as soon as it has focus
-    (find): its checks that focus stays there through the clear (require_focus) are asked of that element, and the
-    hold is then made on it. A locator finds its element anew at each call, which is not the same check: by then the
-    page can have made the selector match another node (a select-all handler that hands the field's id on).
+    (find, within a bound of its own; the take's two other calls then share the take's): its checks that focus stays
+    there through the clear (require_focus) are asked of that element, and the hold is then made on it. A locator
+    finds its element anew at each call, which is not the same check: by then the page can have made the selector
+    match another node (a select-all handler that hands the field's id on).
     """
 
     def __init__(self, element: Any, locator: Any) -> None:

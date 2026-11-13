@@ -230,11 +230,18 @@ If a provider still proposes a side effect, the controller does not trust it bli
   the action tools.
 - What it does not guarantee is delivery against a page that runs script in the gaps between the checks and the
   input: the few milliseconds between the last hit test and the press, and the 20-80 ms between mouse down and up;
-  focus is checked before the text, between select-all and delete and after the clear, not between keystrokes, and
-  a keydown handler can move focus within the key it handles, the clear's Delete included: the check after the
-  clear then reports `focus_lost` after the field it moved to was emptied; hover is not hit-tested once the
-  pointer arrives; a drag's destination is not hit-tested (drag libraries put the dragged element under the
-  pointer), and its check of a coordinate end compares scroll positions, so a page can still change what is under
+  focus is checked before the text, between select-all and delete and after the clear (a type by selector checks
+  its clear the same way, asking the element its selector named as the type focused it, so a page that puts
+  another node in that element's place during the clear is refused as `focus_lost` too), not between keystrokes: a
+  key of the text that moves focus on (an Enter that takes a login form to its password field) sends the rest of
+  the text to the field focus moved to, and the type then keeps no preview of its text (`text_redacted`, under a
+  `restricted` receipt), which it keeps only where the node that had focus as the text began reads as not secret
+  and kept focus until the text was in (a page that stops focus events before its nodes hear them can still move
+  focus away and back unheard); and a keydown handler can move focus within the key it handles, the clear's Delete
+  included: the check after the clear then reports `focus_lost` after the field it moved to was emptied; hover is
+  not hit-tested once the pointer arrives; a drag's destination is not hit-tested (drag libraries put the dragged
+  element under the pointer),
+  and its check of a coordinate end compares scroll positions, so a page can still change what is under
   that point (by scrolling a box no element end is drawn inside while stopping its scroll events or inside a
   shadow root, by scrolling back to where it was, or by replacing content), and a scroller an element end is
   slotted into through a closed shadow root is not seen; the hit test and the focus check do not see into closed

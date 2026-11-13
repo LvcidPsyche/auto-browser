@@ -285,8 +285,14 @@ All notable changes to auto-browser are documented here.
   not match: retry with the action you asked with. The `text_preview` of a type whose text submits its form and
   leaves the page (a search that ends in a newline) is now withheld, and that type's receipt is `restricted`; so
   is that of any type whose field does not have focus once the text is in, or lost it on the way (a text whose
-  Enter moves on to the next field, a field that blurs itself on Enter), and of one typed by a selector that
-  names a frame.
+  Enter moves on to the next field, a field that blurs itself on Enter, a component that hands focus to a field
+  in its own open shadow root and takes it back), and of one typed by a selector that names a frame.
+- **A `type` by selector that clears its field can now end as `focus_lost` during the clear.** It checks after
+  select-all and after Delete that focus is still in the element its selector named, as a type by `element_id`
+  does (see Fixed). A page that moves focus during the clear, or puts another node in the field's place as it
+  empties, now gets the retryable `focus_lost` with no text typed, where the text went into whatever had focus;
+  so does a type whose element is not found again, or does not answer, within a second. Where the page replaced
+  the field, a second type finds the new node. `clear_first: false` skips the clear and its checks.
 
 ### Security
 
@@ -662,8 +668,10 @@ All notable changes to auto-browser are documented here.
   type's target is made, and given back only where the node the text goes to reads as not secret and keeps focus:
   the innermost focused element in the field the type names (through open shadow roots), which the type holds from
   just before the first keystroke, after the focus and the clear, until the text is in, and reads through that
-  hold at both ends; what is typed does not change. A read that fails or is cancelled withholds it, and so does a
-  held node that is not the focused one once the text is in, or that lost focus on the way though it has it back:
+  hold at both ends; the hold changes nothing of what is typed (two entries under Fixed do: a tab in a long text,
+  and a type by selector whose page moves focus during its clear). A read that fails or is cancelled withholds it,
+  and so does a held node that is not the focused one once the text is in, or that lost focus on the way though it
+  has it back:
   a text whose Enter moves focus to another field keeps no preview, nor does one whose field the page replaced
   or took away, one typed by a selector that names a frame (its text goes to a node of the frame's
   document, which is not held), or one whose Enter submits its form and leaves the page. Focus is taken to have
