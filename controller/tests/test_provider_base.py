@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -189,6 +190,43 @@ class ProviderDecisionParsingTests(unittest.TestCase):
     def test_parse_garbage_raises(self) -> None:
         with self.assertRaises(RuntimeError):
             self.adapter.parse_decision_text("no json here, just words {incomplete")
+
+    def test_a_reply_with_several_different_decisions_is_refused_at_the_second(self) -> None:
+        # D1-12: every candidate was collected first, and the message gave the full count.
+        text = " ".join(_decision_json(f"e{number}") for number in (1, 2, 3))
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.adapter.parse_decision_text(text)
+
+        self.assertIn("its reply holds at least 2 different decisions", str(caught.exception))
+        self.assertNotIn("3 different", str(caught.exception))
+
+    def test_the_scan_stops_at_the_second_different_decision(self) -> None:
+        raw_decode = json.JSONDecoder.raw_decode
+
+        def decodes_for(objects: int) -> int:
+            """How many times the reply was decoded as JSON before it was refused."""
+            text = " ".join(_decision_json(f"e{number}") for number in range(objects))
+            decoded: list[int] = []
+
+            def counting(decoder, string, idx=0):
+                decoded.append(idx)
+                return raw_decode(decoder, string, idx)
+
+            with patch.object(json.JSONDecoder, "raw_decode", counting), self.assertRaises(RuntimeError):
+                self.adapter.parse_decision_text(text)
+            return len(decoded)
+
+        # The third object and the rest of a long reply are never decoded: the work does not grow with the reply.
+        self.assertEqual(decodes_for(39), decodes_for(3))
+
+    def test_the_same_decision_given_again_is_one_decision_and_does_not_stop_the_scan(self) -> None:
+        same = _decision_json("again")
+
+        self.assertEqual(self.adapter.parse_decision_text(f"{same} then {same} then {same}").element_id, "again")
+        with self.assertRaises(RuntimeError) as caught:
+            self.adapter.parse_decision_text(f"{same} {same} {_decision_json('other')} {_decision_json('more')}")
+        self.assertIn("at least 2 different decisions", str(caught.exception))
 
     def test_parse_decision_file_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

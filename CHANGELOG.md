@@ -1566,6 +1566,10 @@ All notable changes to auto-browser are documented here.
   `browser.queue_agent_step` and `browser.queue_agent_run`) marks it deprecated and says it is ignored. A request that
   sets it to `true` logs one warning per process. An upload that needs an approval gets one through the approval
   queue: pass its `approval_id`. (STORE-26)
+- **A provider's reply that holds several different decisions is refused as soon as a second one is found.** The
+  parser collected every decision in the reply before it refused it, and its error (the controller log keeps it) gave
+  the full count. It now stops at the second different decision and says `at least 2 different decisions`. A reply
+  with one decision, or with the same decision more than once, is read as before. (D1-12)
 
 ## [1.17.0] — 2026-11-08
 

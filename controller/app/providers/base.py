@@ -816,27 +816,33 @@ class BaseProviderAdapter(ABC):
         # The prompt asks for exactly one decision. A reply that holds two different ones (fenced, bare, or both in
         # one wrapper) is ambiguous, and choosing between them by position lets JSON quoted from the page choose, so
         # it fails as an unparseable reply does. The same decision repeated (the model said it twice) is one decision.
-        decisions: list[BrowserActionDecision] = []
-        try:
-            decisions += self._decisions_in(json.loads(text))
-        except _PARSE_ERRORS:
-            pass
-        decisions += self._decisions_in_text(text)
+        # Refused at the second different one: the rest of the reply is not read.
+        refused = f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object"
         distinct: list[BrowserActionDecision] = []
-        for decision in decisions:
-            if decision not in distinct:
-                distinct.append(decision)
+        for decision in self._candidate_decisions(text):
+            if decision in distinct:
+                continue
+            distinct.append(decision)
+            if len(distinct) == 2:
+                raise RuntimeError(f"{refused}: its reply holds at least 2 different decisions")
         if len(distinct) == 1:
             return distinct[0]
-
-        ambiguity = f": its reply holds {len(distinct)} different decisions" if distinct else ""
-        raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object{ambiguity}")
+        raise RuntimeError(refused)
 
     @classmethod
-    def _decisions_in_text(cls, text: str) -> list[BrowserActionDecision]:
-        """Every decision-shaped JSON object in `text`, fenced or not. An object that holds a decision is read whole."""
+    def _candidate_decisions(cls, text: str) -> Iterator[BrowserActionDecision]:
+        """The decisions in `text` as one JSON value, then each decision-shaped JSON object found in it, one at a time."""
+        try:
+            yield from cls._decisions_in(json.loads(text))
+        except _PARSE_ERRORS:
+            pass
+        yield from cls._decisions_in_text(text)
+
+    @classmethod
+    def _decisions_in_text(cls, text: str) -> Iterator[BrowserActionDecision]:
+        """Every decision-shaped JSON object in `text`, fenced or not, one at a time. An object that holds a decision
+        is read whole."""
         decoder = json.JSONDecoder()
-        found: list[BrowserActionDecision] = []
         index = text.find("{")
         while index != -1:
             try:
@@ -849,9 +855,8 @@ class BaseProviderAdapter(ABC):
             if not decisions:
                 index = text.find("{", index + 1)
                 continue
-            found += decisions
+            yield from decisions
             index = text.find("{", end)
-        return found
 
     def parse_decision_file(self, path: Path) -> BrowserActionDecision:
         return self.parse_decision_text(path.read_text(encoding="utf-8"))
