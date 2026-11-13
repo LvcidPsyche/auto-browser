@@ -21,7 +21,9 @@ class GeminiAdapter(BaseProviderAdapter):
 
     @property
     def default_model(self) -> str:
-        return self.settings.gemini_cli_model or self.settings.gemini_model
+        if self.auth_mode == "cli":
+            return self.settings.gemini_cli_model or self.settings.gemini_model
+        return self.settings.gemini_model
 
     @property
     def configured(self) -> bool:

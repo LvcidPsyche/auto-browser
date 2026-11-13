@@ -308,6 +308,12 @@ All notable changes to auto-browser are documented here.
   failure: try again later), with the error `Provider request failed`. Any other failure of a step now says only
   `Agent step failed`, where it named the error's class and text, and a job that failed with an error nothing
   handled now records `Agent job failed`. The detail is in the controller log.
+- **In API mode, a Claude or Gemini provider reports its API model, whatever `CLAUDE_CLI_MODEL` or
+  `GEMINI_CLI_MODEL` says.** With `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` at `api` (the default) and a CLI model set,
+  `GET /agent/providers` and `browser.list_providers` gave the CLI model as the provider's `model`, and so did a step
+  that failed or waited for an approval, while the request itself went out with `CLAUDE_MODEL` or `GEMINI_MODEL`, as
+  it always did. They now report the model the request uses. A client that read the CLI model there in API mode reads
+  the API model now; in `cli` mode the CLI model is reported as before. Nothing about a request changes. (STORE-30)
 
 ### Security
 

@@ -23,7 +23,9 @@ class ClaudeAdapter(BaseProviderAdapter):
 
     @property
     def default_model(self) -> str:
-        return self.settings.claude_cli_model or self.settings.claude_model
+        if self.auth_mode == "cli":
+            return self.settings.claude_cli_model or self.settings.claude_model
+        return self.settings.claude_model
 
     @property
     def configured(self) -> bool:

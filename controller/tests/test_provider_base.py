@@ -16,7 +16,10 @@ from pathlib import Path
 import httpx
 
 from app.config import Settings
+from app.provider_registry import ProviderRegistry
 from app.providers.base import BaseProviderAdapter
+from app.providers.claude_adapter import ClaudeAdapter
+from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
 
 
@@ -77,6 +80,49 @@ class ProviderReadinessHelperTests(unittest.TestCase):
         detail = self.adapter.invalid_auth_mode_detail("carrier_pigeon")
         self.assertIn("carrier_pigeon", detail)
         self.assertIn("expected one of", detail)
+
+
+class ProviderDefaultModelTests(unittest.TestCase):
+    """STORE-30: a CLI model set for the CLI mode was reported as the model of the API mode too."""
+
+    def _settings(self, **extra: str) -> Settings:
+        return Settings(
+            _env_file=None,
+            CLAUDE_MODEL="claude-api-model",
+            CLAUDE_CLI_MODEL="claude-cli-alias",
+            GEMINI_MODEL="gemini-api-model",
+            GEMINI_CLI_MODEL="gemini-cli-alias",
+            **extra,
+        )
+
+    def test_in_api_mode_the_default_model_is_the_api_model_whatever_the_cli_model_is(self) -> None:
+        settings = self._settings(CLAUDE_AUTH_MODE="api", GEMINI_AUTH_MODE="api")
+
+        self.assertEqual(ClaudeAdapter(settings).default_model, "claude-api-model")
+        self.assertEqual(GeminiAdapter(settings).default_model, "gemini-api-model")
+
+    def test_in_cli_mode_the_default_model_is_the_cli_model(self) -> None:
+        settings = self._settings(CLAUDE_AUTH_MODE="cli", GEMINI_AUTH_MODE="cli")
+
+        self.assertEqual(ClaudeAdapter(settings).default_model, "claude-cli-alias")
+        self.assertEqual(GeminiAdapter(settings).default_model, "gemini-cli-alias")
+
+    def test_in_cli_mode_with_no_cli_model_the_default_model_is_the_api_model(self) -> None:
+        settings = Settings(
+            _env_file=None, CLAUDE_AUTH_MODE="cli", GEMINI_AUTH_MODE="cli", CLAUDE_MODEL="c-api", GEMINI_MODEL="g-api"
+        )
+
+        self.assertEqual(ClaudeAdapter(settings).default_model, "c-api")
+        self.assertEqual(GeminiAdapter(settings).default_model, "g-api")
+
+    def test_the_provider_list_reports_the_model_the_mode_uses(self) -> None:
+        listed = {
+            info.provider: info.model
+            for info in ProviderRegistry(self._settings(CLAUDE_AUTH_MODE="api", GEMINI_AUTH_MODE="cli")).list()
+        }
+
+        self.assertEqual(listed["claude"], "claude-api-model")
+        self.assertEqual(listed["gemini"], "gemini-cli-alias")
 
 
 class ProviderObservationPromptTests(unittest.TestCase):
