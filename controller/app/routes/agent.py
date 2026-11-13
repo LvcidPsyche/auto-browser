@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from ..agent_jobs import AgentJobQueueFull
 from ..models import AgentResumeRequest, AgentRunRequest, AgentStepRequest
 from ..utils import error_text
-from ._utils import log_hidden_cause, queue_full, typed_route_errors
+from ._utils import log_hidden_cause, queue_full, typed_route_errors, unknown_id_is_404
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,15 @@ def runtime_unavailable(cause: RuntimeError, message: str, *args: object) -> HTT
 def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> APIRouter:
     router = APIRouter()
 
+    async def require_known_approval(approval_id: str | None) -> None:
+        """Answer an approval id no record answers to (the store answers another operator's so) with the 404 the
+        action routes answer it with, before a step is made of it: left to the step, it was a failed provider step,
+        502, with an ERROR and its traceback in the log, for a caller's typo. A step that has no id has none to check."""
+        if approval_id is None:
+            return
+        with unknown_id_is_404(approval_id):
+            await manager.get_approval(approval_id)
+
     @router.get("/agent/jobs")
     async def list_agent_jobs(status: str | None = None, session_id: str | None = None) -> list[dict[str, Any]]:
         with typed_route_errors(logger, "agent jobs listing failed"):
@@ -41,6 +50,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
     async def run_agent_step(session_id: str, payload: AgentStepRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "agent step failed for session %s", session_id):
             try:
+                await require_known_approval(payload.approval_id)
                 result = await orchestrator.step(
                     session_id=session_id,
                     provider_name=payload.provider,
@@ -73,6 +83,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
     async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "agent run failed for session %s", session_id):
             try:
+                await require_known_approval(payload.approval_id)
                 result = await orchestrator.run(
                     session_id=session_id,
                     provider_name=payload.provider,

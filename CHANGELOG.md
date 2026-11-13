@@ -1512,6 +1512,13 @@ All notable changes to auto-browser are documented here.
   that names the session and the error's class and text, quoted and cut, as the other routes log a cause they hide.
   A step that failed inside (the provider's failure, or any other) is not among these: it ends as an error result,
   and the answer is its `error_code`.
+- **`POST /sessions/{id}/agent/step` and `/agent/run` answer an `approval_id` that no record holds with `404`, and
+  write nothing.** An id the approval store did not hold (a typo, or another operator's, which the store answers
+  the same way) made a failed step: `502` with `Agent step failed`, and an ERROR with a traceback in the log. The
+  route now looks the id up first and answers `404` `Not found: <id>`, as `POST /sessions/{id}/actions/execute` and
+  `/actions/upload` answer one, so another operator's id and an unknown one read alike. A session the controller
+  does not know is still `404` `Unknown session`. A job queued with such an id is not looked up and fails when it
+  runs, as before.
 
 ### Changed
 
