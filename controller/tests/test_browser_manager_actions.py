@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services import BrowserRemoteAccessService
 from app.browser.services.actions import _Budget
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
@@ -77,9 +78,10 @@ class FakeLocator:
         self.holds: list[FakeFieldHold] = []
         self.element = SimpleNamespace(
             evaluate_handle=AsyncMock(side_effect=self._hold),
-            # What is asked of the element itself: an approval's read of the fields its type's text could go to
-            # from there, which is this one field.
-            evaluate=AsyncMock(side_effect=self._named_fields),
+            # What is asked of the element itself: whether focus is still in it, by a type's checks through its
+            # clear (it is), and an approval's read of the fields its type's text could go to from there, which is
+            # this one field.
+            evaluate=AsyncMock(side_effect=self._asked),
             dispose=AsyncMock(),
         )
         self.element_handle = AsyncMock(return_value=self.element)
@@ -105,7 +107,9 @@ class FakeLocator:
         self.holds.append(FakeFieldHold(self.attributes))
         return self.holds[-1]
 
-    def _named_fields(self, _script: str) -> dict[str, object]:
+    def _asked(self, script: str) -> object:
+        if script == ELEMENT_HAS_FOCUS_SCRIPT:
+            return True
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
         return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "frame": False}
 

@@ -77,6 +77,7 @@ class FakeLocator:
     async def element_handle(self, **_given: Any) -> SimpleNamespace:
         # A type finds its field's element and makes its hold on it: the hold of a plain field that keeps focus.
         # Its approval asks the element for the fields the text could go to: this one, which says nothing secret.
+        # Its clear asks the element whether focus stayed in it: the one answer, which is not empty, says yes.
         return SimpleNamespace(
             evaluate_handle=AsyncMock(return_value=FakeFieldHold({})),
             evaluate=AsyncMock(return_value={"fields": [{}], "frame": False}),

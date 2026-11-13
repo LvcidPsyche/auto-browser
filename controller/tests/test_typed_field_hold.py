@@ -1,5 +1,6 @@
 """A type's hold on the field its text goes to, by selector (app.browser.services.actions._TypedField): taken in steps
-of its own, within one bound, and given back whatever the page or the caller does.
+of its own, within one bound, and given back whatever the page or the caller does. And its checks that focus stays
+in the field through the clear, asked of the element found once.
 
 The take was one call of Playwright's Locator.evaluate_handle(timeout=). There the timeout bounds only the wait for
 the element: the evaluation on it, and the disposal of the element's handle in a finally, wait for the page with no
@@ -21,7 +22,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from playwright._impl._locator import Locator
 
-from app.browser.element_scripts import FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT
+from app.action_errors import BrowserActionError
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT, FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT
 from app.browser.services import actions
 from app.browser.services.actions import _TypedField
 
@@ -32,7 +34,8 @@ PLAIN = {"type": "text", "name": "note", "id": "note", "placeholder": "", "aria-
 class FoundField:
     """What Playwright's Locator finds for a type by selector: the field's element, and the hold made on it. One step
     (``stalls``) does not answer until the test lets it (``answers``); ``asked`` says it was reached. ``takes`` says
-    how many seconds a step takes to answer, by its name."""
+    how many seconds a step takes to answer, by its name. ``focused`` is what the element answers when asked whether
+    focus is in it, a test's to change."""
 
     def __init__(self, stalls: str | None = None, *, takes: dict[str, float] | None = None) -> None:
         self.stalls = stalls
@@ -40,9 +43,12 @@ class FoundField:
         self.asked = asyncio.Event()
         self.answers = asyncio.Event()
         self.scripts: list[str] = []
+        self.focused = True
         self.hold = SimpleNamespace(evaluate=AsyncMock(side_effect=self._run), dispose=AsyncMock())
         self.element = SimpleNamespace(
-            evaluate_handle=AsyncMock(side_effect=self._hold), dispose=AsyncMock(side_effect=self._give_back)
+            evaluate=AsyncMock(side_effect=self._has_focus),
+            evaluate_handle=AsyncMock(side_effect=self._hold),
+            dispose=AsyncMock(side_effect=self._give_back),
         )
         self.locator = object.__new__(Locator)
         self.locator._frame = SimpleNamespace(_timeout=lambda timeout: timeout)
@@ -58,6 +64,10 @@ class FoundField:
     async def _find(self, **_given: Any) -> Any:
         await self._step("finding-the-element")
         return self.element
+
+    async def _has_focus(self, _script: str) -> bool:
+        await self._step("asking-for-focus")
+        return self.focused
 
     async def _hold(self, *_script: Any) -> Any:
         await self._step("making-the-hold")
@@ -240,3 +250,64 @@ async def test_an_element_whose_disposal_does_not_answer_holds_no_type() -> None
     assert took < 2, took
     assert typed.not_secret is True
     assert field.given_back() == (1, 1, 1)
+
+
+# The checks through the clear: a type by selector that clears its field first.
+AFTER_SELECT_ALL = " after select-all (nothing was cleared)"
+THROUGH_THE_CLEAR = " through the clear"
+
+
+async def test_the_checks_through_the_clear_and_the_hold_are_of_the_element_found_once() -> None:
+    # FX9c4's staged review (15): by selector nothing asked whether focus stayed in the field through the clear. The
+    # element the selector names as the type focused it is found once, asked after each key of the clear, and held:
+    # found anew by the locator each time, it could be another element by then.
+    field = FoundField()
+    typed = _TypedField(None, field.locator)
+
+    await typed.find()
+    await typed.require_focus(AFTER_SELECT_ALL)
+    await typed.require_focus(THROUGH_THE_CLEAR)
+    await typed.take()
+    await typed.release()
+
+    assert field.locator.element_handle.await_count == 1
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT,)] * 2
+    assert typed.not_secret is True
+    assert field.given_back() == (1, 1, 1)
+
+
+@pytest.mark.parametrize("during", [AFTER_SELECT_ALL, THROUGH_THE_CLEAR])
+async def test_a_field_that_lost_focus_through_the_clear_refuses_the_type(during: str) -> None:
+    field = FoundField()
+    typed = _TypedField(None, field.locator)
+    await typed.find()
+    field.focused = False
+
+    with pytest.raises(BrowserActionError) as refused:
+        await typed.require_focus(during)
+    await typed.release()
+
+    assert refused.value.message == f"Keyboard focus would not stay in the target field{during}, so nothing was typed."
+    assert (refused.value.code, refused.value.action, refused.value.retryable) == ("focus_lost", "type", True)
+    # No hold was made, and the element found is given back.
+    assert field.given_back() == (0, 0, 1)
+
+
+@pytest.mark.parametrize("stalls", ["finding-the-element", "asking-for-focus"])
+async def test_a_check_through_the_clear_that_cannot_be_made_refuses_the_type_at_the_bound(stalls: str) -> None:
+    # An element that is not found again, or does not answer, has not said that focus is in it: the type is refused
+    # as for one that said no, within the bound, and an element that arrives late is given back as it arrives.
+    field = FoundField(stalls)
+    typed = _TypedField(None, field.locator)
+
+    began = time.monotonic()
+    await asyncio.wait_for(typed.find(), 5)
+    with pytest.raises(BrowserActionError) as refused:
+        await asyncio.wait_for(typed.require_focus(AFTER_SELECT_ALL), 5)
+    took = time.monotonic() - began
+    await typed.release()
+    field.answers.set()
+
+    assert refused.value.code == "focus_lost"
+    assert took < 2, took
+    await _until(lambda: field.given_back() == (0, 0, 1))

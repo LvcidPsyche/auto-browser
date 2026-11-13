@@ -802,6 +802,21 @@ All notable changes to auto-browser are documented here.
   typed in time stays in its field with the tab a character of it, since Playwright's `keyboard.type` has no key
   for a tab and inserts it. A tab past the time is now inserted with the text around it; a newline or a carriage
   return there is still pressed as Enter.
+- **A type by selector no longer empties, or types into, a field the page moved focus to during its clear.** A
+  type clears its field first unless `clear_first` is false: it presses select-all, then Delete, then types. By
+  `element_id` it has checked since 1.11.1 that focus is still in its element after each of the two keys; by
+  selector it checked neither, since 0.1.0 (by its code; the probe ran on this release's). A page whose select-all
+  handler moved focus to a second field had that field emptied by the Delete, and the text typed into it; so had
+  one whose handler moved focus as the Delete went in. Both now end as `focus_lost` (retryable) with nothing
+  typed, as by `element_id`: "Keyboard focus would not stay in the target field after select-all (nothing was
+  cleared), so nothing was typed", or "... through the clear, so nothing was typed", where the field the Delete's
+  handler moved to has been emptied by that key (the limit `docs/llm-adapters.md` gives). The checks are asked of
+  the element the selector named once the type had focused it, found once and then held for the text's preview
+  too: a selector looked up again at each check names whatever the page has made it match by then. So a page that
+  puts another node in the field's place as it is cleared is refused too, where the text went into the new node
+  before; a second type finds that node. A type by selector that clears its field is refused the same way where
+  the element is not found again, or does not answer, within a second: before, the text was typed and its preview
+  withheld. With `clear_first` false nothing changes.
 - **A call into a page's isolated world no longer fails with an `AttributeError` when another call drops the page's
   session under it.** A call that read the page's frame tree again (after a "No frame for given id found") kept the
   frame it read where another call on the same page had run out of time meanwhile and dropped the session: the world

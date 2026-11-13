@@ -553,25 +553,60 @@ class _TypedField:
     answer held the type, and a type cancelled then had made a hold it could not give back. A hold that cannot be
     taken or read says secret, the text typed all the same, as when the field's attributes could not be read. On
     either path every call after the take answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
+
+    A type by selector that clears its field first finds the selector's element earlier, as soon as it has focus
+    (find): its checks that focus stays there through the clear (require_focus) are asked of that element, and the
+    hold is then made on it. A locator finds its element anew at each call, which is not the same check: by then the
+    page can have made the selector match another node (a select-all handler that hands the field's id on).
     """
 
     def __init__(self, element: Any, locator: Any) -> None:
         self._element = element
         self._locator = locator
-        self._nonce = secrets.token_hex(16)
+        # By element_id: what the world keeps the hold under, once it is taken.
+        self._nonce: str | None = None
         # By selector: the handle of the element the selector found, and the hold made on it.
         self._found: Any = None
         self._handle: Any = None
         self.not_secret = False
 
+    async def find(self) -> None:
+        """By selector, find the element the selector names now, which the type has just focused. One that is not
+        found within FIELD_RECHECK_TIMEOUT_MS leaves none: the check that follows then refuses the type."""
+        if self._element is not None:
+            return
+        with contextlib.suppress(Exception):
+            await self._find(asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000)
+
+    async def _find(self, ends: float) -> None:
+        finding = self._locator.element_handle(timeout=FIELD_RECHECK_TIMEOUT_MS)
+        self._found = await _arrives_by(finding, ends, _disposed_soon)
+
+    async def require_focus(self, during: str) -> None:
+        """By selector, refuse the type unless keyboard focus is still in the element found (find), as
+        ElementActions.require_focus does for an element_id. A check that cannot be made refuses too: no element
+        was found, or it does not answer within FIELD_RECHECK_TIMEOUT_MS."""
+        focused = False
+        if self._found is not None:
+            with contextlib.suppress(Exception):
+                focused = bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT)))
+        if not focused:
+            raise BrowserActionError(
+                f"Keyboard focus would not stay in the target field{during}, so nothing was typed.",
+                action="type",
+                code="focus_lost",
+                retryable=True,
+            )
+
     async def take(self) -> None:
         if self._element is not None:
+            self._nonce = secrets.token_hex(16)
             self.not_secret = _reads_not_secret(await self._element.hold_field(self._nonce))
             return
         ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
         try:
-            finding = self._locator.element_handle(timeout=FIELD_RECHECK_TIMEOUT_MS)
-            self._found = await _arrives_by(finding, ends, _disposed_soon)
+            if self._found is None:
+                await self._find(ends)
             holding = self._found.evaluate_handle(FIELD_HOLD_TAKE_SCRIPT)
             self._handle = await _arrives_by(holding, ends, _hold_released_soon)
             read = self._handle.evaluate(FIELD_HOLD_READ_SCRIPT)
@@ -587,7 +622,8 @@ class _TypedField:
         The page's side goes with the release script, which takes the hold's listeners off the node and, by
         element_id, the hold out of the world's fieldHolds. Where that script never runs (a page that does not
         answer it), the node keeps the listeners, and the world its entry, until the document goes. Nothing reads
-        such a hold: each type takes its own, by its own handle or under its own nonce.
+        such a hold: each type takes its own, by its own handle or under its own nonce. A type refused at its
+        clear took no hold: by selector the element it found is given back, and by element_id nothing was taken.
         """
         still_not_secret = False
 
@@ -600,7 +636,7 @@ class _TypedField:
             still_not_secret = _reads_not_secret(attributes)
 
         steps: list[Any] = []
-        if self._element is not None or self._handle is not None:
+        if self._nonce is not None or self._handle is not None:
             steps.append(read_again)
         for handle in (self._handle, self._found):
             if handle is not None:
@@ -773,24 +809,33 @@ class BrowserActionService:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
                 await self.focus_verified(session, locator, action="type")
-            if clear_first:
-                await session.page.keyboard.press("Control+a")
-                await asyncio.sleep(0.03)
-                if element is not None:
-                    # A select-all handler can move focus and select another field, which Delete would empty.
-                    await self.elements.require_focus(element, during=" after select-all (nothing was cleared)")
-                await session.page.keyboard.press("Delete")
-                await asyncio.sleep(0.05)
-                if element is not None:
-                    # A page can move focus once the clear has gone in, before the text does.
-                    await self.elements.require_focus(element, during=" through the clear")
-            # Read just before the first keystroke, and again once the text is in: a page can make the field a
-            # password field as it is focused or cleared (a login form that does so as it is focused), or as the text
-            # goes in. Read before the focus, a field turned so kept the preview of the text typed into it. Both
-            # reads are of the node that has focus as the text begins, held from then until the text is in
-            # (_TypedField): a key of the text can send focus on to another field, which takes the rest.
             field = _TypedField(element, locator)
+
+            async def require_focus(during: str) -> None:
+                # By element_id as the element's other steps ask it. By selector the element the selector named as
+                # it was focused is asked (_TypedField.find): with no check, a page whose select-all handler moved
+                # focus to another field had that field emptied by the Delete, and the text typed into it.
+                if element is not None:
+                    await self.elements.require_focus(element, during=during)
+                else:
+                    await field.require_focus(during)
+
             try:
+                if clear_first:
+                    await field.find()
+                    await session.page.keyboard.press("Control+a")
+                    await asyncio.sleep(0.03)
+                    # A select-all handler can move focus and select another field, which Delete would empty.
+                    await require_focus(" after select-all (nothing was cleared)")
+                    await session.page.keyboard.press("Delete")
+                    await asyncio.sleep(0.05)
+                    # A page can move focus once the clear has gone in, before the text does.
+                    await require_focus(" through the clear")
+                # Read just before the first keystroke, and again once the text is in: a page can make the field a
+                # password field as it is focused or cleared (a login form that does so as it is focused), or as the
+                # text goes in. Read before the focus, a field turned so kept the preview of the text typed into it.
+                # Both reads are of the node that has focus as the text begins, held from then until the text is in
+                # (_TypedField): a key of the text can send focus on to another field, which takes the rest.
                 await field.take()
                 await self.type_text_human_like(session.page, text)
             finally:

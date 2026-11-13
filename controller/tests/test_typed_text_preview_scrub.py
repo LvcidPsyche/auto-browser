@@ -102,13 +102,14 @@ async def test_a_field_whose_attributes_could_not_be_read_keeps_no_preview(tmp_p
     # Attributes that could not be read were taken to say "not secret": a password field that came in after the read
     # had timed out (ACTION_TIMEOUT_MS) and before the scroll had took the text, and its first 80 characters were
     # kept in the result, actions.jsonl, the audit log and the receipt. What is read now is the node the type holds
-    # as the text begins (_TypedField), and a hold that cannot be taken says as little of it.
+    # as the text begins (_TypedField), and a hold that cannot be taken says as little of it. With no clear first:
+    # a type that clears its field finds it before the clear, and is refused where it is not found then.
     field = FakeLocator("#pw", attributes={"type": "password"})
     field.element_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
     manager, page = _typing_manager(tmp_path, field)
 
     with patch("asyncio.sleep", new=AsyncMock()):
-        result = await manager.type("s1", selector="#pw", text="hunter2-secret")
+        result = await manager.type("s1", selector="#pw", text="hunter2-secret", clear_first=False)
 
     assert "".join(call.args[0] for call in page.keyboard.type.await_args_list) == "hunter2-secret"
     for target in (result["target"], *_recorded_targets(manager)):

@@ -17,6 +17,7 @@ from app.action_errors import BrowserActionError
 from app.action_records import wait_for_pending_record
 from app.approvals import ApprovalRequiredError
 from app.audit import reset_current_operator, set_current_operator
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services.actions import FIELD_RECHECK_TIMEOUT_MS
 from app.browser.services.witness import BrowserWitnessService
 from app.browser_manager import BrowserManager, BrowserSession
@@ -925,7 +926,8 @@ async def test_a_field_by_selector_that_cannot_be_held_or_read_keeps_no_preview_
 ) -> None:
     # By selector a hold that cannot be taken, or read, says nothing of the node the text goes to: the text is typed,
     # as before, and its preview stays withheld. The wait for the field is FIELD_RECHECK_TIMEOUT_MS at most: it had
-    # focus a moment ago. What was taken before the step that failed is given back.
+    # focus a moment ago. What was taken before the step that failed is given back. A field that cannot be found is
+    # typed into only where the type does not clear it first: one that does is refused (the test below).
     manager = _typing_manager(tmp_path)
     manager.settings.witness_enabled = True
     page = manager.sessions["s1"].page
@@ -942,7 +944,9 @@ async def test_a_field_by_selector_that_cannot_be_held_or_read_keeps_no_preview_
         field.element.evaluate_handle = AsyncMock(return_value=hold)
 
     with patch("asyncio.sleep", new=AsyncMock()):
-        result = await manager.type("s1", selector="#note", text="hunter2-secret")
+        result = await manager.type(
+            "s1", selector="#note", text="hunter2-secret", clear_first=fails != "finding-the-field"
+        )
 
     assert "".join(call.args[0] for call in page.keyboard.type.await_args_list) == "hunter2-secret"
     assert field.element_handle.await_args.kwargs["timeout"] == FIELD_RECHECK_TIMEOUT_MS
@@ -951,6 +955,83 @@ async def test_a_field_by_selector_that_cannot_be_held_or_read_keeps_no_preview_
         hold.dispose.assert_awaited_once()
     targets, receipt = await _type_targets_and_receipt(manager)
     _assert_withheld_and_restricted([result["target"], *targets], receipt)
+
+
+@pytest.mark.parametrize("lost", ["after-select-all", "through-the-clear", "not-found-again", "no-answer"])
+async def test_a_type_by_selector_whose_field_does_not_keep_focus_through_its_clear_is_refused(
+    tmp_path: Path, lost: str
+) -> None:
+    # FX9c4's staged review (15): the two focus checks through the clear ran for an element_id only. By selector a
+    # select-all handler that moved focus to another field had that field emptied by the Delete, and the text typed
+    # into it. The element the selector named as it was focused is found once and asked after each key of the
+    # clear; one that is not found again, or does not answer, refuses the type as well.
+    manager = _typing_manager(tmp_path)
+    page = manager.sessions["s1"].page
+    field = FakeLocator("#note", attributes={"type": "text", "name": "note"})
+    page.locators["#note"] = field
+    if lost == "not-found-again":
+        field.element_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
+    elif lost == "no-answer":
+        field.element.evaluate = AsyncMock(side_effect=PlaywrightError("Execution context was destroyed"))
+    else:
+        field.element.evaluate = AsyncMock(side_effect=[False] if lost == "after-select-all" else [True, False])
+
+    with patch("asyncio.sleep", new=AsyncMock()), pytest.raises(BrowserActionError) as refused:
+        await manager.type("s1", selector="#note", text="hunter2-secret")
+
+    during = " through the clear" if lost == "through-the-clear" else " after select-all (nothing was cleared)"
+    assert (refused.value.code, refused.value.retryable) == ("focus_lost", True)
+    assert refused.value.message == f"Keyboard focus would not stay in the target field{during}, so nothing was typed."
+    pressed = [call.args[0] for call in page.keyboard.press.await_args_list]
+    assert pressed == (["Control+a", "Delete"] if lost == "through-the-clear" else ["Control+a"])
+    page.keyboard.type.assert_not_awaited()
+    # No hold was taken, and the element found is given back.
+    assert field.holds == []
+    assert field.element.dispose.await_count == (0 if lost == "not-found-again" else 1)
+
+
+async def test_a_type_by_element_id_refused_at_its_clear_has_taken_no_hold_to_give_back(tmp_path: Path) -> None:
+    # Kept: by element_id a type refused at its clear asked the element ids' world for nothing more. The give-back
+    # now runs for a type refused there too (by selector it has the element it found to give back), and asks the
+    # world only for a hold that was taken.
+    manager = _typing_manager(tmp_path)
+    hold = AsyncMock(return_value=NOT_SECRET)
+    manager.element_ids.element = Mock(return_value=_fake_element(hold))
+    manager.actions.elements.focus = AsyncMock()
+    lost = BrowserActionError("Keyboard focus would not stay", code="focus_lost", action="type", retryable=True)
+    manager.actions.elements.require_focus = AsyncMock(side_effect=lost)
+
+    with patch("asyncio.sleep", new=AsyncMock()), pytest.raises(BrowserActionError) as refused:
+        await manager.type("s1", element_id=ELEMENT_ID, text="hunter2-secret")
+
+    assert refused.value.code == "focus_lost"
+    assert manager.actions.elements.require_focus.await_args.kwargs == {
+        "during": " after select-all (nothing was cleared)"
+    }
+    hold.assert_not_awaited()  # neither taken nor given back: the fake's hold_field and release_field
+
+
+async def test_the_focus_checks_through_a_clear_by_selector_ask_the_element_found_once(tmp_path: Path) -> None:
+    # The control, and what is asked: the element the selector found as the type focused it, once after each key of
+    # the clear, and the hold is made on the same element. The locator would find the selector's element anew.
+    manager = _typing_manager(tmp_path)
+    page = manager.sessions["s1"].page
+    field = FakeLocator("#note", attributes={"type": "text", "name": "note"})
+    page.locators["#note"] = field
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await manager.type("s1", selector="#note", text="note")
+    asked_of_the_locator = field.evaluate.await_count
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await manager.type("s1", selector="#note", text="note", clear_first=False)
+
+    assert [call.args[0] for call in page.keyboard.press.await_args_list] == ["Control+a", "Delete"]
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT,)] * 2
+    # One find for each type: the type that clears finds its element before the clear, and holds that one.
+    assert field.element_handle.await_count == 2
+    # The locator is asked as often with a clear as without: for the focus that precedes it, and no more.
+    assert field.evaluate.await_count == 2 * asked_of_the_locator
 
 
 @pytest.mark.parametrize("refusal", ["policy-block", "page-off-allowed-hosts"])
