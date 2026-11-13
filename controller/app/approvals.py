@@ -100,6 +100,9 @@ _ANOTHER_KEY = (
 )
 # What an approval of each origin authorises, as a refusal to spend it names it.
 _ORIGIN_NAMES: dict[str, str] = {"action": "a browser action", "tool_call": "a tool call"}
+# What reading a stored time raises when it holds none (_parse_timestamp). OSError: a time with no offset is read as
+# local time, which Windows refuses before 1970 or far ahead.
+_UNREADABLE_TIME = (ValueError, OverflowError, OSError)
 
 
 def _text_sha256(text: str) -> str:
@@ -301,10 +304,10 @@ class ApprovalStore:
             return True  # a spend is final at a start
         try:
             return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
-        except (ValueError, OverflowError, OSError):
+        except _UNREADABLE_TIME:
             # Neither record can be shown to be the later one, and the rule errs toward rejected. Raised from here,
             # the error ended the catch-up, and the start went on with the file records alone: all of them, this
-            # one read by its file record. OSError: Windows, for a time with no offset before 1970 or far ahead.
+            # one read by its file record.
             logger.warning(
                 "approval %s: a time of its file or SQLite record cannot be read, so the rejection stands", record.id
             )
@@ -429,8 +432,7 @@ class ApprovalStore:
             return False
         try:
             return self._parse_timestamp(approval.decided_at) + self.approval_ttl <= datetime.now(UTC)
-        except (ValueError, OverflowError, OSError):
-            # OSError: a time with no offset is read as local time, which Windows refuses before 1970 or far ahead.
+        except _UNREADABLE_TIME:
             if approval.id not in self._sweep_unreadable:
                 self._sweep_unreadable.add(approval.id)
                 logger.warning("kept the arguments of approval %s: its decision time cannot be read", approval.id)
@@ -519,8 +521,7 @@ class ApprovalStore:
             if record.decided_at is None:
                 raise ValueError("no decided_at")
             age = now - self._parse_timestamp(record.decided_at)
-        except (ValueError, OverflowError, OSError):
-            # OSError: a time with no offset is read as local time, which Windows refuses before 1970 or far ahead.
+        except _UNREADABLE_TIME:
             if record.id not in self._retention_unreadable:
                 self._retention_unreadable.add(record.id)
                 logger.warning(
@@ -1232,9 +1233,16 @@ class ApprovalStore:
         than the claim it turns back.
         """
         now = utc_now()
-        if cls._parse_timestamp(now) > cls._parse_timestamp(stamp):
+        try:
+            stamped = cls._parse_timestamp(stamp)
+            later = stamped + timedelta(microseconds=1)
+        except _UNREADABLE_TIME:
+            # A record whose time cannot be read is no later than now: raised, it could be neither approved nor
+            # rejected, nor asked for again once its field read otherwise, and a pending one stayed so for good (the
+            # retention keeps every pending approval).
             return now
-        later = cls._parse_timestamp(stamp) + timedelta(microseconds=1)
+        if cls._parse_timestamp(now) > stamped:
+            return now
         return later.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @staticmethod

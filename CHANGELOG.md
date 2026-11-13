@@ -1345,8 +1345,10 @@ All notable changes to auto-browser are documented here.
   file store's by their `updated_at`: one that cannot be read ended the comparison for every record, the controller
   ran on the file records alone (logged as a fallback), and that approval read as its file record had it, approved
   where SQLite held the rejection. The rejection now stands, the log names the record, and SQLite stays in use.
-  An `updated_at` that cannot be read still fails a decision on that one record, and an `approved_expires_at` that
-  cannot, a call that presents it.
+  An approve, a reject, the give-back of a claim, and a type asked for again whose field read changed, each on a
+  record whose `updated_at` cannot be read, now stamp it with their own time. The first three failed on that one
+  record, so a pending approval of the kind could be decided by no one while the retention kept it. An
+  `approved_expires_at` that cannot be read still fails a call that presents it.
 - **A tool call that names an approval id the controller does not know is told so.** A governed tool call with an
   `approval_id` no record answers to, and `browser.execute_approval`, `browser.approve_approval` (with
   `AUTONOMOUS_APPROVALS` on) and `browser.reject_approval` for such an id, answered an error whose whole text was

@@ -23,6 +23,8 @@ SESSION = "abc123abc123"
 NOT_A_TIME = "the day before yesterday"
 # No offset, so it is read as local time: Windows raises OSError for one before 1970.
 BEFORE_1970 = "1960-01-01T00:00:00"
+# A time that reads, with no microsecond after it: OverflowError for a stamp later than it.
+LAST_MICROSECOND = "9999-12-31T23:59:59.999999Z"
 
 
 def _ago(**age: float) -> str:
@@ -148,6 +150,34 @@ class CatchUpTests(_Base):
                     any(approval_id in line and "cannot be read" in line for line in logged.output), logged.output
                 )
                 self.store = back
+
+
+class AskedAgainTests(_Base):
+    """The same type asked for again reads its field anew (ApprovalRecord.field_read), and a read that changes it is
+    written, stamped later than the record: a time that could not be read raised there, so the request failed."""
+
+    async def test_a_type_asked_for_again_reads_its_field_whatever_its_time(self) -> None:
+        for unreadable in (NOT_A_TIME, BEFORE_1970, LAST_MICROSECOND):
+            for first, read in (("unread", "plain"), ("plain", "secret")):
+                with self.subTest(updated_at=unreadable, read=(first, read)), _as_windows_reads_it():
+                    self._seeded += 1
+                    action = BrowserActionDecision(
+                        action="type", reason="post", selector=f"#msg-{self._seeded}", text="hi", risk_category="post"
+                    )
+                    asked = await self.store.create_or_reuse_pending(
+                        session_id=SESSION, kind="post", reason="r", action=action, field_read=first
+                    )
+                    record = await self.store.get(asked.id)
+                    record.updated_at = unreadable
+                    await self.store._persist(record)
+
+                    again = await self.store.create_or_reuse_pending(
+                        session_id=SESSION, kind="post", reason="r", action=action, field_read=read
+                    )
+
+                    self.assertEqual((again.id, again.field_read), (asked.id, read))
+                    self.assertEqual((await self.store.get(asked.id)).field_read, read)
+                    self.assertEqual((await self.store.approve(asked.id)).status, "approved")
 
 
 if __name__ == "__main__":
