@@ -15,8 +15,11 @@ MARKER_ATTRIBUTE = "data-auto-browser-target"
 # controls shadow the form's own properties, in this world too: in
 # <form><input name="parentNode"></form>, form.parentNode is that input, so a
 # walk up the tree that read it could be steered onto the element it was
-# looking for. Defines `dom`. In the main world (a selector target's focus
-# check) a page may have replaced one of them: the property is read as it is then.
+# looking for. A document's named elements shadow its properties likewise, in
+# the main world: with <img name="activeElement"> on the page,
+# document.activeElement is that img there. Defines `dom`. In the main world (a
+# selector target's focus check) a page may have replaced one of them: the
+# property is read as it is then.
 _DOM_JS = """const dom = (() => {
   const getter = (proto, name) => {
     const descriptor = Object.getOwnPropertyDescriptor(proto, name);
@@ -33,6 +36,9 @@ _DOM_JS = """const dom = (() => {
   const tagName = getter(Element.prototype, 'tagName');
   const isConnected = getter(Node.prototype, 'isConnected');
   const ownerDocument = getter(Node.prototype, 'ownerDocument');
+  const nodeType = getter(Node.prototype, 'nodeType');
+  const documentActive = getter(Document.prototype, 'activeElement');
+  const shadowActive = getter(ShadowRoot.prototype, 'activeElement');
   const dom = {
     // The element above: the parent element, or the host of the shadow root the element is in.
     up(el) {
@@ -46,6 +52,12 @@ _DOM_JS = """const dom = (() => {
       return false;
     },
     root: method(Node.prototype, 'getRootNode'),
+    // The focused element of a root, a document or a shadow root: null in the root of a tree that is in neither.
+    active(root) {
+      const type = nodeType.call(root);
+      if (type === 9) return documentActive.call(root);
+      return type === 11 && root.host ? shadowActive.call(root) : null;
+    },
     shadowRoot: (el) => shadowRoot.call(el),
     tag: (el) => tagName.call(el).toUpperCase(),
     // Attached, and to this document: one a same-origin frame adopted has the frame's box.
@@ -438,9 +450,9 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # a selector target, without it.
 ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
   {_DOM_JS}
-  let active = dom.root(el).activeElement;
-  for (let root = active && dom.shadowRoot(active); root && root.activeElement; root = dom.shadowRoot(active)) {{
-    active = root.activeElement;
+  let active = dom.active(dom.root(el));
+  for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
+    active = dom.active(root);
   }}
   if (!active) return false;
   if (refuseFrames && active !== el && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) return false;
@@ -465,37 +477,44 @@ _FIELD_ATTRIBUTES_JS = """(node) => {
 # root, through open shadow roots, where it is the element or inside it. Not a frame: keys sent then go to its
 # document's own focused node, which this document cannot hold. A blur or a focus on the node from then on says
 # focus left it, though it came back (a field whose key sent focus to a password field, whose own key sent it back).
+# So does a focusin in the node's own open shadow root: focus that goes from the node into its shadow tree and back
+# fires neither a blur nor a focus on it (both ends of the move are the node, seen from outside the tree), and a
+# move into a root further down passes through that root too. A root the node has only since the take was heard by
+# nothing, so it says the same.
 # read(hold): the node's own attributes, as is_sensitive_field reads them, while it is still the innermost focused
 # element of its root and focus never left it; else null. One the page took out of its document is no root's
 # focused element. Run in the main world too, on a locator, for a selector target (see _DOM_JS).
 _HELD_FIELD_JS = f"""{_DOM_JS}
 const held = {{
   focused(from) {{
-    let active = dom.root(from).activeElement;
-    for (let root = active && dom.shadowRoot(active); root && root.activeElement; root = dom.shadowRoot(active)) {{
-      active = root.activeElement;
+    let active = dom.active(dom.root(from));
+    for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
+      active = dom.active(root);
     }}
     return active || null;
   }},
   take(el) {{
-    const hold = {{ node: null, target: el, left: false, listener: null }};
+    const hold = {{ node: null, root: null, target: el, left: false, listener: null }};
     const active = held.focused(el);
     if (!active || !dom.within(active, el) || ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) {{
       return hold;
     }}
     hold.node = active;
+    hold.root = dom.shadowRoot(active);
     hold.listener = () => {{ hold.left = true; }};
     for (const type of ['blur', 'focus']) active.addEventListener(type, hold.listener, true);
+    if (hold.root) hold.root.addEventListener('focusin', hold.listener, true);
     return hold;
   }},
   read(hold) {{
     const node = hold.node;
-    if (!node || hold.left || held.focused(node) !== node) return null;
+    if (!node || hold.left || dom.shadowRoot(node) !== hold.root || held.focused(node) !== node) return null;
     return ({_FIELD_ATTRIBUTES_JS})(node);
   }},
   release(hold) {{
     if (!hold.node) return;
     for (const type of ['blur', 'focus']) hold.node.removeEventListener(type, hold.listener, true);
+    if (hold.root) hold.root.removeEventListener('focusin', hold.listener, true);
   }},
 }};"""
 

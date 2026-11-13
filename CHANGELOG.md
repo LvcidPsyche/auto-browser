@@ -666,7 +666,11 @@ All notable changes to auto-browser are documented here.
   held node that is not the focused one once the text is in, or that lost focus on the way though it has it back:
   a text whose Enter moves focus to another field keeps no preview, nor does one whose field the page replaced
   or took away, one typed by a selector that names a frame (its text goes to a node of the frame's
-  document, which is not held), or one whose Enter submits its form and leaves the page. No read waits for a field
+  document, which is not held), or one whose Enter submits its form and leaves the page. Focus is taken to have
+  left the held node at a blur or a focus on it, at a focus that arrives anywhere in its own open shadow tree (a
+  component that has focus itself and hands it to a field inside it and back hears neither on itself), and where
+  it has a shadow root it did not have when it was held; and the focused element is read through the
+  prototypes' getters, which an element named `activeElement` does not stand in for. No read waits for a field
   once the text is in, so that last type takes about as long as it did in 1.17.0 (by selector, the medians of
   eight runs in Chromium: 2.5 s, 2.6 s in 1.17.0, and 3.1 s with the field found anew for each read, which waited
   for one that was gone). A type whose preview is withheld has a `restricted` receipt with a
@@ -784,6 +788,14 @@ All notable changes to auto-browser are documented here.
   that did not answer was taken to say no, and with the click's time not spent the click ended as `target_moved`
   (409, "the pointer does not find the target") where a page busy one step earlier ended it as the timeout it is
   (`browser_action_failed`, 400). It now ends as that timeout too. Both are retryable.
+- **A type by selector goes in on a page that has an element named `activeElement`.** The check that focus is in
+  the field a selector names runs in the page's own world, and read `activeElement` as a property of the document,
+  which an element of that name stands in for there (an `<img name="activeElement">`). The image was then the
+  focused element whatever had focus, and a `type` by selector into a field beside it ended as `focus_lost`
+  ("Keyboard focus would not stay in the target field, so nothing was typed"), since 1.9.0 (by its code; the
+  probe ran on this release's). The focused element is now read through the prototypes' getters, a document's and
+  a shadow root's, as the other DOM reads of that check are. A type by `element_id` went in before too: its check
+  runs in a world where no element stands in for it.
 - **A call into a page's isolated world no longer fails with an `AttributeError` when another call drops the page's
   session under it.** A call that read the page's frame tree again (after a "No frame for given id found") kept the
   frame it read where another call on the same page had run out of time meanwhile and dropped the session: the world

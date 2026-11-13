@@ -22,7 +22,7 @@ import pytest
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
-from app.browser.element_scripts import ELEMENT_FIELD_RELEASE_SCRIPT
+from app.browser.element_scripts import ELEMENT_FIELD_RELEASE_SCRIPT, ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.element_world import READ
 from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
@@ -430,7 +430,8 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
             f"""() => {{
               const removed = [];
               const node = {{ removeEventListener: (type) => removed.push(type) }};
-              const registry = {{ fieldHolds: new Map([['nonce', {{ node, left: false, listener: () => {{}} }}]]) }};
+              const hold = {{ node, root: node, left: false, listener: () => {{}} }};
+              const registry = {{ fieldHolds: new Map([['nonce', hold]]) }};
               let threw = false;
               try {{
                 ({ELEMENT_FIELD_RELEASE_SCRIPT})(null, 'nonce', registry);
@@ -441,7 +442,198 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
             }}"""
         )
 
-        assert released == {"threw": True, "kept": 0, "removed": ["blur", "focus"]}
+        # The node's two listeners, and the one on its shadow root (here the same stand-in).
+        assert released == {"threw": True, "kept": 0, "removed": ["blur", "focus", "focusin"]}
+
+
+def _assert_shown(records: list[Any], text: str) -> None:
+    *targets, receipt = records
+    for kept in targets:
+        assert kept.get("text_preview") == text and "text_redacted" not in kept, kept
+    assert receipt.evidence_mode == "standard"
+
+
+# A component that takes focus itself (a text box by its role) and keeps a password field in its own open shadow
+# tree: an Enter on the component sends focus to that field, and an Enter there sends it back. Seen from the
+# component's document focus never left the component, so neither a blur nor a focus is fired on it. The field is in
+# the component's shadow root, in a root two down, or in a root the page makes only as the Enter is pressed.
+IN_AND_BACK = (
+    "box.addEventListener(`keydown`, (event) => { if (event.key !== `Enter`) return; event.preventDefault();"
+    " if (event.composedPath()[0] === box) field().focus(); else box.focus(); });"
+)
+OWN_ROOT = "const made = box.attachShadow({mode: `open`}); made.innerHTML = `<input type=password>`;"
+INTO_ITS_OWN_SHADOW_TREE = {
+    "in-its-shadow-root": f"{OWN_ROOT} const field = () => made.firstChild;",
+    "in-a-root-two-down": (
+        "const made = box.attachShadow({mode: `open`}); made.innerHTML = `<span></span>`;"
+        "const deep = made.firstChild.attachShadow({mode: `open`}); deep.innerHTML = `<input type=password>`;"
+        "const field = () => deep.firstChild;"
+    ),
+    "in-a-root-made-as-the-text-goes-in": (
+        "let made = null; const field = () => { if (!made) { made = box.attachShadow({mode: `open`});"
+        " made.innerHTML = `<input type=password>`; } return made.firstChild; };"
+    ),
+}
+
+
+def _component(script: str, head: str = "") -> str:
+    # With a height of its own: observe gives no element_id to a box of none, as it is before it has a shadow root.
+    return (
+        f'<title>login</title>{head}<div id="box" tabindex="0" role="textbox" aria-label="User" '
+        f'style="min-height: 2em"></div><script>const box = document.getElementById(`box`); {script}</script>'
+    )
+
+
+@pytest.mark.parametrize("where", list(INTO_ITS_OWN_SHADOW_TREE))
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_text_whose_enter_moves_focus_into_the_held_nodes_own_shadow_tree_and_back_keeps_no_preview(
+    tmp_path: Path, by: str, where: str
+) -> None:
+    # Gemini 4 Carbon's read of FX9c4 (2): the hold heard a blur or a focus on its node, and a move from a shadow
+    # host into its own shadow tree fires neither on the host. The host had focus again once the text was in, so its
+    # preview kept the password that went to the field inside, under a standard receipt.
+    page = _component(INTO_ITS_OWN_SHADOW_TREE[where] + IN_AND_BACK)
+    async with browser_env(tmp_path, {"/login": page}) as env:
+        session, records = await _typed_into(env, "/login", by, "User", "#box", f"alice\n{TEXT}\n")
+
+        assert await session.page.evaluate("() => field().value") == TEXT
+        assert await session.page.evaluate("() => document.activeElement.id") == "box"
+        _assert_withheld(records)
+        if by == "element_id":
+            assert await _holds_kept(env, session, records[0]["element_id"]) == 0
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_component_that_keeps_focus_itself_shows_its_preview(tmp_path: Path, by: str) -> None:
+    # The control: a shadow tree below the held node withholds nothing by itself. No key moves focus, the component
+    # reads not secret, and the hold's listeners are off again, its shadow root's with them (by selector they are
+    # the page's world's, which the page counts).
+    async with browser_env(tmp_path, {"/login": _component(OWN_ROOT, head=COUNTS_LISTENERS)}) as env:
+        session, records = await _typed_into(env, "/login", by, "User", "#box", "alice")
+
+        _assert_shown(records, "alice")
+        assert await _listening(session) == 0
+
+
+async def test_a_field_in_a_components_shadow_root_that_keeps_focus_shows_its_preview(tmp_path: Path) -> None:
+    # The control: the held node is the field inside the shadow root, which has no shadow tree of its own for the
+    # hold to hear, and the root above it says nothing of it.
+    page = (
+        '<title>note</title><div id="named"></div><script>document.getElementById(`named`)'
+        ".attachShadow({mode: `open`, delegatesFocus: true}).innerHTML = `<input aria-label=Note>`;</script>"
+    )
+    async with browser_env(tmp_path, {"/note": page}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "", "#named", "ordinary note text")
+
+        typed = await session.page.evaluate("() => document.getElementById(`named`).shadowRoot.firstChild.value")
+        assert typed == "ordinary note text"
+        _assert_shown(records, "ordinary note text")
+
+
+# What a page's own world can answer for the focused element in place of it: an image named activeElement is what
+# document.activeElement answers there, and a shadow root can be given an activeElement of its own. Each with the
+# selector a type names its password field by, or what is around it, and how to read the field's value.
+NO_ACTIVE_ELEMENT_OF_ITS_OWN = (
+    '<title>login</title><div id="named"></div><script>const made = document.getElementById(`named`)'
+    ".attachShadow({mode: `open`, delegatesFocus: true}); made.innerHTML = `<input type=password>`;"
+    "Object.defineProperty(made, `activeElement`, {value: null});</script>"
+)
+NOT_THE_FOCUSED_ELEMENT = {
+    "an-image-named-activeElement": (
+        '<title>login</title><label id="named">Secret <input type="password">'
+        '<img name="activeElement" src="data:,"></label>',
+        "#named",
+        "() => document.querySelector('input').value",
+    ),
+    "a-shadow-root-with-an-activeElement-of-its-own": (
+        NO_ACTIVE_ELEMENT_OF_ITS_OWN,
+        "#named",
+        "() => document.getElementById('named').shadowRoot.firstChild.value",
+    ),
+    "a-field-in-such-a-shadow-root": (
+        NO_ACTIVE_ELEMENT_OF_ITS_OWN,
+        "#named input",
+        "() => document.getElementById('named').shadowRoot.firstChild.value",
+    ),
+}
+
+
+@pytest.mark.parametrize("answers", list(NOT_THE_FOCUSED_ELEMENT))
+async def test_a_type_by_selector_holds_the_focused_element_whatever_the_page_answers_for_it(
+    tmp_path: Path, answers: str
+) -> None:
+    # Gemini 4 Carbon's read of FX9c4 (1): by selector the hold and the focus check run in the page's own world, and
+    # read activeElement as a property, which a named element shadows on a document (and a page can define on a
+    # shadow root). The hold was then of the image, or of the component, which read plain, and the preview kept what
+    # went to the password field; and the field in the shadow root never had focus for the check, so nothing was
+    # typed. It is read through the prototypes' getters, as the other DOM reads are.
+    page, selector, value = NOT_THE_FOCUSED_ELEMENT[answers]
+    async with browser_env(tmp_path, {"/login": page}) as env:
+        session, records = await _typed_into(env, "/login", "selector", "", selector, TEXT)
+
+        assert await session.page.evaluate(value) == TEXT
+        _assert_withheld(records)
+
+
+# A note field that hands focus on to a password field in a component's open shadow root, and that shadow root
+# answers the note field for its focused element.
+ANSWERS_FOR_ANOTHER_FIELD = (
+    '<title>login</title><input id="note" aria-label="Note"><div id="host"></div><script>'
+    "const note = document.getElementById(`note`);"
+    "const made = document.getElementById(`host`).attachShadow({mode: `open`});"
+    "made.innerHTML = `<input type=password>`;"
+    "Object.defineProperty(made, `activeElement`, {get: () => note});"
+    "note.addEventListener(`focus`, () => made.firstChild.focus());</script>"
+)
+
+
+async def test_a_type_by_selector_is_refused_where_a_shadow_root_answers_its_field_for_the_focused_one(
+    tmp_path: Path,
+) -> None:
+    # The focus check by selector followed focus down through each shadow root by the root's own activeElement: the
+    # note field had focus by that answer, the type went on, and the text went to the password field, with its
+    # preview kept. Read through the prototype's getter, focus is where it is, and nothing is typed.
+    async with browser_env(tmp_path, {"/login": ANSWERS_FOR_ANOTHER_FIELD}) as env:
+        session_id = await env.create("/login")
+        session = env.manager.sessions[session_id]
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.type(session_id, selector="#note", text=TEXT)
+
+        assert refused.value.code == "focus_lost"
+        assert await session.page.evaluate("() => [note.value, made.firstChild.value]") == ["", ""]
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_type_into_a_field_beside_an_image_named_active_element_goes_in(tmp_path: Path, by: str) -> None:
+    # The focus check by selector read the same property: with such an image on the page the image was the focused
+    # element whatever had focus, so no field beside it could be typed into by selector ("Keyboard focus would not
+    # stay in the target field"). By element_id the check runs in a world where no element stands in for it.
+    page = '<title>note</title><img name="activeElement" src="data:,"><input id="note" aria-label="Note">'
+    async with browser_env(tmp_path, {"/note": page}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_shown(records, "ordinary note text")
+
+
+async def test_an_element_in_neither_a_document_nor_a_shadow_tree_has_no_focus(tmp_path: Path) -> None:
+    # Kept: the root of such an element (a fragment, or a link the page took out, which has a `host` of its own)
+    # has no focused element to ask for, and the check answers no, where asking it as a shadow root throws.
+    async with browser_env(tmp_path, {"/blank": "<title>blank</title>"}) as env:
+        session_id = await env.create("/blank")
+
+        focused = await env.manager.sessions[session_id].page.evaluate(
+            f"""() => {{
+              const inFragment = document.createDocumentFragment().appendChild(document.createElement('input'));
+              const link = document.createElement('a');
+              link.href = 'https://example.com/';
+              const inLink = link.appendChild(document.createElement('input'));
+              return [inFragment, inLink].map((el) => ({ELEMENT_HAS_FOCUS_SCRIPT})(el, false));
+            }}"""
+        )
+
+        assert focused == [False, False]
 
 
 # A note field the page puts in when the test says so (addNote), so its timing is the test's.
