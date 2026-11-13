@@ -13,6 +13,7 @@ from ..models import ShareSessionRequest
 from ..rate_limits import SlidingWindowRateLimiter
 from ..session_ownership import as_system
 from ..session_share import (
+    ShareAuditError,
     ShareRevocationStoreError,
     ensure_links_revocable,
     mint_share_token,
@@ -71,7 +72,10 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
             return await mint_share_token(share_manager, manager.audit, session_id, ttl_seconds=ttl_minutes * 60)
         except ShareRevocationStoreError as cause:
             raise HTTPException(status_code=503, detail=error_text(cause)) from None
+        except ShareAuditError:
+            raise internal_error(logger, "the mint of a share link of session %s was not audited", session_id) from None
         except ValueError as cause:
+            # create_token's refusal of the request; an audit that failed with a ValueError is a ShareAuditError.
             log_hidden_cause(logger, 400, cause, "share failed for session %s", session_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

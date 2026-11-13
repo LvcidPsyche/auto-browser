@@ -148,6 +148,18 @@ class MintAuditTests(_Links):
         self.assertEqual(response.status_code, 500)
         self.assertNotIn("token", response.text)
 
+    def test_a_mint_whose_event_fails_as_a_value_error_is_the_servers_fault_and_no_400(self) -> None:
+        # The audit log's file store reads events.jsonl back as UTF-8 when it trims it: a log that holds bytes that
+        # are not raises this after the event was appended.
+        self.audit.fail_with = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        with self.assertLogs("app.routes.share", level="ERROR") as logs:
+            response = self.client.post(f"/sessions/{SESSION_ID}/share")
+
+        self.assertEqual((response.status_code, response.json()), (500, {"detail": "Internal error"}))
+        self.assertIn(SESSION_ID, logs.output[0])
+        self.assertIn("UnicodeDecodeError", "\n".join(logs.output))
+
 
 class McpMintAuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_mint_over_mcp_writes_the_same_event(self) -> None:
@@ -191,6 +203,27 @@ class McpMintAuditTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(response.isError)
         self.assertNotIn("token", json.dumps(response.model_dump(), default=str).replace("token_", ""))
+
+    async def test_a_mint_over_mcp_whose_event_fails_as_a_value_error_is_no_refusal_of_the_call(self) -> None:
+        manager = _manager(Path("unused.png"))
+        manager.audit.fail_with = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        gateway = McpToolGateway(
+            manager=manager,
+            orchestrator=SimpleNamespace(),
+            job_queue=SimpleNamespace(),
+            tool_profile="full",
+            share_manager=SessionShareManager(secret=SECRET, ttl_minutes=10),
+        )
+
+        with self.assertLogs("app.tool_gateway.gateway", level="ERROR"):
+            response = await gateway.call_tool(
+                McpToolCallRequest(name="browser.share_session", arguments={"session_id": SESSION_ID})
+            )
+
+        self.assertTrue(response.isError)
+        answered = json.dumps(response.model_dump(), default=str)
+        self.assertIn("Tool execution failed", answered)
+        self.assertNotIn("utf-8", answered)
 
 
 class FirstViewAuditTests(_Links):

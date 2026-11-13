@@ -65,6 +65,12 @@ class ShareRevocationStoreError(RuntimeError):
         super().__init__(SHARE_REVOCATIONS_UNAVAILABLE)
 
 
+class ShareAuditError(Exception):
+    """A mint's event could not be written to the audit log, raised from the audit's own error: the server's fault
+    whatever that error's class (the file store's trim raises UnicodeDecodeError, a ValueError, for a log that is not
+    UTF-8), and never a refusal of the caller's request. No token is handed out."""
+
+
 # A link's first view is audited once per token per process: the digests of this many tokens are remembered, and the
 # one viewed longest ago is forgotten first. A forgotten token's next view is audited again.
 SHARE_VIEWED_TOKENS_KEPT = 4096
@@ -420,21 +426,24 @@ async def mint_share_token(share_manager: Any, audit: Any, session_id: str, *, t
     each of which has first checked that its caller may use the session.
 
     The token is returned only once its stamp is in the store (create_token, in a worker thread: it reads and writes
-    the store) and its event is written: a mint that cannot be audited raises, and the token made for it is dropped
-    unseen. The event names the token by its digest (token_digest).
+    the store) and its event is written: a mint that cannot be audited raises ShareAuditError, and the token made
+    for it is dropped unseen. The event names the token by its digest (token_digest).
     """
     token = await asyncio.to_thread(share_manager.create_token, session_id, ttl_seconds=ttl_seconds)
-    await audit.append(
-        event_type=SHARE_MINTED_EVENT,
-        status="ok",
-        action="share_session",
-        session_id=token["session_id"],
-        details={
-            "token_sha256": token_digest(token["token"]),
-            "scope": token["scope"],
-            "expires_at": token["expires_at"],
-        },
-    )
+    try:
+        await audit.append(
+            event_type=SHARE_MINTED_EVENT,
+            status="ok",
+            action="share_session",
+            session_id=token["session_id"],
+            details={
+                "token_sha256": token_digest(token["token"]),
+                "scope": token["scope"],
+                "expires_at": token["expires_at"],
+            },
+        )
+    except Exception as cause:
+        raise ShareAuditError("the mint of a share link was not audited, and no link was handed out") from cause
     return token
 
 
