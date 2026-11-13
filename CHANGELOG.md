@@ -859,6 +859,20 @@ All notable changes to auto-browser are documented here.
   the token by `token_sha256`, its SHA-256, and never hold it. A `share_viewed` event is the `anonymous` operator's
   unless the viewer also proved a named credential, whatever its `X-Operator-Id` header says. "Share links" in
   docs/deployment.md describes both. (AUTH-23)
+- **A share link can be revoked.** A link worked until it expired, up to 24 hours, with no way to end it short of
+  changing `SHARE_TOKEN_SECRET`. `DELETE /sessions/{id}/share`, and `browser.revoke_session_share` over MCP (in the
+  `session_admin` pack, governed as `destructive`), now end every link of a session minted so far: each answers `403`
+  from then on, and a link minted afterwards works. Whoever may use the session may revoke, as for the mint, and a
+  closed session's links can be revoked by its id while its record is kept. A new link says when it was minted, in
+  milliseconds, and a revoke ends the links minted up to its own time. A link minted before this release does not
+  say: it works until it expires, as before, unless its session's links are revoked, which ends it too. Revocations
+  are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, mode `0600`), so a restart does not
+  bring a revoked link back, and each is dropped once no link it ended can still be unexpired. A revoke that cannot
+  be saved revokes nothing and answers `503`. A file that cannot be read at startup is left where it is, and until
+  a mint, a revoke or a restart can read it no link is honoured and a mint or a revoke answers `503`; a file that
+  reads as something the controller did not write is logged, every link minted before then is revoked, and it is
+  written again. A revoke writes `share_revoked` to the audit log. The `full` tool profile lists one tool more, 77
+  without a vision model. (AUTH-23)
 
 ### Fixed
 

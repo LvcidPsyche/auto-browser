@@ -154,6 +154,7 @@ def controller_owned_paths(settings: Any, data_root: Path = DATA_ROOT) -> list[P
         parent(settings.remote_access_info_path),
         parent(settings.mcp_session_store_path),
         parent(settings.cron_store_path),
+        parent(settings.share_revocation_store_path),
         data_root / "browser-sessions",
         data_root / "db",
     ]

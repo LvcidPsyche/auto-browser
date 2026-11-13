@@ -368,7 +368,7 @@ controller serves a selection fixed at startup. `MCP_TOOL_PROFILE` picks a profi
 |---|---|---|---|---|
 | `lean` | `browse` | 7 | about 13 KB | the browsing loop: observe, act, read the page, hand to a person, close |
 | `curated` (default) | `browse`, `sessions`, `tabs`, `downloads`, `auth_profiles`, `wait`, `scripting`, `vision` | 20 (21 with a vision model) | about 29 KB | a browsing agent: adds sessions with options, saved sign-ins, tabs, downloads, waits and `eval_js` |
-| `full` | every pack | 76 (77 with a vision model) | about 79 KB | everything: diagnostics, Witness, admin, the agent queue, the harness |
+| `full` | every pack | 77 (78 with a vision model) | about 83 KB | everything: diagnostics, Witness, admin, the agent queue, the harness |
 
 Sizes are the JSON `tools/list` returns, without a vision model.
 
@@ -392,7 +392,7 @@ tools in the order `tools/list` returns them.
 | `advanced_actions` | full | drag and drop, viewport size | `browser.drag_drop`, `browser.set_viewport` |
 | `storage` | full | cookies, and local and session storage | `browser.get_cookies`, `browser.set_cookies`, `browser.get_local_storage`, `browser.set_local_storage` |
 | `auth_admin` | full | inspecting a saved sign-in's files, saving a session's raw storage state | `browser.get_auth_profile`, `browser.save_auth_state` |
-| `session_admin` | full | attaching to a running Chrome, sharing a session, switching a session to a visible window | `browser.cdp_attach`, `browser.share_session`, `browser.enable_shadow_browse` |
+| `session_admin` | full | attaching to a running Chrome, sharing a session and ending its share links, switching a session to a visible window | `browser.cdp_attach`, `browser.share_session`, `browser.revoke_session_share`, `browser.enable_shadow_browse` |
 | `approvals` | full | listing and deciding approvals over MCP | `browser.list_approvals`, `browser.approve_approval`, `browser.reject_approval`, `browser.execute_approval` |
 | `agent_jobs` | full | the built-in agent queue and its model providers | `browser.list_agent_jobs`, `browser.get_agent_job`, `browser.resume_agent_job`, `browser.discard_agent_job`, `browser.cancel_agent_job`, `browser.queue_agent_step`, `browser.queue_agent_run`, `browser.list_providers` |
 | `proxies` | full | proxy personas | `browser.list_proxy_personas`, `browser.create_proxy_persona`, `browser.delete_proxy_persona` |
@@ -404,7 +404,7 @@ MCP_TOOL_PROFILE=lean                                  # 7 tools, about 13 KB
 MCP_TOOL_PROFILE=lean MCP_TOOL_PACKS=sessions,tabs     # 14 tools
 MCP_TOOL_PACKS=harness                                 # curated + harness: 29 tools, about 38 KB
 MCP_TOOL_PACKS=-scripting                              # curated without eval_js: 19 tools, about 27 KB
-MCP_TOOL_PROFILE=full MCP_TOOL_PACKS=-harness,-cron    # 61 tools, about 64 KB
+MCP_TOOL_PROFILE=full MCP_TOOL_PACKS=-harness,-cron    # 62 tools, about 67 KB
 ```
 
 The rules:

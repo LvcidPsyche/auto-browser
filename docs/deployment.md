@@ -1392,14 +1392,36 @@ or to wait for an approval or a takeover, reads `completed` too, and the agent j
 API token: a signed token that expires after `ttl_minutes` (60 by default, 1440 at most). Whoever holds it can open
 `/share/{token}`, a page that shows the session's screen, URL and title and asks for a new frame every five seconds.
 The link reads nothing else of the session and cannot act on it, and the token is the whole credential: anyone the
-link reaches can watch until it expires. Set `SHARE_TOKEN_SECRET`, or links stop working at each restart (the
-controller then signs with a key it makes at startup).
+link reaches can watch until it expires or is revoked. Set `SHARE_TOKEN_SECRET`, or links stop working at each restart
+(the controller then signs with a key it makes at startup).
 
-The audit log records a link twice, and names it by `token_sha256`, the SHA-256 of the token as the link carries it,
-never by the token: the digest ties a view to its mint and opens nothing.
+`DELETE /sessions/{id}/share` (over MCP, `browser.revoke_session_share`) revokes: every link of that session minted
+so far answers `403` from then on, whatever time it had left, and a link minted afterwards works. Whoever may use the
+session may revoke its links, as for the mint. A closed session's links can be revoked too, by its id, while its
+record is kept: such a link shows nothing live, but still opens the frames that were taken for it until it expires.
+The MCP tool is governed as `destructive`, so a `governed` call of it waits for an operator's approval; the route
+does not.
+
+- A link says when it was minted, and a revoke ends the links minted up to its own time. A link minted before 1.18.0
+  does not say: it works until it expires, as before, unless its session's links are revoked, which ends it too.
+- Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
+  so a restart does not bring a revoked link back. One is dropped, as the file is next written, once it is older
+  than the longest life a link can have: 24 hours, or `SHARE_TOKEN_TTL_MINUTES` where that is longer. A restart
+  without the file brings back the revoked links that have not expired.
+- A revoke that cannot be saved revokes nothing and answers `503`.
+- A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
+  and a mint or a revoke answers `503`, until one of those, or a restart, can read it. A file that reads as
+  something the controller did not write can no longer say which links were revoked: the controller logs an error,
+  revokes every link minted before that moment, and writes the file again.
+
+The audit log records a link's mint, its first view and a revoke. It names a link by `token_sha256`, the SHA-256 of
+the token as the link carries it, never by the token: the digest ties a view to its mint and opens nothing.
 
 - `share_minted` is written by the mint, as the operator who made the link, before the token is answered. A mint
   whose event cannot be written fails, and answers no token.
+- `share_revoked` is written by a revoke, as the operator who made it, with `revoked_before`: the time, in
+  milliseconds, that the session's links are ended up to. The revocation is saved first: a revoke whose event
+  cannot be written answers `500` with the links ended.
 - `share_viewed` is written the first time a valid token is shown something of its session: the page, a frame or a
   frame's image. Once per token while the controller runs: it remembers the 4,096 tokens viewed last, so after a
   restart, or once a token is forgotten, its next view is recorded again. A view whose event cannot be written is
@@ -1417,6 +1439,7 @@ Back up at least:
 - `/data/audit/`
 - `/data/witness/`, whole: the chains with their `*.anchor.json` files, `.anchors-migrated` and `keys/` (since 1.11.2 a chain restored without its anchor fails verification, and receipts verify only against the key that signed them)
 - `/data/crons/` if you use cron jobs
+- `/data/share/` if a share link revoked before the copy must stay revoked after a restore (a link lives 24 hours at most, unless `SHARE_TOKEN_TTL_MINUTES` is longer)
 - `/data/approvals/` if pending approvals and operators' rejections should survive a restore, whole, with its `.tool-call-digest.key` (a glob such as `approvals/*` leaves a dot file out): approvals for tool calls are matched under that key, also when `/data/db/` holds the records, and restored without it they are refused and asked for again, and an operator's rejection of a tool call no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS` (each start then logs a warning with how many pending or approved approvals are kept under the lost key, if there are any, and another with how many operator rejections are, if there are any); a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
 
 ## Cleanup

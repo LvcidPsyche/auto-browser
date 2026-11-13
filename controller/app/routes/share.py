@@ -9,7 +9,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
 from ..session_ownership import as_system
-from ..session_share import mint_share_token
+from ..session_share import (
+    ShareRevocationStoreError,
+    ensure_links_revocable,
+    mint_share_token,
+    revoke_share_links,
+)
+from ..utils import error_text
 from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, log_hidden_cause, require_safe_segment
 
 logger = logging.getLogger(__name__)
@@ -43,9 +49,23 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         ttl_minutes = payload.ttl_minutes if payload is not None else 60
         try:
             return await mint_share_token(share_manager, manager.audit, session_id, ttl_seconds=ttl_minutes * 60)
+        except ShareRevocationStoreError as cause:
+            raise HTTPException(status_code=503, detail=error_text(cause)) from None
         except ValueError as cause:
             log_hidden_cause(logger, 400, cause, "share failed for session %s", session_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
+
+    @router.delete("/sessions/{session_id}/share")
+    async def revoke_session_share(session_id: str) -> dict[str, Any]:
+        try:
+            await ensure_links_revocable(manager, session_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        try:
+            return await revoke_share_links(share_manager, manager.audit, session_id)
+        except ShareRevocationStoreError as cause:
+            # Its fixed text: the path and the cause are in the log, where the store wrote them.
+            raise HTTPException(status_code=503, detail=error_text(cause)) from None
 
     # The /share/{token}/... routes are exempt from the bearer token
     # (app/middleware/http.py): the signed, expiring share token *is* the

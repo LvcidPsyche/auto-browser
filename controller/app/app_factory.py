@@ -84,6 +84,7 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
     share_manager = SessionShareManager(
         secret=settings.share_token_secret,
         ttl_minutes=settings.share_token_ttl_minutes,
+        revocations_path=settings.share_revocation_store_path,
     )
     vision_targeter = VisionTargeter.from_settings(settings)
     metrics = MetricsRecorder(enabled=settings.metrics_enabled)

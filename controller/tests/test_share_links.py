@@ -25,6 +25,8 @@ from app.session_share import SHARE_MINTED_EVENT, SHARE_VIEWED_EVENT, SessionSha
 from app.tool_gateway import McpToolGateway
 
 SESSION_ID = "session-1"
+CLOSED_SESSION_ID = "session-closed"
+SECRET = "a-secret-for-tests"
 
 
 class _Audit:
@@ -49,9 +51,16 @@ def _manager(frame: Path) -> SimpleNamespace:
             raise KeyError(session_id)
         return SimpleNamespace(id=SESSION_ID)
 
+    async def get_session_record(session_id: str) -> dict[str, Any]:
+        # A session that is live, or closed with its record kept.
+        if session_id not in (SESSION_ID, CLOSED_SESSION_ID):
+            raise KeyError(session_id)
+        return {"id": session_id}
+
     snapshot = {"url": "https://example.com/", "title": "Example", "screenshot_path": str(frame)}
     return SimpleNamespace(
         get_session=AsyncMock(side_effect=get_session),
+        get_session_record=AsyncMock(side_effect=get_session_record),
         share_snapshot=AsyncMock(return_value=snapshot),
         audit=_Audit(),
         settings=SimpleNamespace(force_governed_approvals=False),
@@ -65,13 +74,14 @@ class _Links(unittest.TestCase):
     def setUp(self) -> None:
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        artifact_root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-        (artifact_root / SESSION_ID).mkdir()
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        artifact_root = self.root / "artifacts"
+        (artifact_root / SESSION_ID).mkdir(parents=True)
         self.frame = artifact_root / SESSION_ID / "20260101T000000000000Z-share-frame.png"
         self.frame.write_bytes(b"png")
         self.manager = _manager(self.frame)
         self.audit: _Audit = self.manager.audit
-        self.share_manager = SessionShareManager(secret="a-secret-for-tests", ttl_minutes=10)
+        self.share_manager = self.new_share_manager()
         api = FastAPI()
         api.include_router(
             create_share_router(
@@ -81,6 +91,9 @@ class _Links(unittest.TestCase):
             )
         )
         self.client = self.stack.enter_context(TestClient(api, raise_server_exceptions=False))
+
+    def new_share_manager(self) -> SessionShareManager:
+        return SessionShareManager(secret=SECRET, ttl_minutes=10)
 
     def mint(self, session_id: str = SESSION_ID) -> str:
         response = self.client.post(f"/sessions/{session_id}/share", json={"ttl_minutes": 5})
@@ -136,7 +149,7 @@ class McpMintAuditTests(unittest.IsolatedAsyncioTestCase):
             orchestrator=SimpleNamespace(),
             job_queue=SimpleNamespace(),
             tool_profile="full",
-            share_manager=SessionShareManager(secret="a-secret-for-tests", ttl_minutes=10),
+            share_manager=SessionShareManager(secret=SECRET, ttl_minutes=10),
         )
 
         response = await gateway.call_tool(
@@ -160,7 +173,7 @@ class McpMintAuditTests(unittest.IsolatedAsyncioTestCase):
             orchestrator=SimpleNamespace(),
             job_queue=SimpleNamespace(),
             tool_profile="full",
-            share_manager=SessionShareManager(secret="a-secret-for-tests", ttl_minutes=10),
+            share_manager=SessionShareManager(secret=SECRET, ttl_minutes=10),
         )
 
         with self.assertLogs("app.tool_gateway.gateway", level="ERROR"):
@@ -280,7 +293,7 @@ class FirstViewAuditTests(_Links):
 
 class ConcurrentFirstViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_views_that_arrive_together_write_one_event(self) -> None:
-        share_manager = SessionShareManager(secret="a-secret-for-tests", ttl_minutes=10)
+        share_manager = SessionShareManager(secret=SECRET, ttl_minutes=10)
         token = share_manager.create_token(SESSION_ID)["token"]
         writing, release = asyncio.Event(), asyncio.Event()
         events: list[dict[str, Any]] = []

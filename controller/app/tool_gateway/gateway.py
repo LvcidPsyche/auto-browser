@@ -51,7 +51,7 @@ from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..run_as import controller_user_status
 from ..session_ownership import verified_operator
-from ..session_share import mint_share_token
+from ..session_share import ensure_links_revocable, mint_share_token, revoke_share_links
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
@@ -95,6 +95,7 @@ from ..tool_inputs import (
     ReadDownloadInput,
     ReadinessCheckInput,
     ResumeAgentJobInput,
+    RevokeSessionShareInput,
     SaveAuthProfileInput,
     SaveAuthStateInput,
     SaveMemoryProfileInput,
@@ -1384,6 +1385,12 @@ class McpToolGateway:
         return await mint_share_token(
             self.share_manager, self.manager.audit, payload.session_id, ttl_seconds=payload.ttl_minutes * 60
         )
+
+    async def _revoke_session_share(self, payload: RevokeSessionShareInput) -> dict[str, Any]:
+        if self.share_manager is None:
+            raise RuntimeError("Session sharing is not configured")
+        await ensure_links_revocable(self.manager, payload.session_id)
+        return await revoke_share_links(self.share_manager, self.manager.audit, payload.session_id)
 
     async def _enable_shadow_browse(self, payload: ShadowBrowseInput) -> dict[str, Any]:
         return await self.manager.enable_shadow_browse(payload.session_id)

@@ -144,6 +144,7 @@ PACK_OF = {
     "browser.save_auth_state": "auth_admin",
     "browser.cdp_attach": "session_admin",
     "browser.share_session": "session_admin",
+    "browser.revoke_session_share": "session_admin",
     "browser.enable_shadow_browse": "session_admin",
     "browser.list_approvals": "approvals",
     "browser.approve_approval": "approvals",
@@ -343,7 +344,7 @@ class SelectionTests(unittest.TestCase):
 class PackCatalogTests(unittest.TestCase):
     def test_every_tool_is_in_the_pinned_pack(self) -> None:
         packs = {name: spec.pack for name, spec in _all_specs().items()}
-        self.assertEqual(len(PACK_OF), 77)
+        self.assertEqual(len(PACK_OF), 78)
         self.assertEqual(packs, PACK_OF)
         self.assertEqual(set(packs.values()), set(PACKS))
 
@@ -381,7 +382,7 @@ class GatewaySelectionTests(unittest.TestCase):
 
     def test_full_serves_every_tool_in_registration_order(self) -> None:
         every = list(_all_specs())
-        self.assertEqual(len(every), 77)
+        self.assertEqual(len(every), 78)
         self.assertEqual(_names(_gateway(tool_profile="full", vision_targeter=object())), every)
         self.assertEqual(
             _names(_gateway(tool_profile="full")), [name for name in every if name != "browser.find_by_vision"]

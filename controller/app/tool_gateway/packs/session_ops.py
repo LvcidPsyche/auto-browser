@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from ...tool_inputs import CdpAttachInput, ForkSessionInput, ShadowBrowseInput, ShareSessionInput
+from ...tool_inputs import (
+    CdpAttachInput,
+    ForkSessionInput,
+    RevokeSessionShareInput,
+    ShadowBrowseInput,
+    ShareSessionInput,
+)
 from ..registry import ToolSpec
 
 
@@ -50,6 +56,18 @@ def register(registry, gateway):
             handler=gateway._share_session,
             pack="session_admin",
             governed_kind="write",
+        ),
+        ToolSpec(
+            name="browser.revoke_session_share",
+            description=(
+                "End every share link of a session that has been minted so far: each is refused from then on, "
+                "whatever time it had left. A link minted afterwards works. "
+                "Name a closed session by its id to end the links that still open its frames."
+            ),
+            input_model=RevokeSessionShareInput,
+            handler=gateway._revoke_session_share,
+            pack="session_admin",
+            governed_kind="destructive",
         ),
         ToolSpec(
             name="browser.enable_shadow_browse",

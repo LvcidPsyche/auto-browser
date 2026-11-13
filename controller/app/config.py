@@ -485,6 +485,9 @@ class Settings(BaseSettings):
     # Shared session links
     share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET", repr=False)
     share_token_ttl_minutes: int = Field(60, alias="SHARE_TOKEN_TTL_MINUTES")
+    # Which sessions' links were revoked, and when (DELETE /sessions/{id}/share): kept so a restart does not bring a
+    # revoked link back.
+    share_revocation_store_path: str = Field("/data/share/revocations.json", alias="SHARE_REVOCATION_STORE_PATH")
 
     model_config = SettingsConfigDict(
         env_file=".env",

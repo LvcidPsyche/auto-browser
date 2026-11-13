@@ -69,6 +69,7 @@ for _name, _relative in {
     "MESH_IDENTITY_DIR": "mesh/identity",
     "MESH_PEERS_PATH": "mesh/peers.json",
     "CRON_STORE_PATH": "crons/crons.json",
+    "SHARE_REVOCATION_STORE_PATH": "share/revocations.json",
     "MCP_SESSION_STORE_PATH": "mcp/sessions.json",
     "COMPLIANCE_MANIFEST_PATH": "compliance-manifest.json",
     "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",

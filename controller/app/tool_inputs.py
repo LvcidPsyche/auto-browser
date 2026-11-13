@@ -640,6 +640,10 @@ class ShareSessionInput(SessionIdInput):
     ttl_minutes: int = Field(default=60, ge=1, le=1440, description="How long the share link works.")
 
 
+class RevokeSessionShareInput(SessionIdInput):
+    """End every share link of one session that has been minted so far."""
+
+
 class ShadowBrowseInput(SessionIdInput):
     pass
 
