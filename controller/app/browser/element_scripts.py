@@ -52,11 +52,20 @@ _DOM_JS = """const dom = (() => {
       return false;
     },
     root: method(Node.prototype, 'getRootNode'),
-    // The focused element of a root, a document or a shadow root: null in the root of a tree that is in neither.
+    // The focused element of a root, a document or a shadow root: null in the root of a tree that is in neither (a
+    // fragment, or an element the page took out of its tree). Whether a root is a shadow root is not read off the root:
+    // a page can give its own open shadow root a `host` (as it can an activeElement), which read as a property made the
+    // walk stop at the component. The prototype's getter is asked instead, and it throws for a fragment that is no
+    // shadow root, which has no focused element.
     active(root) {
       const type = nodeType.call(root);
       if (type === 9) return documentActive.call(root);
-      return type === 11 && root.host ? shadowActive.call(root) : null;
+      if (type !== 11) return null;
+      try {
+        return shadowActive.call(root);
+      } catch (error) {
+        return null;
+      }
     },
     shadowRoot: (el) => shadowRoot.call(el),
     tag: (el) => tagName.call(el).toUpperCase(),

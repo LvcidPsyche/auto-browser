@@ -538,6 +538,16 @@ NO_ACTIVE_ELEMENT_OF_ITS_OWN = (
     ".attachShadow({mode: `open`, delegatesFocus: true}); made.innerHTML = `<input type=password>`;"
     "Object.defineProperty(made, `activeElement`, {value: null});</script>"
 )
+# A shadow root that gives itself a `host` of its own, which a page can do to its open shadow root as it can give it an
+# activeElement; and the same shadow root with nothing of its own, for the control.
+SHADOW_ROOT_WITH_A_PASSWORD = (
+    '<title>login</title><div id="named"></div><script>const made = document.getElementById(`named`)'
+    ".attachShadow({mode: `open`, delegatesFocus: true});"
+    " made.innerHTML = `<input type=password>`;{own}</script>"
+)
+A_HOST_OF_ITS_OWN = SHADOW_ROOT_WITH_A_PASSWORD.replace("{own}", "Object.defineProperty(made, `host`, {value: null});")
+NOTHING_OF_ITS_OWN = SHADOW_ROOT_WITH_A_PASSWORD.replace("{own}", "")
+IN_THE_SHADOW_ROOT = "() => document.getElementById('named').shadowRoot.firstChild.value"
 NOT_THE_FOCUSED_ELEMENT = {
     "an-image-named-activeElement": (
         '<title>login</title><label id="named">Secret <input type="password">'
@@ -555,6 +565,10 @@ NOT_THE_FOCUSED_ELEMENT = {
         "#named input",
         "() => document.getElementById('named').shadowRoot.firstChild.value",
     ),
+    "a-field-in-a-shadow-root-with-a-host-of-its-own": (A_HOST_OF_ITS_OWN, "#named input", IN_THE_SHADOW_ROOT),
+    # The control: the same page with nothing of its own on the shadow root.
+    "a-shadow-root-with-nothing-of-its-own": (NOTHING_OF_ITS_OWN, "#named", IN_THE_SHADOW_ROOT),
+    "a-field-in-a-shadow-root-with-nothing-of-its-own": (NOTHING_OF_ITS_OWN, "#named input", IN_THE_SHADOW_ROOT),
 }
 
 
@@ -572,6 +586,41 @@ async def test_a_type_by_selector_holds_the_focused_element_whatever_the_page_an
         session, records = await _typed_into(env, "/login", "selector", "", selector, TEXT)
 
         assert await session.page.evaluate(value) == TEXT
+        _assert_withheld(records)
+
+
+async def test_a_type_by_selector_into_a_component_whose_shadow_root_has_a_host_of_its_own_keeps_no_preview(
+    tmp_path: Path,
+) -> None:
+    # The focus walk read the root's `host` as a property, and the page's own null stopped it at the component: the
+    # hold was of the component, which reads plain, and the preview kept what went to the password field inside. The
+    # walk now goes on to the field. The component itself is then refused or withheld, never typed with its preview
+    # kept: the walk up from the field to the component (`up`) still reads `host` as a property, so by selector it
+    # does not find the field in the component and refuses (focus_lost), where one by the field's own selector goes in.
+    async with browser_env(tmp_path, {"/login": A_HOST_OF_ITS_OWN}) as env:
+        try:
+            session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
+        except BrowserActionError as refused:
+            assert refused.code == "focus_lost"
+            (session,) = env.manager.sessions.values()
+            assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == "", "a refused type typed nothing"
+        else:
+            assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == TEXT
+            _assert_withheld(records)
+
+
+async def test_a_type_by_element_id_is_the_same_where_a_shadow_root_has_a_host_of_its_own(tmp_path: Path) -> None:
+    # By element_id the focus walk runs in the isolated world, which does not see what the page defined on the shadow
+    # root in its own: the property changes nothing there, as it changed the type by selector above. A component the
+    # page lists by its role, whose shadow root delegates focus to a password field.
+    page = _component(
+        "const made = box.attachShadow({mode: `open`, delegatesFocus: true});"
+        " made.innerHTML = `<input type=password>`; Object.defineProperty(made, `host`, {value: null});"
+    )
+    async with browser_env(tmp_path, {"/login": page}) as env:
+        session, records = await _typed_into(env, "/login", "element_id", "User", "#box", TEXT)
+
+        assert await session.page.evaluate("() => box.shadowRoot.firstChild.value") == TEXT
         _assert_withheld(records)
 
 
