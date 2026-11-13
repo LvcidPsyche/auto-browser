@@ -413,7 +413,12 @@ All notable changes to auto-browser are documented here.
   Two lines passed the error to logging behind a fallback (`exc.strerror or exc`), where the source test did not
   look: the cleanup sweep's `could not handle` line of an entry under the artifact, upload or auth root, and the line
   of a generated token file whose mode could not be checked. Each writes the error's text quoted and cut now, the OS
-  error whole (`"[Errno 13] Permission denied: '/data/uploads/a.bin'"`) where it wrote the reason alone. The line
+  error whole (`"[Errno 13] Permission denied: '/data/uploads/a.bin'"`) where it wrote the reason alone. The
+  sweep's line wrote the entry's path as it came as well, and an entry is named as whoever wrote it chose (a member
+  of an imported auth profile archive keeps its name, a line break or an ESC in it): the path is quoted and cut as
+  the error is, and the line reads
+  `cleanup sweep could not handle '/data/uploads/a.bin': "[Errno 13] Permission denied: '/data/uploads/a.bin'"`.
+  The line
   of an isolated session's directory that could not be removed named the first entry left, a file of the browser's
   profile or downloads, and its error as they came: both are quoted and cut.
   The lines that cut an error's text at 200 or 300 characters as it came, a line break and an ESC in it, now quote

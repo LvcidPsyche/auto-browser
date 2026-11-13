@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterable
 
 from .config import Settings
-from .utils import UTC, error_text_for_log
+from .utils import UTC, error_text_for_log, quoted_for_log
 
 if TYPE_CHECKING:
     from .approvals import ApprovalStore
@@ -244,7 +245,10 @@ class MaintenanceService:
             return
         seen.add(path)
         stats.errors += 1
-        logger.warning("cleanup sweep could not handle %s: %s", path, error_text_for_log(exc))
+        # The path too: an entry's name is whatever was written there (an imported auth profile archive's member).
+        logger.warning(
+            "cleanup sweep could not handle %s: %s", quoted_for_log(os.fspath(path)), error_text_for_log(exc)
+        )
 
     def _cleanup_root(self, root: Path, retention_hours: float, protected_roots: list[Path]) -> CleanupStats:
         stats = CleanupStats(root=str(root), retention_hours=retention_hours)

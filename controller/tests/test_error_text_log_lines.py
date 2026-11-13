@@ -24,7 +24,7 @@ import logging
 import re
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -36,6 +36,7 @@ from app.action_errors import BrowserUnreachableError
 from app.browser import prefetch
 from app.browser.request_gate import RequestGate
 from app.browser.services import runtime
+from app.browser.services.auth_profiles import BrowserAuthProfileService
 from app.browser.services.sessions import BrowserSessionService
 from app.maintenance import CleanupStats, MaintenanceService
 from app.session_store import FileSessionStore
@@ -262,8 +263,10 @@ class CutLinesAreQuotedTests(unittest.IsolatedAsyncioTestCase):
 
     def test_the_line_of_a_cleanup_entry_that_could_not_be_handled(self) -> None:
         # Passed to logging as a fallback (the error's strerror, or the error where it has none), either as it came.
+        # Now the error whole: an OSError's text begins with its errno, which its strerror alone does not hold.
         path = Path("uploads") / "a.bin"
-        for failed in (OSError(13, FORGED), RuntimeError(FORGED)):
+        named = f"cleanup sweep could not handle {str(path)!r}: "
+        for failed, text in ((OSError(13, FORGED), f"[Errno 13] {FORGED}"), (RuntimeError(FORGED), FORGED)):
             with self.subTest(failed=type(failed).__name__):
                 stats = CleanupStats(root="uploads", retention_hours=1)
                 with self.assertLogs("app.maintenance", "WARNING") as logged:
@@ -271,7 +274,44 @@ class CutLinesAreQuotedTests(unittest.IsolatedAsyncioTestCase):
 
                 (written,) = _written(logged.records)
                 self.assertEqual(stats.errors, 1)
-                self.assert_one_line(written, f"cleanup sweep could not handle {path}: '")
+                self.assert_one_line(written, named + "'")
+                self.assertEqual(
+                    written, f"{named}{text[:MAX_LOGGED_PATH_CHARS]!r}... (cut from {len(text)} characters)"
+                )
+
+    def test_the_cleanup_line_writes_an_os_error_with_its_errno_its_reason_and_its_file(self) -> None:
+        # The line as the CHANGELOG gives it.
+        path = PurePosixPath("/data/uploads/a.bin")
+        failed = PermissionError(13, "Permission denied", str(path))
+
+        with self.assertLogs("app.maintenance", "WARNING") as logged:
+            MaintenanceService._entry_error(CleanupStats(root="/data/uploads", retention_hours=1), path, failed, set())
+
+        self.assertEqual(
+            _written(logged.records),
+            [
+                "cleanup sweep could not handle '/data/uploads/a.bin': "
+                "\"[Errno 13] Permission denied: '/data/uploads/a.bin'\""
+            ],
+        )
+
+    def test_the_cleanup_line_of_an_entry_whose_name_holds_a_line_break_and_an_esc(self) -> None:
+        # The error was guarded, and the path written as it came. An entry's name is whatever was written there: a
+        # member of an imported auth profile archive can hold both, and be as long as the file system lets it.
+        name = "p\nWARNING:app.main:forged by a page\x1b[2J" + "x" * 220
+        self.assertEqual(BrowserAuthProfileService.safe_archive_member_name(f"profile/{name}").name, name)
+        path = PurePosixPath("/data/auth/profiles/profile") / name
+        stats = CleanupStats(root="/data/auth", retention_hours=1)
+
+        with self.assertLogs("app.maintenance", "WARNING") as logged:
+            MaintenanceService._entry_error(stats, path, OSError(13, "Permission denied"), set())
+
+        (written,) = _written(logged.records)
+        self.assert_one_line(written, "cleanup sweep could not handle '/data/auth/profiles/profile/p\\nWARNING:")
+        self.assertEqual(
+            written,
+            f"cleanup sweep could not handle {str(path)[:MAX_LOGGED_PATH_CHARS]!r}...: '[Errno 13] Permission denied'",
+        )
 
     def test_the_line_of_a_token_file_whose_mode_could_not_be_checked(self) -> None:
         def stat(_path: Path) -> None:
