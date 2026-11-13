@@ -1423,6 +1423,12 @@ whichever link the poll came by: a watched session costs one capture in that tim
 token is checked and the session looked up for every poll first, so a poll of a revoked link or of a closed session
 is refused, never answered from a frame taken earlier.
 
+A frame is PII-scrubbed as every screenshot is (see "What PII scrubbing covers, and what it does not"). One that could
+not be (no OCR, or a redaction that failed) is shown as it was captured, the page says so above it, and the poll's
+answer carries `screenshot_pii_scrub: {"applied": false, "reason": ...}` as every other screenshot's result does. With
+`PII_SCRUB_SCREENSHOT_STRICT=true` such a frame is withheld instead: the poll answers `503` with a fixed text that
+names no setting, and the page shows that text in place of the frame.
+
 The audit log records a link's mint, its first view and a revoke. It names a link by `token_sha256`, the SHA-256 of
 the token as the link carries it, never by the token: the digest ties a view to its mint and opens nothing.
 

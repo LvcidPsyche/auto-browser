@@ -49,6 +49,10 @@ def _word_key(block: dict[str, Any]) -> tuple[Any, ...]:
     return block.get("text"), box.get("x"), box.get("y"), box.get("width"), box.get("height")
 
 
+# The result field _scrub_disclosure adds.
+SCRUB_DISCLOSURE = "screenshot_pii_scrub"
+
+
 def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
     """The result field that says a screenshot went out without PII redaction.
 
@@ -56,7 +60,7 @@ def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
     `_scrub_screenshot_if_needed` records the reason on the screenshot dict.
     """
     reason = screenshot.get("pii_scrub_skipped")
-    return {"screenshot_pii_scrub": {"applied": False, "reason": reason}} if reason else {}
+    return {SCRUB_DISCLOSURE: {"applied": False, "reason": reason}} if reason else {}
 
 
 # The unscrubbed-screenshot WARNING's hint, by reason (round 7, item 18). The others (tesseract_not_found, and the
@@ -231,6 +235,7 @@ class BrowserObservationService:
         waited on the viewer and its artifact directory filled with PNGs. This
         holds the lock for one redacted capture and two reads, and keeps only
         recent frames. It does not emit an observe event or touch the audit log.
+        A frame that could not be scrubbed says so as every other screenshot's result does (_scrub_disclosure).
 
         Anyone who holds a link can poll, and several pages can be open on one session: one capture answers every
         poll that arrives while it is taken or within SHARE_FRAME_REUSE_SECONDS of its end (ShareFrame). The session
@@ -259,6 +264,8 @@ class BrowserObservationService:
                 "url": session.page.url,
                 "title": title,
                 "screenshot_path": screenshot["path"],
+                # A viewer is shown the frame all the same, so the page must be able to say it was not scrubbed.
+                **_scrub_disclosure(screenshot),
             }
         await asyncio.to_thread(_prune_share_frames, Path(session.artifact_dir), keep=Path(screenshot["path"]))
         return snapshot

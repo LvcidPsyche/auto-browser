@@ -902,6 +902,15 @@ All notable changes to auto-browser are documented here.
   `browser.delete_proxy_persona`) make one check, so a refused tool call is a tool error (`code: not_permitted`)
   that reads and changes nothing. Unset, every credential may use them as before. See the upgrade note and
   docs/production-hardening.md. (AUTH-32)
+- **A share link's frame says when it could not be PII-scrubbed.** When screenshot scrubbing is on and cannot run
+  (no OCR, or a redaction that failed), a screenshot goes out as captured and its result says so in
+  `screenshot_pii_scrub`, but a share link's frame said nothing: whoever held the link was shown it as any other
+  frame. `GET /share/{token}/observe` now carries the same `screenshot_pii_scrub: {"applied": false, "reason": ...}`,
+  and the share page says above the frame that it is not PII-scrubbed and why, for as long as its frames are not.
+  With `PII_SCRUB_SCREENSHOT_STRICT=true` such a frame is withheld, and the poll answered `500` with an error in the
+  log at every poll; it now answers `503` with a fixed text that says the frame is withheld and names no setting,
+  and writes no line. In place of the frame, the page now shows a refused poll's own text with its status, where it
+  showed only the status. (N9)
 
 ### Fixed
 

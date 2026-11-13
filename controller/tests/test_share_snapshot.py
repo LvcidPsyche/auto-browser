@@ -27,6 +27,11 @@ from app.browser.services import observation as observation_module
 from app.browser.services.observation import SHARE_FRAME_KEEP_SECONDS, SHARE_FRAME_LABEL, BrowserObservationService
 from app.browser_scripts import AB_TITLE_MAX
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
+from app.routes.share import SHARE_FRAME_WITHHELD_DETAIL
+
+# What the OCR answers where it cannot run (no tesseract binary), and what a screenshot's result then says of it.
+NO_OCR = {"available": False, "error": "tesseract_not_found"}
+NOT_SCRUBBED = {"applied": False, "reason": "tesseract_not_found"}
 
 
 class FakePage:
@@ -120,6 +125,25 @@ class ShareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         result = await BrowserObservationService(manager=manager).share_snapshot("session-1")
 
         manager.ocr.extract_from_image.assert_awaited_once_with(result["screenshot_path"])
+
+    async def test_a_frame_that_could_not_be_scrubbed_says_so_as_every_other_screenshot_does(self) -> None:
+        manager = _manager(self.session, scrubbing=True)
+        manager.ocr.extract_from_image.return_value = NO_OCR
+
+        result = await BrowserObservationService(manager=manager).share_snapshot("session-1")
+
+        self.assertEqual(result["screenshot_pii_scrub"], NOT_SCRUBBED)
+        self.assertTrue(Path(result["screenshot_path"]).is_file())
+
+    async def test_a_frame_that_was_scrubbed_or_was_not_to_be_carries_no_such_field(self) -> None:
+        for scrubbing in (True, False):
+            with self.subTest(scrubbing=scrubbing):
+                self.session.share_frame = None
+                service = BrowserObservationService(manager=_manager(self.session, scrubbing=scrubbing))
+
+                result = await service.share_snapshot("session-1")
+
+                self.assertEqual(set(result), {"url", "title", "screenshot_path"})
 
     async def test_the_lock_is_not_held_while_old_frames_are_pruned(self) -> None:
         manager = _manager(self.session)
@@ -339,8 +363,8 @@ class ShareFrameReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["screenshot_path"], first["screenshot_path"])
 
 
-class ShareRouteTests(unittest.TestCase):
-    """Through the real app: the poll must not run the full observation."""
+class ShareApp(unittest.TestCase):
+    """The real app, answering the share routes for one fake session under the token "tok"; no tests of its own."""
 
     def setUp(self) -> None:
         self.stack = ExitStack()
@@ -380,6 +404,20 @@ class ShareRouteTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.stack.close()
 
+    def no_ocr(self, *, strict: bool) -> AsyncMock:
+        """Screenshot scrubbing on with an OCR that cannot run; ``strict`` is PII_SCRUB_SCREENSHOT_STRICT. Returns the
+        OCR's double, whose return_value a test sets to an OCR that can."""
+        scrubber = main_module.manager.pii_scrubber
+        self.stack.enter_context(patch.object(scrubber, "screenshot_enabled", True))
+        self.stack.enter_context(patch.object(scrubber, "screenshot_strict", strict))
+        return self.stack.enter_context(
+            patch.object(main_module.manager.ocr, "extract_from_image", new=AsyncMock(return_value=NO_OCR))
+        )
+
+
+class ShareRouteTests(ShareApp):
+    """Through the real app: the poll must not run the full observation."""
+
     def test_shared_observe_answers_from_a_frame_without_a_full_observation(self) -> None:
         response = self.client.get("/share/tok/observe")
 
@@ -388,6 +426,30 @@ class ShareRouteTests(unittest.TestCase):
         self.assertEqual((body["url"], body["title"]), ("https://example.com/watched", "Watched"))
         self.assertRegex(body["screenshot_url"], rf"^/share/tok/screenshots/.*-{SHARE_FRAME_LABEL}\.png$")
         self.assertEqual(body["session"], {"id": "session-1"})
+        # No word of scrubbing for a frame that went out as it should.
+        self.assertEqual(set(body), {"session", "url", "title", "screenshot_url"})
+        self.assertFalse(self.session.lock.locked())
+
+    def test_a_frame_that_could_not_be_scrubbed_is_answered_with_the_reason_it_was_not(self) -> None:
+        self.no_ocr(strict=False)
+
+        response = self.client.get("/share/tok/observe")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["screenshot_pii_scrub"], NOT_SCRUBBED)
+        # The frame is shown still: the field is what says it went out as captured.
+        (frame,) = self.dir.glob("*.png")
+        self.assertTrue(body["screenshot_url"].endswith(f"/{frame.name}"))
+
+    def test_a_frame_withheld_because_it_could_not_be_scrubbed_is_answered_as_that_and_not_as_a_fault(self) -> None:
+        self.no_ocr(strict=True)
+
+        with self.assertNoLogs("app.routes.share", level="WARNING"):
+            response = self.client.get("/share/tok/observe")
+
+        self.assertEqual((response.status_code, response.json()), (503, {"detail": SHARE_FRAME_WITHHELD_DETAIL}))
+        self.assertEqual(list(self.dir.glob("*.png")), [])
         self.assertFalse(self.session.lock.locked())
 
     def test_two_polls_a_moment_apart_cost_one_capture(self) -> None:

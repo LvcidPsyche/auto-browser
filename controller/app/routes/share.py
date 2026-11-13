@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
+from ..action_errors import SCREENSHOT_WITHHELD, BrowserActionError
+from ..browser.services.observation import SCRUB_DISCLOSURE
 from ..models import ShareSessionRequest
 from ..rate_limits import SlidingWindowRateLimiter
 from ..session_ownership import as_system
@@ -28,6 +30,11 @@ logger = logging.getLogger(__name__)
 SHARE_POLL_LIMIT = 120
 SHARE_POLL_WINDOW_SECONDS = 60
 SHARE_POLL_LIMIT_DETAIL = "This share link is polled too often. Try again shortly."
+# PII_SCRUB_SCREENSHOT_STRICT kept back a frame that could not be scrubbed. The viewer holds no API token: told that
+# and no more, where the error's own text names the setting and how to turn it off.
+SHARE_FRAME_WITHHELD_DETAIL = (
+    "The frame is withheld: it could not be PII-scrubbed, and this controller shows no frame that was not."
+)
 
 
 def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> APIRouter:
@@ -116,11 +123,18 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
             # refuses it, not a 500 whose log line names the host. Not logged as observe's is: the
             # shared page asks again every few seconds for as long as it is open.
             raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
+        except BrowserActionError as cause:
+            if cause.code != SCREENSHOT_WITHHELD:
+                raise internal_error(logger, "shared observe failed") from None
+            # No fault of the server's, and it comes back with every poll: not logged here. /readiness fails its
+            # screenshot_scrubbing check for an OCR that cannot run, and a redaction that failed logged its own
+            # warning.
+            raise HTTPException(status_code=503, detail=SHARE_FRAME_WITHHELD_DETAIL) from None
         except Exception:
             raise internal_error(logger, "shared observe failed") from None
         await _audit_first_view(token, session_id)
         screenshot_path = observation.get("screenshot_path")
-        return {
+        answer = {
             "session": {"id": session_id},
             "url": observation.get("url"),
             "title": observation.get("title"),
@@ -128,6 +142,11 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
                 f"/share/{token}/screenshots/{Path(str(screenshot_path)).name}" if screenshot_path else None
             ),
         }
+        # Present only for a frame that went out as captured, as in every other screenshot's result: the page
+        # says so above it.
+        if SCRUB_DISCLOSURE in observation:
+            answer[SCRUB_DISCLOSURE] = observation[SCRUB_DISCLOSURE]
+        return answer
 
     @router.get("/share/{token}/screenshots/{name}")
     async def shared_screenshot(token: str, name: str) -> FileResponse:
@@ -239,6 +258,11 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         padding: 24px;
         color: #fecaca;
       }
+      .notice {
+        padding: 10px 18px;
+        border-bottom: 1px solid var(--panel-border);
+        color: #fde68a;
+      }
       a {
         color: var(--accent);
       }
@@ -258,6 +282,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
           <div class="status"><strong id="state">Connecting</strong> <span id="detail">Fetching shared observe payload…</span></div>
           <div class="meta" id="updated">Never updated</div>
         </div>
+        <div class="notice" id="scrub" hidden></div>
         <div class="frame" id="frame">
           <div class="meta">Loading screenshot…</div>
         </div>
@@ -273,6 +298,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
       const updatedEl = document.getElementById("updated");
       const urlEl = document.getElementById("url");
       const sessionIdEl = document.getElementById("session-id");
+      const scrubEl = document.getElementById("scrub");
       const safeHttpUrl = (value) => {
         if (!value) return null;
         try {
@@ -301,18 +327,34 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         errorEl.textContent = `Unable to refresh shared session: ${message}`;
         frameEl.replaceChildren(errorEl);
       };
+      // Given for a frame that screenshot scrubbing is on for and could not scrub: it is shown as captured.
+      const showScrubStatus = (scrub) => {
+        scrubEl.hidden = !scrub;
+        scrubEl.textContent = scrub
+          ? `Not PII-scrubbed: this frame is shown as it was captured (${scrub.reason}).`
+          : "";
+      };
+      // The answer's own text where it has one: a frame withheld because it could not be scrubbed says so.
+      const failureText = async (response) => {
+        let detail = null;
+        try {
+          detail = (await response.json()).detail;
+        } catch (_) {}
+        return typeof detail === "string" ? `${detail} (HTTP ${response.status})` : `HTTP ${response.status}`;
+      };
 
       async function refresh() {
         try {
           const response = await fetch(observeUrl, { cache: "no-store" });
           if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+            throw new Error(await failureText(response));
           }
           const payload = await response.json();
           const sessionId = payload.session && payload.session.id ? payload.session.id : "Shared session";
           sessionIdEl.textContent = sessionId;
           imageEl.src = `${payload.screenshot_url}?ts=${Date.now()}`;
           imageEl.alt = payload.title || payload.url || sessionId;
+          showScrubStatus(payload.screenshot_pii_scrub);
           if (!imageEl.isConnected) {
             frameEl.replaceChildren(imageEl);
           }
@@ -322,6 +364,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
           updatedEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
         } catch (error) {
           showFrameError(error.message);
+          showScrubStatus(null);
           stateEl.textContent = "Error";
           detailEl.textContent = "Retrying every 5 seconds";
           updatedEl.textContent = `Last attempt ${new Date().toLocaleTimeString()}`;
