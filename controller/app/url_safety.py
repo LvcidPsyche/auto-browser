@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 from idna import uts46_remap
 
-from .utils import error_text
+from .utils import error_text, quoted_for_log
 
 # WHATWG: strip leading and trailing C0 control-or-space, then remove every
 # ASCII tab and newline from the input before parsing.
@@ -102,22 +102,26 @@ def refuse_another_navigation_host(url: str, *, field_name: str) -> str:
             urllib_mapped = host if not host or host.isascii() else browser_host(host)
         except UnicodeError as error:
             raise ValueError(
-                f"{field_name} writes its host {written!r} with what a browser refuses: {error_text(error)}"
+                f"{field_name} writes its host {quoted_for_log(written)} with what a browser refuses: "
+                f"{error_text(error)}"
             ) from None
         # Beyond case folding and composition (Cherokee capitals, a name written decomposed; casefold also
         # maps the fi ligature, the long s and the micro sign as UTS 46 does, so those are accepted): full-width
         # forms, segmented digits, a dropped ignorable.
         if _folded(mapped) != _folded(written):
             raise ValueError(
-                f"{field_name} writes its host {written!r} in a form a browser reads as another host, {mapped!r}"
+                f"{field_name} writes its host {quoted_for_log(written)} in a form a browser reads as another host, "
+                f"{quoted_for_log(mapped)}"
             )
         if urllib_mapped != mapped:
             raise ValueError(
-                f"{field_name} writes its host {written!r} in a form a browser reads as another host than urllib"
-                f" does ({mapped!r}, not {urllib_mapped!r})"
+                f"{field_name} writes its host {quoted_for_log(written)} in a form a browser reads as another host "
+                f"than urllib does ({quoted_for_log(mapped)}, not {quoted_for_log(urllib_mapped)})"
             )
     if host and _decoded_by_a_browser(host):
-        raise ValueError(f"{field_name} writes its host {host!r} in a form a browser reads as another host")
+        raise ValueError(
+            f"{field_name} writes its host {quoted_for_log(host)} in a form a browser reads as another host"
+        )
     return url
 
 

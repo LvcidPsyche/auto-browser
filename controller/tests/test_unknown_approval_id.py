@@ -106,6 +106,20 @@ class UnknownApprovalIdTests(SpendBase):
             text,
         )
 
+    async def test_an_id_of_60000_characters_is_named_cut(self) -> None:
+        # governed_approval_id is read before any model bounds it, and the answer named the id by its repr, whole: it
+        # came back in the text and again in the structured error.
+        long_id = "0" * 60_000
+
+        answer = await self.call("browser.set_cookies", **GOVERNED_COOKIES, governed_approval_id=long_id)
+
+        text = answer.content[0].text
+        self.assertTrue(answer.isError)
+        named = f"Unknown approval {long_id[:200]!r}... (presented as governed_approval_id): {HELD}"
+        self.assertTrue(text.startswith(named), text[:400])
+        self.assertLess(len(text), 1000)
+        self.assertEqual(answer.structuredContent, {"error": text})
+
     async def test_white_space_round_the_id_of_a_decision_is_still_told(self) -> None:
         # These three tools strip their strings, so the store is asked for the stripped id and its KeyError names
         # that one: compared with the id as it was sent, a pasted id with a line break after it got the bare id back.

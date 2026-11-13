@@ -251,7 +251,7 @@ class ProxyPersonaStore:
         data = self._load()
         # Another operator's persona is reported as missing, so a name leaks nothing.
         if name not in data or not may_use(data[name].get("owner")):
-            raise KeyError(f"Proxy persona not found: {name!r}")
+            raise KeyError(f"Proxy persona not found: {quoted_for_log(name)}")
         return data[name]
 
     def set_persona(
@@ -277,7 +277,7 @@ class ProxyPersonaStore:
         existing = data.get(normalized_name)
         if existing is not None and not may_use(existing.get("owner")):
             # The one place a name is revealed: a single namespace cannot hide a collision.
-            raise PermissionError(f"proxy persona {normalized_name!r} belongs to another operator")
+            raise PermissionError(f"proxy persona {quoted_for_log(normalized_name)} belongs to another operator")
         # An update never changes who owns a persona (nor claims an unowned one); a new
         # persona belongs to its creator when a named credential proved who that is.
         normalized_persona["owner"] = existing["owner"] if existing is not None else verified_operator()
@@ -285,7 +285,7 @@ class ProxyPersonaStore:
         # An entry under this exact key other than the one found is one the store ignores (a typo in "server");
         # the save would overwrite it, so it is refused as a valid entry would be when another operator owns it.
         if key != normalized_name and normalized_name in raw and not may_use(self._owner_of(raw[normalized_name])):
-            raise PermissionError(f"proxy persona {normalized_name!r} belongs to another operator")
+            raise PermissionError(f"proxy persona {quoted_for_log(normalized_name)} belongs to another operator")
         # An update keeps its entry's place in the file and any key an operator added to it by hand; the store's
         # own fields are laid over it.
         entry = {**(raw[key] if key is not None else {}), **normalized_persona}

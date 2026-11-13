@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ..utils import error_text_for_log
+from ..utils import error_text_for_log, quoted_for_log
 from .models import PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ class PeerRegistryFile:
         """Return a peer by node_id; raise KeyError if unknown."""
         self._reload_if_changed()
         if node_id not in self._peers:
-            raise KeyError(f"Unknown peer node_id={node_id!r}")
+            raise KeyError(f"Unknown peer node_id={quoted_for_log(node_id)}")
         return self._with_last_seen(node_id, self._peers[node_id])
 
     def get_optional(self, node_id: str) -> Optional[PeerRecord]:

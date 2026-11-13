@@ -13,6 +13,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.config import Settings
 from app.session_isolation import DockerBrowserNodeProvisioner
@@ -115,6 +116,27 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(logs.output)
         self.assertIn(str(self._session_dir("s2").resolve()), text)
         self.assertRegex(text, r"could not remove|left")
+
+    async def test_the_first_entry_left_is_named_on_one_line(self) -> None:
+        # The line named the first entry rmtree could not remove and its error as they came: a file of the browser's
+        # profile or downloads, by a name the controller did not choose, which the OS error repeats.
+        self._fill("s7")
+        forged = "statement\nWARNING:app.main:forged by a page\x1b[2J.pdf"
+
+        def rmtree(path: Path, onerror) -> None:
+            left = str(Path(path) / "downloads" / forged)
+            onerror(None, left, (PermissionError, PermissionError(13, "Permission denied", left), None))
+
+        with (
+            patch("app.session_isolation.shutil.rmtree", rmtree),
+            self.assertLogs("app.session_isolation", level=logging.WARNING) as logs,
+        ):
+            self.provisioner._remove_runtime_dirs("s7")
+
+        (written,) = [record.getMessage() for record in logs.records]
+        self.assertIn("entries left (first: '", written)
+        self.assertEqual(written.splitlines(), [written], ascii(written))
+        self.assertNotIn("\x1b", written)
 
     async def test_the_orphan_sweep_empties_leftovers_with_no_container(self) -> None:
         # A previous run's session: its container is gone, its profile is still here.

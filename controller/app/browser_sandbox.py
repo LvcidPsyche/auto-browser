@@ -141,7 +141,7 @@ def read_sandbox_state(path: Path) -> dict[str, Any] | None:
             return _unreadable(f"{path} is larger than {STATE_MAX_BYTES} bytes")
         data = os.read(fd, STATE_MAX_BYTES + 1)
     except OSError as exc:
-        return _unreadable(f"{path} could not be read ({exc.strerror or exc})")
+        return _unreadable(f"{path} could not be read ({exc.strerror or error_text(exc)})")
     finally:
         os.close(fd)
     try:

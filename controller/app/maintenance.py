@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterable
 
 from .config import Settings
-from .utils import UTC
+from .utils import UTC, error_text_for_log
 
 if TYPE_CHECKING:
     from .approvals import ApprovalStore
@@ -244,7 +244,7 @@ class MaintenanceService:
             return
         seen.add(path)
         stats.errors += 1
-        logger.warning("cleanup sweep could not handle %s: %s", path, getattr(exc, "strerror", None) or exc)
+        logger.warning("cleanup sweep could not handle %s: %s", path, error_text_for_log(exc))
 
     def _cleanup_root(self, root: Path, retention_hours: float, protected_roots: list[Path]) -> CleanupStats:
         stats = CleanupStats(root=str(root), retention_hours=retention_hours)

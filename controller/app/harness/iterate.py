@@ -16,7 +16,14 @@ from typing import Any, Callable, Iterable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
-from ..utils import error_text_for_log, holds_lone_surrogate, record_json, run_to_completion, without_lone_surrogates
+from ..utils import (
+    error_text_for_log,
+    holds_lone_surrogate,
+    quoted_for_log,
+    record_json,
+    run_to_completion,
+    without_lone_surrogates,
+)
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -424,7 +431,7 @@ class HarnessRunStore:
 
     def run_dir(self, run_id: str) -> Path:
         if not _RUN_ID_RE.fullmatch(run_id):
-            raise ValueError(f"invalid harness run id: {run_id!r}")
+            raise ValueError(f"invalid harness run id: {quoted_for_log(run_id)}")
         return self.runs_root / run_id
 
     def save(self, record: HarnessRunRecord) -> None:

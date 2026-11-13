@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from ..utils import error_text
+from ..utils import error_text, quoted_for_log
 from .identity import NodeIdentity
 from .models import PeerRecord, SignedEnvelope
 
@@ -90,11 +90,11 @@ def verify_envelope(
     # Resolve sender's pinned public key
     if envelope.sender_node_id != expected_peer.node_id:
         raise EnvelopeVerificationError(
-            f"sender_node_id {envelope.sender_node_id!r} != expected {expected_peer.node_id!r}"
+            f"sender_node_id {quoted_for_log(envelope.sender_node_id)} != expected {expected_peer.node_id!r}"
         )
     if expected_recipient_node_id is not None and envelope.recipient_node_id != expected_recipient_node_id:
         raise EnvelopeVerificationError(
-            f"recipient_node_id {envelope.recipient_node_id!r} != expected {expected_recipient_node_id!r}"
+            f"recipient_node_id {quoted_for_log(envelope.recipient_node_id)} != expected {expected_recipient_node_id!r}"
         )
 
     try:

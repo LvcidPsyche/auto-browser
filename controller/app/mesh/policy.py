@@ -294,7 +294,8 @@ class PolicyEvaluator:
 
         if matching_grant is None:
             raise PolicyDenied(
-                f"No grant for capability {request.capability!r} from peer {peer.node_id!r}. Default-deny."
+                f"No grant for capability {quoted_for_log(request.capability)} from peer {peer.node_id!r}. "
+                "Default-deny."
             )
 
         # Run all constraint evaluators

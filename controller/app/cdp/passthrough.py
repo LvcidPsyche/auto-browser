@@ -262,7 +262,7 @@ class CDPPassthrough:
             )
             node_id = result.get("nodeId", 0)
             if node_id == 0:
-                return {"error": f"Selector not found: {selector!r}"}
+                return {"error": f"Selector not found: {quoted_for_log(selector)}"}
 
             # Gather data in parallel conceptually (sequential here for clarity)
             attrs_raw = await self._cdp.send("DOM.getAttributes", {"nodeId": node_id})

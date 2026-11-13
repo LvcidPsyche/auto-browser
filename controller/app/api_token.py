@@ -437,7 +437,7 @@ def _check_the_mode_was_kept(path: Path, name: str) -> str:
             "controller's user can read it.",
             name,
             path,
-            exc.strerror or exc,
+            error_text_for_log(exc),
         )
         return "its mode could not be checked"
     if mode & _GROUP_OR_OTHER_BITS:

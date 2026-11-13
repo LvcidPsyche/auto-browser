@@ -396,6 +396,12 @@ All notable changes to auto-browser are documented here.
   decode is refused as `Malformed DelegationRequest: 1 refused by DelegationRequest: capability: string_type` (the
   delegation manager's own text: the route answers a fixed `403`). The private CLI home's lines and `mesh.peers`'
   line of a peers file it cannot use, which wrote such a text as it came, now quote and cut it.
+  Two lines passed the error to logging behind a fallback (`exc.strerror or exc`), where the source test did not
+  look: the cleanup sweep's `could not handle` line of an entry under the artifact, upload or auth root, and the line
+  of a generated token file whose mode could not be checked. Each writes the error's text quoted and cut now, the OS
+  error whole (`"[Errno 13] Permission denied: '/data/uploads/a.bin'"`) where it wrote the reason alone. The line
+  of an isolated session's directory that could not be removed named the first entry left, a file of the browser's
+  profile or downloads, and its error as they came: both are quoted and cut.
   The lines that cut an error's text at 200 or 300 characters as it came, a line break and an ESC in it, now quote
   it too: the pre-request gate's (a detach of its session, a page's `targetId` read, and the bypass of a page's
   service workers, which wrote the text whole),
@@ -418,6 +424,18 @@ All notable changes to auto-browser are documented here.
   failed while its caller was cancelled (whose repr can hold the error), and the prefetch preference a launched
   browser read back. A `%r` in a log line now writes only the controller's own values and what the operator
   configured.
+  An answer or an error's message that named a caller's or a peer's value by its repr escaped it and wrote it
+  whole. A mesh peer's capability of a kind this node does not route came back whole in the reply that refused it,
+  in its `error` and again in its `result` (`Unknown capability kind`), and an approval id presented as
+  `governed_approval_id`, which no input model bounds, came back in `Unknown approval`. Each such text now quotes
+  the value the same way and cuts it at 200 characters as an unknown MCP method is cut, the mark after the closing
+  quote; a value of 200 characters or fewer reads as it did. They are those two, `No saved auth profile`,
+  `No file ... in the auth directory` (and `in this session's auth directory`, `in the upload directory`), the CDP
+  element read's `Selector not found`, `Invalid cron schedule`, `invalid harness run id`, a memory profile's and a
+  proxy persona's refusals (`not found`, `belongs to another operator`, `collides with the existing profile`,
+  `cannot be read`), the mesh's `Unknown sender node_id`, `nonce replay from sender`, `Unknown peer node_id`,
+  `No grant for capability` and its envelope whose sender or recipient is not the one expected, and the refusals of
+  a URL whose host a browser reads otherwise (`writes its host`).
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,

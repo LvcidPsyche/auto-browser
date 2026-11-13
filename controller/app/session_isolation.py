@@ -1078,7 +1078,14 @@ class DockerBrowserNodeProvisioner:
                     # The helper's host path is built from the validated id, never from a resolved path.
                     self._empty_as_browser_user(client, session_id, Path(session_id))
             failures: list[str] = []
-            shutil.rmtree(resolved, onerror=lambda _func, path, exc: failures.append(f"{path}: {exc[1]}"))
+            # Each quoted and cut: an entry here is the browser's, by a name the controller did not choose, and the
+            # error's text repeats it.
+            shutil.rmtree(
+                resolved,
+                onerror=lambda _func, path, exc: failures.append(
+                    f"{quoted_for_log(path)}: {error_text_for_log(exc[1])}"
+                ),
+            )
             if resolved.exists():
                 left = sum(1 for _ in resolved.rglob("*"))
                 logger.warning(

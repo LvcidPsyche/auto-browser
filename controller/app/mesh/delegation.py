@@ -300,7 +300,7 @@ class DelegationManager:
         sender_id = envelope.sender_node_id
         peer = self._peers.get_optional(sender_id)
         if peer is None:
-            raise DelegationRejected(f"Unknown sender node_id={sender_id!r}")
+            raise DelegationRejected(f"Unknown sender node_id={quoted_for_log(sender_id)}")
 
         # Timestamp window — check before signature verification (cheap, fails fast). Against the clock the nonces
         # expire by, which never moves back (CB3-1): read raw, a clock stepped back put an envelope whose nonce had
@@ -366,7 +366,7 @@ class DelegationManager:
             )
             raise
         if not fresh:
-            raise DelegationReplayError(f"nonce replay from sender={sender_id!r}")
+            raise DelegationReplayError(f"nonce replay from sender={quoted_for_log(sender_id)}")
 
         # Policy evaluation
         try:
@@ -487,4 +487,5 @@ class DelegationManager:
             )
             return {"_mesh_error": True, "error": "session delegation not yet wired", "verb": verb}
 
-        return {"_mesh_error": True, "error": f"Unknown capability kind: {cap!r}"}
+        # Quoted, and cut as an unknown MCP method is: the peer's own text, as long as its body.
+        return {"_mesh_error": True, "error": f"Unknown capability kind: {quoted_for_log(cap)}"}

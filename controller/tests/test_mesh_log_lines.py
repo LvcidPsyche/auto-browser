@@ -447,6 +447,17 @@ def test_the_two_approval_lines_cut_a_peers_text_of_60000_characters(
         assert len(message) < 500 and "capability='tool:xyyy" in message, (len(message), message[:300])
 
 
+def test_a_capability_of_a_kind_the_node_does_not_route_does_not_come_back_whole(mesh) -> None:
+    # The refusal named the capability by its repr, whole: the reply carried a peer's 60,000 characters back, in its
+    # error and again in its result.
+    add_legit_peer(mesh, "other:*")
+
+    reply = _post(mesh, "other:x" + LONG).json()["payload"]
+
+    refusal = "Unknown capability kind: " + repr("other:x" + "y" * 193) + "..."
+    assert (reply["status"], reply["error"], reply["result"]) == ("rejected", refusal, {"error": refusal})
+
+
 def test_a_session_id_that_names_no_record_is_logged_on_one_line_at_debug(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

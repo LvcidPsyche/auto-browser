@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .utils import error_text_for_log
+from .utils import error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +276,7 @@ def fix_ownership(
                 report.changed += 1
                 report.changed_paths.append(relative)
             except OSError as exc:
-                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
 
     def skip(relative: str, st: os.stat_result, root_dev: int) -> bool:
         if st.st_dev != root_dev:
@@ -308,7 +308,7 @@ def fix_ownership(
         except FileNotFoundError:
             return
         except OSError as exc:
-            report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+            report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
             return
         report.examined += 1
         if report.examined % WALK_PROGRESS_EVERY == 0:
@@ -322,7 +322,7 @@ def fix_ownership(
                     report.changed += 1
                     report.changed_paths.append(relative)
                 except OSError as exc:
-                    report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                    report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
             return
         if before_open is not None:
             before_open(relative)
@@ -338,7 +338,7 @@ def fix_ownership(
                 # contents were not looked at, which main() logs once per pass as a WARNING.
                 report.unchecked.append(relative)
             else:
-                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
             return
         try:
             opened = os.fstat(fd)
@@ -356,7 +356,7 @@ def fix_ownership(
                         children.append(entry.name)
                 children.sort()
             except OSError as exc:
-                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
                 return
             errors_before = len(report.errors)
             for child in children:
@@ -376,7 +376,7 @@ def fix_ownership(
     try:
         root_fd = os.open(str(data_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
-        report.errors.append(f"{data_root}: {exc.strerror or exc}")
+        report.errors.append(f"{data_root}: {exc.strerror or error_text(exc)}")
         report.seconds = time.monotonic() - started
         return report
     try:
@@ -427,7 +427,7 @@ def fix_ownership(
                 finally:
                     os.close(parent_fd)
             except OSError as exc:
-                report.errors.append(f"{top}: {exc.strerror or exc}")
+                report.errors.append(f"{top}: {exc.strerror or error_text(exc)}")
         # /data itself last, after everything under it, on the same rule: a stuck entry must not keep the controller
         # from writing into /data unless handing /data over would lock root out of it.
         if not report.errors or root_st.st_mode & ROOT_REOPENS == ROOT_REOPENS:

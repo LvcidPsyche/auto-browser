@@ -8,6 +8,7 @@ from ...action_errors import SessionNotFoundError
 from ...approvals import effect_started, held_for_execution, refused_before_effect
 from ...models import BrowserActionDecision
 from ...session_ownership import may_use
+from ...utils import quoted_for_log
 from .session_creation import SESSION_ID_HEX_DIGITS, is_session_id
 
 if TYPE_CHECKING:
@@ -194,4 +195,5 @@ class BrowserUploadService:
 def _missing_upload(file_path: str) -> str:
     # In the caller's terms: the resolved path under UPLOAD_ROOT means nothing
     # to an agent, and REST answers a bare 404 either way.
-    return f"No file {os.fspath(file_path)!r} in the upload directory (UPLOAD_ROOT); put the file there first."
+    named = quoted_for_log(os.fspath(file_path))
+    return f"No file {named} in the upload directory (UPLOAD_ROOT); put the file there first."

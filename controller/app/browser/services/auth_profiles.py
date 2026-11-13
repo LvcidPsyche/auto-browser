@@ -17,7 +17,15 @@ from urllib.parse import urlparse
 
 from ...audit import get_current_operator
 from ...session_ownership import may_use, verified_operator
-from ...utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, error_text_for_log, replace_retrying, utc_now
+from ...utils import (
+    PRIVATE_FILE_MODE,
+    UTC,
+    atomic_write_text,
+    error_text_for_log,
+    quoted_for_log,
+    replace_retrying,
+    utc_now,
+)
 from ...witness import WitnessActionContext
 from ..page_read import title_or_blank
 
@@ -71,12 +79,12 @@ class UncheckedAuthProfileError(PermissionError):
 def _no_saved_profile(profile_name: str) -> FileNotFoundError:
     # Named for the caller, not by the path under AUTH_ROOT: this is what an agent sees after a mistyped auth_profile.
     return FileNotFoundError(
-        f"No saved auth profile {profile_name!r}. browser.list_auth_profiles lists the saved ones."
+        f"No saved auth profile {quoted_for_log(profile_name)}. browser.list_auth_profiles lists the saved ones."
     )
 
 
 def _no_file_in_auth_root(relative_path: str) -> FileNotFoundError:
-    return FileNotFoundError(f"No file {os.fspath(relative_path)!r} in the auth directory")
+    return FileNotFoundError(f"No file {quoted_for_log(os.fspath(relative_path))} in the auth directory")
 
 
 def _staged_beside(path: Path) -> Path:
@@ -927,7 +935,9 @@ class BrowserAuthProfileService:
         os.makedirs(os.path.dirname(candidate_str), exist_ok=True)
 
         if must_exist and not os.path.exists(candidate_str):
-            raise FileNotFoundError(f"No file {os.fspath(relative_path)!r} in this session's auth directory")
+            raise FileNotFoundError(
+                f"No file {quoted_for_log(os.fspath(relative_path))} in this session's auth directory"
+            )
         return Path(candidate_str)
 
     def storage_state_source(self, relative_path: str) -> Path:

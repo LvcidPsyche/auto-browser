@@ -86,8 +86,8 @@ class MemoryManager:
                     # to "_", so "github.com" and "github_com" share a file.
                     # Saving one merged into the other.
                     raise ValueError(
-                        f"memory profile name {name!r} collides with the existing profile {stored_as!r}; "
-                        "choose another name"
+                        f"memory profile name {quoted_for_log(name)} collides with the existing profile "
+                        f"{quoted_for_log(stored_as)}; choose another name"
                     )
             now = utc_now()
             if existing:
@@ -177,7 +177,7 @@ class MemoryManager:
         # Names the profile as the caller asked for it, never as stored: the
         # stored name of a colliding profile would reveal another operator's.
         if profile is not None and not may_use(profile.owner):
-            raise PermissionError(f"memory profile {name!r} belongs to another operator")
+            raise PermissionError(f"memory profile {quoted_for_log(name)} belongs to another operator")
 
     async def _load(self, name: str) -> MemoryProfile | None:
         """The profile saved under exactly `name`; a file another name maps to is not it."""
@@ -200,8 +200,8 @@ class MemoryManager:
                 # Not the parser's message, which quotes the file, and the file can be another operator's (STORE-36).
                 logger.warning("memory profile file %s cannot be read: %s", path.name, type(exc).__name__)
                 raise ValueError(
-                    f"memory profile {name!r} cannot be read: its file is not a valid profile; fix or remove it "
-                    "in MEMORY_ROOT"
+                    f"memory profile {quoted_for_log(name)} cannot be read: its file is not a valid profile; fix or "
+                    "remove it in MEMORY_ROOT"
                 ) from None
 
         return await asyncio.to_thread(_read_sync)

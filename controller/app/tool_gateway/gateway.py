@@ -719,9 +719,11 @@ class McpToolGateway:
             again = "To get a new approval, repeat the call that needed one without this approval id."
         else:
             again = f"Repeat the call without {named} to ask for a new approval."
+        # The id quoted, and cut as an unknown MCP method is: governed_approval_id is read before any model bounds it,
+        # so it is as long as the call.
         known = (
-            f"Unknown approval {approval_id!r} (presented as {named}): this controller holds no approval of that id "
-            "that this call can use."
+            f"Unknown approval {quoted_for_log(approval_id)} (presented as {named}): this controller holds no "
+            "approval of that id that this call can use."
         )
         if days <= 0:
             return f"{known} {again}"
@@ -876,7 +878,7 @@ class McpToolGateway:
             raise RuntimeError("Memory profiles are not enabled.")
         profile = await self.manager.memory.get(payload.profile_name)
         if profile is None:
-            raise KeyError(f"Memory profile not found: {payload.profile_name!r}")
+            raise KeyError(f"Memory profile not found: {quoted_for_log(payload.profile_name)}")
         return profile.model_dump()
 
     async def _list_memory_profiles(self, _: EmptyInput) -> list[dict[str, Any]]:
