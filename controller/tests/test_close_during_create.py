@@ -80,6 +80,34 @@ class Gate:
         await self.open.wait()
 
 
+class LingeringProcess(FakeProcess):
+    """autossh as a real process ends: after SIGTERM its returncode stays None until it has exited, which it does
+    when the test calls ``exit``. The suite's FakeProcess has exited inside terminate(), so a release of its tunnel
+    takes no time."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signalled = asyncio.Event()
+        self._exited = asyncio.Event()
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.signalled.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.exit(-9)
+
+    def exit(self, returncode: int = 0) -> None:
+        if self.returncode is None:
+            self.returncode = returncode
+        self._exited.set()
+
+    async def wait(self) -> int:
+        await self._exited.wait()
+        return self.returncode
+
+
 class _ACloseWhileTheCreateRuns:
     PRE_REQUEST_BLOCKING: bool
 
@@ -120,9 +148,10 @@ class _ACloseWhileTheCreateRuns:
 
         self.manager._acquire_session_browser = acquire  # type: ignore[method-assign]
         self.processes: list[FakeProcess] = []
+        self.process_type: type[FakeProcess] = FakeProcess  # LingeringProcess, where a release has to take time
 
         async def autossh(*_args: object, **_kwargs: object) -> FakeProcess:
-            self.processes.append(FakeProcess())
+            self.processes.append(self.process_type())
             return self.processes[-1]
 
         # The tunnel's startup grace is held at this gate; a test that wants the tunnel up at once opens it first.
@@ -174,11 +203,12 @@ class _ACloseWhileTheCreateRuns:
         self, session, *, close_reason: str | None = None, context_closes: int = 1
     ) -> None:
         """One teardown, the close's: the tunnel released once and nothing of it left, and the record its own."""
-        tunnels = [] if session.tunnel is None else [session.tunnel]
         self.assertNotIn(session.id, self.manager.sessions)
-        self.assertEqual(self.released, tunnels)
+        # Each autossh started is a tunnel that came up, whoever then released it: one the create released is not
+        # left on the session to ask for.
+        self.assertEqual([tunnel.process for tunnel in self.released], self.processes)
         self.assertEqual((self.broker._tunnels, self.broker._allocated_ports), ({}, set()))
-        self.assertEqual([process.returncode is None for process in self.processes], [False] * len(tunnels))
+        self.assertNotIn(None, [process.returncode for process in self.processes])
         self.assertEqual(self.context.close.await_count, context_closes)
         self.assertEqual(self.release_runtime.await_count, 1)
         record = await self.manager.session_store.get(session.id)
@@ -196,9 +226,87 @@ class _ACloseWhileTheCreateRuns:
         self.tunnel_start.open.set()
 
         await self.assert_answered_closed(create)
-        self.assertIsNotNone(session.tunnel)
+        # Up after the close had looked: released by the create, and taken off the session.
+        self.assertEqual((len(self.released), session.tunnel), (1, None))
         await self.assert_left_as_the_close_made_it(session)
         self.assertEqual(await self.events(), ["session_closed"])
+
+    async def test_a_tunnel_that_comes_up_while_the_close_builds_its_summary_is_not_in_the_closed_record(self) -> None:
+        # The close has looked for the tunnel (none yet) and is building its summary, waiting for the title of a
+        # busy page, when the tunnel comes up. The create releases it, and autossh has not exited yet when the title
+        # answers: the summary took the tunnel for the session's own and up, so the close's answer and its record
+        # named the tunnel's public URL, on a port the release then gives to the next session's tunnel.
+        self.process_type = LingeringProcess
+        title = Gate()
+
+        async def a_busy_pages_title() -> str:
+            await title.hold()
+            return "Fixture Page"
+
+        self.page.title = AsyncMock(side_effect=a_busy_pages_title)
+        create = self.creating()
+        await self.reach(self.tunnel_start)
+        session = self.the_session()
+        # The bound on the title's wait is out of the way: the title answers when this test says, on any runner.
+        with patch("app.browser.services.sessions.PAGE_TITLE_TIMEOUT_SECONDS", _WAIT):
+            close = asyncio.create_task(self.manager.close_session(session.id))
+            await self.reach(title)
+            self.tunnel_start.open.set()
+            (autossh,) = self.processes
+            await asyncio.wait_for(autossh.signalled.wait(), _WAIT)  # the create is releasing the tunnel
+            title.open.set()
+            closed = await asyncio.wait_for(close, _WAIT)
+        autossh.exit()
+        await self.assert_answered_closed(create)
+
+        record = await self.manager.session_store.get(session.id)
+        local = session.takeover_url
+        self.assertEqual((closed["session"]["takeover_url"], record.takeover_url), (local, local))
+        self.assertEqual((closed["session"]["remote_access"]["active"], record.remote_access["active"]), (False, False))
+        await self.assert_left_as_the_close_made_it(session)
+        self.assertEqual(await self.events(), ["session_closed"])
+
+    async def test_a_tunnel_the_create_released_is_not_released_again_by_a_second_close(self) -> None:
+        # An action holds the session's lock on a page that does not answer, so the first close goes on without the
+        # lock: it marks the session, finds no tunnel yet, and is still releasing the runtime (the session is still
+        # registered) when the tunnel comes up and the create releases it. A second close, which waited for the
+        # lock, then found that tunnel on the session and released it again, which drops the reservation of its
+        # port: a newer tunnel may hold it by then.
+        first_teardown = Gate()
+
+        async def release_runtime(_runtime: object) -> None:
+            if not first_teardown.reached.is_set():  # the first close's; whatever a second one does is not held
+                await first_teardown.hold()
+
+        self.release_runtime.side_effect = release_runtime
+        create = self.creating()
+        await self.reach(self.tunnel_start)
+        session = self.the_session()
+        stuck = Gate()
+
+        async def action() -> None:
+            async with session.lock:
+                await stuck.hold()
+
+        self.addCleanup(asyncio.create_task(action()).cancel)
+        await self.reach(stuck)
+        with (
+            patch("app.browser.services.sessions.CLOSE_LOCK_WAIT_SECONDS", 0.05),
+            self.assertLogs("app.browser.services.sessions", level="WARNING"),
+        ):
+            first = asyncio.create_task(self.manager.close_session(session.id))
+            await self.reach(first_teardown)
+        second = asyncio.create_task(self.manager.close_session(session.id))  # waits for the lock
+
+        self.tunnel_start.open.set()
+        await self.assert_answered_closed(create)
+        stuck.open.set()  # the action ends: the second close has the lock, and the session is still registered
+        await asyncio.wait_for(asyncio.gather(second, return_exceptions=True), _WAIT)
+        first_teardown.open.set()
+        await asyncio.wait_for(first, _WAIT)
+
+        self.assertEqual([tunnel.process for tunnel in self.released], self.processes)
+        self.assertEqual((self.broker._tunnels, self.broker._allocated_ports), ({}, set()))
 
     async def test_a_close_queued_behind_the_start_url_load_is_answered_closed(self) -> None:
         # The review's probe: another caller lists the sessions and closes the one it finds, while the create waits
@@ -340,7 +448,7 @@ class _ACloseWhileTheCreateRuns:
         closed = await asyncio.wait_for(close, _WAIT)
 
         self.assertEqual((closed["closed"], closed["teardown"]), (True, "complete"))
-        self.assertIsNotNone(session.tunnel)
+        self.assertEqual((len(self.released), session.tunnel), (1, None))  # up, and taken off the session
         await self.assert_left_as_the_close_made_it(session)
         self.assertEqual(await self.events(), ["session_closed"])
 

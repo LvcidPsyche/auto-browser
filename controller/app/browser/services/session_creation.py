@@ -338,6 +338,11 @@ class SessionCreation:
         session: it answered active, wrote session_created after session_closed, and left running a tunnel that came
         up after the close. ``unreleased`` is that tunnel, at the one look that can tell."""
         if session.closing:
+            if unreleased is not None:
+                # Off the session in the turn it reached it, so that nothing else finds it there while the create
+                # releases it. The close's summary, still being built, took it for up (the closed record named its
+                # public URL, on a port the release gives the next tunnel), and a second close released it again.
+                session.tunnel = None
             raise _ClosedWhileStarting(unreleased)
 
     async def _release_what_the_close_missed(
