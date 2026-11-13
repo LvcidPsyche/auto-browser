@@ -8,6 +8,8 @@ tested on Linux where Landlock works, as in test_cli_sandbox_launcher.py.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import errno
 import json
 import logging
 import os
@@ -52,7 +54,7 @@ _DECISION = '{"action":"done","reason":"x","risk_category":"read"}'
 @pytest.fixture(autouse=True)
 def _a_process_that_has_probed_and_reported_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """The probe's answer, and each line already written, are kept for the process: every test starts without."""
-    monkeypatch.setattr(cli_sandbox, "_probed", [])
+    monkeypatch.setattr(cli_sandbox, "_asked", None)
     monkeypatch.setattr(cli_sandbox, "_reported", set())
 
 
@@ -88,12 +90,13 @@ def _settings(data: SimpleNamespace, **changed: str | None) -> Settings:
 
 
 def _probe_says(monkeypatch: pytest.MonkeyPatch, answer: str | None) -> list[dict[str, str]]:
-    """Stand in for the probe: it answers ``answer`` (None: the launcher works), and each run's environment is kept."""
+    """Stand in for the probe: it answers ``answer`` (None: the launcher works) as the launcher's own answer, which is
+    kept, and each run's environment is kept."""
     runs: list[dict[str, str]] = []
 
-    def probe(env: dict[str, str]) -> str | None:
+    def probe(env: dict[str, str]) -> tuple[str | None, bool]:
         runs.append(env)
-        return answer
+        return answer, True
 
     monkeypatch.setattr(cli_sandbox, "_probe", probe)
     return runs
@@ -296,9 +299,10 @@ async def test_the_probes_answer_is_kept_for_the_process(data, monkeypatch) -> N
 async def test_calls_that_start_together_probe_once(data, monkeypatch) -> None:
     runs: list[dict[str, str]] = []
 
-    def slow_probe(env: dict[str, str]) -> None:
+    def slow_probe(env: dict[str, str]) -> tuple[None, bool]:
         runs.append(env)
         time.sleep(0.2)
+        return None, True
 
     monkeypatch.setattr(cli_sandbox, "_probe", slow_probe)
 
@@ -348,42 +352,66 @@ async def test_with_cli_sandbox_required_and_nothing_wrong_the_cli_starts_under_
 # ---- the probe ----
 
 
-def _the_probe_runs(monkeypatch: pytest.MonkeyPatch, outcome) -> list[SimpleNamespace]:
-    """Stand in for subprocess.run under the probe, on what is taken for Linux: ``outcome`` is what it returns, or
-    the error it raises. Each call is kept."""
+def _the_probe_runs(monkeypatch: pytest.MonkeyPatch, *outcomes) -> list[SimpleNamespace]:
+    """Stand in for subprocess.run under the probe, on what is taken for Linux. Each run takes the next of
+    ``outcomes`` (the last one repeats): what it returns, the error it raises, or a function it calls and whose
+    result it returns. Each call is kept."""
     calls: list[SimpleNamespace] = []
 
     def run(command, **kwargs):
         calls.append(SimpleNamespace(command=command, **kwargs))
+        outcome = outcomes[min(len(calls), len(outcomes)) - 1]
         if isinstance(outcome, BaseException):
             raise outcome
-        return outcome
+        return outcome() if callable(outcome) else outcome
 
     monkeypatch.setattr(cli_sandbox, "_LINUX", True)
     monkeypatch.setattr(cli_sandbox.subprocess, "run", run)
     return calls
 
 
-def test_the_probe_runs_the_launcher_itself_in_its_probe_mode(monkeypatch) -> None:
-    calls = _the_probe_runs(monkeypatch, subprocess.CompletedProcess([], 0, b"", b""))
+async def _until(condition, seconds: float = 10) -> None:
+    """Wait for ``condition``, and fail rather than hang where it does not come."""
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "what the test waits for did not come"
+        await asyncio.sleep(0.01)
 
-    assert cli_sandbox._probe(CLI_ENV) is None
+
+_PASSED = subprocess.CompletedProcess([], 0, b"", b"")
+_REFUSAL_LINE = MARKER + "landlock_create_ruleset(version): ENOSYS (Function not implemented)\n"
+_REFUSED = subprocess.CompletedProcess([], EXIT_NOT_APPLIED, b"", _REFUSAL_LINE.encode())
+# Probes that ended without the launcher's own answer.
+_UNFINISHED = {
+    "timed out": subprocess.TimeoutExpired(["python"], 30),
+    "not started": OSError(errno.EAGAIN, "Resource temporarily unavailable"),
+    "a traceback": subprocess.CompletedProcess([], 1, b"", b"Traceback (most recent call last):\n"),
+    "125 without the launcher's line": subprocess.CompletedProcess([], EXIT_NOT_APPLIED, b"", b"Killed\n"),
+}
+
+
+def test_the_probe_runs_the_launcher_itself_in_its_probe_mode(monkeypatch) -> None:
+    calls = _the_probe_runs(monkeypatch, _PASSED)
+
+    assert cli_sandbox._probe(CLI_ENV) == (None, True)
 
     (call,) = calls
     probe = [sys.executable, "-I", "-S", cli_sandbox.LAUNCHER, "--protect", cli_sandbox.PROTECTED_ROOT, "--probe"]
     assert call.command == probe
     assert call.env == CLI_ENV and call.stdin == subprocess.DEVNULL
     assert call.timeout == cli_sandbox.PROBE_TIMEOUT_SECONDS
+    # Without the pipes a refused probe's stderr is None, and reading it raises outside the probe's own try.
+    assert call.capture_output is True and call.check is False
 
 
-def test_a_probe_that_exits_with_the_launchers_status_is_a_reason_that_holds_its_line(monkeypatch) -> None:
-    line = MARKER + "landlock_create_ruleset(version): ENOSYS (Function not implemented)\n"
-    _the_probe_runs(monkeypatch, subprocess.CompletedProcess([], EXIT_NOT_APPLIED, b"", line.encode()))
+def test_a_probe_that_exits_with_the_launchers_status_is_a_kept_reason_that_holds_its_line(monkeypatch) -> None:
+    _the_probe_runs(monkeypatch, _REFUSED)
 
-    reason = cli_sandbox._probe(CLI_ENV)
+    reason, kept = cli_sandbox._probe(CLI_ENV)
 
     assert reason is not None and "ENOSYS" in reason and str(EXIT_NOT_APPLIED) in reason
     assert reason.splitlines() == [reason], "one line of the log"
+    assert kept is True, "the launcher's own refusal"
 
 
 @pytest.mark.parametrize(
@@ -391,24 +419,175 @@ def test_a_probe_that_exits_with_the_launchers_status_is_a_reason_that_holds_its
     [subprocess.TimeoutExpired(["python"], 30), FileNotFoundError(2, "No such file or directory"), OSError(12, "x")],
     ids=["no answer in time", "no python", "no memory"],
 )
-def test_a_probe_that_cannot_be_run_is_a_reason_and_not_an_error(monkeypatch, failure: Exception) -> None:
+def test_a_probe_that_cannot_be_run_is_a_reason_not_kept_and_not_an_error(monkeypatch, failure: Exception) -> None:
     _the_probe_runs(monkeypatch, failure)
 
-    reason = cli_sandbox._probe(CLI_ENV)
+    reason, kept = cli_sandbox._probe(CLI_ENV)
 
     assert reason and reason.splitlines() == [reason]
+    assert kept is False
 
 
-def test_off_linux_the_probe_starts_nothing(monkeypatch) -> None:
+def test_off_linux_the_probe_starts_nothing_and_its_answer_is_kept(monkeypatch) -> None:
     calls = _the_probe_runs(monkeypatch, AssertionError("started a process"))
     monkeypatch.setattr(cli_sandbox, "_LINUX", False)
 
-    assert cli_sandbox._probe(CLI_ENV)
+    reason, kept = cli_sandbox._probe(CLI_ENV)
+
+    assert reason and kept is True
     assert calls == []
 
 
 def test_this_process_takes_linux_for_linux_and_nothing_else() -> None:
     assert cli_sandbox._LINUX is sys.platform.startswith("linux")
+
+
+# ---- which of the probe's answers is kept ----
+
+
+@pytest.mark.parametrize("unfinished", list(_UNFINISHED))
+async def test_a_probe_that_did_not_finish_is_asked_again_at_the_next_call(
+    data, monkeypatch, caplog, unfinished: str
+) -> None:
+    # A loaded host at start-up, a transient OSError: not the kernel's answer, and not to be kept for the process.
+    calls = _the_probe_runs(monkeypatch, _UNFINISHED[unfinished], _PASSED)
+
+    with caplog.at_level(logging.WARNING):
+        commands = [await _launch(_settings(data), data) for _ in range(3)]
+
+    assert commands[0] == COMMAND, "the call it answered starts without the launcher, as before"
+    assert commands[1:] == [_under_the_launcher(data)] * 2
+    assert len(calls) == 2, "asked again at the next call, and the answer that came then is kept"
+    (line,) = _written(caplog)
+    assert "probe" in line
+
+
+@pytest.mark.parametrize("answer", ["passed", "refused"])
+async def test_the_launchers_own_answer_is_kept_for_the_process(data, monkeypatch, answer: str) -> None:
+    calls = _the_probe_runs(monkeypatch, _PASSED if answer == "passed" else _REFUSED, AssertionError("probed again"))
+
+    commands = [await _launch(_settings(data), data) for _ in range(3)]
+
+    assert commands == [_under_the_launcher(data) if answer == "passed" else COMMAND] * 3
+    assert len(calls) == 1
+
+
+async def test_calls_that_start_together_share_one_unfinished_probe_and_a_later_call_asks_again(
+    data, monkeypatch
+) -> None:
+    probing, release = threading.Event(), threading.Event()
+
+    def held():
+        probing.set()
+        release.wait(30)
+        raise subprocess.TimeoutExpired(["python"], 30)
+
+    calls = _the_probe_runs(monkeypatch, held, _PASSED)
+    together = [asyncio.create_task(_launch(_settings(data), data)) for _ in range(4)]
+    try:
+        await _until(probing.is_set)
+    finally:
+        release.set()
+    commands = await asyncio.wait_for(asyncio.gather(*together), 10)
+
+    # Each took the answer it waited for: four calls behind a timeout wait once, not four times in turn.
+    assert commands == [COMMAND] * 4
+    assert len(calls) == 1
+    assert await _launch(_settings(data), data) == _under_the_launcher(data)
+    assert len(calls) == 2
+
+
+async def test_calls_waiting_for_the_probe_leave_the_loops_executor_to_the_rest_of_the_controller(
+    data, monkeypatch
+) -> None:
+    # The job store, OCR, audit and approvals go through asyncio.to_thread: a probe that is asked again may run for
+    # PROBE_TIMEOUT_SECONDS, and the calls behind it must not hold that executor's threads meanwhile.
+    probing, release = threading.Event(), threading.Event()
+
+    def held():
+        probing.set()
+        release.wait(30)
+        return _PASSED
+
+    _the_probe_runs(monkeypatch, held)
+    executor = concurrent.futures.ThreadPoolExecutor(2)
+    asyncio.get_running_loop().set_default_executor(executor)
+    together = [asyncio.create_task(_launch(_settings(data), data)) for _ in range(4)]
+    try:
+        await _until(probing.is_set)
+        await asyncio.wait_for(asyncio.to_thread(lambda: None), 5)
+    finally:
+        release.set()
+        commands = await asyncio.wait_for(asyncio.gather(*together), 10)
+        executor.shutdown(wait=False)
+
+    assert commands == [_under_the_launcher(data)] * 4
+
+
+async def test_a_waiting_call_that_is_cancelled_leaves_the_probe_to_the_calls_that_wait_with_it(
+    data, monkeypatch
+) -> None:
+    probing, release = threading.Event(), threading.Event()
+
+    def held():
+        probing.set()
+        release.wait(30)
+        return _PASSED
+
+    calls = _the_probe_runs(monkeypatch, held)
+    first, second = (asyncio.create_task(_launch(_settings(data), data)) for _ in range(2))
+    try:
+        await _until(probing.is_set)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(second, 10) == _under_the_launcher(data)
+    assert await _launch(_settings(data), data) == _under_the_launcher(data)
+    assert len(calls) == 1, "one probe for the calls that started together, and its answer kept"
+
+
+async def test_a_probe_whose_thread_cannot_be_started_fails_that_call_and_the_next_call_probes(
+    data, monkeypatch
+) -> None:
+    calls = _the_probe_runs(monkeypatch, _PASSED)
+    real_start = threading.Thread.start
+    refusals = iter([RuntimeError("can't start new thread")])
+
+    def start(thread: threading.Thread) -> None:
+        refused = next(refusals, None)
+        if refused is not None:
+            raise refused
+        real_start(thread)
+
+    executor = concurrent.futures.ThreadPoolExecutor(1)
+    asyncio.get_running_loop().set_default_executor(executor)
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(threading.Thread, "start", start)
+            with pytest.raises(RuntimeError, match="can't start new thread"):
+                await asyncio.wait_for(_launch(_settings(data), data), 5)
+            assert await asyncio.wait_for(_launch(_settings(data), data), 5) == _under_the_launcher(data)
+    finally:
+        executor.shutdown(wait=False)
+
+    assert len(calls) == 1
+
+
+async def test_a_probe_that_raises_fails_its_call_keeps_nothing_and_the_next_call_probes_again(
+    data, monkeypatch
+) -> None:
+    calls = _the_probe_runs(monkeypatch, ValueError("a probe that raised"), _PASSED)
+
+    with pytest.raises(ValueError, match="a probe that raised"):
+        await asyncio.wait_for(_launch(_settings(data), data), 5)
+    second = await asyncio.wait_for(_launch(_settings(data), data), 5)
+    third = await asyncio.wait_for(_launch(_settings(data), data), 5)
+
+    assert second == third == _under_the_launcher(data)
+    assert len(calls) == 2, "the failed probe is not kept, and the one that answered is"
 
 
 # ---- run_cli ----
@@ -470,26 +649,27 @@ async def test_a_call_cancelled_while_the_probe_runs_starts_no_cli_and_the_probe
 ) -> None:
     probing, answered = threading.Event(), threading.Event()
 
-    def held_probe(env: dict[str, str]) -> None:
+    def held_probe(env: dict[str, str]) -> tuple[None, bool]:
         probing.set()
         answered.wait(30)
+        return None, True
 
     monkeypatch.setattr(cli_sandbox, "_probe", held_probe)
     adapter = ClaudeAdapter(_settings(data))
 
     with _spawning(_child()) as spawn:
         task = asyncio.create_task(adapter.run_cli(command=COMMAND, env=CLI_ENV))
-        while not probing.is_set():
-            await asyncio.sleep(0.01)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        answered.set()
-        while not cli_sandbox._probed:
-            await asyncio.sleep(0.01)
+        try:
+            await _until(probing.is_set)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            answered.set()
+        await _until(lambda: cli_sandbox._asked is not None and cli_sandbox._asked.done())
 
     spawn.assert_not_awaited()
-    assert cli_sandbox._probed == [None], "the probe ran to its end, and the next call does not probe again"
+    assert cli_sandbox._asked.result() is None, "the probe ran to its end, and the next call does not probe again"
 
 
 async def test_run_cli_under_cli_sandbox_required_starts_nothing_and_raises_the_fixed_provider_error(
@@ -588,7 +768,7 @@ async def test_only_the_codex_cli_is_given_the_calls_screenshot(tmp_path: Path, 
 
 @needs_landlock
 def test_the_probe_passes_where_landlock_works(data) -> None:
-    assert cli_sandbox._probe(CLI_ENV) is None
+    assert cli_sandbox._probe(CLI_ENV) == (None, True)
 
 
 @needs_landlock
@@ -596,7 +776,7 @@ def test_the_probe_passes_for_the_root_production_protects() -> None:
     # /data is there in the image and is not on a runner: the ruleset is applied whole either way.
     assert cli_sandbox.PROTECTED_ROOT == "/data"
 
-    assert cli_sandbox._probe(CLI_ENV) is None
+    assert cli_sandbox._probe(CLI_ENV) == (None, True)
 
 
 def _spy_on_spawns():

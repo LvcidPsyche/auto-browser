@@ -8,19 +8,21 @@ can open nothing in PROTECTED_ROOT but its own home and the screenshot of its ca
 Three things leave a secret open to it all the same:
 
 - the launcher cannot restrict a process here: this is not Linux, the kernel has no Landlock, or a probe of the
-  launcher failed. The CLI is started as it always was, without the launcher.
+  launcher failed. The CLI is started as it always was, without the launcher. The launcher's own answer is kept for
+  the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
 - the CLI home is PROTECTED_ROOT or holds it: a rule on that home would open the root, and the launcher refuses it.
   The CLI is started without the launcher.
 - a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT or inside the CLI
   home. The CLI is started under the launcher, which does not close that place.
 
-Each is one WARNING for the process that names the condition or the settings, never a value, and the CLI runs. With
-CLI_SANDBOX_REQUIRED=true each is one ERROR and SandboxRequired: no CLI runs.
+Each is one WARNING for the process (one for each distinct text) that names the condition or the settings, never a
+value, and the CLI runs. With CLI_SANDBOX_REQUIRED=true each is one ERROR and SandboxRequired: no CLI runs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import subprocess
@@ -55,8 +57,11 @@ NOT_APPLIED_MESSAGE = "the CLI sandbox could not be applied, and the CLI was not
 
 _LINUX = sys.platform.startswith("linux")
 _probe_lock = threading.Lock()
-# The probe's answer once it has run: the launcher and the kernel stay what they are for as long as the process does.
-_probed: list[str | None] = []
+# The probe once a call has asked for it, and its answer once it has run. Kept for the process only where the
+# launcher itself answered: the launcher and the kernel stay what they are for as long as the process does, and a
+# probe that timed out or could not be started says nothing of either. The calls that start together wait on this
+# one future, and not in a thread each.
+_asked: concurrent.futures.Future[str | None] | None = None
 # What has been written already, so that each thing found is one line for the process.
 _reported: set[tuple[bool, str]] = set()
 
@@ -65,32 +70,66 @@ class SandboxRequired(Exception):
     """CLI_SANDBOX_REQUIRED is set and the sandbox would leave a secret open: the CLI is not to be started."""
 
 
-def _probe(env: dict[str, str]) -> str | None:
-    """Why the launcher cannot restrict a process here, as one line of a log; None where a probe of it just did.
+def _probe(env: dict[str, str]) -> tuple[str | None, bool]:
+    """Why the launcher cannot restrict a process here, as one line of a log (None where a probe of it just did),
+    and whether that is the launcher's own answer: its success, its refusal, or not Linux. A probe that timed out,
+    could not be started or ended any other way is not.
 
     The probe is the launcher itself, started as a CLI's is, applying the ruleset for PROTECTED_ROOT and exiting.
     """
     if not _LINUX:
-        return "Landlock is the Linux kernel's, and this is not Linux"
+        return "Landlock is the Linux kernel's, and this is not Linux", True
     command = [sys.executable, "-I", "-S", LAUNCHER, "--protect", PROTECTED_ROOT, "--probe"]
     try:
         done = subprocess.run(  # noqa: S603 - this interpreter and the launcher beside this file
             command, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return "the launcher's probe did not run: " + error_text_for_log(exc)
+        return "the launcher's probe did not run: " + error_text_for_log(exc), False
     if done.returncode != 0:
-        said = quoted_for_log(done.stderr.decode("utf-8", errors="replace").strip())
-        return "the launcher's probe exited %d: %s" % (done.returncode, said)
-    return None
+        stderr = done.stderr.decode("utf-8", errors="replace")
+        said = quoted_for_log(stderr.strip())
+        return "the launcher's probe exited %d: %s" % (done.returncode, said), launcher_refused(done.returncode, stderr)
+    return None, True
 
 
-def _landlock_missing(env: dict[str, str]) -> str | None:
-    """_probe's answer, asked for once however many calls start together."""
+def _landlock_missing(env: dict[str, str]) -> concurrent.futures.Future[str | None]:
+    """_probe's answer to come, asked for once however many calls start together.
+
+    The probe runs in a thread of its own to its end, whoever has stopped waiting for it. Its future is running from
+    the start, so that the cancel of one waiting call is not every waiting call's.
+    """
+    global _asked
     with _probe_lock:
-        if not _probed:
-            _probed.append(_probe(env))
-        return _probed[0]
+        if _asked is None:
+            asked: concurrent.futures.Future[str | None] = concurrent.futures.Future()
+            asked.set_running_or_notify_cancel()
+            # Kept only once its thread runs: a thread that cannot be started fails this call and no other.
+            threading.Thread(target=_answer, args=(asked, env), name="cli-sandbox-probe").start()
+            _asked = asked
+        return _asked
+
+
+def _forget(asked: concurrent.futures.Future[str | None]) -> None:
+    """The next call asks again."""
+    global _asked
+    with _probe_lock:
+        if _asked is asked:
+            _asked = None
+
+
+def _answer(asked: concurrent.futures.Future[str | None], env: dict[str, str]) -> None:
+    """The probe's answer, to every call that waits for it, kept or not. An answer that is not kept is forgotten
+    before it is given, so that a call that starts from then on asks again."""
+    try:
+        answer, kept = _probe(env)
+    except BaseException as exc:
+        _forget(asked)
+        asked.set_exception(exc)
+        return
+    if not kept:
+        _forget(asked)
+    asked.set_result(answer)
 
 
 def _within(path: str, directory: str) -> bool:
@@ -128,7 +167,8 @@ async def launch_command(
     ``env`` is the CLI's, which the probe is started with too. SandboxRequired where a secret would stay open and
     CLI_SANDBOX_REQUIRED is set.
     """
-    missing = _probed[0] if _probed else await asyncio.to_thread(_landlock_missing, env)
+    asked = _asked if _asked is not None else _landlock_missing(env)
+    missing = asked.result() if asked.done() else await asyncio.wrap_future(asked)
     if missing is None and _within(PROTECTED_ROOT, os.path.realpath(cli_home)):
         missing = "CLI_HOME is %s or holds it, which the launcher refuses" % PROTECTED_ROOT
     if missing:

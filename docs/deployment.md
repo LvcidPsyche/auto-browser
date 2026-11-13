@@ -519,13 +519,17 @@ program it starts gains nothing. Whatever a CLI needs under `/data` (its sign-in
 older than 5.19 Landlock also refuses a sandboxed process every rename or link from one directory to another
 (`EXDEV`), in `CLI_HOME` as anywhere.
 
-Where the sandbox would leave a secret open, the controller writes one warning per process, which names the
-condition or the settings and never a setting's value, and runs the CLI:
+Where the sandbox would leave a secret open, the controller writes a warning, once in the life of the process for
+each distinct line, which names the condition or the settings and never a setting's value, and runs the CLI:
 
 - **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
   seccomp profile refuses Landlock's system calls (Docker's default profile allows them), or the launcher's probe
-  failed for another reason: at the first CLI call the controller runs the launcher once in a mode that applies the
-  ruleset and exits. The CLI starts without the launcher, as it did before 1.18.0.
+  failed for another reason: at the first CLI call the controller runs the launcher in a mode that applies the
+  ruleset and exits. The CLI starts without the launcher, as it did before 1.18.0. The launcher's own answer (it
+  applied the ruleset, or it refused to) is taken once for the process. A probe that did not finish (it timed out
+  after 30 seconds, or could not be started) is run again at the next CLI call; the calls that started while it ran
+  take its answer. The probe runs outside the call's own timeout, so on a host where it keeps timing out every CLI
+  call waits 30 seconds before it starts, and then runs without the launcher.
 - **`CLI_HOME` is `/data` or a directory that holds it.** The CLI starts without the launcher.
 - **A secret is kept outside `/data`, or inside `CLI_HOME`.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`,
   `WITNESS_ROOT`, `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and

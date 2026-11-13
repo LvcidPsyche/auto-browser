@@ -327,10 +327,10 @@ All notable changes to auto-browser are documented here.
   CLI's own binary. A CLI now runs with `no_new_privs` too, cannot list `/` itself, and on a kernel older than 5.19
   cannot rename a file from one directory to another. Where the sandbox would leave a secret open (no Landlock, a
   `CLI_HOME` that is `/data` or holds it, or a secret's path set outside `/data` or inside `CLI_HOME`) the controller
-  logs one warning per process that names the condition, and still runs the CLI: a host run that uses a `cli`
-  provider and keeps its data outside `/data` gets that warning at its first CLI call, and so does one on macOS or
-  Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI sandbox" in
-  docs/deployment.md. (N1)
+  logs a warning that names the condition, once per process for each distinct line, and still runs the CLI: a host
+  run that uses a `cli` provider and keeps its data outside `/data` gets that warning at its first CLI call, and so
+  does one on macOS or Windows. Set `CLI_SANDBOX_REQUIRED=true` to have no CLI run there instead. See "The CLI
+  sandbox" in docs/deployment.md. (N1)
 - **`API_ADMIN_OPERATORS` is new, and once set it refuses the shared token on the admin surfaces.** Nothing changes
   until you set it. Set (`API_ADMIN_OPERATORS=alice,ops`), the maintenance sweep and its status, `GET /readiness`,
   the `/proxy-personas` routes, `GET /mesh/peers`, and the `browser.readiness_check` and proxy persona tools answer
@@ -843,13 +843,15 @@ All notable changes to auto-browser are documented here.
   entry beside `/data` and, in `/data`, `CLI_HOME` to read and write and the one screenshot the call names to read:
   another session's screenshot, a listing of `/data` and every secret there are refused, to root too. It handles only
   the rights the running kernel knows, and it never execs without its ruleset: a kernel call that fails ends it with
-  status `125` and a line that names the call. The controller runs it once, to apply a ruleset and exit, at its first
-  CLI call: where that fails, where the host is not Linux, or where a secret is kept where the ruleset does not
-  reach, one warning says so and the CLI runs, and `CLI_SANDBOX_REQUIRED=true` refuses to run it instead (see the
-  upgrade note). A launcher that fails at a real start after that fails the call, and the CLI is never started
-  without it. The sandbox does not stop `stat` and other metadata calls on a file under `/data`, one CLI call
-  reaching another's files in `CLI_HOME`, or signals and TCP connections to the controller: docs/deployment.md lists
-  these and the rest. The Codex host bridge's Codex runs outside it. (N1)
+  status `125` and a line that names the call. The controller runs it to apply a ruleset and exit at its first CLI
+  call, and keeps that answer for the process where the launcher gave it (a probe that timed out or could not be
+  started is run again at the next call): where that fails, where the host is not Linux, or where a secret is kept
+  where the ruleset does not reach, a warning says so, once for each distinct line, and the CLI runs, and
+  `CLI_SANDBOX_REQUIRED=true` refuses to run it instead (see the upgrade note). A launcher that fails at a real start
+  after that fails the call, and the CLI is never started without it. The sandbox does not stop `stat` and other
+  metadata calls on a file under `/data`, one CLI call reaching another's files in `CLI_HOME`, or signals and TCP
+  connections to the controller: docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs
+  outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
   can: the checkout's `.env`, `data/api-token`, `data/takeover-token` and the keys under `data/`.
