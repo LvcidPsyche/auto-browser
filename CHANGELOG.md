@@ -300,6 +300,14 @@ All notable changes to auto-browser are documented here.
   `/api/healthz`) loses that exemption: write each entry without the prefix (`/healthz`). Behind a prefix the
   paths that answer without a token (`/healthz`, `/readyz`, `/version`, `/dashboard` and the rest of that list)
   now do, as they do without one, where each answered `401`.
+- **A failed agent step's `error_code` is now `502` or `503`, never the provider's own status, and its error text is
+  fixed.** A step the provider failed carried the provider's HTTP status as its `error_code`: it was also the
+  response status of `POST /sessions/{id}/agent/step`, and it is in the steps of a run and of a queued job's result.
+  A `401`, a `404` or a `429` from the provider came back as that. A client that read it must now read `502` (the
+  provider refused, and a retry will not help) or `503` (a rate limit, a server error, a timeout or a network
+  failure: try again later), with the error `Provider request failed`. Any other failure of a step now says only
+  `Agent step failed`, where it named the error's class and text, and a job that failed with an error nothing
+  handled now records `Agent job failed`. The detail is in the controller log.
 
 ### Security
 
@@ -785,6 +793,15 @@ All notable changes to auto-browser are documented here.
   whoever set it. A job record an older version wrote can hold the merged block in its `context_hints`: a resume cuts
   it off, and so does the run of a resumed job queued before the upgrade; that job's record keeps what was written.
   (STORE-24)
+- **A failed agent step no longer hands the provider's status, or an error's text, to the caller.** The step's
+  `error_code` was the status the provider had answered with, and any failure that was no provider's put its class and
+  text, up to 300 characters, into the step's `error`: a `PermissionError` from the CLI home named its path. A
+  provider's failure is now `503` where trying again may help (a `429`, a `5xx`, a timeout, a network failure) and
+  `502` where it will not, with the error `Provider request failed`; any other failure says `Agent step failed`.
+  The detail was already in the controller log and stays there. A job that failed with an error nothing handled
+  (one raised outside the provider call, such as a log file that could not be written) recorded the error's class
+  and text, a path among them, in the record that anyone who lists the jobs reads: it records `Agent job failed`
+  now. See the upgrade note. (STORE-27)
 
 ### Fixed
 

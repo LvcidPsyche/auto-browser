@@ -26,7 +26,6 @@ from .utils import (
     PRIVATE_FILE_MODE,
     atomic_write_text,
     error_lines_for_log,
-    error_text,
     error_text_for_log,
     record_json,
     record_path,
@@ -300,6 +299,8 @@ _QUEUE_ENDED_FINISH_WAIT_SECONDS = 5.0
 # version wrote can still hold the block, built from pages' text: a resume cuts it (_without_resume_block), and so does
 # the run of a resumed job that was queued before the upgrade.
 RESUME_CONTEXT_PREFIX = "Resuming background agent job"
+# What a job's record says when an error escaped its run: the error's class and text can hold a path, and stay in the log.
+JOB_FAILED_ERROR = "Agent job failed"
 QUEUED_OPERATOR_CREDENTIAL_REMOVED = (
     "refused: the operator who queued this job no longer has a named credential (API_BEARER_TOKENS)"
 )
@@ -755,19 +756,13 @@ class AgentJobQueue:
         except asyncio.CancelledError:
             await self._record_stop(job_id)
             raise
-        except Exception as exc:
+        except Exception:
             # Previously a bare `except Exception` that recorded the constant
             # string "agent_job_failed" and logged nothing at all, so a crashing
             # provider adapter, a Playwright error, or a JSON parse failure were
             # indistinguishable and left no server-side traceback.
             logger.exception("agent job %s failed", job_id)
-            detail = f"{type(exc).__name__}: {error_text(exc)}"
-            record = await self.store.finish(
-                record.id,
-                status="failed",
-                result=None,
-                error=detail[:500],
-            )
+            record = await self.store.finish(record.id, status="failed", result=None, error=JOB_FAILED_ERROR)
         await self._audit("agent_job_finished", record.status, record)
 
     def _queued_by_a_removed_operator(self, record: AgentJobRecord) -> bool:

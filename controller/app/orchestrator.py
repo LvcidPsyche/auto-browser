@@ -22,6 +22,24 @@ logger = logging.getLogger(__name__)
 OBSERVE_RETRY_DELAY_SECONDS = 0.5
 # The decision comment on an approval the agent gave itself.
 AUTONOMOUS_APPROVAL_COMMENT = "Approved by the agent (AUTONOMOUS_APPROVALS=true)"
+# What a failed step's error says, whatever went wrong: the provider's status, its text and a path in an OS error stay
+# in the log (the step's ERROR line), and reach neither the caller nor a job's record.
+PROVIDER_FAILED_ERROR = "Provider request failed"
+STEP_FAILED_ERROR = "Agent step failed"
+# What a provider's failure is answered with: its status is the provider's, so it is fixed here.
+PROVIDER_RETRYABLE_STATUS = 503
+PROVIDER_REFUSED_STATUS = 502
+
+
+def _provider_failure_status(exc: Exception) -> int | None:
+    """503 where trying again may help and 502 where it will not, for a failure on the provider's side; None for any
+    other failure. Never the status the provider answered with."""
+    if isinstance(exc, ProviderAPIError):
+        return PROVIDER_RETRYABLE_STATUS if exc.retryable else PROVIDER_REFUSED_STATUS
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return PROVIDER_RETRYABLE_STATUS if status == 429 or status >= 500 else PROVIDER_REFUSED_STATUS
+    return None
 
 
 class BrowserOrchestrator:
@@ -147,17 +165,8 @@ class BrowserOrchestrator:
                 error_text_for_log(exc),
                 error_lines_for_log(exc),
             )
-            if isinstance(exc, ProviderAPIError):
-                error_code: int | None = exc.status_code or (503 if exc.retryable else 502)
-            elif isinstance(exc, httpx.HTTPStatusError):
-                error_code = exc.response.status_code
-            else:
-                error_code = None
-            error_message = (
-                "Provider request failed"
-                if error_code
-                else f"Agent step failed: {type(exc).__name__}: {error_text(exc)}"[:300]
-            )
+            error_code = _provider_failure_status(exc)
+            error_message = PROVIDER_FAILED_ERROR if error_code else STEP_FAILED_ERROR
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,
