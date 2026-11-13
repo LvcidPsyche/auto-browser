@@ -814,7 +814,8 @@ All notable changes to auto-browser are documented here.
   that says the run resumes an earlier one; `context_hints` of a resumed run is the operator's alone. A client can set
   the field on `POST /sessions/{id}/agent/run` and in the `request` of the queue tools, and it is shown as page data
   whoever set it. A job record an older version wrote can hold the merged block in its `context_hints`: a resume cuts
-  it off, and so does the run of a resumed job queued before the upgrade; that job's record keeps what was written.
+  it off, and so does the run of a resumed job queued before the upgrade, which reads its checkpoints from its
+  parent's record (none where that record is gone or cannot be read); that job's record keeps what was written.
   (STORE-24)
 - **A failed agent step no longer hands the provider's status, or an error's text, to the caller.** The step's
   `error_code` was the status the provider had answered with, and any failure that was no provider's put its class and

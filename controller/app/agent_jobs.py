@@ -747,9 +747,13 @@ class AgentJobQueue:
             else:
                 request = AgentRunRequest.model_validate(record.request)
                 context_hints = request.context_hints
+                resume_checkpoints = request.resume_checkpoints
                 if record.parent_job_id is not None:
-                    # A resume queued by 1.17.0 and run after the upgrade: its hints still hold the merged block.
+                    # A resume queued by 1.17.0 and run after the upgrade: its hints still hold the merged block, and
+                    # its request has no checkpoints (a resume this version queues has a list, if an empty one).
                     context_hints = self._without_resume_block(context_hints)
+                    if resume_checkpoints is None:
+                        resume_checkpoints = await self._parents_resume_checkpoints(record.id, record.parent_job_id)
 
                 async def checkpoint_step(step_index: int, step_result: AgentStepResult) -> None:
                     await self.store.append_checkpoint(record.id, self._checkpoint_from_step(step_index, step_result))
@@ -765,7 +769,7 @@ class AgentJobQueue:
                     provider_model=request.provider_model,
                     workflow_profile=request.workflow_profile,
                     on_step=checkpoint_step,
-                    resume_checkpoints=request.resume_checkpoints,
+                    resume_checkpoints=resume_checkpoints,
                 )
             # A run or step that ended in "error" did not complete: record it failed, with the reason it gave.
             failed = result.status == "error"
@@ -887,6 +891,24 @@ class AgentJobQueue:
             )
             for checkpoint in record.checkpoints[-RESUME_CHECKPOINTS_MAX:]
         ]
+
+    async def _parents_resume_checkpoints(self, job_id: str, parent_job_id: str) -> list[ResumeCheckpoint]:
+        """What resume_job would hand this resume, for one whose request holds no list: its parent's last checkpoints.
+
+        Read as resume_job reads its source, through _accessible: the worker acts as the operator who queued the job,
+        so a parent in a session that operator may not use gives nothing. Nothing either where the parent's record is
+        gone or cannot be read: the job runs all the same, as a resume with no step known. The error is logged by its
+        class alone: the text of a record that does not validate repeats the record's fields, pages' text among them.
+        """
+        try:
+            return self._resume_checkpoints(await self._accessible(parent_job_id))
+        except Exception as exc:
+            logger.warning(
+                "agent job %s resumes with no checkpoints: its parent's record could not be used (%s)",
+                job_id,
+                type(exc).__name__,
+            )
+            return []
 
     @staticmethod
     def _without_resume_block(hints: str | None) -> str | None:
