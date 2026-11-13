@@ -1386,6 +1386,26 @@ cannot say.
 `completed` means the run ended without an error, not that it reached its goal: a run that stopped at its step limit,
 or to wait for an approval or a takeover, reads `completed` too, and the agent job's `result.status` says which.
 
+## Share links
+
+`POST /sessions/{id}/share` (over MCP, `browser.share_session`) mints a link to a live session for someone who holds no
+API token: a signed token that expires after `ttl_minutes` (60 by default, 1440 at most). Whoever holds it can open
+`/share/{token}`, a page that shows the session's screen, URL and title and asks for a new frame every five seconds.
+The link reads nothing else of the session and cannot act on it, and the token is the whole credential: anyone the
+link reaches can watch until it expires. Set `SHARE_TOKEN_SECRET`, or links stop working at each restart (the
+controller then signs with a key it makes at startup).
+
+The audit log records a link twice, and names it by `token_sha256`, the SHA-256 of the token as the link carries it,
+never by the token: the digest ties a view to its mint and opens nothing.
+
+- `share_minted` is written by the mint, as the operator who made the link, before the token is answered. A mint
+  whose event cannot be written fails, and answers no token.
+- `share_viewed` is written the first time a valid token is shown something of its session: the page, a frame or a
+  frame's image. Once per token while the controller runs: it remembers the 4,096 tokens viewed last, so after a
+  restart, or once a token is forgotten, its next view is recorded again. A view whose event cannot be written is
+  answered `500`. The event's operator is `anonymous` unless the viewer also proved a named credential
+  (`API_BEARER_TOKENS`), whatever an `X-Operator-Id` header on the request says.
+
 ## Backups
 
 Back up at least:

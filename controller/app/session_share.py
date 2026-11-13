@@ -17,20 +17,37 @@ Endpoints (wired in main.py):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import logging
 import time
+from collections import OrderedDict
 from typing import Any
 
+from .audit import get_current_operator
+from .session_ownership import ANONYMOUS, verified_operator
 from .utils import error_text
 
 logger = logging.getLogger(__name__)
 
 # Scope constants
 SCOPE_OBSERVE = "observe"
+
+# The audit events of a link: its mint, and its first view.
+SHARE_MINTED_EVENT = "share_minted"
+SHARE_VIEWED_EVENT = "share_viewed"
+# A link's first view is audited once per token per process: the digests of this many tokens are remembered, and the
+# one viewed longest ago is forgotten first. A forgotten token's next view is audited again.
+SHARE_VIEWED_TOKENS_KEPT = 4096
+
+
+def token_digest(token: str) -> str:
+    """A share token's SHA-256: what stands for it wherever the token itself must not be written or kept (the audit
+    log, and the keys of what is remembered per token). The token is the credential, and its digest opens nothing."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 class SessionShareManager:
@@ -51,6 +68,9 @@ class SessionShareManager:
             )
         self._secret = secret.encode()
         self.ttl_seconds = ttl_minutes * 60
+        # The digests of the tokens whose first view is audited (record_view), the one viewed last at the end.
+        self._viewed: OrderedDict[str, None] = OrderedDict()
+        self._viewed_lock = asyncio.Lock()
 
     # ── Token creation ─────────────────────────────────────────────────────
 
@@ -160,7 +180,66 @@ class SessionShareManager:
         except ValueError:
             return {"valid": False, "error": "Invalid token"}
 
+    # ── Audit ──────────────────────────────────────────────────────────────
+
+    async def record_view(self, audit: Any, token: str, session_id: str) -> None:
+        """Audit the first view of a valid token, once per token per process; a later view returns at once.
+
+        For a share route that is about to show the session to the token's holder. The event is written before the
+        view is answered, so a view whose event cannot be written fails, and the next one tries again. Views that
+        arrive together write one event, and the others wait for it. A view cancelled while its event is written can
+        be audited twice (the write goes on in a worker thread), never left out.
+
+        The viewer holds the share token and no credential, so a name in its headers is its own text: the event is
+        the anonymous operator's unless a named credential proved one.
+        """
+        digest = token_digest(token)
+        if self._viewed_before(digest):
+            return
+        async with self._viewed_lock:
+            if self._viewed_before(digest):
+                return
+            await audit.append(
+                event_type=SHARE_VIEWED_EVENT,
+                status="ok",
+                action="view_share",
+                session_id=session_id,
+                operator=get_current_operator() if verified_operator() is not None else ANONYMOUS,
+                details={"token_sha256": digest},
+            )
+            self._viewed[digest] = None
+            while len(self._viewed) > SHARE_VIEWED_TOKENS_KEPT:
+                self._viewed.popitem(last=False)
+
+    def _viewed_before(self, digest: str) -> bool:
+        if digest not in self._viewed:
+            return False
+        self._viewed.move_to_end(digest)
+        return True
+
     # ── Private ────────────────────────────────────────────────────────────
 
     def _sign(self, data: str) -> str:
         return hmac.new(self._secret, data.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+async def mint_share_token(share_manager: Any, audit: Any, session_id: str, *, ttl_seconds: int) -> dict[str, Any]:
+    """Mint a share token and audit it: the one mint behind POST /sessions/{id}/share and browser.share_session,
+    each of which has first checked that its caller may use the session.
+
+    The token is returned only once its event is written: a mint that cannot be audited raises, and the token made
+    for it is dropped unseen. The event names the token by its digest (token_digest).
+    """
+    token = share_manager.create_token(session_id, ttl_seconds=ttl_seconds)
+    await audit.append(
+        event_type=SHARE_MINTED_EVENT,
+        status="ok",
+        action="share_session",
+        session_id=token["session_id"],
+        details={
+            "token_sha256": token_digest(token["token"]),
+            "scope": token["scope"],
+            "expires_at": token["expires_at"],
+        },
+    )
+    return token

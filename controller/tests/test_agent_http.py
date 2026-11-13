@@ -443,7 +443,11 @@ class AgentHttpTests(unittest.TestCase):
                 patch.object(main_module.manager, "get_pii_scrubber_status", return_value={"enabled": True})
             )
             stack.enter_context(
-                patch.object(main_module.share_manager, "create_token", return_value={"token": "share"})
+                patch.object(
+                    main_module.share_manager,
+                    "create_token",
+                    return_value={"token": "share", "session_id": "session-1", "scope": "observe", "expires_at": 0},
+                )
             )
             stack.enter_context(
                 patch.object(

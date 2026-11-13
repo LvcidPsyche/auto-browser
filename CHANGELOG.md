@@ -849,6 +849,16 @@ All notable changes to auto-browser are documented here.
   leading `-`, and the `PrivateUsers=yes` that goes with them in a user unit. The data directory itself is not among
   them, since the bridge's socket is in it. The option is off as shipped and no CI runs a systemd unit: "Closing the
   checkout's secrets to the bridge" in docs/deployment.md says how to turn it on and what to check afterwards. (N1)
+- **A share link's mint and its first view are in the audit log.** `POST /sessions/{id}/share` and
+  `browser.share_session` hand out a link that lets anyone who holds it watch the session, and nothing recorded that
+  one was made or that it was used. A mint now writes `share_minted`, as the operator who made the link, before the
+  token is answered: one whose event cannot be written fails, and answers no token. The first time a valid token is
+  shown something of its session (the share page, a frame or a frame's image) `share_viewed` is written, once per
+  token while the controller runs: it remembers the 4,096 tokens viewed last, so after a restart, or once a token is
+  forgotten, its next view is recorded again. A view whose event cannot be written answers `500`. Both events name
+  the token by `token_sha256`, its SHA-256, and never hold it. A `share_viewed` event is the `anonymous` operator's
+  unless the viewer also proved a named credential, whatever its `X-Operator-Id` header says. "Share links" in
+  docs/deployment.md describes both. (AUTH-23)
 
 ### Fixed
 

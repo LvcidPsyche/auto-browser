@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
 from ..session_ownership import as_system
+from ..session_share import mint_share_token
 from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, log_hidden_cause, require_safe_segment
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,15 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
             raise HTTPException(status_code=403, detail="Invalid token")
         return require_safe_segment(str(info["session_id"]), field="session_id")
 
+    async def _audit_first_view(token: str, session_id: str) -> None:
+        """Called once a route has something of the session to show the token's holder, before it answers."""
+        try:
+            await share_manager.record_view(manager.audit, token, session_id)
+        except Exception:
+            raise internal_error(
+                logger, "the first view of a share link of session %s was not audited", session_id
+            ) from None
+
     @router.post("/sessions/{session_id}/share")
     async def share_session(session_id: str, payload: ShareSessionRequest | None = None) -> dict[str, Any]:
         try:
@@ -32,7 +42,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
 
         ttl_minutes = payload.ttl_minutes if payload is not None else 60
         try:
-            return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
+            return await mint_share_token(share_manager, manager.audit, session_id, ttl_seconds=ttl_minutes * 60)
         except ValueError as cause:
             log_hidden_cause(logger, 400, cause, "share failed for session %s", session_id)
             raise HTTPException(status_code=400, detail="Invalid request") from None
@@ -69,6 +79,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
             raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
         except Exception:
             raise internal_error(logger, "shared observe failed") from None
+        await _audit_first_view(token, session_id)
         screenshot_path = observation.get("screenshot_path")
         return {
             "session": {"id": session_id},
@@ -89,6 +100,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         candidate = (session_dir / safe_name).resolve()
         if candidate.parent != session_dir or not candidate.is_file():
             raise HTTPException(status_code=404, detail="Not found")
+        await _audit_first_view(token, session_id)
         return FileResponse(path=str(candidate), media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @router.get("/share/{token}", response_class=HTMLResponse)
@@ -99,6 +111,7 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
                 await manager.get_session(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        await _audit_first_view(token, session_id)
 
         html = """<!doctype html>
 <html lang="en">

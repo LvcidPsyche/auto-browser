@@ -146,7 +146,7 @@ class ShareHttpTests(unittest.TestCase):
 
     def test_share_session_uses_default_ttl_without_body(self) -> None:
         get_session = AsyncMock(return_value=SimpleNamespace(id="session-1"))
-        create_token = Mock(return_value={"token": "tok", "session_id": "session-1"})
+        create_token = Mock(wraps=main_module.share_manager.create_token)  # a whole token: its mint is audited
 
         with (
             patch.object(main_module.manager, "get_session", get_session),

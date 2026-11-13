@@ -51,6 +51,7 @@ from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..run_as import controller_user_status
 from ..session_ownership import verified_operator
+from ..session_share import mint_share_token
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
@@ -1380,9 +1381,8 @@ class McpToolGateway:
         if self.share_manager is None:
             raise RuntimeError("Session sharing is not configured")
         await self.manager.get_session(payload.session_id)  # verify session exists
-        return self.share_manager.create_token(
-            payload.session_id,
-            ttl_seconds=payload.ttl_minutes * 60,
+        return await mint_share_token(
+            self.share_manager, self.manager.audit, payload.session_id, ttl_seconds=payload.ttl_minutes * 60
         )
 
     async def _enable_shadow_browse(self, payload: ShadowBrowseInput) -> dict[str, Any]:

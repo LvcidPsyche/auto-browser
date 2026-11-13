@@ -1243,7 +1243,14 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             set_persona=lambda *args, **kwargs: {"name": args[0]},
             delete_persona=lambda name: True,
         )
-        share_manager = SimpleNamespace(create_token=lambda session_id, ttl_seconds: {"token": "share-token"})
+        share_manager = SimpleNamespace(
+            create_token=lambda session_id, ttl_seconds: {
+                "token": "share-token",
+                "session_id": session_id,
+                "scope": "observe",
+                "expires_at": 0,
+            }
+        )
         vision_targeter = SimpleNamespace(find_element=AsyncMock(return_value={"selector": "button"}))
         gateway = McpToolGateway(
             manager=self.manager,
