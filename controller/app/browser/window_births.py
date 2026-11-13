@@ -907,14 +907,24 @@ class WindowBirths:
             entry[1].forget_session(session)
 
     async def release(self, browser: Any) -> None:
-        # First, and before the lock: a re-attach in progress holds it, on a browser that is going.
+        """The controller closes or drops this browser: its watcher is detached, and its re-attaches are ended.
+
+        In two passes. Nothing waits before the first one's removal, so a release cancelled at a later wait (a
+        teardown step's bound, its caller's cancel) has forgotten the browser all the same; and it ends a re-attach
+        in progress, which holds the lock on a browser that is going. The second is under the lock, so after an
+        attach in flight: what that attach registered goes too, with a re-attach that a loss started in between."""
+        await self._drop(browser)
+        async with self._lock:
+            await self._drop(browser)
+
+    async def _drop(self, browser: Any) -> None:
+        """One pass of release(): the removals and the cancels come before its first wait."""
+        self._attach_failures.pop(id(browser), None)
+        entry = self._watchers.pop(id(browser), None)
         reattaching = [task for task, its_browser in self._reattaching.items() if its_browser is browser]
         for task in reattaching:
             task.cancel()
         await asyncio.gather(*reattaching, return_exceptions=True)
-        async with self._lock:
-            self._attach_failures.pop(id(browser), None)
-            entry = self._watchers.pop(id(browser), None)
         if entry is not None:
             await entry[1].detach()
 

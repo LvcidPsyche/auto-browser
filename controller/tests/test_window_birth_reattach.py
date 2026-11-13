@@ -5,6 +5,9 @@ The loss starts one attach. When that one failed, the watcher stayed lost, and t
 new session was created on the browser. Now the attach is tried REATTACH_RETRIES more times, each a little later than
 the attach backoff, and only while the browser still has the lost watcher and a watched session.
 
+A release of the browser ends them, and forgets the browser before it waits for anything: one that is cancelled at a
+wait has forgotten it all the same.
+
 No real browser. The clock is the test's too (time.monotonic and asyncio.sleep, as window_births sees them), so a
 wait ends when the test says; the last test runs on the real clock.
 """
@@ -12,6 +15,7 @@ wait ends when the test says; the last test runs on the real clock.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -27,6 +31,7 @@ A_RETRY_LATER = BACKOFF * 1.1
 # The founder's decision for 1.18.0: three more attaches after the one the loss itself starts.
 RETRIES = 3
 REFUSED = "could not re-attach after a loss"
+IDLE = {"state": "idle", "watchers": []}
 
 
 class _ModuleWith:
@@ -135,6 +140,13 @@ async def w(clock: Clock) -> Watched:
 
 def refusals(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [record.getMessage() for record in caplog.records if REFUSED in record.getMessage()]
+
+
+def assert_forgotten(w: Watched) -> None:
+    """Neither registry holds the browser, and /readiness is told of no watcher."""
+    assert id(w.browser) not in w.births._watchers
+    assert id(w.browser) not in w.births._attach_failures
+    assert w.births.status() == IDLE
 
 
 # ── the retry ────────────────────────────────────────────────────────────────
@@ -302,6 +314,111 @@ async def test_a_retry_whose_watcher_a_new_session_replaced_does_nothing_more(
 
     await clock.advance(A_RETRY_LATER)
     assert w.attaches.asked == 4
+
+
+# ── a release that is cancelled, or beside an attach ─────────────────────────
+
+
+async def test_a_release_cancelled_while_it_waits_for_a_retry_to_end_has_forgotten_the_browser(
+    w: Watched, clock: Clock
+) -> None:
+    """A teardown step's bound, or the caller's own cancel, which still reaches the caller."""
+    await w.lose(refuse=99)
+    assert w.lost() and len(w.left_running()) == 1  # the retry, waiting out the backoff
+
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await asyncio.sleep(0)  # as far as its first wait: for the retry it cancelled
+    assert not release.done()
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+
+    assert_forgotten(w)
+    assert w.left_running() == set()
+    await clock.advance(A_RETRY_LATER * 5)
+    assert w.attaches.asked == 1
+
+
+async def test_a_release_cancelled_while_it_waits_for_the_lock_has_forgotten_the_browser(w: Watched) -> None:
+    """The lock is another browser's attach's, for as long as that attach takes."""
+    async with w.births._lock:
+        release = asyncio.ensure_future(w.births.release(w.browser))
+        await settle()
+        assert not release.done()
+        release.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await release
+
+    assert_forgotten(w)
+
+
+async def test_a_release_waits_for_an_attach_in_flight_and_forgets_the_watcher_it_registers(clock: Clock) -> None:
+    """A new session's own attach, which a release does not end: what it registers must not outlive the release."""
+    w = Watched()
+    answer = asyncio.Event()
+    attach = w.browser.new_browser_cdp_session
+
+    async def answers_late() -> FakeCdp:
+        await answer.wait()
+        return await attach()
+
+    w.browser.new_browser_cdp_session = answers_late
+    watching = asyncio.ensure_future(w.watch())
+    await settle()
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await settle()
+    assert not watching.done() and not release.done()
+
+    answer.set()
+    await release
+    await watching
+
+    assert_forgotten(w)
+    assert w.browser.cdp.detached is True
+
+
+async def test_a_release_forgets_the_watcher_of_a_retry_that_attached_although_it_was_cancelled(
+    w: Watched, clock: Clock
+) -> None:
+    """A cancel does not always end an attach: on Python 3.11 asyncio.wait_for answers a task cancelled once the
+    browser had answered with that answer, and the attach goes on. Here the browser's own call does that."""
+    await w.lose(refuse=1)
+    attaching = asyncio.Event()
+    attach = w.browser.new_browser_cdp_session
+
+    async def answers_all_the_same() -> FakeCdp:
+        attaching.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        return await attach()
+
+    w.browser.new_browser_cdp_session = answers_all_the_same
+    await clock.advance(A_RETRY_LATER)
+    await asyncio.wait_for(attaching.wait(), timeout=5)
+
+    await asyncio.wait_for(w.births.release(w.browser), timeout=5)
+
+    assert w.left_running() == set()
+    assert_forgotten(w)
+
+
+# ── a loss beside a release ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("shutdown", [False, True], ids=["release", "release_all"])
+async def test_a_loss_while_the_release_waits_for_the_lock_starts_no_attach(w: Watched, shutdown: bool) -> None:
+    """Held as another browser's attach holds it. The session stays watched throughout: the release alone is why."""
+    async with w.births._lock:
+        release = asyncio.ensure_future(w.births.release_all() if shutdown else w.births.release(w.browser))
+        await settle()
+        assert not release.done()
+        await w.lose()
+    await release
+
+    assert w.left_running() == set()
+    await settle()
+    assert w.attaches.asked == 0
+    assert_forgotten(w)
 
 
 # ── on the real clock ────────────────────────────────────────────────────────
