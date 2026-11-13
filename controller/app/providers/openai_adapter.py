@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import tempfile
@@ -11,7 +10,7 @@ import httpx
 
 from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision, ResumeCheckpoint
-from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision
+from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision, is_retryable_status
 
 logger = logging.getLogger(__name__)
 
@@ -298,64 +297,43 @@ class OpenAIAdapter(BaseProviderAdapter):
         )
 
     async def _post_host_bridge_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        socket_path = self.settings.openai_host_bridge_socket
-        max_attempts = max(1, self.settings.model_max_retries + 1)
-        transport = httpx.AsyncHTTPTransport(uds=socket_path)
+        transport = httpx.AsyncHTTPTransport(uds=self.settings.openai_host_bridge_socket)
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://host-bridge",
             timeout=self.settings.model_request_timeout_seconds,
         ) as client:
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    response = await client.post("/openai/decide", json=payload)
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    if attempt < max_attempts:
-                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
-                        continue
-                    raise ProviderAPIError(
-                        provider=self.provider,
-                        message="host bridge network request failed",
-                        status_code=None,
-                        retryable=True,
-                    ) from exc
+            response = await self._send_retrying(
+                lambda: client.post("/openai/decide", json=payload),
+                network_failure="host bridge network request failed",
+            )
 
-                try:
-                    body = response.json()
-                except Exception:
-                    body = None
+        try:
+            body = response.json()
+        except Exception:
+            body = None
 
-                retryable_status = response.status_code == 429 or response.status_code >= 500
-                if response.status_code >= 400:
-                    if retryable_status and attempt < max_attempts:
-                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
-                        continue
-                    detail = None
-                    if isinstance(body, dict):
-                        error = body.get("error")
-                        if isinstance(error, str) and error.strip():
-                            detail = error
-                        elif isinstance(error, dict):
-                            detail = error.get("message") or error.get("detail")
-                        if detail is None:
-                            detail = body.get("detail")
-                    raise ProviderAPIError(
-                        provider=self.provider,
-                        message=str(detail or response.text[:1200] or "host bridge request failed"),
-                        status_code=response.status_code,
-                        retryable=retryable_status,
-                        raw_error=body if isinstance(body, dict) else None,
-                    )
+        if response.status_code >= 400:
+            detail = None
+            if isinstance(body, dict):
+                error = body.get("error")
+                if isinstance(error, str) and error.strip():
+                    detail = error
+                elif isinstance(error, dict):
+                    detail = error.get("message") or error.get("detail")
+                if detail is None:
+                    detail = body.get("detail")
+            raise ProviderAPIError(
+                provider=self.provider,
+                message=str(detail or response.text[:1200] or "host bridge request failed"),
+                status_code=response.status_code,
+                retryable=is_retryable_status(response.status_code),
+                raw_error=body if isinstance(body, dict) else None,
+            )
 
-                if not isinstance(body, dict):
-                    raise RuntimeError("OpenAI host bridge returned a non-object response")
-                return body
-
-        raise ProviderAPIError(
-            provider=self.provider,
-            message="host bridge request failed without a response",
-            retryable=True,
-        )
+        if not isinstance(body, dict):
+            raise RuntimeError("OpenAI host bridge returned a non-object response")
+        return body
 
     def _ensure_codex_config_path_compatibility(self) -> None:
         if getattr(self, "_codex_config_checked", False):
