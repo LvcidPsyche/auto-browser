@@ -435,7 +435,10 @@ All notable changes to auto-browser are documented here.
   proxy persona's refusals (`not found`, `belongs to another operator`, `collides with the existing profile`,
   `cannot be read`), the mesh's `Unknown sender node_id`, `nonce replay from sender`, `Unknown peer node_id`,
   `No grant for capability` and its envelope whose sender or recipient is not the one expected, and the refusals of
-  a URL whose host a browser reads otherwise (`writes its host`).
+  a URL whose host a browser reads otherwise (`writes its host`). The raw CDP route's refusal of a command its
+  allowlist does not hold named the caller's method whole in the error's own text, and names it quoted and cut now
+  (`CDP command 'xyyy'... is not in the allowed list`). No answer and no log line carried that text, then or now:
+  the route answers a fixed `403` (`CDP command is not permitted`), and no MCP tool reaches the raw command.
   `mesh.delegation.reply_verification_failed` wrote the fields of a peer's reply as long as the reply was, and the
   MCP transport's `requested unsupported protocol version` line the `protocolVersion` an `initialize` sent, as long
   as the body: one wrote a line of 90,073 characters. Each is now written quoted, a control character as its escape,
@@ -456,14 +459,23 @@ All notable changes to auto-browser are documented here.
   agent job worker's crash, an agent step that failed and a background task that failed, each a traceback, which
   prints a Playwright error's text as it is. The `RuntimeError` behind a `409 Conflict` of `POST /sessions` and of
   a fork, written by its traceback too (a persona's name or a URL the caller sent among it), is written as a
-  route's hidden cause. Every other log line that writes an error's text now quotes and cuts it, made inside the
-  guard, and a source test refuses one that passes a caught error to logging itself, takes an error's text outside
-  the guard, or writes a caller's value by `%r`. Still written whole: an error's text in a traceback, which prints
-  it as it is (an MCP tool's or an agent job's unexpected error and a readiness check that failed among them, and
-  otherwise mostly the failures of the controller's own work: a store's, an audit event's or a witness receipt's
-  write, a maintenance sweep), and, where only the standard library is at hand, the stdio bridge's error texts (on
-  stderr and in its answers, its known secrets taken out) and the entrypoint's line of the capabilities it could
-  not drop.
+  route's hidden cause. Every other log line that takes a caught error's text now quotes and cuts it, made inside
+  the guard, wherever a source test can see the error. That test refuses a log call that is passed a caught error
+  itself, alone or behind a fallback or a conditional (`exc.strerror or exc`), or its text as it is, neither quoted
+  nor cut; an error's text taken outside the guard by `str()`, `repr()`, `format()`, an f-string, `%` or
+  `.format()`, whether of the error, of what it was raised with or of a task's `.exception()`; a log call whose
+  arguments are not as many as the conversions of a format written in one piece; and a value written by its repr
+  (`%r`, `{value!r}`, `repr()`), in a log format or anywhere else, that its lists do not name with the reason it is
+  no caller's. It reads the source, and takes for an error what an `except` clause names, or a parameter named or
+  annotated as one: an error kept under another name (assigned, held in a list, returned by a helper) is not seen,
+  nor is a text made earlier and logged under a name of its own, as the entrypoint's hand-over pass writes the OS's
+  reason for an entry it could not hand over (escaped, a line each, and not cut). Still written whole: an error's
+  text in a traceback, which prints it as it is (an MCP tool's or an agent job's unexpected error and a readiness
+  check that failed among them, and otherwise mostly the failures of the controller's own work: a store's, an audit
+  event's or a witness receipt's write, a maintenance sweep); the last 800 characters of autossh's own log, as that
+  file holds them, in `session tunnel for ... degraded`; and, where only the standard library is at hand, the stdio
+  bridge's error texts (on stderr and in its answers, its known secrets taken out) and the entrypoint's line of the
+  capabilities it could not drop.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
   `APP_ENV=production`, an `OPENAI_AUTH_MODE`, `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` that is not a mode stops the
   start with an error that quoted the value, and `.env.example` has each a few lines under its provider's API key:
