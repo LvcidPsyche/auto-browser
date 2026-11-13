@@ -11,7 +11,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from .approvals import ApprovalRequiredError, given_back_notes, held_for_execution
 from .browser_manager import BrowserManager
-from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
+from .models import AgentRunResult, AgentStepResult, ProviderName, ResumeCheckpoint, WorkflowProfile
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
 from .utils import error_lines_for_log, error_text, error_text_for_log
@@ -45,6 +45,7 @@ class BrowserOrchestrator:
         provider_model: str | None = None,
         workflow_profile: WorkflowProfile = "fast",
         previous_steps: list[AgentStepResult] | None = None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> AgentStepResult:
         workflow_profile = self._effective_profile(workflow_profile)
         adapter = self.registry.get(provider_name)
@@ -85,6 +86,7 @@ class BrowserOrchestrator:
                 context_hints=effective_context_hints,
                 previous_steps=prompt_history,
                 model_override=provider_model,
+                resume_checkpoints=resume_checkpoints,
             )
             execute = functools.partial(
                 self._execute_decision,
@@ -192,6 +194,7 @@ class BrowserOrchestrator:
         provider_model: str | None = None,
         workflow_profile: WorkflowProfile = "fast",
         on_step: Callable[[int, AgentStepResult], Awaitable[None]] | None = None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> AgentRunResult:
         workflow_profile = self._effective_profile(workflow_profile)
         steps: list[AgentStepResult] = []
@@ -211,6 +214,7 @@ class BrowserOrchestrator:
                 provider_model=provider_model,
                 workflow_profile=workflow_profile,
                 previous_steps=steps,
+                resume_checkpoints=resume_checkpoints,
             )
             steps.append(step_result)
             if on_step is not None:

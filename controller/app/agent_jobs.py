@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from .audit import get_current_operator
 from .models import (
-    CONTEXT_HINTS_MAX_CHARS,
+    RESUME_CHECKPOINTS_MAX,
     AgentJobCheckpoint,
     AgentJobRecord,
     AgentJobStatus,
@@ -19,6 +19,7 @@ from .models import (
     AgentStepRequest,
     AgentStepResult,
     OperatorIdentity,
+    ResumeCheckpoint,
 )
 from .session_ownership import acting_as
 from .utils import (
@@ -294,8 +295,11 @@ async def _finished_in_the_queue(_job_id: str) -> None:
 # waits for a worker to stop a running job. The callback goes on past it.
 _QUEUE_ENDED_FINISH_WAIT_SECONDS = 5.0
 
+# How the block began that 1.17.0 and earlier merged into a resumed run's context_hints, after the operator's text. A
+# resume's checkpoints are a field of their own now (page data, which the planner shows as such), but a record an older
+# version wrote can still hold the block, built from pages' text: a resume cuts it (_without_resume_block), and so does
+# the run of a resumed job that was queued before the upgrade.
 RESUME_CONTEXT_PREFIX = "Resuming background agent job"
-RESUME_CONTEXT_MIN_CHARS = 1000
 QUEUED_OPERATOR_CREDENTIAL_REMOVED = (
     "refused: the operator who queued this job no longer has a named credential (API_BEARER_TOKENS)"
 )
@@ -481,10 +485,8 @@ class AgentJobQueue:
             payload.max_steps = max_steps
         # The approval the first run was queued with was given for that run: this one asks for its own.
         payload.approval_id = None
-        payload.context_hints = self._merge_context_hints(
-            payload.context_hints,
-            self._resume_context(source),
-        )
+        payload.context_hints = self._without_resume_block(payload.context_hints)
+        payload.resume_checkpoints = self._resume_checkpoints(source)
         resumed = await self._enqueue(
             source.session_id,
             "agent_run",
@@ -722,6 +724,10 @@ class AgentJobQueue:
                 record = await self.store.append_checkpoint(record.id, self._checkpoint_from_step(1, result))
             else:
                 request = AgentRunRequest.model_validate(record.request)
+                context_hints = request.context_hints
+                if record.parent_job_id is not None:
+                    # A resume queued by 1.17.0 and run after the upgrade: its hints still hold the merged block.
+                    context_hints = self._without_resume_block(context_hints)
 
                 async def checkpoint_step(step_index: int, step_result: AgentStepResult) -> None:
                     await self.store.append_checkpoint(record.id, self._checkpoint_from_step(step_index, step_result))
@@ -732,12 +738,13 @@ class AgentJobQueue:
                     goal=request.goal,
                     max_steps=request.max_steps,
                     observation_limit=request.observation_limit,
-                    context_hints=request.context_hints,
+                    context_hints=context_hints,
                     upload_approved=request.upload_approved,
                     approval_id=request.approval_id,
                     provider_model=request.provider_model,
                     workflow_profile=request.workflow_profile,
                     on_step=checkpoint_step,
+                    resume_checkpoints=request.resume_checkpoints,
                 )
             # A run or step that ended in "error" did not complete: record it failed, with the reason it gave.
             failed = result.status == "error"
@@ -847,43 +854,27 @@ class AgentJobQueue:
         )
 
     @classmethod
-    def _resume_context(cls, record: AgentJobRecord) -> str:
-        if not record.checkpoints:
-            return (
-                f"{RESUME_CONTEXT_PREFIX} {record.id}. No completed step checkpoints were recorded; "
-                "continue from the current browser state and avoid repeating completed work when visible."
+    def _resume_checkpoints(cls, record: AgentJobRecord) -> list[ResumeCheckpoint]:
+        """The last steps a run completed, cut to the bounds of the request field that carries them to its resume."""
+        return [
+            ResumeCheckpoint(
+                step_index=checkpoint.step_index,
+                status=checkpoint.status,
+                action=cls._truncate(checkpoint.action, 120),
+                url=cls._truncate(checkpoint.url, 500),
+                title=cls._truncate(checkpoint.title, 200),
             )
-        latest = record.checkpoints[-1]
-        step_lines = []
-        for checkpoint in record.checkpoints[-6:]:
-            action = checkpoint.action or "unknown"
-            location = cls._truncate(checkpoint.url or checkpoint.title, 200) or "current page"
-            step_lines.append(f"{checkpoint.step_index}. {checkpoint.status} {action} at {location}")
-        return (
-            f"{RESUME_CONTEXT_PREFIX} {record.id} after {len(record.checkpoints)} completed step(s). "
-            f"Latest checkpoint: status={latest.status}, action={latest.action or 'unknown'}, "
-            f"url={cls._truncate(latest.url, 500) or 'unknown'}. Continue from the current browser state; do not repeat completed "
-            "actions unless the page state requires it.\nCompleted checkpoints:\n" + "\n".join(step_lines)
-        )
+            for checkpoint in record.checkpoints[-RESUME_CHECKPOINTS_MAX:]
+        ]
 
     @staticmethod
-    def _merge_context_hints(existing: str | None, resume_context: str) -> str:
-        """Operator hints plus this resume's context, within the request's limit.
+    def _without_resume_block(hints: str | None) -> str | None:
+        """The operator's hints, with the block an older version merged in after them cut off (None if nothing is left).
 
-        The merged text is stored as the new job's request and re-validated when
-        a worker picks it up. It used to be unbounded: long checkpoint URLs, or a
-        few resumes in a row each appending another block, pushed it past
-        context_hints' limit and the resumed job failed with a ValidationError
-        before running a step. An earlier resume block is dropped, since the
-        new one describes the same run from a later point.
+        That block was written from pages' text and sat where the operator's own text does (RESUME_CONTEXT_PREFIX).
         """
-        operator_hints = (existing or "").split(RESUME_CONTEXT_PREFIX, 1)[0].strip()
-        if not operator_hints:
-            return resume_context[:CONTEXT_HINTS_MAX_CHARS]
-        # Operator hints win, but always leave the resume context some room.
-        operator_hints = operator_hints[: CONTEXT_HINTS_MAX_CHARS - 2 - RESUME_CONTEXT_MIN_CHARS]
-        budget = CONTEXT_HINTS_MAX_CHARS - 2 - len(operator_hints)
-        return f"{operator_hints}\n\n{resume_context[:budget]}"
+        operator_hints = (hints or "").split(RESUME_CONTEXT_PREFIX, 1)[0].strip()
+        return operator_hints or None
 
     @staticmethod
     def _truncate(value: object, limit: int) -> str | None:

@@ -773,6 +773,18 @@ All notable changes to auto-browser are documented here.
   takes its session out of the controller's list before its rollback starts, so a close that arrives then finds no
   session to close: a pre-request gate lost while the first page loaded had the controller's close and the create's
   rollback each close the context.
+- **A resumed agent run no longer shows its first run's page text to the planner as the operator's hints.**
+  `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` merged a summary of the first run's checkpoints into
+  the new run's `context_hints`, which every planner's prompt prints as operator text, so a URL or a title a page had
+  chosen sat beside the operator's instructions. The last six checkpoints (step, status, action, URL, title) are now a
+  request field of their own, `resume_checkpoints`, bounded as the hints are (a URL at 500 characters, a title at 200,
+  an action at 120). Every planner's prompt (the Claude, Gemini, OpenAI and OpenAI-compatible APIs, the three CLIs and
+  the Codex host bridge) shows them inside the observation's JSON, quoted, beside one sentence of the controller's own
+  that says the run resumes an earlier one; `context_hints` of a resumed run is the operator's alone. A client can set
+  the field on `POST /sessions/{id}/agent/run` and in the `request` of the queue tools, and it is shown as page data
+  whoever set it. A job record an older version wrote can hold the merged block in its `context_hints`: a resume cuts
+  it off, and so does the run of a resumed job queued before the upgrade; that job's record keeps what was written.
+  (STORE-24)
 
 ### Fixed
 

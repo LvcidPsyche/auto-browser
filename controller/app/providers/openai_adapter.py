@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from ..codex_sandbox import codex_sandbox_flags
-from ..models import BrowserActionDecision
+from ..models import BrowserActionDecision, ResumeCheckpoint
 from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         if self.auth_mode == "host_bridge":
             return await self._decide_via_host_bridge(
@@ -104,6 +105,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 observation=observation,
                 context_hints=context_hints,
                 previous_steps=previous_steps,
+                resume_checkpoints=resume_checkpoints,
                 model_override=model_override,
             )
         if self.auth_mode == "cli":
@@ -112,6 +114,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 observation=observation,
                 context_hints=context_hints,
                 previous_steps=previous_steps,
+                resume_checkpoints=resume_checkpoints,
                 model_override=model_override,
             )
 
@@ -139,6 +142,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                                 observation=observation,
                                 context_hints=context_hints,
                                 previous_steps=previous_steps,
+                                resume_checkpoints=resume_checkpoints,
                             ),
                         },
                         *(
@@ -194,6 +198,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         model = model_override or self.settings.openai_cli_model
         prompt = self.build_cli_prompt(
@@ -201,6 +206,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             observation=observation,
             context_hints=context_hints,
             previous_steps=previous_steps,
+            resume_checkpoints=resume_checkpoints,
             include_schema=False,
         )
         # Under the CLI home, not the shared system temp dir, whose other users could plant config in a parent.
@@ -259,6 +265,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         model = model_override or self.settings.openai_cli_model
         prompt = self.build_cli_prompt(
@@ -266,6 +273,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             observation=observation,
             context_hints=context_hints,
             previous_steps=previous_steps,
+            resume_checkpoints=resume_checkpoints,
             include_schema=False,
         )
         image = self.encode_screenshot(observation)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..models import BrowserActionDecision
+from ..models import BrowserActionDecision, ResumeCheckpoint
 from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderDecision
 
 # Current Claude models think on every request, and thinking counts against
@@ -68,6 +68,7 @@ class ClaudeAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         if self.auth_mode == "cli":
             return await self._decide_via_cli(
@@ -75,6 +76,7 @@ class ClaudeAdapter(BaseProviderAdapter):
                 observation=observation,
                 context_hints=context_hints,
                 previous_steps=previous_steps,
+                resume_checkpoints=resume_checkpoints,
                 model_override=model_override,
             )
 
@@ -114,6 +116,7 @@ class ClaudeAdapter(BaseProviderAdapter):
                                 observation=observation,
                                 context_hints=context_hints,
                                 previous_steps=previous_steps,
+                                resume_checkpoints=resume_checkpoints,
                             ),
                         },
                     ],
@@ -153,6 +156,7 @@ class ClaudeAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         model = model_override or self.settings.claude_cli_model
         prompt = self.build_cli_prompt(
@@ -160,6 +164,7 @@ class ClaudeAdapter(BaseProviderAdapter):
             observation=observation,
             context_hints=context_hints,
             previous_steps=previous_steps,
+            resume_checkpoints=resume_checkpoints,
         )
         command = [
             self.settings.claude_cli_path,

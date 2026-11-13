@@ -74,6 +74,7 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
                     approval_id=payload.approval_id,
                     provider_model=payload.provider_model,
                     workflow_profile=payload.workflow_profile,
+                    resume_checkpoints=payload.resume_checkpoints,
                 )
                 return result.model_dump()
             except KeyError:

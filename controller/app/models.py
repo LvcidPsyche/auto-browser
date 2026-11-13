@@ -516,10 +516,34 @@ class AgentStepRequest(StrictInputModel):
 
 
 AGENT_RUN_MAX_STEPS = 20
+# The checkpoints a resume hands on: the last six, as much of the run as a planner's prompt shows of its own.
+RESUME_CHECKPOINTS_MAX = 6
+
+
+class ResumeCheckpoint(StrictInputModel):
+    """One completed step of the run a resumed run continues.
+
+    Its url and title came from a page, so a planner's prompt shows it as page data (inside the observation's JSON), and
+    never as operator text. Bounded as `context_hints` is.
+    """
+
+    step_index: int = Field(ge=1)
+    status: AgentStepStatus
+    action: str | None = Field(default=None, max_length=120)
+    url: str | None = Field(default=None, max_length=500)
+    title: str | None = Field(default=None, max_length=200)
 
 
 class AgentRunRequest(AgentStepRequest):
     max_steps: int = Field(default=6, ge=1, le=AGENT_RUN_MAX_STEPS)
+    resume_checkpoints: list[ResumeCheckpoint] | None = Field(
+        default=None,
+        max_length=RESUME_CHECKPOINTS_MAX,
+        description=(
+            "Set by a resume: the completed steps of the run it continues, which the planner is shown as page data. "
+            "An empty list marks a resume of a run that completed none. Omit it for a new run."
+        ),
+    )
 
 
 class AgentResumeRequest(StrictInputModel):

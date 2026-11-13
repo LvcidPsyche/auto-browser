@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from playwright.async_api import Error as PlaywrightError
 
 from app.approvals import ApprovalRequiredError
-from app.models import ApprovalRecord, BrowserActionDecision
+from app.models import ApprovalRecord, BrowserActionDecision, ResumeCheckpoint
 from app.orchestrator import BrowserOrchestrator
 from app.providers.base import ProviderDecision
 
@@ -191,6 +191,46 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Stay on the current account.", adapter.last_context_hints)
         self.assertIn("Workflow profile: governed", adapter.last_context_hints)
         self.assertIn("request human takeover", adapter.last_context_hints)
+
+    async def test_run_hands_the_resume_checkpoints_to_the_planner_at_every_step(self) -> None:
+        # STORE-24: they are the planner's data, beside the operator's hints and never merged into them.
+        seen: list[dict] = []
+
+        class RecordingAdapter(RepeatingAdapter):
+            async def decide(self, **kwargs):
+                seen.append(kwargs)
+                return await super().decide(**kwargs)
+
+        checkpoints = [ResumeCheckpoint(step_index=1, status="acted", url="https://x.test/")]
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(RecordingAdapter()))
+
+        await orchestrator.run(
+            session_id="session-1",
+            provider_name="openai",
+            goal="Keep going",
+            max_steps=2,
+            context_hints="Stay on the account.",
+            resume_checkpoints=checkpoints,
+        )
+
+        self.assertEqual(len(seen), 2)
+        for kwargs in seen:
+            self.assertEqual(kwargs["resume_checkpoints"], checkpoints)
+            self.assertEqual(kwargs["context_hints"], "Stay on the account.")
+
+    async def test_a_step_with_no_resume_checkpoints_passes_none(self) -> None:
+        seen: list[dict] = []
+
+        class RecordingAdapter(RepeatingAdapter):
+            async def decide(self, **kwargs):
+                seen.append(kwargs)
+                return await super().decide(**kwargs)
+
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(RecordingAdapter()))
+
+        await orchestrator.step(session_id="session-1", provider_name="openai", goal="Click")
+
+        self.assertIsNone(seen[0]["resume_checkpoints"])
 
     async def test_governed_workflow_profile_blocks_write_without_approval(self) -> None:
         approval = ApprovalRecord(
