@@ -538,7 +538,9 @@ each distinct line, which names the condition or the settings and never a settin
 - **A secret is kept outside `/data`, or inside `CLI_HOME`.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`,
   `WITNESS_ROOT`, `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and
   `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so a `/data` that is a symbolic link to another place
-  holds none of them. The CLI starts under the launcher, which closes `/data` and not that place. A Linux host run
+  holds none of them. "Inside `CLI_HOME`" is as written or once resolved: a path written there counts wherever it
+  resolves, since the CLI can replace a link in its home with a file of its own. The CLI starts under the launcher,
+  which closes `/data` and not that place. A Linux host run
   that keeps its data elsewhere gets this warning, with the name of each of them it sets.
 
 `CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails

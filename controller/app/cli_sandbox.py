@@ -13,8 +13,9 @@ Four things leave a secret open to it all the same:
   the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
 - the CLI home is PROTECTED_ROOT or holds it: a rule on that home would open the root, and the launcher refuses it.
   The CLI is started without the launcher.
-- a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT or inside the CLI
-  home. The CLI is started under the launcher, which does not close that place.
+- a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT, or a path that lies
+  in the CLI home as written or once resolved (the CLI can replace a link written there). The CLI is started under
+  the launcher, which does not close that place.
 
 Each is one WARNING for the process (one for each distinct text) that names the condition or the settings, never a
 value, and the CLI runs. With CLI_SANDBOX_REQUIRED=true each is one ERROR and SandboxRequired: no CLI runs.
@@ -138,14 +139,25 @@ def _within(path: str, directory: str) -> bool:
     return Path(os.path.realpath(path)).is_relative_to(directory)
 
 
+def _ways(path: str) -> tuple[str, str]:
+    """``path`` as written (absolute and normalised) and once resolved."""
+    return os.path.abspath(path), os.path.realpath(path)
+
+
 def _open_settings(settings: Settings, cli_home: str) -> list[str]:
     """The names of the settings whose secret the ruleset leaves open: each one that is set and resolves to a place
-    outside PROTECTED_ROOT as it is written (a root that is a link holds nothing itself), or inside the CLI home."""
-    home = os.path.realpath(cli_home)
+    outside PROTECTED_ROOT as it is written (a root that is a link holds nothing itself), or whose path, as written or
+    once resolved, lies in the CLI home as written or once resolved. A path written there is the CLI's to replace,
+    wherever it resolves now."""
+    homes = _ways(cli_home)
     return [
         name
         for attribute, name in SECRET_PATH_SETTINGS.items()
-        if (value := getattr(settings, attribute)) and (not _within(value, PROTECTED_ROOT) or _within(value, home))
+        if (value := getattr(settings, attribute))
+        and (
+            not _within(value, PROTECTED_ROOT)
+            or any(Path(place).is_relative_to(home) for place in _ways(value) for home in homes)
+        )
     ]
 
 

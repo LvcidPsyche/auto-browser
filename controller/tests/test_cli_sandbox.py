@@ -217,6 +217,33 @@ async def test_a_secret_in_the_cli_home_is_named_too(data, monkeypatch, caplog) 
     assert "AUTH_ROOT" in line
 
 
+@pytest.mark.parametrize("kind", ["a directory", "a file"])
+async def test_a_secret_whose_path_is_written_inside_the_cli_home_is_named_wherever_it_resolves(
+    data, monkeypatch, caplog, kind: str
+) -> None:
+    # The path resolves into the root, which the ruleset closes; but the CLI writes its home, so it can put a file of
+    # its own making where the link is, and the controller would read that as its secret.
+    if kind == "a file" and os.name == "nt":
+        pytest.skip("a symbolic link to a file takes a privilege on Windows")
+    _probe_says(monkeypatch, None)
+    if kind == "a directory":
+        (data.root / "auth").mkdir()
+        _link_to_directory(data.home / "auth", data.root / "auth")
+        name, changed = "AUTH_ROOT", {"AUTH_ROOT": str(data.home / "auth")}
+    else:
+        (data.root / "api-token").write_text("a token", encoding="utf-8")
+        (data.home / "token").symlink_to(data.root / "api-token")
+        name, changed = "API_TOKEN_FILE", {"API_TOKEN_FILE": str(data.home / "token")}
+
+    with caplog.at_level(logging.WARNING):
+        await _launch(_settings(data, **changed), data)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data)
+
+    (line,) = _written(caplog)
+    assert name in line
+
+
 @pytest.mark.parametrize("unset", [None, ""])
 async def test_a_setting_that_is_not_set_is_passed_over(data, monkeypatch, caplog, unset) -> None:
     _probe_says(monkeypatch, None)
