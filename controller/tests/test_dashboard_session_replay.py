@@ -27,7 +27,9 @@ from tests.test_session_diagnostics import SESSION, _replay
 BEARER = "Bearer ops-alice"  # drive() answers the dashboard's token prompt with ops-alice
 BUTTON = "#sessions-tbody button"
 NOTE = "document.getElementById('takeover-note').textContent"
-ELSEWHERE = "http://elsewhere.test/shot.png"
+ELSEWHERE_ORIGIN = "http://elsewhere.test"
+ELSEWHERE = f"{ELSEWHERE_ORIGIN}/shot.png"
+REPLAY_COPY_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
 PNG_DATA_URL = "data:image/png;base64,"
 
 
@@ -152,6 +154,7 @@ HOSTILE_PAGE = f"""<!DOCTYPE html>
 <body><h1>Session Replay</h1>
 <img id="shot" src="/artifacts/{SESSION}/step-1.png">
 <img id="off-artifacts" src="/audit/events?limit=1&amp;name=x.png">
+<img id="same-origin" src="{ORIGIN}/audit/events?limit=1&amp;name=y.png">
 <img id="climbs" src="/artifacts/../sessions/{SESSION}/replay">
 <img id="elsewhere" src="{ELSEWHERE}">
 <img id="handler" src="/artifacts/{SESSION}/step-2.png" onload="window.ran = 'an image handler'">
@@ -163,10 +166,14 @@ HOSTILE_PAGE = f"""<!DOCTYPE html>
 def test_the_copy_runs_no_script_and_the_token_goes_only_to_this_controllers_artifacts() -> None:
     # The route's page holds no script and escapes what it shows. The copy is opened on the dashboard's own origin,
     # so it would not run one either way, and reads with the token only what is a screenshot of this controller.
+    # A path-absolute src cannot be loaded from the copy (a blob: document has no base to resolve it by): the
+    # absolute one of this origin outside /artifacts is what the copy's policy alone keeps from loading.
     stub = ReplayStub(HOSTILE_PAGE)
 
     async def scenario(page, dialogs) -> dict:
         await page.context.route("http://elsewhere.test/**", stub.handle)
+        # What the copy asks of this origin: drive()'s route is the dashboard page's alone.
+        await page.context.route(f"{ORIGIN}/**", stub.handle)
         popup = await _opened_copy(page)
         return {
             "ran": await popup.evaluate("window.ran"),
@@ -179,15 +186,74 @@ def test_the_copy_runs_no_script_and_the_token_goes_only_to_this_controllers_art
     seen = drive(stub, scenario)
 
     assert seen["ran"] is None
-    assert seen["policy"] == "default-src 'none'; img-src data:; style-src 'unsafe-inline'"
-    assert seen["widths"] == {"shot": 1, "off-artifacts": 0, "climbs": 0, "elsewhere": 0, "handler": 1}
+    assert seen["policy"] == REPLAY_COPY_POLICY
+    assert seen["widths"] == {
+        "shot": 1,
+        "off-artifacts": 0,
+        "same-origin": 0,
+        "climbs": 0,
+        "elsewhere": 0,
+        "handler": 1,
+    }
     # Nothing but the page and the two screenshots was asked for, by the dashboard or by the copy.
     assert stub.tokens == {
         f"/sessions/{SESSION}/replay": [BEARER],
         f"/artifacts/{SESSION}/step-1.png": [BEARER],
         f"/artifacts/{SESSION}/step-2.png": [BEARER],
     }
-    assert [path for path in stub.asked if "name=x.png" in path] == []
+    assert [path for path in stub.asked if "name=x.png" in path or "name=y.png" in path] == []
+
+
+NAVIGATING_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title><base href="{ELSEWHERE_ORIGIN}/based/"></head>
+<body><h1>Session Replay</h1>
+<form action="{ELSEWHERE_ORIGIN}/submitted" method="get">
+<input name="q" value="page text"><button id="submit">go</button>
+</form>
+<a id="relative" href="relative-link">a relative link</a>
+</body></html>"""
+REFRESH_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title><meta http-equiv="refresh" content="1;url={ELSEWHERE_ORIGIN}/refreshed"></head>
+<body><h1>Session Replay</h1></body></html>"""
+# Each way a page could move the copy's window elsewhere with no script: its markup, and what is clicked.
+NAVIGATIONS = {
+    "a form": (NAVIGATING_PAGE, "#submit"),
+    "a base": (NAVIGATING_PAGE, "#relative"),
+    "a refresh": (REFRESH_PAGE, None),
+}
+# Longer than the refresh's second: a window that is moving has moved by then.
+NAVIGATION_WAIT_MS = 2500
+
+
+@requires_chromium
+@pytest.mark.parametrize("case", list(NAVIGATIONS))
+def test_the_copy_is_not_moved_elsewhere_by_a_form_a_base_or_a_refresh(case: str) -> None:
+    # None is in the route's page, which escapes what it shows: the copy does not rest on that. With its <base>
+    # refused, a relative link has nothing to resolve against in a blob: document, and Chromium refuses it too
+    # (about:blank#blocked).
+    markup, clicked = NAVIGATIONS[case]
+    stub = ReplayStub(markup)
+
+    async def scenario(page, dialogs) -> dict:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        await page.context.route(f"{ELSEWHERE_ORIGIN}/**", stub.handle)
+        popup = await _opened_copy(page)
+        base = await popup.evaluate("document.baseURI")
+        if clicked:
+            # A refused submit leaves a navigation scheduled that never ends: the click does not wait for it.
+            await popup.click(clicked, no_wait_after=True)
+        try:
+            await popup.wait_for_url(lambda url: url.startswith(ELSEWHERE_ORIGIN), timeout=NAVIGATION_WAIT_MS)
+        except PlaywrightTimeoutError:
+            pass
+        return {"base": base.split(":", 1)[0], "at": popup.url.split(":", 1)[0]}
+
+    seen = drive(stub, scenario)
+
+    assert seen["base"] == "blob"
+    assert seen["at"] in ("blob", "about"), seen
+    assert [path for path in stub.asked if path.startswith(ELSEWHERE_ORIGIN)] == []
 
 
 @requires_chromium
