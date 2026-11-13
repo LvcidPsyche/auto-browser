@@ -20,7 +20,7 @@ import pytest
 
 from app.action_errors import SessionNotFoundError
 from app.browser.services.sessions import BrowserSessionService
-from app.mesh.delegation import DelegationManager
+from app.mesh.delegation import DelegationManager, DelegationRejected
 from app.mesh.identity import NodeIdentity
 from app.mesh.models import CapabilityGrant, PeerRecord
 from app.mesh.peers import PeerRegistryFile
@@ -87,6 +87,22 @@ def test_a_session_id_is_logged_on_one_line(mesh, caplog: pytest.LogCaptureFixtu
     _post(mesh, "session:close", session_id="s1" + FORGED)
 
     _the_line(caplog, "app.mesh.delegation", "mesh.delegation.session_verb")
+
+
+def test_a_request_that_does_not_decode_is_refused_without_the_values_it_held(mesh) -> None:
+    # The refusal's text was pydantic's own, which repeats each value it refused (the first and last characters of a
+    # long one). The route answers a fixed 403; the text is the DelegationRejected's, for whatever takes that.
+    add_legit_peer(mesh, "tool:*")
+    payload = {"capability": ["a value that must not come back"], "arguments": {}, "session_id": ""}
+    envelope = make_envelope(mesh.legit, payload, recipient_node_id=mesh.server.node_id)
+
+    with pytest.raises(DelegationRejected) as refused:
+        asyncio.run(mesh.app.state.delegation_manager.receive_inbound(envelope))
+    response = mesh.client.post("/mesh/receive", json=envelope.model_dump())
+
+    assert str(refused.value) == "Malformed DelegationRequest: 1 refused by DelegationRequest: capability: string_type"
+    assert (response.status_code, response.json()) == (403, {"detail": "Mesh delegation rejected"})
+    assert mesh.calls == []
 
 
 # What of a refused URL is not for a log: its userinfo, its path, its query and its fragment.

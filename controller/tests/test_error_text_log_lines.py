@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import Error as PlaywrightError
+from pydantic import BaseModel, ValidationError
 
 from app.action_errors import BrowserUnreachableError
 from app.browser import prefetch
@@ -26,6 +27,7 @@ from app.browser.services import runtime
 from app.browser.services.sessions import BrowserSessionService
 from app.session_store import FileSessionStore
 from app.startup import extensions
+from app.utils import MAX_LOGGED_PATH_CHARS, error_text
 
 _APP = Path(__file__).resolve().parents[1] / "app"
 # A line break, an ESC and 5,000 characters, after a line a reader of the log would take for the controller's.
@@ -576,6 +578,30 @@ class AValidationErrorLoggedTests(unittest.IsolatedAsyncioTestCase):
             ascii(written),
         )
         self.assertNotIn("forged", written)
+
+
+class AValidationErrorAnsweredTests(unittest.TestCase):
+    def test_error_text_names_each_refused_field_and_its_kind_and_never_its_value(self) -> None:
+        # An answer and an exception's message take error_text: it was str() of the error, which pydantic writes
+        # over several lines with each value it refused (the first and last characters of a long one).
+        class Stored(BaseModel):
+            goal: str
+            steps: dict[str, int]
+
+        value = "a value that must not come back"
+        with self.assertRaises(ValidationError) as refused:
+            Stored.model_validate({"goal": [value], "steps": {f"step-{index}": value for index in range(40)}})
+
+        text = error_text(refused.exception)
+
+        fields = ["goal: string_type", *(f"steps.step-{index}: int_parsing" for index in range(40))]
+        # Every field, unquoted and uncut: an answer cuts its own text where it did.
+        self.assertEqual(text, "41 refused by Stored: " + "; ".join(fields))
+        self.assertGreater(len(text), MAX_LOGGED_PATH_CHARS)
+
+    def test_error_text_of_any_other_error_is_its_own_text(self) -> None:
+        self.assertEqual(error_text(ValueError("Job is not resumable\nas it was")), "Job is not resumable\nas it was")
+        self.assertEqual(error_text("a KeyError's first argument"), "a KeyError's first argument")
 
 
 if __name__ == "__main__":

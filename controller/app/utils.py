@@ -102,13 +102,14 @@ LOGGED_GROUP_MEMBERS = 3
 def error_text(error: object) -> str:
     """What str() makes of ``error`` (an error, or what one carries, such as its first argument), made so that it
     never raises: a text that cannot be made (str(KeyError(x)) is repr(x), and an object's repr can raise) is named
-    as error_text_for_log names it, and the except that takes it goes on.
+    as error_text_for_log names it, and the except that takes it goes on. Of a pydantic ValidationError, as there,
+    the fields it refused and never the values a model was given (_refused_fields).
 
     For an answer, an exception's message or a test of the text, which cut it as they did: neither quoted nor cut.
     A log line takes error_text_for_log.
     """
     try:
-        return str(error)
+        return _refused_fields(error) if isinstance(error, ValidationError) else str(error)
     except Exception as failed:
         return _text_not_made(failed)
 
@@ -117,17 +118,18 @@ def _text_not_made(failed: BaseException) -> str:
     return f"<its text could not be made: {type(failed).__name__}>"
 
 
+def _refused_fields(error: ValidationError) -> str:
+    """A pydantic ValidationError's text without what pydantic's own prints, the value of each field it refused (a
+    body holds a webhook key or a password): which field and what kind of refusal, no more."""
+    refused = error.errors(include_url=False, include_context=False, include_input=False)
+    fields = "; ".join(f"{'.'.join(str(part) for part in entry['loc'])}: {entry['type']}" for entry in refused)
+    return f"{error.error_count()} refused by {error.title}: {fields}"
+
+
 def error_text_for_log(error: BaseException) -> str:
     """The error's own text for the log: on one line, cut, and never the values a model was given."""
     try:
-        if isinstance(error, ValidationError):
-            # pydantic prints the value of each field it refused, and a body holds a webhook key or a password:
-            # which field and what kind of refusal, no more.
-            refused = error.errors(include_url=False, include_context=False, include_input=False)
-            fields = "; ".join(f"{'.'.join(str(part) for part in entry['loc'])}: {entry['type']}" for entry in refused)
-            text = f"{error.error_count()} refused by {error.title}: {fields}"
-        else:
-            text = str(error)
+        text = _refused_fields(error) if isinstance(error, ValidationError) else str(error)
         cut = "" if len(text) <= MAX_LOGGED_PATH_CHARS else f" (cut from {len(text)} characters)"
         return quoted_for_log(text) + cut
     except Exception as failed:

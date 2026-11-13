@@ -33,7 +33,7 @@ import app.main as main_module
 import app.routes.system as system_routes
 from app.agent_jobs import AgentJobStore
 from app.cron_service import WebhookKeyRefusedError
-from app.models import AgentStepResult, ProviderInfo
+from app.models import AgentJobRecord, AgentStepResult, ProviderInfo
 from app.witness import ReceiptList
 
 
@@ -296,6 +296,31 @@ class AgentHttpTests(unittest.TestCase):
         self.assertIn("queue is full", record.getMessage())
         self.assertIn(refused.id, record.getMessage())
         self.assertIsNone(record.exc_info)
+
+    def test_resuming_a_job_whose_stored_request_no_longer_validates_answers_without_its_values(self) -> None:
+        # The 400 carried pydantic's text of the refusal, which repeats each value it refused: here the job's goal,
+        # as a record written before the request's model took its present shape holds it.
+        store = AgentJobStore(tempfile.mkdtemp(dir=_TEST_ROOT))
+        stored = AgentJobRecord(
+            id="job-1",
+            session_id="session-1",
+            kind="agent_run",
+            status="failed",
+            created_at="2026-11-12T00:00:00Z",
+            updated_at="2026-11-12T00:00:00Z",
+            request={"provider": "openai", "goal": ["a value that must not come back"], "max_steps": 99},
+        )
+        store._write_sync(stored)
+        with (
+            patch.object(main_module.manager, "session_accessible", new=AsyncMock(return_value=True)),
+            patch.object(main_module.job_queue, "store", store),
+        ):
+            response = self.client.post("/agent/jobs/job-1/resume")
+
+        self.assertEqual(
+            (response.status_code, response.json()),
+            (400, {"detail": "2 refused by AgentRunRequest: goal: string_type; max_steps: less_than_equal"}),
+        )
 
     def test_an_error_that_is_not_the_full_queue_answers_500_and_is_logged(self) -> None:
         # Each route that queues answered every RuntimeError as a full queue, 503 and unlogged: an audit write that

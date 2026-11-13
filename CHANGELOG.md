@@ -388,8 +388,14 @@ All notable changes to auto-browser are documented here.
   the text, where `str()` of an error whose text cannot be made raised out of the `except` that took it, in place of
   the error it was about: the pre-request gate's detach of a session that went with its target (a close met that
   error instead), a CDP connect that failed, an upload's check, a post-action observation, a tool's refusal, a
-  route's answer that repeats an error's text. The private CLI home's lines and `mesh.peers`' line of a peers file
-  it cannot use, which wrote such a text as it came, now quote and cut it.
+  route's answer that repeats an error's text. Where such a text is a pydantic `ValidationError`'s, it repeated
+  each value the model refused (the first and last characters of a long one), in an answer as in a log line: it is
+  now the fields and kinds of refusal alone there too, neither quoted nor cut. `POST /agent/jobs/{id}/resume` of a
+  job whose stored request no longer validates answers `400` with
+  `2 refused by AgentRunRequest: goal: string_type; max_steps: less_than_equal`, and a mesh request that does not
+  decode is refused as `Malformed DelegationRequest: 1 refused by DelegationRequest: capability: string_type` (the
+  delegation manager's own text: the route answers a fixed `403`). The private CLI home's lines and `mesh.peers`'
+  line of a peers file it cannot use, which wrote such a text as it came, now quote and cut it.
   The lines that cut an error's text at 200 or 300 characters as it came, a line break and an ESC in it, now quote
   it too: the pre-request gate's (a detach of its session, a page's `targetId` read, and the bypass of a page's
   service workers, which wrote the text whole),
