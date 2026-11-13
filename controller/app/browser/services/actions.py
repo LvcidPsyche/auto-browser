@@ -496,7 +496,8 @@ def _left_until(ends: float) -> float:
 
 async def _arrives_by(call: Awaitable[Any], ends: float, give_back: Callable[[Any], Coroutine[Any, Any, None]]) -> Any:
     """The handle ``call`` answers, where it answers by the loop's time ``ends``: else the call's error, or the
-    bound's.
+    bound's. A call asked once ``ends`` has passed gets the bound's error whatever it answers. One that answered by
+    then keeps its answer however late the loop runs its caller again.
 
     The call is a task of its own, which giving up on it (the bound passed, the caller was cancelled) does not
     cancel. A cancelled call does not stop the page: the handle is made all the same, and the answer that carries it
@@ -505,10 +506,15 @@ async def _arrives_by(call: Awaitable[Any], ends: float, give_back: Callable[[An
     """
     step = asyncio.ensure_future(call)
     try:
+        left = _left_until(ends)
+        if not left:
+            # Asked once the bound had passed (an earlier step of the take used it up): asyncio.wait with no time
+            # left would still find a step done that answers within a loop turn or two, and hand its handle over.
+            raise TimeoutError
         # Not wait_for(shield(step)): on Python 3.11 wait_for answered a caller cancelled once the step had answered
         # with that answer, and on 3.14 shield hands a failure of a step given up on to the loop's exception
         # handler, which logs it at ERROR. asyncio.wait neither cancels the step nor raises its error.
-        done, _ = await asyncio.wait({step}, timeout=_left_until(ends))
+        done, _ = await asyncio.wait({step}, timeout=left)
         if not done:
             raise TimeoutError
         return step.result()

@@ -415,3 +415,52 @@ async def test_a_step_that_has_not_answered_by_its_bound_is_a_timeout_and_is_giv
     gate.set_result(None)
 
     await _until(lambda: given_back == [handle])
+
+
+@pytest.mark.parametrize("yields", [0, 1], ids=["answers-at-once", "yields-once"])
+async def test_a_step_asked_once_its_bound_had_passed_is_a_timeout_and_is_given_back(yields: int) -> None:
+    # A take's steps share one end, so a step that used the whole budget leaves the next one none. Waited for with
+    # no time left, a step that answers within a loop turn or two was still found done, and the take went on past
+    # its bound with that handle. No time left is the bound's error, and the handle is given back as it arrives.
+    loop = asyncio.get_running_loop()
+    given_back: list[object] = []
+    handle = object()
+
+    async def step() -> object:
+        for _ in range(yields):
+            await asyncio.sleep(0)
+        return handle
+
+    async def give_back(arrived: object) -> None:
+        given_back.append(arrived)
+
+    with pytest.raises(TimeoutError):
+        await _arrives_by(step(), loop.time() - 1.0, give_back)
+
+    await _until(lambda: given_back == [handle])
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert given_back == [handle]
+
+
+async def test_a_step_that_answered_by_its_bound_is_accepted_though_its_caller_hears_of_it_late() -> None:
+    # The bound is on the step's answer, not on the moment its caller runs again: a loop that is busy past the bound
+    # once the step has answered (here it sleeps, as a slow callback of anything else would make it) takes no handle
+    # from a take that had it in time.
+    loop = asyncio.get_running_loop()
+    given_back: list[object] = []
+    handle = object()
+
+    async def step() -> object:
+        loop.call_soon(time.sleep, 2 * BOUND_MS / 1000)  # runs once the step has answered, before its caller does
+        return handle
+
+    async def give_back(arrived: object) -> None:
+        given_back.append(arrived)
+
+    ends = loop.time() + BOUND_MS / 1000
+    assert await _arrives_by(step(), ends, give_back) is handle
+    assert loop.time() > ends
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert given_back == []
