@@ -366,9 +366,9 @@ class _ACloseWhileTheCreateRuns:
 
     STEPS = ("first save", "receipt", "second save", "summary", "audit event")
 
-    async def assert_a_close_ends_the_create_after(self, held: str) -> None:
-        """The tunnel is up, and the close lands as the create's step ``held`` ends: the close saw the tunnel and
-        released it, and the create takes no further step, releases nothing again and answers closed."""
+    async def a_create_held_after(self, held: str) -> tuple[asyncio.Task, Gate, list[str]]:
+        """A create whose tunnel is up, held as its step ``held`` ends until the gate opens. The list names each of
+        its steps as it starts."""
         self.tunnel_start.open.set()
         manager, gate, started = self.manager, Gate(), []
 
@@ -403,10 +403,16 @@ class _ACloseWhileTheCreateRuns:
         bridge.record_session_receipt = step("receipt", bridge.record_session_receipt)  # type: ignore[method-assign]
         create = self.creating()
         await self.reach(gate)
-        session = self.the_session()
-        self.assertIsNotNone(session.tunnel)
+        self.assertIsNotNone(self.the_session().tunnel)
+        return create, gate, started
 
-        await manager.close_session(session.id)
+    async def assert_a_close_ends_the_create_after(self, held: str) -> None:
+        """The tunnel is up, and the close lands as the create's step ``held`` ends: the close saw the tunnel and
+        released it, and the create takes no further step, releases nothing again and answers closed."""
+        create, gate, started = await self.a_create_held_after(held)
+        session = self.the_session()
+
+        await self.manager.close_session(session.id)
         gate.open.set()
 
         await self.assert_answered_closed(create)
@@ -429,6 +435,28 @@ class _ACloseWhileTheCreateRuns:
 
     async def test_a_close_after_the_audit_event_is_still_answered_closed(self) -> None:
         await self.assert_a_close_ends_the_create_after("audit event")
+
+    async def test_a_close_that_is_still_releasing_the_tunnel_ends_the_create_after_the_first_save(self) -> None:
+        # The five above let the whole close end before the create goes on. Here the close is in its first step, the
+        # release of the tunnel it found (autossh has not exited), when the create goes on: the close marks the
+        # session before that step. Marked after it, the create would go on beside the release, answer active, and
+        # write session_created before session_closed.
+        self.process_type = LingeringProcess
+        create, gate, started = await self.a_create_held_after("first save")
+        session = self.the_session()
+        (autossh,) = self.processes
+        close = asyncio.create_task(self.manager.close_session(session.id))
+        await asyncio.wait_for(autossh.signalled.wait(), _WAIT)  # the close is releasing the tunnel
+
+        gate.open.set()
+        await self.assert_answered_closed(create)
+        self.assertEqual(started, ["first save"])  # before autossh exits: no later step ran beside the release
+        autossh.exit()
+        closed = await asyncio.wait_for(close, _WAIT)
+
+        self.assertEqual((closed["closed"], closed["teardown"]), (True, "complete"))
+        await self.assert_left_as_the_close_made_it(session)
+        self.assertEqual(await self.events(), ["session_closed"])
 
     async def test_a_tunnel_that_comes_up_while_the_close_tears_the_session_down_is_released(self) -> None:
         # The close has looked for the tunnel (there was none yet) and is still releasing the runtime, so the session
