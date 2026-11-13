@@ -314,6 +314,11 @@ All notable changes to auto-browser are documented here.
   that failed or waited for an approval, while the request itself went out with `CLAUDE_MODEL` or `GEMINI_MODEL`, as
   it always did. They now report the model the request uses. A client that read the CLI model there in API mode reads
   the API model now; in `cli` mode the CLI model is reported as before. Nothing about a request changes. (STORE-30)
+- **The Skills Curator's default model is now the provider's model setting.** With `CURATOR_ENABLED=true` and no
+  `CURATOR_MODEL`, the curator used its own fixed defaults (`claude-opus-4-7`, `gpt-4o`, `gemini-1.5-pro`), which no
+  longer matched the models the controller is set up for. It now uses `CLAUDE_MODEL`, `OPENAI_MODEL` or `GEMINI_MODEL`
+  for `CURATOR_PROVIDER`, so a deployment that relied on the old defaults changes model, and its cost with it. Set
+  `CURATOR_MODEL` to keep a specific model. (STORE-31)
 
 ### Security
 

@@ -28,10 +28,6 @@ from .utils import error_text_for_log
 logger = logging.getLogger(__name__)
 
 
-_CLAUDE_DEFAULT_MODEL = "claude-opus-4-7"
-_OPENAI_DEFAULT_MODEL = "gpt-4o"
-_GEMINI_DEFAULT_MODEL = "gemini-1.5-pro"
-
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TIMEOUT = 30.0
 
@@ -63,13 +59,14 @@ class CuratorLLMAdapter:
         if provider_norm not in {"claude", "openai", "gemini"}:
             raise ValueError(f"Unsupported curator provider: {provider!r}")
         self.provider = provider_norm
+        # The controller's settings (models, base URLs, API version). Without them the cached get_settings() is read,
+        # which differs from app.state.settings if the controller was started with injected ones. Set before the
+        # default model, which reads them.
+        self._settings = settings
         self.model = model or self._default_model()
         self.max_tokens = max_tokens
         self.timeout = timeout
         self._api_key_env_override = api_key_env
-        # The controller's settings (base URLs, API version). Without them the cached get_settings() is read when a
-        # request is built, which differs from app.state.settings if the controller was started with injected ones.
-        self._settings = settings
 
     # ── Construction helpers ──────────────────────────────────────────────
 
@@ -114,11 +111,9 @@ class CuratorLLMAdapter:
         return self._settings if self._settings is not None else get_settings()
 
     def _default_model(self) -> str:
-        return {
-            "claude": _CLAUDE_DEFAULT_MODEL,
-            "openai": _OPENAI_DEFAULT_MODEL,
-            "gemini": _GEMINI_DEFAULT_MODEL,
-        }[self.provider]
+        """The model the controller's own settings name for this provider (CLAUDE_MODEL, OPENAI_MODEL, GEMINI_MODEL);
+        CURATOR_MODEL overrides it."""
+        return getattr(self._settings_in_use(), f"{self.provider}_model")
 
     def _api_key_env(self) -> str:
         if self._api_key_env_override:

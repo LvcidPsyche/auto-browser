@@ -38,6 +38,53 @@ class _FakeAsyncClient:
         return self.response
 
 
+class CuratorDefaultModelTests(unittest.IsolatedAsyncioTestCase):
+    """STORE-31: the curator's own defaults (claude-opus-4-7, gpt-4o, gemini-1.5-pro) had gone stale beside the
+    controller's model settings, so a curator with no CURATOR_MODEL called a model the agent providers do not."""
+
+    def _settings(self, **extra: str) -> Settings:
+        return Settings(
+            _env_file=None, CLAUDE_MODEL="claude-set", OPENAI_MODEL="openai-set", GEMINI_MODEL="gemini-set", **extra
+        )
+
+    async def test_the_default_model_is_the_providers_model_setting(self) -> None:
+        settings = self._settings()
+
+        for provider, expected in (("claude", "claude-set"), ("openai", "openai-set"), ("gemini", "gemini-set")):
+            with self.subTest(provider=provider):
+                adapter = CuratorLLMAdapter(provider, settings=settings)
+                self.assertEqual(adapter._default_model(), expected)
+                self.assertEqual(adapter.model, expected)
+
+    async def test_the_request_names_that_model(self) -> None:
+        fake_client = _FakeAsyncClient(_FakeResponse({"content": []}))
+
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}, clear=True),
+            patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+        ):
+            await CuratorLLMAdapter("claude", settings=self._settings()).complete("hi")
+
+        self.assertEqual(fake_client.calls[0][2]["model"], "claude-set")
+
+    async def test_curator_model_still_overrides_the_default(self) -> None:
+        settings = self._settings(CURATOR_PROVIDER="openai", CURATOR_MODEL="curators-pick")
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}, clear=True):
+            adapter = CuratorLLMAdapter.from_env(settings)
+
+        self.assertEqual(adapter.model, "curators-pick")
+        self.assertEqual(CuratorLLMAdapter("openai", model="explicit", settings=settings).model, "explicit")
+
+    async def test_from_env_with_no_curator_model_takes_the_setting_of_the_curators_provider(self) -> None:
+        settings = self._settings(CURATOR_PROVIDER="gemini")
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "key"}, clear=True):
+            adapter = CuratorLLMAdapter.from_env(settings)
+
+        self.assertEqual(adapter.model, "gemini-set")
+
+
 class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_from_env_returns_none_for_invalid_provider_or_missing_key(self) -> None:
         with patch.dict(os.environ, {"CURATOR_PROVIDER": "bogus"}, clear=False):
@@ -176,7 +223,9 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(fake_client.calls[0][0], expected)
 
     async def test_the_claude_request_uses_the_settings_it_was_built_with(self) -> None:
-        settings = SimpleNamespace(anthropic_base_url="https://injected.example/v1", anthropic_version="2024-01-01")
+        settings = SimpleNamespace(
+            anthropic_base_url="https://injected.example/v1", anthropic_version="2024-01-01", claude_model="claude-x"
+        )
         fake_client = _FakeAsyncClient(_FakeResponse({"content": []}))
 
         with (
