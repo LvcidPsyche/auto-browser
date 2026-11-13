@@ -337,3 +337,38 @@ async def test_a_caller_given_cwd_is_kept() -> None:
         adapter = GeminiAdapter(Settings(_env_file=None, CLI_HOME=str(Path(tmp) / "home")))
 
         assert await _spawn_cwd(adapter, cwd=tmp) == tmp
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PermissionError("/data/cli-home/tmpx1"),
+        PermissionError(13, "Permission denied", "/data/cli-home/tmpx1"),
+        OSError(28, "No space left on device", "/data/cli-home/tmpx1"),
+    ],
+    ids=["no errno", "permission denied", "disk full"],
+)
+async def test_a_per_call_directory_that_cannot_be_made_raises_one_error_that_names_no_path(
+    failure: OSError, caplog: pytest.LogCaptureFixture
+) -> None:
+    # D1-7: the OSError's text carried the path, and reached the caller's error as it was.
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, _private_env(tmp), clear=True):
+        adapter = OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex"))
+        adapter.run_cli = AsyncMock()
+
+        with (
+            patch("app.providers.openai_adapter.tempfile.TemporaryDirectory", side_effect=failure),
+            caplog.at_level(logging.ERROR, "app.providers.openai_adapter"),
+            pytest.raises(RuntimeError) as caught,
+        ):
+            await adapter._decide(
+                goal="g", observation={"url": "https://x.test/"}, context_hints=None, previous_steps=[],
+                model_override=None,
+            )  # fmt: skip
+
+        assert UNUSABLE in str(caught.value)
+        assert "/data/cli-home" not in str(caught.value)
+        assert caught.value.__cause__ is None and caught.value.__suppress_context__, "the OSError is not chained"
+        # The path is in the log, where the operator reads it.
+        assert "/data/cli-home/tmpx1" in caplog.text
+        adapter.run_cli.assert_not_awaited()

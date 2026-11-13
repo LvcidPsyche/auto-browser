@@ -10,7 +10,15 @@ import httpx
 
 from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision, ResumeCheckpoint
-from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision, is_retryable_status
+from ..utils import error_text_for_log, quoted_for_log
+from .base import (
+    PAGE_DATA_NOTICE,
+    PRIVATE_CLI_HOME_ERROR,
+    BaseProviderAdapter,
+    ProviderAPIError,
+    ProviderDecision,
+    is_retryable_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,8 +216,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             resume_checkpoints=resume_checkpoints,
             include_schema=False,
         )
-        # Under the CLI home, not the shared system temp dir, whose other users could plant config in a parent.
-        with tempfile.TemporaryDirectory(dir=self.effective_cli_home()) as tempdir:
+        with self._call_directory() as tempdir:
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
@@ -255,6 +262,25 @@ class OpenAIAdapter(BaseProviderAdapter):
                 usage={"auth_mode": "cli", "transport": "codex-exec"},
                 raw_text=raw_text,
             )
+
+    def _call_directory(self) -> tempfile.TemporaryDirectory[str]:
+        """The directory one Codex call works in, under the CLI home and not the shared system temp dir, whose other
+        users could plant config in a parent.
+
+        One error that names no path when it cannot be made: the OSError's text carries the path (and it would reach
+        a step's error and a job's record), so it goes to the log alone, as the failures of the CLI home itself do.
+        """
+        home = self.effective_cli_home()
+        try:
+            return tempfile.TemporaryDirectory(dir=home)
+        except OSError as exc:
+            logger.error(
+                "could not make a working directory under the CLI home %s: %s: %s",
+                quoted_for_log(home),
+                type(exc).__name__,
+                error_text_for_log(exc),
+            )
+            raise RuntimeError(PRIVATE_CLI_HOME_ERROR) from None
 
     async def _decide_via_host_bridge(
         self,

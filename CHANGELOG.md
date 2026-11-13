@@ -1496,6 +1496,11 @@ All notable changes to auto-browser are documented here.
   16 KiB is kept, which holds the failure's text (its first 1,200 characters). A prompt that cannot be encoded (a
   page's lone surrogate) now fails before the CLI is started: it was started first, and then given up on without
   being stopped or reaped. (STORE-34)
+- **Under `OPENAI_AUTH_MODE=cli`, a working directory that cannot be made raises one error with no path.** Each Codex
+  call works in a directory made under the CLI home. When that failed (a full disk, a home the controller may not
+  write) the OS error, with the path in its text, was what the call raised. It now raises the error the CLI home's own
+  failures raise (`set CLI_HOME to a writable directory`), and the path and the cause are in the log, on a line of
+  their own. (D1-7)
 
 ### Changed
 
