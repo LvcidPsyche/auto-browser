@@ -1415,6 +1415,16 @@ All notable changes to auto-browser are documented here.
   `browser.queue_agent_run` kept the profile its request named. A call is now `governed` when either argument
   says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before (a `null` is
   none: it reads as an argument left out).
+- **A window-birth watcher that is lost is attached again when its first re-attach fails.** When the watcher's
+  browser session dies while the browser lives, a replacement is attached at once, and until it is up every popup
+  of that browser's sessions is refused as unjudged. That attach was tried once. If it failed, the watcher stayed
+  lost: `/readiness` went on reporting `lost`, and the popups stayed refused, until a new session was created on
+  the browser, even where the browser could be attached to again a moment later. The attach is now tried three
+  more times, each about 2 seconds after the one before (a little longer than the attach backoff, so that it
+  reaches the browser), while the browser still has that lost watcher and a watched session. Releasing the browser
+  ends the retries at once, as the controller's shutdown does, and they stop where a new session's own attach has
+  replaced the watcher or the browser's last watched session is gone. After the last of them the watcher stays
+  lost until the next session is created there, as before.
 
 ### Changed
 

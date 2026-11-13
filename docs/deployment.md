@@ -879,7 +879,9 @@ reads of at most 2 seconds, and the waits between them.) It is blanked rather th
 unjudged, it may be a refused page's window with a script planted in it. If the watcher's session dies while
 the browser lives, a replacement attaches at once; until it is up, every popup reported in those sessions is
 refused as unjudged, and stays so until the agent navigates it (a replacement cannot judge a window born
-before it). The replacement registers every live session on that browser before it discovers the browser's
+before it). An attach that fails is tried three more times, about 2 seconds apart, while the browser still
+has a watched session; after the last one the watcher stays lost until a session is created on that browser.
+The replacement registers every live session on that browser before it discovers the browser's
 targets, so the windows that exist by then are its entries too: a page the controller knows (its target id
 cached) counts as reported and clean; a window with an opener is unjudged, refused if it is reported and swept
 as soon as the replacement is up and the session does not count; a window with no opener is clean. While no

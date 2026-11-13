@@ -91,6 +91,10 @@ ATTACH_TIMEOUT_SECONDS = 10.0
 DETACH_TIMEOUT_SECONDS = 2.0
 # After a failed attach, how long before the next session tries again on that browser.
 ATTACH_RETRY_BACKOFF_SECONDS = 2.0
+# A lost watcher whose replacement did not attach: how many more attaches are tried, and how much longer than that
+# backoff each one waits after the one before (no longer, and it is answered from the failure kept for the backoff).
+REATTACH_RETRIES = 3
+REATTACH_BACKOFF_MARGIN = 1.05
 # Reading a new context's browserContextId when the gate did not already supply one.
 CONTEXT_ID_TIMEOUT_SECONDS = 2.0
 # How often a watcher re-checks its live born-refused unreported windows, while it has any.
@@ -599,6 +603,8 @@ class WindowBirths:
         self._watchers: dict[int, tuple[Any, WindowBirthWatcher]] = {}
         # Why, and when, the last attach to a browser failed, until one succeeds (readiness, the retry backoff).
         self._attach_failures: dict[int, tuple[Any, str, float]] = {}
+        # The tasks re-attaching a lost watcher, each with its browser, while they run (_lost).
+        self._reattaching: dict[asyncio.Task[None], Any] = {}
         # Every watched session with its context id, by id(session): registered on a replacement watcher
         # before it discovers the browser's targets, and the sessions whose popups are refused while it has none.
         self._registered: dict[int, tuple[Any, str]] = {}
@@ -682,18 +688,41 @@ class WindowBirths:
 
     def _lost(self, watcher: WindowBirthWatcher) -> None:
         """The watcher's session died on its own: attach a replacement now, so the hold on the sessions'
-        popups (holds_refused) is short; until it is up, or if the browser is gone, they stay refused."""
+        popups (holds_refused) is short; until it is up, or if the browser is gone, they stay refused.
+
+        An attach that fails is tried REATTACH_RETRIES more times, each once _ensure's backoff has passed, while the
+        browser still has this watcher and a watched session (_awaits_replacement); release() ends the task. After
+        the last one the watcher stays lost until a new session is watched on the browser."""
         browser = watcher._browser
         logger.warning("window-birth watcher: its browser session closed; the sessions' popups are refused meanwhile")
 
         async def reattach() -> None:
-            try:
-                await self._ensure(browser)
-            except Exception as exc:
-                logger.warning("window-birth watcher: could not re-attach after a loss: %s", error_text_for_log(exc))
+            for attempt in range(1 + REATTACH_RETRIES):
+                if attempt:
+                    await asyncio.sleep(ATTACH_RETRY_BACKOFF_SECONDS * REATTACH_BACKOFF_MARGIN)
+                    if not self._awaits_replacement(watcher):
+                        return
+                try:
+                    await self._ensure(browser)
+                except Exception as exc:
+                    logger.warning(
+                        "window-birth watcher: could not re-attach after a loss: %s", error_text_for_log(exc)
+                    )
+                else:
+                    return
 
         with contextlib.suppress(RuntimeError):
-            spawn_background_task(reattach())
+            task = spawn_background_task(reattach())
+            self._reattaching[task] = browser
+            task.add_done_callback(self._reattaching.pop)
+
+    def _awaits_replacement(self, watcher: WindowBirthWatcher) -> bool:
+        """Whether a lost watcher is still the one its browser has, with a session there to judge windows for: not
+        once the browser was released, a new session's watch attached another, or its last watched session went."""
+        browser = watcher._browser
+        return self._watchers.get(id(browser), (None, None))[1] is watcher and any(
+            getattr(session, "browser", None) is browser for session, _context_id in self._registered.values()
+        )
 
     @staticmethod
     async def _read_context_id(context: Any, page: Any) -> tuple[str | None, str | None]:
@@ -878,6 +907,11 @@ class WindowBirths:
             entry[1].forget_session(session)
 
     async def release(self, browser: Any) -> None:
+        # First, and before the lock: a re-attach in progress holds it, on a browser that is going.
+        reattaching = [task for task, its_browser in self._reattaching.items() if its_browser is browser]
+        for task in reattaching:
+            task.cancel()
+        await asyncio.gather(*reattaching, return_exceptions=True)
         async with self._lock:
             self._attach_failures.pop(id(browser), None)
             entry = self._watchers.pop(id(browser), None)
