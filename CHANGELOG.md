@@ -1571,6 +1571,10 @@ All notable changes to auto-browser are documented here.
   that named the path and then rendered the page the controller carries. It now always renders that page: no file is
   read, no warning is written, and `checks[0].details.source` in the answer is always `embedded`, where a controller
   run from a checkout answered `fixture`. The file is removed from `evals/fixtures/`. (AUTH-12)
+- **A browser context that `GET /healthz/deep` created just as its probe was cancelled is closed.** The probe closes
+  a context that Chromium creates after the probe's total has run out, but it arranged that only while the creation
+  was unfinished. A cancel that landed in the turn of the event loop in which Chromium answered found the creation
+  done, so nothing closed the context and it stayed open in the browser. It is closed in that case too. (D6-2)
 
 ### Changed
 

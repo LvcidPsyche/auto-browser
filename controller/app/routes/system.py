@@ -206,8 +206,9 @@ async def _new_context(browser: Any) -> Any:
     try:
         return await asyncio.shield(creating)
     except BaseException:
-        if not creating.done():
-            creating.add_done_callback(_close_late_context)
+        # Also when it is already done: a cancel that lands in the turn of the loop in which Chromium answered finds
+        # the context created and handed to nobody. A done future calls the callback soon.
+        creating.add_done_callback(_close_late_context)
         raise
 
 

@@ -206,6 +206,48 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
         context.close.assert_awaited_once()
         self.assertTrue([line for line in logged.output if "created after the probe gave up" in line])
 
+    async def test_a_context_created_in_the_turn_the_probe_is_cancelled_is_closed(self) -> None:
+        # The cancel can land when Chromium has just answered: the creation is done, nobody was handed the context,
+        # and a callback that is added only to an unfinished creation never closes it. No clock: the creation itself
+        # cancels its waiter as it returns.
+        release = asyncio.Event()
+        context = SimpleNamespace(close=mock.AsyncMock())
+        waiters: list[asyncio.Future[object]] = []
+
+        async def new_context(*_args: object, **_kwargs: object) -> object:
+            await release.wait()
+            waiters[0].cancel()
+            return context
+
+        waiters.append(asyncio.ensure_future(system._new_context(SimpleNamespace(new_context=new_context))))
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(waiters[0], timeout=5)
+        await _closing_drained()
+
+        context.close.assert_awaited_once()
+
+    async def test_a_creation_that_failed_in_the_turn_the_probe_is_cancelled_is_read_and_closes_nothing(self) -> None:
+        # Its error is read, so the loop is not left to report an exception nobody retrieved; there is nothing to close.
+        release = asyncio.Event()
+        waiters: list[asyncio.Future[object]] = []
+        reported: list[dict[str, object]] = []
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, context: reported.append(context))
+
+        async def new_context(*_args: object, **_kwargs: object) -> object:
+            await release.wait()
+            waiters[0].cancel()
+            raise RuntimeError("the browser went away")
+
+        waiters.append(asyncio.ensure_future(system._new_context(SimpleNamespace(new_context=new_context))))
+        release.set()
+        with self.assertNoLogs(system.logger, level="WARNING"):
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(waiters[0], timeout=5)
+            await _closing_drained()
+
+        self.assertEqual(reported, [])
+
     async def test_a_close_left_to_finish_is_held_until_it_ends(self) -> None:
         release = asyncio.Event()
         browser = _rendering_browser()
@@ -484,6 +526,15 @@ class ReadyzRestartTests(unittest.TestCase):
                 self.assertEqual(client.get("/readyz").status_code, 200)
 
         self.assertEqual(ensure_browser.await_count, 2)
+
+
+async def _closing_drained() -> None:
+    """Every close and creation the probe left behind has ended, and its done callbacks have run."""
+    for _ in range(100):
+        if not system._CLOSING:
+            break
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
 
 def _rendering_browser() -> object:
