@@ -24,6 +24,7 @@ from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
 from app.browser import element_world
 from app.browser.element_target import ElementTarget
+from app.browser.services import actions
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
 
 REPORT = "quarterly"  # 9 bytes
@@ -703,6 +704,37 @@ async def test_type_by_element_id_into_a_contenteditable(tmp_path: Path) -> None
         await env.manager.type(session_id, element_id=notes["element_id"], text="hello")
 
         assert await env.page(session_id).evaluate("document.getElementById('notes').textContent") == "hello"
+
+
+# ── A tab in the text ────────────────────────────────────────────────────────
+
+TWO_FIELDS = """<title>form</title>
+<textarea id="note" aria-label="Note"></textarea>
+<input id="next" aria-label="Next">
+"""
+
+
+@pytest.mark.parametrize("budget", [None, 0.0], ids=["typed-in-time", "past-the-typing-budget"])
+@pytest.mark.parametrize("by", ["element_id", "selector"])
+async def test_a_tab_in_a_typed_text_goes_in_as_text_however_long_the_text_takes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, by: str, budget: float | None
+) -> None:
+    """The orchestrator's read of FX9c4: past the typing budget a tab was pressed as the Tab key, which moves focus
+    on, so the rest of the text went into the next field. Typed in time (the control) it is a character of the
+    text: the same text now goes to the same field however long it takes."""
+    if budget is not None:
+        monkeypatch.setattr(actions, "HUMAN_TYPING_BUDGET_SECONDS", budget)
+    async with browser_env(tmp_path, {"/": TWO_FIELDS}) as env:
+        session_id = await env.create("/")
+        target = {"selector": "#note"}
+        if by == "element_id":
+            target = {"element_id": (await env.element(session_id, "Note"))["element_id"]}
+
+        await env.manager.type(session_id, text="a\tb", **target)
+
+        page = env.page(session_id)
+        assert [await page.input_value("#note"), await page.input_value("#next")] == ["a\tb", ""]
+        assert await page.evaluate("document.activeElement.id") == "note"
 
 
 # ── A world call whose answer is lost after it ran ───────────────────────────

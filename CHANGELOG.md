@@ -796,6 +796,12 @@ All notable changes to auto-browser are documented here.
   probe ran on this release's). The focused element is now read through the prototypes' getters, a document's and
   a shadow root's, as the other DOM reads of that check are. A type by `element_id` went in before too: its check
   runs in a world where no element stands in for it.
+- **A tab in a long typed text goes in as text, as it does in a short one.** Human-like typing inserts the rest of
+  a text as plain text once its 20 seconds are used up, and pressed a tab in that rest as the Tab key, since 1.15.0
+  (whose notes say so): focus moved to the next field, and what followed the tab was inserted there. The same text
+  typed in time stays in its field with the tab a character of it, since Playwright's `keyboard.type` has no key
+  for a tab and inserts it. A tab past the time is now inserted with the text around it; a newline or a carriage
+  return there is still pressed as Enter.
 - **A call into a page's isolated world no longer fails with an `AttributeError` when another call drops the page's
   session under it.** A call that read the page's frame tree again (after a "No frame for given id found") kept the
   frame it read where another call on the same page had run out of time meanwhile and dropped the session: the world

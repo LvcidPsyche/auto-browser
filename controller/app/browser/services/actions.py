@@ -372,13 +372,13 @@ class _Budget:
 
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
 # longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
-# rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
+# rest goes in as plain text (insert_text), its newlines pressed as Enter.
 HUMAN_TYPING_BUDGET_SECONDS = 20.0
 # The least a keystroke or the final insert is given once the budget is spent, before it counts as hung. The worst
 # case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest
 # of the text is then bounded by max(deadline, now) + this.
 HUMAN_TYPING_STEP_FLOOR_SECONDS = 2.0
-_CONTROL_KEYS = {"\n": "Enter", "\r": "Enter", "\t": "Tab"}
+_CONTROL_KEYS = {"\n": "Enter", "\r": "Enter"}
 _CONTROL_KEY_PATTERN = re.compile("([" + "".join(_CONTROL_KEYS) + "])")
 
 # Where the TOTP autofill looks for a one-time-code field, most specific first.
@@ -1879,8 +1879,8 @@ class BrowserActionService:
             delays_ms.append(delay_ms)
         # Scale every delay down together when the pauses alone would overrun the budget. Each keystroke is a round
         # trip to a browser node, outside the pauses, so the deadline is what bounds the total: once it passes, the
-        # rest is inserted as plain text, with each newline, carriage return or tab in it still pressed as Enter or
-        # Tab (_insert_rest), all within one shared cutoff.
+        # rest is inserted as plain text, with each newline or carriage return in it still pressed as Enter
+        # (_insert_rest), all within one shared cutoff.
         scale = min(1.0, HUMAN_TYPING_BUDGET_SECONDS * 1000 / max(sum(delays_ms), 1))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
@@ -1893,10 +1893,13 @@ class BrowserActionService:
             await asyncio.sleep(min(delay_ms * scale / 1000, max(deadline - loop.time(), 0)))
 
     async def _insert_rest(self, page: "Page", rest: str, deadline: float) -> None:
-        """The text past the deadline: inserted as plain text, but newline and tab are still pressed as keys.
+        """The text past the deadline: inserted as plain text, but a newline or a carriage return is still pressed
+        as Enter.
 
         insert_text of a newline into an <input> drops it, so a long text ending in one would not submit the form
-        as the same text typed in time does (keyboard.type presses Enter and Tab for them).
+        as the same text typed in time does (keyboard.type presses Enter for them). A tab stays in the text that is
+        inserted, as keyboard.type puts it in: it has no key for a tab. Pressed as Tab, it moved focus on, and the
+        rest of a text that took long went to the next field, where the same text typed in time stayed in its own.
         """
         # One cutoff for every remaining step: a floor per step would let a text with many newlines run far past it.
         loop = asyncio.get_running_loop()

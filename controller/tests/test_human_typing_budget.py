@@ -112,23 +112,17 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         keyboard.type.assert_not_awaited()
         return calls
 
-    async def test_past_the_deadline_a_newline_or_tab_is_still_pressed_as_a_key(self) -> None:
-        # insert_text of a newline into an <input> drops it, so a trailing newline that should submit would not.
+    async def test_past_the_deadline_a_newline_is_still_pressed_as_enter_and_a_tab_goes_in_as_text(self) -> None:
+        # insert_text of a newline into an <input> drops it, so a trailing newline that should submit would not. A
+        # tab was pressed as Tab too, which moves focus on: typed in time it is a character of the text
+        # (keyboard.type has no key for it), so the same text went to other fields by how long it took.
         calls = await self._type_past_the_deadline("ab\ncd\te\r")
 
-        self.assertEqual(
-            calls,
-            [
-                ("insert", "ab"),
-                ("press", "Enter"),
-                ("insert", "cd"),
-                ("press", "Tab"),
-                ("insert", "e"),
-                ("press", "Enter"),
-            ],
-        )
+        self.assertEqual(calls, [("insert", "ab"), ("press", "Enter"), ("insert", "cd\te"), ("press", "Enter")])
 
-    async def test_a_deadline_passed_partway_inserts_the_rest_with_newline_and_tab_still_pressed(self) -> None:
+    async def test_a_deadline_passed_partway_inserts_the_rest_with_its_newline_pressed_and_its_tab_as_text(
+        self,
+    ) -> None:
         # Each keystroke a round trip of 10 ms on the stand-in clock: 4,000 of them outlast the 20 s budget, so the
         # deadline passes partway, as on a slow host, and the rest, a newline and a tab among it, is inserted.
         calls: list[tuple[str, str]] = []
@@ -157,13 +151,7 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[:typed], [("type", "x")] * typed)
         self.assertEqual(
             calls[typed:],
-            [
-                ("insert", "x" * (4000 - typed) + "ab"),
-                ("press", "Enter"),
-                ("insert", "cd"),
-                ("press", "Tab"),
-                ("insert", "e"),
-            ],
+            [("insert", "x" * (4000 - typed) + "ab"), ("press", "Enter"), ("insert", "cd\te")],
         )
 
     async def test_past_the_deadline_plain_text_is_one_insert_and_consecutive_control_keys_are_each_pressed(
