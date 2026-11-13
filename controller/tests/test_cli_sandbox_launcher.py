@@ -919,6 +919,22 @@ def test_a_cli_that_is_not_there_exits_127_with_the_launchers_line(layout) -> No
     assert done.stderr.startswith(launcher.MARKER + "execvpe: ENOENT")
 
 
+@needs_landlock
+def test_a_bare_cli_name_is_found_in_a_directory_that_only_the_childs_own_path_names(layout) -> None:
+    # The exec looks the name up in the PATH of the environment the launcher was started with (its bytes), as a
+    # child started directly would: the image's CLIs, outside os.defpath, start by bare name so.
+    directory = layout.base / "outside" / "only-here"
+    directory.mkdir()
+    cli = directory / "auto-browser-test-cli"
+    cli.write_text("#!/bin/sh\necho found by its PATH\n", encoding="utf-8")
+    cli.chmod(0o755)
+    assert str(directory) not in [*os.environ.get("PATH", "").split(os.pathsep), *os.defpath.split(os.pathsep)]
+
+    done = _run([*_launcher_command(layout), "--", cli.name], layout, env={"PATH": str(directory)})
+
+    assert (done.returncode, done.stdout) == (0, "found by its PATH\n"), done.stderr[-2000:]
+
+
 # A stand-in for the controller: non-dumpable, as the controller makes itself at its start (PR_SET_DUMPABLE is 4),
 # it starts the command it is given and passes on what that printed.
 _NON_DUMPABLE_PARENT = r"""

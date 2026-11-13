@@ -1,6 +1,7 @@
 """Start a provider CLI where it cannot open the controller's files: a Landlock ruleset, then an exec.
 
-    python -I -S cli_sandbox_launcher.py --protect ROOT [--rw DIR]... [--ro-file FILE]... [--probe] -- CLI [ARG]...
+    python -I -S cli_sandbox_launcher.py --protect ROOT [--rw DIR]... [--ro-file FILE]... -- CLI [ARG]...
+    python -I -S cli_sandbox_launcher.py --protect ROOT [--rw DIR]... [--ro-file FILE]... --probe
 
 The controller starts this file as a script (app.cli_sandbox builds the command), with the environment, the working
 directory and the descriptors the CLI is to have. It restricts itself and then execs the CLI, so the CLI is this
@@ -9,9 +10,10 @@ like. Standard library only, and nothing of the app: it runs under -I -S.
 
 Landlock only allows, so the ruleset names what stays open:
 
-- every entry beside ROOT, and beside each directory that holds ROOT, from / down, to read, to list and to run, and
-  no more (a file: to read and to run). The controller is not under this ruleset, and what a CLI could write there
-  it could leave for the controller to run or read: in its home, a Python user site or an ssh config;
+- every entry beside ROOT, and beside each directory that holds ROOT, from / down, that it can open, to read, to
+  list and to run, and no more (a file: to read and to run). One that is gone since the listing, or cannot be
+  opened, gets no rule, which allows nothing. The controller is not under this ruleset, and what a CLI could write
+  there it could leave for the controller to run or read: in its home, a Python user site or an ssh config;
 - each --rw directory with every right: what app.cli_sandbox lets a CLI write (its home, wherever that is, the temp
   directories, /dev). Each is opened following links and must then be the path given: the controller gives resolved
   paths, so a link on the way means the path changed since, and its rule is not made;
@@ -24,7 +26,8 @@ No rule goes on ROOT or on a directory that holds it, so what is in ROOT and has
 root as to anyone, and so is listing / itself. A symbolic link gets no rule: the place it names has one, or is in
 ROOT, or holds it. ROOT is read as it is written: one whose holding directory is reached through a link is refused,
 and one that is itself a link to another place closes nothing there (app.cli_sandbox warns of that one).
-PR_SET_NO_NEW_PRIVS is set first, as the kernel requires of a process without CAP_SYS_ADMIN.
+PR_SET_NO_NEW_PRIVS is set just before the ruleset is applied, as the kernel requires of a process without
+CAP_SYS_ADMIN.
 
 It execs only with the ruleset on. The exit statuses that are its own, each with one line on stderr that begins with
 MARKER and names the call that failed:
@@ -32,9 +35,11 @@ MARKER and names the call that failed:
 - 125 (EXIT_NOT_APPLIED): the ruleset is not on, and the CLI was not started. Wrong arguments, a grant that cannot
   be made as asked, a kernel without Landlock, or a kernel call that failed.
 - 126 (EXIT_NOT_RUN): the ruleset is on, and the CLI was found and could not be run.
-- 127 (EXIT_NOT_FOUND): the ruleset is on, and there is no such CLI.
+- 127 (EXIT_NOT_FOUND): the ruleset is on, and there is no such CLI, or no such interpreter for its #! line (execve
+  answers ENOENT for both).
 
-With --probe it applies the ruleset and exits 0 without an exec: how the controller learns that all of this works.
+With --probe it applies the ruleset and exits 0 without an exec: how the controller learns that all of this works. It
+takes no command; one after -- is ignored.
 """
 
 from __future__ import annotations
@@ -321,7 +326,9 @@ def main(argv: list[str]) -> int:
     if probe:
         return 0
     # Python ignores SIGPIPE and SIGXFSZ from its start, and an ignored signal stays ignored through an exec: the CLI
-    # gets them as a child started directly does (subprocess's restore_signals).
+    # gets them as a child started directly does (subprocess's restore_signals). The tuple is subprocess's own, name
+    # for name (Lib/subprocess.py, under "See _Py_RestoreSignals()"), SIGXFZ among it: keep every name. The hasattr
+    # passes over one this platform lacks (Windows, where main()'s tests run, has none of them).
     for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), signal.SIG_DFL)

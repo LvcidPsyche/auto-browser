@@ -223,8 +223,9 @@ jobs:
         # and test_readiness.py (4) because they are pytest-style. The one job that
         # validates the shipped container was running zero PII and zero mesh-crypto
         # tests, and any new pytest-style file was excluded with no warning.
-        # The build above sets INSTALL_DEV_DEPS=true, so pytest is present.
-        run: docker compose run --no-deps --rm controller python -m pytest tests/ -q
+        # The build above sets INSTALL_DEV_DEPS=true, so pytest is present. CI=true reaches the container, so the
+        # guard in test_cli_sandbox_launcher.py fails there too where the kernel tests would skip.
+        run: docker compose run --no-deps --rm -e CI=true controller python -m pytest tests/ -q
 
       - name: Run the root step's tests as root in the image
         # The suite above runs as the owner of ./data (the runner), so the tests that hand other uids' files over
