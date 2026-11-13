@@ -877,10 +877,11 @@ once reached, is final. (A judgement still running when `activate_tab`'s 10 seco
 clean later; nothing known runs that long, since a target id read that hangs gives up after 7.5 seconds: three
 reads of at most 2 seconds, and the waits between them.) It is blanked rather than kept open because,
 unjudged, it may be a refused page's window with a script planted in it. If the watcher's session dies while
-the browser lives, a replacement attaches at once; until it is up, every popup reported in those sessions is
-refused as unjudged, and stays so until the agent navigates it (a replacement cannot judge a window born
-before it). An attach that fails is tried three more times, about 2 seconds apart, while the browser still
-has a watched session; after the last one the watcher stays lost until a session is created on that browser.
+the browser lives and has a watched session, a replacement attaches at once; until it is up, every popup
+reported in those sessions is refused as unjudged, and stays so until the agent navigates it (a replacement
+cannot judge a window born before it). An attach that fails is tried three more times, about 2 seconds apart,
+while the browser still has a watched session; after the last one, and where the watcher was lost with no
+session watched, the watcher stays lost until a session is created on that browser.
 The replacement registers every live session on that browser before it discovers the browser's
 targets, so the windows that exist by then are its entries too: a page the controller knows (its target id
 cached) counts as reported and clean; a window with an opener is unjudged, refused if it is reported and swept

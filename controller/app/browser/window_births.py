@@ -649,50 +649,63 @@ class WindowBirths:
 
     async def _ensure(self, browser: Any, new_session: tuple[Any, str] | None = None) -> WindowBirthWatcher:
         async with self._lock:
-            existing = self._watchers.get(id(browser))
-            if existing is not None and existing[1].live:
-                return existing[1]
-            failed = self._attach_failures.get(id(browser))
-            if failed is not None and time.monotonic() - failed[2] < ATTACH_RETRY_BACKOFF_SECONDS:
-                raise WindowBirthWatcherUnavailable(
-                    "the window-birth watcher could not attach within the last "
-                    f"{ATTACH_RETRY_BACKOFF_SECONDS:g} s: {failed[1]}"
-                )
-            watcher = WindowBirthWatcher(
-                browser,
-                opener_refused=self._opener_refused,
-                session_counts_as_refused=self._counts,
-                page_by_target_id=self._page_by_target_id,
-                unmatched_pages=self._unmatched_pages,
-                on_lost=self._lost,
-                on_recheck=self.close_unreported,
-                opener_held=self._opener_held,
+            return await self._attached(browser, new_session)
+
+    async def _replace(self, lost: WindowBirthWatcher) -> None:
+        """One attempt of the re-attach a loss starts (_lost): made only while the browser still has the lost watcher
+        and a watched session. Read here, under the lock and with no wait before the attach: read sooner, the
+        browser's release could come between the two, and the attach would register a watcher on a released browser."""
+        async with self._lock:
+            if self._awaits_replacement(lost):
+                await self._attached(lost._browser)
+
+    async def _attached(self, browser: Any, new_session: tuple[Any, str] | None = None) -> WindowBirthWatcher:
+        """The browser's live watcher, attached if it has none (with ``self._lock`` held)."""
+        existing = self._watchers.get(id(browser))
+        if existing is not None and existing[1].live:
+            return existing[1]
+        failed = self._attach_failures.get(id(browser))
+        if failed is not None and time.monotonic() - failed[2] < ATTACH_RETRY_BACKOFF_SECONDS:
+            raise WindowBirthWatcherUnavailable(
+                "the window-birth watcher could not attach within the last "
+                f"{ATTACH_RETRY_BACKOFF_SECONDS:g} s: {failed[1]}"
             )
-            # Before the attach: discovery replays every target that exists, and only a registered session's
-            # targets get entries (a replacement after a loss: every live session on this browser is this
-            # watcher's; a first watcher: the session being created).
-            sessions = [entry for entry in self._registered.values() if getattr(entry[0], "browser", None) is browser]
-            if new_session is not None:
-                sessions.append(new_session)
-            for session, context_id in sessions:
-                watcher.register_session(context_id, session)
-            try:
-                await watcher.attach()
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {error_text(exc)}"[:300]
-                self._attach_failures[id(browser)] = (browser, message, time.monotonic())
-                raise WindowBirthWatcherUnavailable(f"the window-birth watcher could not attach: {message}") from exc
-            self._attach_failures.pop(id(browser), None)
-            self._watchers[id(browser)] = (browser, watcher)
-            return watcher
+        watcher = WindowBirthWatcher(
+            browser,
+            opener_refused=self._opener_refused,
+            session_counts_as_refused=self._counts,
+            page_by_target_id=self._page_by_target_id,
+            unmatched_pages=self._unmatched_pages,
+            on_lost=self._lost,
+            on_recheck=self.close_unreported,
+            opener_held=self._opener_held,
+        )
+        # Before the attach: discovery replays every target that exists, and only a registered session's
+        # targets get entries (a replacement after a loss: every live session on this browser is this
+        # watcher's; a first watcher: the session being created).
+        sessions = [entry for entry in self._registered.values() if getattr(entry[0], "browser", None) is browser]
+        if new_session is not None:
+            sessions.append(new_session)
+        for session, context_id in sessions:
+            watcher.register_session(context_id, session)
+        try:
+            await watcher.attach()
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {error_text(exc)}"[:300]
+            self._attach_failures[id(browser)] = (browser, message, time.monotonic())
+            raise WindowBirthWatcherUnavailable(f"the window-birth watcher could not attach: {message}") from exc
+        self._attach_failures.pop(id(browser), None)
+        self._watchers[id(browser)] = (browser, watcher)
+        return watcher
 
     def _lost(self, watcher: WindowBirthWatcher) -> None:
         """The watcher's session died on its own: attach a replacement now, so the hold on the sessions'
         popups (holds_refused) is short; until it is up, or if the browser is gone, they stay refused.
 
-        An attach that fails is tried REATTACH_RETRIES more times, each once _ensure's backoff has passed, while the
-        browser still has this watcher and a watched session (_awaits_replacement); release() ends the task. After
-        the last one the watcher stays lost until a new session is watched on the browser."""
+        An attach that fails is tried REATTACH_RETRIES more times, each once _ensure's backoff has passed. Every one,
+        the first too, is made only while the browser still has this watcher and a watched session
+        (_awaits_replacement, which _replace reads as it attaches); release() ends the task. After the last one the
+        watcher stays lost until a new session is watched on the browser."""
         browser = watcher._browser
         logger.warning("window-birth watcher: its browser session closed; the sessions' popups are refused meanwhile")
 
@@ -700,10 +713,8 @@ class WindowBirths:
             for attempt in range(1 + REATTACH_RETRIES):
                 if attempt:
                     await asyncio.sleep(ATTACH_RETRY_BACKOFF_SECONDS * REATTACH_BACKOFF_MARGIN)
-                    if not self._awaits_replacement(watcher):
-                        return
                 try:
-                    await self._ensure(browser)
+                    await self._replace(watcher)
                 except Exception as exc:
                     logger.warning(
                         "window-birth watcher: could not re-attach after a loss: %s", error_text_for_log(exc)
@@ -929,7 +940,11 @@ class WindowBirths:
             await entry[1].detach()
 
     async def release_all(self) -> None:
-        for browser, _watcher in list(self._watchers.values()):
+        """Every browser a registry or a re-attach names: one whose watcher never attached has no watcher to go by."""
+        named = [browser for browser, _watcher in self._watchers.values()]
+        named += [browser for browser, _message, _at in self._attach_failures.values()]
+        named += self._reattaching.values()
+        for browser in {id(browser): browser for browser in named}.values():
             await self.release(browser)
 
     # ── readiness ───────────────────────────────────────────────────────────────

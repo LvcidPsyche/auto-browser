@@ -3,7 +3,8 @@
 
 The loss starts one attach. When that one failed, the watcher stayed lost, and the sessions' popups refused, until a
 new session was created on the browser. Now the attach is tried REATTACH_RETRIES more times, each a little later than
-the attach backoff, and only while the browser still has the lost watcher and a watched session.
+the attach backoff, and only while the browser still has the lost watcher and a watched session. The first attach is
+made on those terms too: a loss with no watched session left, or beside a release of the browser, attaches nothing.
 
 A release of the browser ends them, and forgets the browser before it waits for anything: one that is cancelled at a
 wait has forgotten it all the same.
@@ -60,6 +61,10 @@ class Clock:
         self._sleepers.append((self.now + delay, woken))
         await woken.wait()
         return result
+
+    def sleeping(self) -> int:
+        """How many sleeps have been started and not ended."""
+        return len(self._sleepers)
 
     async def advance(self, seconds: float) -> None:
         self.now += seconds
@@ -417,6 +422,116 @@ async def test_a_loss_while_the_release_waits_for_the_lock_starts_no_attach(w: W
 
     assert w.left_running() == set()
     await settle()
+    assert w.attaches.asked == 0
+    assert_forgotten(w)
+
+
+async def test_a_release_after_the_loss_ends_its_retry_and_forgets_the_failed_attach(w: Watched, clock: Clock) -> None:
+    await w.lose(refuse=99)
+    assert w.lost() and id(w.browser) in w.births._attach_failures
+
+    await w.births.release(w.browser)
+
+    assert w.left_running() == set()
+    assert_forgotten(w)
+    await clock.advance(A_RETRY_LATER * 5)
+    assert w.attaches.asked == 1
+
+
+async def test_a_loss_while_the_release_waits_for_a_retry_to_end_starts_no_attach(w: Watched, clock: Clock) -> None:
+    """The retry is an older loss's, whose watcher a new session replaced; the loss is that replacement's."""
+    await w.lose(refuse=1)
+    await clock.advance(BACKOFF * 1.02)  # past the backoff, and before the retry
+    newcomer = FakeSession(w.browser, "s2")
+    await w.births.watch(newcomer, context=object(), page=object(), context_id=OTHER_CTX)
+    assert w.attaches.asked == 2 and w.attached()
+    assert len(w.left_running()) == 1  # the first loss's retry, still waiting out its backoff
+
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    await asyncio.sleep(0)  # as far as its wait for that retry
+    assert not release.done()
+    await w.lose()
+    await release
+
+    assert w.left_running() == set()
+    assert w.attaches.asked == 2
+    assert_forgotten(w)
+
+
+async def test_a_loss_after_the_release_starts_no_attach(w: Watched) -> None:
+    """The watcher a release detached reports no loss when its session closes; a loss reported all the same finds
+    no lost watcher of the browser to replace."""
+    released = w.watcher
+    await w.births.release(w.browser)
+
+    await w.lose()
+    assert w.left_running() == set()
+    w.births._lost(released)
+    await settle()
+
+    assert w.left_running() == set()
+    assert w.attaches.asked == 0
+    assert_forgotten(w)
+
+
+async def test_a_loss_with_no_watched_session_left_attaches_nothing_until_a_session_is_watched(w: Watched) -> None:
+    w.births.forget_session(w.session)
+
+    await w.lose()
+
+    assert w.attaches.asked == 0
+    assert w.left_running() == set()
+    assert w.births.status()["state"] == "lost"
+
+    newcomer = FakeSession(w.browser, "s2")
+    await w.births.watch(newcomer, context=object(), page=object(), context_id=OTHER_CTX)
+    assert w.attaches.asked == 1
+    assert w.births.active_for(newcomer) and w.watcher._sessions == {OTHER_CTX: newcomer}
+
+
+async def test_a_loss_with_a_watched_session_is_re_attached_at_once_with_no_wait_first(
+    w: Watched, clock: Clock
+) -> None:
+    old = w.watcher
+
+    await w.lose()
+
+    assert w.attaches.asked == 1
+    assert w.attached() and w.watcher is not old
+    assert clock.sleeping() == 0  # the clock never moved, and nothing waits on it
+    assert w.left_running() == set()
+
+
+async def test_the_controllers_shutdown_forgets_a_browser_whose_watcher_never_attached(w: Watched) -> None:
+    """Its only trace is the failure kept for the backoff, which /readiness reports."""
+    unreachable = FakeBrowser()
+    unreachable.fail_attach = True
+    with pytest.raises(wb.WindowBirthWatcherUnavailable):
+        await w.births.watch(FakeSession(unreachable, "s2"), context=object(), page=object(), context_id=OTHER_CTX)
+    assert w.births.status()["state"] == "attach_failed"
+
+    await w.births.release_all()
+
+    assert w.births._attach_failures == {}
+    assert w.births.status() == IDLE
+
+
+async def test_the_controllers_shutdown_ends_a_re_attach_of_a_browser_no_registry_holds(w: Watched) -> None:
+    """Its only trace is the task: a loss reported after the release, waiting for the lock another attach holds."""
+    released = w.watcher
+    await w.births.release(w.browser)
+    before = asyncio.all_tasks()
+
+    async with w.births._lock:
+        w.births._lost(released)
+        await settle()
+        waiting = asyncio.all_tasks() - before
+        assert len(waiting) == 1
+        shutdown = asyncio.ensure_future(w.births.release_all())
+        await settle()
+        assert all(task.done() for task in waiting)
+    await shutdown
+
     assert w.attaches.asked == 0
     assert_forgotten(w)
 

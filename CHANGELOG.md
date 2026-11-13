@@ -1463,15 +1463,20 @@ All notable changes to auto-browser are documented here.
   says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before (a `null` is
   none: it reads as an argument left out).
 - **A window-birth watcher that is lost is attached again when its first re-attach fails.** When the watcher's
-  browser session dies while the browser lives, a replacement is attached at once, and until it is up every popup
-  of that browser's sessions is refused as unjudged. That attach was tried once. If it failed, the watcher stayed
-  lost: `/readiness` went on reporting `lost`, and the popups stayed refused, until a new session was created on
-  the browser, even where the browser could be attached to again a moment later. The attach is now tried three
-  more times, each about 2 seconds after the one before (a little longer than the attach backoff, so that it
-  reaches the browser), while the browser still has that lost watcher and a watched session. Releasing the browser
-  ends the retries at once, as the controller's shutdown does, and they stop where a new session's own attach has
-  replaced the watcher or the browser's last watched session is gone. After the last of them the watcher stays
-  lost until the next session is created there, as before.
+  browser session dies while the browser lives and has a watched session, a replacement is attached at once, and
+  until it is up every popup of that browser's sessions is refused as unjudged. That attach was tried once. If it
+  failed, the watcher stayed lost: `/readiness` went on reporting `lost`, and the popups stayed refused, until a
+  new session was created on the browser, even where the browser could be attached to again a moment later. The
+  attach is now tried three more times, each about 2 seconds after the one before (a little longer than the attach
+  backoff, so that it reaches the browser), while the browser still has that lost watcher and a watched session.
+  Releasing the browser ends the retries at once, as the controller's shutdown does, and they stop where a new
+  session's own attach has replaced the watcher or the browser's last watched session is gone. After the last of
+  them the watcher stays lost until the next session is created there, as before. The first attach is now made on
+  the same terms. A watcher lost on a browser with no watched session is not replaced until a session is created
+  there, and `/readiness` reports `lost` meanwhile: before, a watcher that watched nothing was attached. And a
+  watcher lost while its browser is being released is not replaced: before, that attach could be made once the
+  release had ended, and `/readiness` then reported a watcher, or a failed attach, on a browser the controller no
+  longer used.
 - **An MCP call that names an agent job or an auth profile the controller does not hold is told what is missing.**
   `browser.get_agent_job`, `browser.resume_agent_job`, `browser.discard_agent_job`, `browser.cancel_agent_job` and
   `browser.get_auth_profile` answered an id no record answers to with the id alone (`nope123`), the text of the

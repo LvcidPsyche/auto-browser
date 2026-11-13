@@ -150,7 +150,8 @@ def window_birth_watcher_check(watchers: dict[str, Any]) -> ReadinessCheck:
             message=(
                 f"The window-birth watcher is {state.replace('_', ' ')} on a browser: while it has none, sessions "
                 "are refused there, and the popups of its existing sessions are refused, until a new watcher "
-                "attaches (the next session tries, and a lost one is re-attached at once)."
+                "attaches (the next session tries, and a lost one is re-attached at once while a session is watched "
+                "there)."
             ),
             fix="Check the controller log for 'window-birth watcher'.",
             details=details,
