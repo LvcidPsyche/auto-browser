@@ -5,7 +5,10 @@ import json
 import unittest
 from unittest import mock
 
-from app.network_inspector import NetworkInspector
+from playwright.async_api import Error as PlaywrightError
+
+from app import network_inspector
+from app.network_inspector import BODY_READ_TIMED_OUT, BODY_TOO_LARGE, NetworkInspector
 from app.pii_scrub import PiiScrubber
 
 
@@ -52,6 +55,21 @@ class FakeResponse:
     async def body(self) -> bytes:
         self.body_calls += 1
         return self._body
+
+
+class EndlessResponse(FakeResponse):
+    """A response that never ends (a chunked application/x-ndjson a page keeps open): its body never resolves."""
+
+    read_cancelled = False
+
+    async def body(self) -> bytes:
+        self.body_calls += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.read_cancelled = True
+            raise
+        raise AssertionError("unreachable")
 
 
 class FakePage:
@@ -241,6 +259,48 @@ class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
             response = FakeResponse(request, headers={"content-type": content_type}, body=b"data: x\n\n")
             await _record(inspector, request, response)
             self.assertEqual(response.body_calls, 0, content_type)
+
+    async def test_a_response_that_never_ends_frees_its_read_and_says_so(self) -> None:
+        # N9: the exclusion above names two types, so another response that need not end (a chunked
+        # application/x-ndjson, a long poll) still held its read, and its task, until the page let it go.
+        inspector = NetworkInspector("session-9", body_max_bytes=100)
+        request = FakeRequest(url="https://example.com/feed")
+        response = EndlessResponse(request, headers={"content-type": "application/x-ndjson"})
+        await inspector._handle_request(request)
+
+        with mock.patch.object(network_inspector, "RESPONSE_BODY_READ_SECONDS", 0.05):
+            # Far past the read's limit: only a read that is never given up runs into it.
+            await asyncio.wait_for(inspector._handle_response(response), timeout=5)
+        await inspector._handle_request_finished(request)  # it ends at last, long after
+
+        entry = inspector.entries()[0]
+        self.assertEqual((entry["response_body"], entry["response_body_not_captured"]), (None, BODY_READ_TIMED_OUT))
+        self.assertEqual((entry["status"], entry["content_type"]), (200, "application/x-ndjson"))
+        self.assertEqual((response.body_calls, response.read_cancelled), (1, True))
+
+    async def test_a_text_body_that_is_not_kept_says_why_and_no_other_does(self) -> None:
+        inspector = NetworkInspector("session-10", body_max_bytes=100)
+        json_type = {"content-type": "application/json"}
+        cases = {
+            "declared-oversize": ({**json_type, "content-length": "5000"}, b"x" * 50, BODY_TOO_LARGE),
+            "read-oversize": (json_type, b"x" * 500, BODY_TOO_LARGE),
+            "at-the-cap": (json_type, b"x" * 100, None),
+            "empty": (json_type, b"", None),
+            "binary": ({"content-type": "video/mp4"}, b"x" * 500, None),
+            "streaming": ({"content-type": "text/event-stream"}, b"x" * 500, None),
+            "unreadable": (json_type, PlaywrightError("Response body is unavailable for redirect responses"), None),
+        }
+        for name, (headers, body, reason) in cases.items():
+            with self.subTest(name):
+                request = FakeRequest(url=f"https://example.com/{name}")
+                response = FakeResponse(request, headers=headers)
+                response.body = mock.AsyncMock(side_effect=[body])
+
+                entry = await _record(inspector, request, response)
+
+                self.assertEqual(entry.get("response_body_not_captured"), reason)
+                if reason is not None:
+                    self.assertIsNone(entry["response_body"])
 
 
 SIGNUP_URL = "https://x.test/signup?email=ops%40example.com"

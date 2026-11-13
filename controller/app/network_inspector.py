@@ -21,6 +21,9 @@ Each entry:
                                    after requestfinished if the body is still being
                                    read, so hooks may see None (the hook's entry is
                                    the log's entry and is updated in place)
+    "response_body_not_captured": str — only on an entry whose text body was not kept:
+                                   "too_large", or "timed_out" (it did not end within
+                                   RESPONSE_BODY_READ_SECONDS)
     "duration_ms":   float | None
     "failed":        bool
     "failure_text":  str | None
@@ -376,32 +379,45 @@ class NetworkInspector:
 
             # Capture response body (text/json only, size limited)
             resp_body: str | None = None
+            not_captured: str | None = None
             pii_hit = entry.get("pii_redacted", False)
-            if self.capture_bodies and _worth_reading_body(content_type, resp_headers, self.body_max_bytes):
-                try:
-                    # A response with no declared length (chunked, streamed) can
-                    # only be size-checked after Playwright has buffered it, so
-                    # that case still reads the whole body before it is dropped.
-                    raw_bytes = await response.body()
-                    if raw_bytes and len(raw_bytes) <= self.body_max_bytes:
-                        resp_body = raw_bytes.decode("utf-8", errors="replace")
-                except Exception as exc:
-                    # Bodies are unavailable for redirects and torn-down contexts.
-                    logger.debug(
-                        "could not read response body for %s: %s",
-                        quoted_for_log(entry.get("url", "?")),
-                        error_text_for_log(exc),
-                    )
+            if self.capture_bodies and _worth_reading_body(content_type):
+                if _declared_too_large(resp_headers, self.body_max_bytes):
+                    not_captured = BODY_TOO_LARGE
+                else:
+                    resp_body, not_captured = await self._read_body(response, entry.get("url", "?"))
                 if resp_body and self.scrubber:
                     resp_body, body_hit = _scrub_body(self.scrubber, resp_body, content_type, entry.get("url", "?"))
                     pii_hit = pii_hit or body_hit
 
             async with self._lock:
                 entry["response_body"] = resp_body
+                if not_captured:
+                    entry["response_body_not_captured"] = not_captured
                 entry["pii_redacted"] = pii_hit
 
         except Exception as exc:
             logger.debug("network inspector response error: %s", error_text_for_log(exc))
+
+    async def _read_body(self, response: "Response", url: str) -> tuple[str | None, str | None]:
+        """A response's body as text, or None, and why a body was not kept: BODY_TOO_LARGE, BODY_READ_TIMED_OUT, or
+        None (kept, empty, or a read Playwright refused)."""
+        try:
+            # A response with no declared length (chunked, streamed) can
+            # only be size-checked after Playwright has buffered it, so
+            # that case still reads the whole body before it is dropped.
+            raw_bytes = await asyncio.wait_for(response.body(), RESPONSE_BODY_READ_SECONDS)
+        except TimeoutError:
+            return None, BODY_READ_TIMED_OUT
+        except Exception as exc:
+            # Bodies are unavailable for redirects and torn-down contexts.
+            logger.debug("could not read response body for %s: %s", quoted_for_log(url), error_text_for_log(exc))
+            return None, None
+        if not raw_bytes:
+            return None, None
+        if len(raw_bytes) > self.body_max_bytes:
+            return None, BODY_TOO_LARGE
+        return raw_bytes.decode("utf-8", errors="replace"), None
 
     async def _handle_request_failed(self, request: "Request") -> None:
         try:
@@ -604,24 +620,36 @@ def _elapsed_ms(entry: dict[str, Any]) -> float | None:
 
 _TEXT_CONTENT_MARKERS = ("json", "text", "html", "xml", "javascript")
 # Responses that need not end: response.body() waits for the end, so reading one held its task for as long as the
-# page kept the stream open (ACT-35).
+# page kept the stream open (ACT-35). Not read at all; any other response that does not end (a chunked
+# application/x-ndjson, a long poll) is given up on after RESPONSE_BODY_READ_SECONDS.
 _STREAMING_MEDIA_TYPES = ("text/event-stream", "multipart/x-mixed-replace")
 
+# How long a response body's read is waited for. Past it the read is cancelled, which in Playwright asks the driver to
+# abort the call and waits for its answer: probed with Playwright 1.64.1 on an endless chunked application/x-ndjson,
+# a read given 1 s ended in 1.02 s and left no call waiting on the connection.
+RESPONSE_BODY_READ_SECONDS = 10.0
+# Why a text response's body is not in its entry, as its "response_body_not_captured".
+BODY_TOO_LARGE = "too_large"
+BODY_READ_TIMED_OUT = "timed_out"
 
-def _worth_reading_body(content_type: str, headers: dict[str, str], max_bytes: int) -> bool:
-    """Decide from the headers alone whether reading the body can be useful.
 
-    Playwright's `response.body()` buffers the whole payload in memory, so a
-    binary download or a declared-oversize body must be ruled out before the
-    call, not after.
-    """
+def _worth_reading_body(content_type: str) -> bool:
+    """Whether a body of this type is kept: text, and not of a type that need not end."""
     if not any(marker in content_type.lower() for marker in _TEXT_CONTENT_MARKERS):
         return False
-    if content_type.split(";", 1)[0].strip().lower() in _STREAMING_MEDIA_TYPES:
-        return False
+    return content_type.split(";", 1)[0].strip().lower() not in _STREAMING_MEDIA_TYPES
+
+
+def _declared_too_large(headers: dict[str, str], max_bytes: int) -> bool:
+    """Whether the headers declare a body over ``max_bytes``.
+
+    Playwright's `response.body()` buffers the whole payload in memory, so a
+    declared-oversize body must be ruled out before the call, not after, as a
+    binary download is (_worth_reading_body).
+    """
     declared = {k.lower(): v for k, v in headers.items()}.get("content-length")
     try:
-        return declared is None or int(declared) <= max_bytes
+        return declared is not None and int(declared) > max_bytes
     except ValueError:
         # A malformed length is not proof of size; fall back to the post-read check.
-        return True
+        return False

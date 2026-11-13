@@ -1651,6 +1651,14 @@ All notable changes to auto-browser are documented here.
   page that cannot be read closes the window and says why on the dashboard. The dashboard keeps the last copy it
   opened: an earlier one's window keeps what it shows and cannot be reloaded. The route and its page are as they
   were. (AUTH-27)
+- **The network inspector gives up on a response body that does not end.** Playwright's `response.body()` waits
+  for the end of a response, and the inspector left out only `text/event-stream` and `multipart/x-mixed-replace`,
+  so any other response a page kept open, a chunked `application/x-ndjson` or a long poll, held the read and its
+  task for as long as the page did. A read is now given 10 seconds, and then cancelled, which Playwright's driver
+  answers at once. Such an entry keeps no body and says why in a new field, `response_body_not_captured`, as
+  `"timed_out"`; a text body over `NETWORK_INSPECTOR_BODY_MAX_BYTES`, whether its length was declared or read, now
+  says `"too_large"` there. Every other entry has no such field, and the two streaming types are still never read.
+  (N9)
 
 ### Changed
 
