@@ -405,7 +405,8 @@ class NetworkInspector:
         try:
             # A response with no declared length (chunked, streamed) can
             # only be size-checked after Playwright has buffered it, so
-            # that case still reads the whole body before it is dropped.
+            # that case still reads the whole body, for up to
+            # RESPONSE_BODY_READ_SECONDS, before it is dropped.
             raw_bytes = await asyncio.wait_for(response.body(), RESPONSE_BODY_READ_SECONDS)
         except TimeoutError:
             return None, BODY_READ_TIMED_OUT
@@ -634,7 +635,7 @@ BODY_READ_TIMED_OUT = "timed_out"
 
 
 def _worth_reading_body(content_type: str) -> bool:
-    """Whether a body of this type is kept: text, and not of a type that need not end."""
+    """Whether a body of this type is read: text, and not of a type that need not end."""
     if not any(marker in content_type.lower() for marker in _TEXT_CONTENT_MARKERS):
         return False
     return content_type.split(";", 1)[0].strip().lower() not in _STREAMING_MEDIA_TYPES

@@ -354,7 +354,7 @@ class SessionShareManager:
             revocations = _Revocations(every_session=self._next_stamp(ahead_ms=(self.max_ttl_seconds + 1) * 1000))
             logger.error(
                 "the store of revoked share links %s is corrupt (%s) and no longer says which links were revoked: "
-                "every link minted before now is revoked, and the store is written again",
+                "every link minted before now is revoked, and the store is being written again",
                 path,
                 error_text_for_log(exc),
             )

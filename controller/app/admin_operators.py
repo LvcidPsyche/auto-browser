@@ -2,8 +2,8 @@
 
 Named credentials (API_BEARER_TOKENS) keep each operator's sessions, approvals, jobs and files apart
 (session_ownership). Some surfaces are the whole controller's, and any credential could use them: the maintenance
-sweep and its status, the readiness report, the proxy personas, and the mesh peer list. API_ADMIN_OPERATORS lists
-the operators who may. A caller passes when a named credential proved its id and that id is listed, compared
+sweep and its status, the readiness report, the proxy persona routes and tools (a session opened with a persona is
+not one of them), and the mesh peer list. API_ADMIN_OPERATORS lists the operators who may. A caller passes when a named credential proved its id and that id is listed, compared
 exactly. Nothing else proves an operator: not the shared API_BEARER_TOKEN, whatever its operator header says, and
 not the system, whose housekeeping calls the services themselves. Unset, every credential passes, as before.
 

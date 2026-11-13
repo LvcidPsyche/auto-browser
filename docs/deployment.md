@@ -1508,15 +1508,16 @@ does not.
 - A link says when it was minted, and a revoke ends the links minted up to its own time. A link minted before 1.18.0
   does not say: it works until it expires, as before, unless its session's links are revoked, which ends it too.
 - Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
-  so a restart does not bring a revoked link back. One is dropped, as the file is next written, once it is older
-  than the longest life a link can have: 24 hours, or `SHARE_TOKEN_TTL_MINUTES` where that is longer. A restart
-  without the file brings back the revoked links that have not expired.
+  so a restart does not bring a revoked link back. One is kept at least as long as a link can live, 24 hours, and
+  dropped by the first revoke after that. A restart without the file brings back the revoked links that have not
+  expired.
 - The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
   revoke that cannot be saved revokes nothing: each answers `503`, as while the file cannot be read.
 - A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
   and a mint or a revoke answers `503`, until one of those, or a restart, can read it. A file that reads as
   something the controller did not write can no longer say which links were revoked: the controller logs an error,
-  revokes every link minted before that moment, and writes the file again.
+  revokes every link minted before that moment, and writes the file again. One it cannot write again counts as one
+  it cannot read: no link is honoured until a mint, a revoke or a restart can write it.
 
 Anyone who holds a link can poll it, so two bounds apply beside the general rate limit, which counts each client
 apart. A link is answered 150 polls a minute, room for ten open pages (they ask for 120, and more in one minute when
@@ -1557,7 +1558,7 @@ Back up at least:
 - `/data/audit/`
 - `/data/witness/`, whole: the chains with their `*.anchor.json` files, `.anchors-migrated` and `keys/` (since 1.11.2 a chain restored without its anchor fails verification, and receipts verify only against the key that signed them)
 - `/data/crons/` if you use cron jobs
-- `/data/share/` if a share link revoked before the copy must stay revoked after a restore (a link lives 24 hours at most, unless `SHARE_TOKEN_TTL_MINUTES` is longer)
+- `/data/share/` if a share link revoked before the copy must stay revoked after a restore (a link lives 24 hours at most)
 - `/data/approvals/` if pending approvals and operators' rejections should survive a restore, whole, with its `.tool-call-digest.key` (a glob such as `approvals/*` leaves a dot file out): approvals for tool calls are matched under that key, also when `/data/db/` holds the records, and restored without it they are refused and asked for again, and an operator's rejection of a tool call no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS` (each start then logs a warning with how many pending or approved approvals are kept under the lost key, if there are any, and another with how many operator rejections are, if there are any); a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
 
 ## Cleanup

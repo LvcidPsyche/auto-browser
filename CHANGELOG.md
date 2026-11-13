@@ -907,8 +907,9 @@ All notable changes to auto-browser are documented here.
   saved revokes nothing, each answering `503` as when the file cannot be read. A file that cannot be read at startup
   is left where it is, and until a mint, a revoke or a restart can read it no link is honoured and a mint or a
   revoke answers `503`; a file that reads as something the controller did not write is logged, every link minted
-  before then is revoked, and it is written again. A revoke writes `share_revoked` to the audit log. The `full` tool
-  profile lists one tool more, 77 without a vision model. (AUTH-23)
+  before then is revoked, and it is written again (one that cannot be written again counts as one that cannot be
+  read). A revoke writes `share_revoked` to the audit log. The `full` tool profile lists one tool more, 77 without
+  a vision model. (AUTH-23)
 - **A share link's polls are bounded, and a watched session costs one capture however many pages watch it.**
   `GET /share/{token}/observe` needs no API token, and every poll took a capture of its own under the session lock,
   which the session's agent waits for: only the general rate limit, which counts each client address apart, stood
@@ -937,9 +938,10 @@ All notable changes to auto-browser are documented here.
   frame. `GET /share/{token}/observe` now carries the same `screenshot_pii_scrub: {"applied": false, "reason": ...}`,
   and the share page says above the frame that it is not PII-scrubbed and why, for as long as its frames are not.
   With `PII_SCRUB_SCREENSHOT_STRICT=true` such a frame is withheld, and the poll answered `500` with an error in the
-  log at every poll; it now answers `503` with a fixed text that says the frame is withheld and names no setting,
-  and writes no line. In place of the frame, the page now shows a refused poll's own text with its status, where it
-  showed only the status. (N9)
+  log at every poll; it now answers `503` with a fixed text that says the frame is withheld and names no setting.
+  The share route writes no line of its own: a redaction that failed still logs its failure, and audits it unless
+  `PII_SCRUB_AUDIT_REPORT=false`, at each capture. In place of the frame, the page now shows a refused poll's own
+  text with its status, where it showed only the status. (N9)
 
 ### Fixed
 

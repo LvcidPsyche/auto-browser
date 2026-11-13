@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     # still works and still leaves identity unverified.
     api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS", repr=False, exclude=True)
     # Operator ids, comma-separated, of the named credentials above that may use the surfaces no operator owns:
-    # the maintenance sweep and its status, the readiness report, the proxy personas and the mesh peer list, over
-    # REST and MCP alike. Empty leaves them to every credential. See app/admin_operators.py.
+    # the maintenance sweep and its status, the readiness report, the proxy persona routes and tools and the mesh
+    # peer list, over REST and MCP alike. Empty leaves them to every credential. See app/admin_operators.py.
     api_admin_operators: str = Field("", alias="API_ADMIN_OPERATORS")
     # Where the controller keeps its own token when neither setting above is set.
     # A loopback controller generates one here on first start and demands it, and
