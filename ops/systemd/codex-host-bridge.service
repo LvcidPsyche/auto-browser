@@ -10,5 +10,25 @@ ExecStart=/usr/bin/env python3 scripts/codex_host_bridge.py --socket-path data/h
 Restart=on-failure
 RestartSec=2
 
+# Optional: keep the bridge, and the Codex it starts, from the controller's secrets in this checkout. Uncomment
+# every line below, then `systemctl --user daemon-reload` and restart the unit.
+# - The paths repeat WorkingDirectory=: change them with it. A leading "-" passes over a path that is not there.
+# - The data directory itself is not named. The bridge's socket is data/host-bridge/codex.sock, and systemd cannot
+#   nest a writable path inside an inaccessible one.
+# - In a user unit these settings work inside a user namespace (PrivateUsers=), so the host has to allow
+#   unprivileged user namespaces, and some restrict them.
+# - No CI runs this unit. Afterwards check that the bridge still answers, and that a command its Codex runs cannot
+#   read data/api-token. See "Closing the checkout's secrets to the bridge" in docs/deployment.md.
+#PrivateUsers=yes
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/.env
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/api-token
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/takeover-token
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/proxy-personas.json
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/auth
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/witness
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/mesh/identity
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/ssh
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/browser-profile
+
 [Install]
 WantedBy=default.target

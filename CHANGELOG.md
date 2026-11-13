@@ -841,6 +841,13 @@ All notable changes to auto-browser are documented here.
   without it. The sandbox does not stop `stat` and other metadata calls on a file under `/data`, one CLI call
   reaching another's files in `CLI_HOME`, or signals and TCP connections to the controller: docs/deployment.md lists
   these and the rest. The Codex host bridge's Codex runs outside it. (N1)
+- **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
+  The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
+  can: the checkout's `.env`, `data/api-token`, `data/takeover-token` and the keys under `data/`.
+  `ops/systemd/codex-host-bridge.service` now has, commented out, `InaccessiblePaths=` lines for those, each with a
+  leading `-`, and the `PrivateUsers=yes` that goes with them in a user unit. The data directory itself is not among
+  them, since the bridge's socket is in it. The option is off as shipped and no CI runs a systemd unit: "Closing the
+  checkout's secrets to the bridge" in docs/deployment.md says how to turn it on and what to check afterwards. (N1)
 
 ### Fixed
 

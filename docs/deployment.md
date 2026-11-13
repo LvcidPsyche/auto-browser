@@ -558,7 +558,8 @@ What the sandbox does not stop:
   and what is mounted there is open to the CLI. Mount it once, as the compose files do.
 - **The Codex host bridge's Codex.** It runs on the host as the bridge's user and not under this launcher, so it can
   read what that user can: `data/api-token`, `data/takeover-token` and the mesh and witness keys when the checkout
-  is that user's. Use `api` mode where that matters.
+  is that user's. The bridge's unit has an option that closes those to it ("Closing the checkout's secrets to the
+  bridge", below). Use `api` mode where that matters.
 
 The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
 processes of the controller's user: their environment holds none of the controller's own tokens or keys (a proxy
@@ -660,6 +661,24 @@ In `APP_ENV=production`, startup now fails fast if:
 - a provider is set to `cli` mode but its CLI binary is missing
 - OpenAI is set to `host_bridge` mode but the bridge socket is missing, stale, not a real Unix socket, or failing `/healthz`
 - `CLI_HOME` is set but the expected auth-state files are missing for that CLI
+
+#### Closing the checkout's secrets to the bridge
+
+The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and a page shown to the model can
+prompt-inject it as it can any CLI: what that user can read, it can read. The unit template
+(`ops/systemd/codex-host-bridge.service`) carries an option against that, off as shipped: `InaccessiblePaths=` lines,
+commented out, that name the checkout's `.env` and the default places of the controller's secrets under `data/`
+(`api-token`, `takeover-token`, `proxy-personas.json`, `auth`, `witness`, `mesh/identity`, `ssh` and
+`browser-profile`), each with a leading `-` so that one that is not there is passed over. To turn it on, take the
+comment marks off those lines and off the `PrivateUsers=yes` line above them, change the paths with
+`WorkingDirectory=` if your checkout is elsewhere, add any other place you keep a secret, then reload and restart
+the unit. The data directory itself is not named, and must not be: the bridge's socket is
+`data/host-bridge/codex.sock`, and systemd cannot nest a writable path inside an inaccessible one.
+
+In a user unit these settings need unprivileged user namespaces, which some hosts restrict, and no CI runs the unit.
+After turning the option on, check that a step through the bridge still works and that a command the bridge's Codex
+runs cannot read `data/api-token`. The option closes the paths it names and nothing else: the rest of what the
+bridge's user can read stays open to its Codex.
 
 ## Generate an auth-state encryption key
 
