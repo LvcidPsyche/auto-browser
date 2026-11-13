@@ -6,6 +6,7 @@ from typing import Any
 from .auth_policy import credentials_for
 from .browser.request_gate import REDIRECT_ORIGIN_SWITCH
 from .browser.request_gates import PREFETCH_PENDING
+from .browser.window_births import REATTACH_RETRIES
 from .browser_sandbox import browser_sandbox_check
 from .ocr import tesseract_available
 
@@ -150,8 +151,8 @@ def window_birth_watcher_check(watchers: dict[str, Any]) -> ReadinessCheck:
             message=(
                 f"The window-birth watcher is {state.replace('_', ' ')} on a browser: while it has none, sessions "
                 "are refused there, and the popups of its existing sessions are refused, until a new watcher "
-                "attaches (the next session tries, and a lost one is re-attached at once while a session is watched "
-                "there)."
+                "attaches (the next session tries, and after a loss an attach is tried at once and "
+                f"{REATTACH_RETRIES} more times while a session is watched there)."
             ),
             fix="Check the controller log for 'window-birth watcher'.",
             details=details,

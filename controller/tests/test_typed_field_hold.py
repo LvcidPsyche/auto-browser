@@ -418,6 +418,9 @@ async def test_a_step_that_has_not_answered_by_its_bound_is_a_timeout_and_is_giv
     gate.set_result(None)
 
     await _until(lambda: given_back == [handle])
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert given_back == [handle]  # once, and not again a turn later
 
 
 @pytest.mark.parametrize("yields", [0, 1], ids=["answers-at-once", "yields-once"])

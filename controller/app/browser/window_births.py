@@ -921,9 +921,11 @@ class WindowBirths:
         """The controller closes or drops this browser: its watcher is detached, and its re-attaches are ended.
 
         In two passes. Nothing waits before the first one's removal, so a release cancelled at a later wait (a
-        teardown step's bound, its caller's cancel) has forgotten the browser all the same; and it ends a re-attach
-        in progress, which holds the lock on a browser that is going. The second is under the lock, so after an
-        attach in flight: what that attach registered goes too, with a re-attach that a loss started in between.
+        teardown step's bound, its caller's cancel) has forgotten all the same what the registries held of the browser
+        when it began; and it ends a re-attach in progress, which holds the lock on a browser that is going. The
+        second is under the lock, so after an attach in flight: what that attach registered goes too, with a re-attach
+        that a loss started in between. A release cancelled before the second pass has not looked again: what an
+        attach in flight registers then stays.
 
         A watcher that a pass removed is detached by a task the pass starts with the removal: no registry holds it
         any more, so no later release could detach it. A release that is cancelled ends at once and leaves that task

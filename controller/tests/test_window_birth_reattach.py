@@ -65,7 +65,8 @@ class Clock:
         return result
 
     def sleeping(self) -> int:
-        """How many sleeps have been started and not ended."""
+        """How many sleeps advance() has not ended. One that was cancelled meanwhile (a retry its browser's release
+        ended) still counts, until an advance() passes its time."""
         return len(self._sleepers)
 
     async def advance(self, seconds: float) -> None:
@@ -423,25 +424,31 @@ async def test_a_release_forgets_the_watcher_of_a_retry_that_attached_although_i
     w: Watched, clock: Clock
 ) -> None:
     """A cancel does not always end an attach: on Python 3.11 asyncio.wait_for answers a task cancelled once the
-    browser had answered with that answer, and the attach goes on. Here the browser's own call does that."""
+    browser had answered with that answer, and the attach goes on. Here the browser answers in the turn the release
+    cancels the attach, which is that case on 3.11; from 3.12, where wait_for awaits the call in the attach's own
+    task, the browser's call takes the cancel and answers all the same."""
     await w.lose(refuse=1)
-    attaching = asyncio.Event()
+    attaching, answer = asyncio.Event(), asyncio.Event()
     attach = w.browser.new_browser_cdp_session
 
     async def answers_all_the_same() -> FakeCdp:
         attaching.set()
         with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.Event().wait()
+            await answer.wait()
         return await attach()
 
     w.browser.new_browser_cdp_session = answers_all_the_same
     await clock.advance(A_RETRY_LATER)
     await asyncio.wait_for(attaching.wait(), timeout=5)
 
-    await asyncio.wait_for(w.births.release(w.browser), timeout=5)
+    release = asyncio.ensure_future(w.births.release(w.browser))
+    answer.set()
+    await asyncio.wait_for(release, timeout=5)
 
     assert w.left_running() == set()
     assert_forgotten(w)
+    replacement = w.browser.cdp
+    assert replacement.handlers and replacement.detached is True  # attached all the same, and detached again
 
 
 # ── the watcher a release removed is detached, whether or not the release is cancelled ───────────────────────────────
