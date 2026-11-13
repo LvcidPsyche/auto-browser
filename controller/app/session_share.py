@@ -27,7 +27,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -51,8 +51,8 @@ SHARE_TOKEN_MAX_TTL_SECONDS = 24 * 60 * 60
 
 SHARE_REVOCATIONS_UNAVAILABLE = (
     "the store of revoked share links (SHARE_REVOCATION_STORE_PATH) cannot be read or written. While it cannot be "
-    "read, no share link is honoured, minted or revoked; a revoke that cannot be saved revokes nothing. The server "
-    "log has the cause and where the file is."
+    "read, no share link is honoured, minted or revoked; a mint that cannot be saved hands out no link, and a revoke "
+    "that cannot be saved revokes nothing. The server log has the cause and where the file is."
 )
 
 
@@ -84,23 +84,28 @@ def _is_stamp(value: object) -> bool:
 @dataclass(frozen=True)
 class _Revocations:
     """What has been revoked: a link is ended when it was minted at or before the time held for its session, or at or
-    before ``every_session``, the mark a corrupt store leaves (0 where there is none)."""
+    before ``every_session``, the mark a corrupt store leaves (0 where there is none). ``minted`` is the stamp the
+    last mint gave (0 before any), which a restart starts its stamps after."""
 
     every_session: int = 0
     sessions: dict[str, int] = field(default_factory=dict)
+    minted: int = 0
 
     def revoked_before(self, session_id: str) -> int:
         return max(self.every_session, self.sessions.get(session_id, 0))
 
 
 def _revocations_read(data: object) -> _Revocations:
-    """The store's JSON as revocations; ValueError for anything a save does not write."""
+    """The store's JSON as revocations; ValueError for anything a save does not write. A store with no "minted" (the
+    first 1.18.0 builds wrote none) has seen no mint."""
     if not isinstance(data, dict):
         raise ValueError(f"it holds a JSON {type(data).__name__}, not an object")
-    every_session, sessions = data.get("all", 0), data.get("sessions", {})
+    every_session, sessions, minted = data.get("all", 0), data.get("sessions", {}), data.get("minted", 0)
     if not _is_stamp(every_session) or not isinstance(sessions, dict) or not all(map(_is_stamp, sessions.values())):
         raise ValueError("it holds something other than the times of revocations")
-    return _Revocations(every_session, sessions)
+    if not _is_stamp(minted):
+        raise ValueError("it holds something other than the time of a mint")
+    return _Revocations(every_session, sessions, minted)
 
 
 class SessionShareManager:
@@ -127,9 +132,8 @@ class SessionShareManager:
         self._viewed_lock = asyncio.Lock()
         # Where revocations are kept (SHARE_REVOCATION_STORE_PATH); None keeps them in this process alone.
         self._revocations_path = Path(revocations_path) if revocations_path else None
-        # A revoke runs in a worker thread (it writes the store) and a mint in the event loop's: each takes the next
-        # stamp under the first lock, and the second makes one read or one revoke of the store at a time.
-        self._stamp_lock = threading.Lock()
+        # A mint and a revoke each write the store, in a worker thread: one at a time, each taking its stamp under
+        # this lock, so that the stamps are in the order of the writes.
         self._store_lock = threading.Lock()
         self._last_stamp = 0
         # None while the store cannot be read. Replaced whole, never changed: a validation reads it without the lock.
@@ -148,7 +152,10 @@ class SessionShareManager:
         ttl_seconds: int | None = None,
         scope: str = SCOPE_OBSERVE,
     ) -> dict[str, Any]:
-        """Create a signed share token for session_id.
+        """Create a signed share token for session_id. Blocking (it writes the store): call it in a worker thread.
+
+        The token's stamp is written to the store before the token is returned, so one that cannot be saved raises
+        ShareRevocationStoreError and hands out nothing, as does a store that cannot be read.
 
         Returns:
             {
@@ -170,14 +177,17 @@ class SessionShareManager:
         if effective_ttl > self.max_ttl_seconds:
             # A revocation is dropped once this long has passed: a link with a longer life would outlive its own.
             raise ValueError(f"ttl_seconds must be at most {self.max_ttl_seconds}")
-        if self._revocations is None:
-            # No link is honoured while the store cannot be read: read it again before one more is handed out.
-            with self._store_lock:
-                if self._revocations is None:
-                    self._read_revocations()
+        with self._store_lock:
+            # No link is honoured while the store cannot be read: it is read again before one more is handed out.
+            held = self._revocations if self._revocations is not None else self._read_revocations()
+            # iat: when it was minted, in milliseconds, for a revoke to end it by (validate_token). Kept as the last
+            # mint's, so that a revoke after a restart takes a later stamp (_read_revocations).
+            iat = self._next_stamp()
+            revocations = replace(held, minted=iat)
+            self._write_revocations(revocations)
+            self._revocations = revocations
         exp = int(time.time()) + effective_ttl
-        # iat: when it was minted, in milliseconds, for a revoke to end it by (validate_token).
-        payload = {"session_id": normalized_session_id, "exp": exp, "scope": scope, "iat": self._next_stamp()}
+        payload = {"session_id": normalized_session_id, "exp": exp, "scope": scope, "iat": iat}
         payload_json = json.dumps(payload, separators=(",", ":"))
         payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
         sig = self._sign(payload_b64)
@@ -187,7 +197,7 @@ class SessionShareManager:
             "session_id": normalized_session_id,
             "scope": scope,
             "expires_at": exp,
-            "expires_in_seconds": exp - int(time.time()),
+            "expires_in_seconds": effective_ttl,
         }
 
     # ── Token validation ───────────────────────────────────────────────────
@@ -290,17 +300,21 @@ class SessionShareManager:
                     **{name: at for name, at in held.sessions.items() if at >= oldest_needed},
                     normalized_session_id: stamp,
                 },
+                held.minted,
             )
             self._write_revocations(revocations)
             self._revocations = revocations
         return stamp
 
-    def _next_stamp(self) -> int:
-        """The time, in milliseconds, of a mint or a revoke: later than every one before it in this process and in the
-        store it read, whatever the clock does, so that a link minted after a revoke is never one it ends."""
-        with self._stamp_lock:
-            self._last_stamp = max(int(time.time() * 1000), self._last_stamp + 1)
-            return self._last_stamp
+    def _next_stamp(self, *, ahead_ms: int = 0) -> int:
+        """The time, in milliseconds, of a mint or a revoke, at least ``ahead_ms`` past the clock's: later than every
+        stamp this controller has given before, in this process or an earlier one, so that a link minted after a
+        revoke is never one it ends and a revoke ends every link minted before it. The store keeps the last stamp of a
+        mint and of a revoke, each written before its link is handed out or its revocation counts, and
+        _read_revocations starts after them; a corrupt store, which no longer says, leaves a mark in their place (see
+        there). Called under ``_store_lock``, or by __init__."""
+        self._last_stamp = max(int(time.time() * 1000) + ahead_ms, self._last_stamp + 1)
+        return self._last_stamp
 
     def _read_revocations(self) -> _Revocations:
         """Read the store into ``_revocations``, at the start and again for a mint or a revoke while it could not be
@@ -325,7 +339,13 @@ class SessionShareManager:
             )
             raise ShareRevocationStoreError from exc
         except (ValueError, RecursionError) as exc:  # json.JSONDecodeError, UnicodeDecodeError: the file is corrupt
-            revocations = _Revocations(every_session=self._next_stamp())
+            # It no longer says what was minted either, and after a step back the clock cannot say which links are
+            # still alive. A mark one link's longest life past the clock is later than every link minted before it
+            # that this clock has not seen expire, unless the clock was stepped back by more than that life (every link
+            # then lives as much longer). Every stamp after it is later still (the seed below), so stamps run ahead of
+            # the clock until it catches up: nothing but the revocation check (validate_token) reads a link's stamp,
+            # and its expiry is its own exp.
+            revocations = _Revocations(every_session=self._next_stamp(ahead_ms=(self.max_ttl_seconds + 1) * 1000))
             logger.error(
                 "the store of revoked share links %s is corrupt (%s) and no longer says which links were revoked: "
                 "every link minted before now is revoked, and the store is written again",
@@ -333,8 +353,9 @@ class SessionShareManager:
                 error_text_for_log(exc),
             )
             self._write_revocations(revocations)
-        with self._stamp_lock:
-            self._last_stamp = max(self._last_stamp, revocations.every_session, *revocations.sessions.values())
+        self._last_stamp = max(
+            self._last_stamp, revocations.every_session, revocations.minted, *revocations.sessions.values()
+        )
         self._revocations = revocations
         return revocations
 
@@ -342,7 +363,8 @@ class SessionShareManager:
         path = self._revocations_path
         if path is None:
             return
-        text = json.dumps({"all": revocations.every_session, "sessions": revocations.sessions}, indent=2)
+        stored = {"all": revocations.every_session, "sessions": revocations.sessions, "minted": revocations.minted}
+        text = json.dumps(stored, indent=2)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(path, text, mode=PRIVATE_FILE_MODE)
@@ -397,10 +419,11 @@ async def mint_share_token(share_manager: Any, audit: Any, session_id: str, *, t
     """Mint a share token and audit it: the one mint behind POST /sessions/{id}/share and browser.share_session,
     each of which has first checked that its caller may use the session.
 
-    The token is returned only once its event is written: a mint that cannot be audited raises, and the token made
-    for it is dropped unseen. The event names the token by its digest (token_digest).
+    The token is returned only once its stamp is in the store (create_token, in a worker thread: it reads and writes
+    the store) and its event is written: a mint that cannot be audited raises, and the token made for it is dropped
+    unseen. The event names the token by its digest (token_digest).
     """
-    token = share_manager.create_token(session_id, ttl_seconds=ttl_seconds)
+    token = await asyncio.to_thread(share_manager.create_token, session_id, ttl_seconds=ttl_seconds)
     await audit.append(
         event_type=SHARE_MINTED_EVENT,
         status="ok",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -37,7 +38,7 @@ from app.tool_inputs import ShareSessionInput
 from app.utils import PRIVATE_FILE_MODE, UTC
 from tests.test_browser_manager_create_session import FakePage
 from tests.test_session_ownership import ALICE, BOB
-from tests.test_share_links import CLOSED_SESSION_ID, SECRET, SESSION_ID, _Links, _manager
+from tests.test_share_links import CLOSED_SESSION_ID, SECRET, SESSION_ID, _Audit, _Links, _manager
 
 REVOKE_TOOL = "browser.revoke_session_share"
 LOGGER = "app.session_share"
@@ -179,7 +180,10 @@ class RevocationStoreTests(_Stores):
         revoked_before = first.revoke(SESSION_ID)
         kept = first.create_token(SESSION_ID)["token"]
 
-        self.assertEqual(self.stored(), {"all": 0, "sessions": {SESSION_ID: revoked_before}})
+        # The last mint's stamp is kept too, written before its link was handed out.
+        self.assertEqual(
+            self.stored(), {"all": 0, "sessions": {SESSION_ID: revoked_before}, "minted": _payload(kept)["iat"]}
+        )
         restarted = self.manager(self.path)
         self.assertFalse(restarted.token_info(old)["valid"])
         self.assertTrue(restarted.token_info(kept)["valid"])
@@ -192,6 +196,52 @@ class RevocationStoreTests(_Stores):
         restarted = self.manager(self.path)
 
         self.assertTrue(restarted.token_info(restarted.create_token(SESSION_ID)["token"])["valid"])
+
+    def test_after_a_restart_with_the_clock_set_back_a_revoke_ends_a_link_minted_before_it(self) -> None:
+        clock = self.clock()
+        token = self.manager(self.path).create_token(SESSION_ID)["token"]
+        # The restart: the host's clock had run ten minutes fast, and is stepped back as the controller comes up.
+        clock.now -= 600
+
+        restarted = self.manager(self.path)
+        revoked_before = restarted.revoke(SESSION_ID)
+
+        self.assertGreater(revoked_before, _payload(token)["iat"])
+        self.assertFalse(restarted.token_info(token)["valid"])
+        self.assertTrue(restarted.token_info(restarted.create_token(SESSION_ID)["token"])["valid"])
+
+    def test_a_mint_whose_stamp_cannot_be_saved_hands_out_no_link(self) -> None:
+        manager = self.manager(self.path)
+
+        with (
+            patch.object(session_share, "atomic_write_text", side_effect=OSError(28, "No space left on device")),
+            self.assertLogs(LOGGER, level="ERROR") as logs,
+            self.assertRaises(ShareRevocationStoreError) as caught,
+        ):
+            manager.create_token(SESSION_ID)
+
+        self.assertEqual(str(caught.exception), SHARE_REVOCATIONS_UNAVAILABLE)
+        self.assertIn("No space left on device", logs.output[0])
+        self.assertFalse(self.path.exists())
+        token = manager.create_token(SESSION_ID)["token"]
+        self.assertEqual(self.stored()["minted"], _payload(token)["iat"])
+
+    def test_a_store_that_holds_no_mint_is_read_and_the_next_mint_adds_one(self) -> None:
+        # What the first 1.18.0 builds wrote, before a mint's stamp was kept.
+        clock = self.clock()
+        revoked_before = int(clock.now * 1000) - 60_000
+        self.path.parent.mkdir()
+        self.path.write_text(json.dumps({"all": 0, "sessions": {SESSION_ID: revoked_before}}), encoding="utf-8")
+
+        with self.assertNoLogs(LOGGER, level="ERROR"):
+            manager = self.manager(self.path)
+
+        self.assertFalse(manager.token_info(_signed(manager, now=clock.now))["valid"])
+        token = manager.create_token(SESSION_ID)["token"]
+        self.assertTrue(manager.token_info(token)["valid"])
+        self.assertEqual(
+            self.stored(), {"all": 0, "sessions": {SESSION_ID: revoked_before}, "minted": _payload(token)["iat"]}
+        )
 
     def test_the_store_is_written_whole_and_private(self) -> None:
         with patch.object(session_share, "atomic_write_text", side_effect=session_share.atomic_write_text) as write:
@@ -250,6 +300,7 @@ class RevocationStoreTests(_Stores):
     def test_a_revoke_that_cannot_be_saved_revokes_nothing(self) -> None:
         manager = self.manager(self.path)
         token = manager.create_token(SESSION_ID)["token"]
+        stored = self.stored()
 
         with (
             patch.object(session_share, "atomic_write_text", side_effect=OSError(28, "No space left on device")),
@@ -261,7 +312,7 @@ class RevocationStoreTests(_Stores):
         self.assertEqual(str(caught.exception), SHARE_REVOCATIONS_UNAVAILABLE)
         self.assertIn("No space left on device", logs.output[0])
         self.assertTrue(manager.token_info(token)["valid"])
-        self.assertFalse(self.path.exists())
+        self.assertEqual(self.stored(), stored)
         manager.revoke(SESSION_ID)
         self.assertFalse(manager.token_info(token)["valid"])
 
@@ -305,6 +356,10 @@ class RevocationStoreTests(_Stores):
             b'{"sessions": {"session-1": true}}',
             b'{"all": -1}',
             b'{"all": 1.5, "sessions": {}}',
+            b'{"sessions": {}, "minted": "soon"}',
+            b'{"sessions": {}, "minted": true}',
+            b'{"minted": -1}',
+            b'{"minted": 1.5}',
         )
         clock = self.clock()
         for number, content in enumerate(corrupt):
@@ -351,6 +406,20 @@ class RevocationStoreTests(_Stores):
 
         self.assertEqual(self.path.read_text(encoding="utf-8"), "not json")
 
+    def test_after_a_restart_with_the_clock_set_back_a_corrupt_store_ends_a_link_minted_before_it(self) -> None:
+        clock = self.clock()
+        token = self.manager(self.path).create_token(SESSION_ID)["token"]
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("not json", encoding="utf-8")
+        # The restart: the clock is stepped back by as long as a link can live.
+        clock.now -= SHARE_TOKEN_MAX_TTL_SECONDS
+
+        with self.assertLogs(LOGGER, level="ERROR"):
+            found = self.manager(self.path)
+
+        self.assertFalse(found.token_info(token)["valid"])
+        self.assertTrue(found.token_info(found.create_token(SESSION_ID)["token"])["valid"])
+
     def test_the_mark_a_corrupt_store_left_is_dropped_with_the_last_link_it_could_end(self) -> None:
         clock = self.clock()
         self.path.parent.mkdir()
@@ -358,7 +427,8 @@ class RevocationStoreTests(_Stores):
         with self.assertLogs(LOGGER, level="ERROR"):
             manager = self.manager(self.path)
 
-        clock.now += SHARE_TOKEN_MAX_TTL_SECONDS + 1
+        # The mark is a link's longest life past the time the store was found corrupt, and is kept as long again.
+        clock.now += 2 * (SHARE_TOKEN_MAX_TTL_SECONDS + 1)
         manager.revoke("session-kept")
         self.assertGreater(self.stored()["all"], 0)
         clock.now += 1
@@ -454,6 +524,99 @@ class UnreadableStoreRouteTests(_Links):
             self.assertEqual((response.status_code, response.json()), (503, {"detail": SHARE_REVOCATIONS_UNAVAILABLE}))
             self.assertNotIn(self.root.name, response.text)
         self.assertEqual(self.audit.events, [])
+
+
+class UnwritableStoreRouteTests(_Links):
+    def new_share_manager(self) -> SessionShareManager:
+        return SessionShareManager(
+            secret=SECRET, ttl_minutes=10, revocations_path=self.root / "share" / "revocations.json"
+        )
+
+    def test_a_mint_whose_stamp_cannot_be_saved_answers_503_and_no_token(self) -> None:
+        with (
+            patch.object(session_share, "atomic_write_text", side_effect=OSError(28, "No space left on device")),
+            self.assertLogs(LOGGER, level="ERROR"),
+        ):
+            response = self.client.post(f"/sessions/{SESSION_ID}/share")
+
+        self.assertEqual((response.status_code, response.json()), (503, {"detail": SHARE_REVOCATIONS_UNAVAILABLE}))
+        self.assertEqual(self.audit.events, [])
+        self.assertEqual(self.client.get(f"/share/{self.mint()}/observe").status_code, 200)
+
+
+class MintOffTheLoopTests(unittest.IsolatedAsyncioTestCase):
+    """A mint reads and writes the store in a worker thread: a slow disk holds the mint, not every other request."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "share" / "revocations.json"
+
+    async def assert_minted_while_the_loop_runs(self, manager: SessionShareManager, name: str) -> None:
+        """Mint while ``manager.<name>`` waits until the event loop has run again: in vain, were it on the loop."""
+        reached, loop_ran = threading.Event(), threading.Event()
+        waited: list[bool] = []
+        call = getattr(manager, name)
+
+        def slowly(*args: Any, **kwargs: Any) -> Any:
+            reached.set()
+            waited.append(loop_ran.wait(timeout=5))
+            return call(*args, **kwargs)
+
+        with patch.object(manager, name, side_effect=slowly):
+            minting = asyncio.ensure_future(
+                session_share.mint_share_token(manager, _Audit(), SESSION_ID, ttl_seconds=60)
+            )
+            self.assertTrue(await asyncio.to_thread(reached.wait, 5))
+            loop_ran.set()
+            token = await minting
+
+        self.assertEqual(waited, [True])
+        self.assertTrue(manager.token_info(token["token"])["valid"])
+
+    async def test_a_mint_reads_a_store_it_could_not_read_before_off_the_loop(self) -> None:
+        self.path.mkdir(parents=True)
+        with self.assertLogs(LOGGER, level="ERROR"):
+            manager = SessionShareManager(secret=SECRET, ttl_minutes=10, revocations_path=self.path)
+        self.path.rmdir()
+
+        await self.assert_minted_while_the_loop_runs(manager, "_read_revocations")
+
+    async def test_a_mint_writes_its_stamp_off_the_loop(self) -> None:
+        manager = SessionShareManager(secret=SECRET, ttl_minutes=10, revocations_path=self.path)
+
+        await self.assert_minted_while_the_loop_runs(manager, "_write_revocations")
+
+
+class McpMintStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_mint_whose_stamp_cannot_be_saved_is_a_tool_error_with_its_fixed_text(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        manager = _manager(Path("unused.png"))
+        gateway = McpToolGateway(
+            manager=manager,
+            orchestrator=SimpleNamespace(),
+            job_queue=SimpleNamespace(),
+            tool_profile="full",
+            share_manager=SessionShareManager(
+                secret=SECRET, ttl_minutes=10, revocations_path=Path(directory.name) / "revocations.json"
+            ),
+        )
+
+        with (
+            patch.object(session_share, "atomic_write_text", side_effect=OSError(28, "No space left on device")),
+            self.assertLogs(LOGGER, level="ERROR"),
+            self.assertNoLogs("app.tool_gateway.gateway", level="ERROR"),
+        ):
+            response = await gateway.call_tool(
+                McpToolCallRequest(name="browser.share_session", arguments={"session_id": SESSION_ID})
+            )
+
+        self.assertTrue(response.isError)
+        answered = json.dumps(response.model_dump(), default=str)
+        self.assertIn(SHARE_REVOCATIONS_UNAVAILABLE, answered)
+        self.assertNotIn('"token"', answered)
+        self.assertEqual(manager.audit.events, [])
 
 
 class McpRevokeTests(unittest.IsolatedAsyncioTestCase):

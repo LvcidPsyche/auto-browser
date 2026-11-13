@@ -1511,7 +1511,8 @@ does not.
   so a restart does not bring a revoked link back. One is dropped, as the file is next written, once it is older
   than the longest life a link can have: 24 hours, or `SHARE_TOKEN_TTL_MINUTES` where that is longer. A restart
   without the file brings back the revoked links that have not expired.
-- A revoke that cannot be saved revokes nothing and answers `503`.
+- The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
+  revoke that cannot be saved revokes nothing: each answers `503`, as while the file cannot be read.
 - A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
   and a mint or a revoke answers `503`, until one of those, or a restart, can read it. A file that reads as
   something the controller did not write can no longer say which links were revoked: the controller logs an error,
