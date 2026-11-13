@@ -495,7 +495,8 @@ const held = {{
 }};"""
 
 # By selector the hold is a handle of the page's, taken on the locator's element: read, then read once more as it
-# is released (the handle is then given back).
+# is released (the handle is then given back). The release is in a finally: a read that throws (in the main world
+# a page can have replaced what it calls) left the hold's listeners on the node.
 FIELD_HOLD_TAKE_SCRIPT = f"""(el) => {{
   {_HELD_FIELD_JS}
   return held.take(el);
@@ -506,15 +507,18 @@ FIELD_HOLD_READ_SCRIPT = f"""(hold) => {{
 }}"""
 FIELD_HOLD_RELEASE_SCRIPT = f"""(hold) => {{
   {_HELD_FIELD_JS}
-  const attributes = held.read(hold);
-  held.release(hold);
-  return attributes;
+  try {{
+    return held.read(hold);
+  }} finally {{
+    held.release(hold);
+  }}
 }}"""
 # By element_id the hold is the world's, kept under a nonce (the registry's fieldHolds, made here: a registry an
 # earlier version made has none). Taking it answers its first read. Both are reads, which the world sends again
 # when an answer is lost: a second take under the nonce reads the hold the first took, and a second release finds
 # none and answers null, as for a node that lost focus. The hold keeps the element, so the release finds it by its
-# id though the page has taken it out of the document.
+# id though the page has taken it out of the document. The hold leaves the registry, and its listeners the node, in
+# a finally: taken out first, a read that then threw left listeners nothing could find again.
 ELEMENT_FIELD_HOLD_SCRIPT = f"""(el, nonce, registry) => {{
   {_HELD_FIELD_JS}
   if (!registry.fieldHolds) registry.fieldHolds = new Map();
@@ -525,10 +529,12 @@ ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
   {_HELD_FIELD_JS}
   const hold = registry.fieldHolds && registry.fieldHolds.get(nonce);
   if (!hold) return null;
-  registry.fieldHolds.delete(nonce);
-  const attributes = held.read(hold);
-  held.release(hold);
-  return attributes;
+  try {{
+    return held.read(hold);
+  }} finally {{
+    registry.fieldHolds.delete(nonce);
+    held.release(hold);
+  }}
 }}"""
 
 # Playwright's selectOptions, on the element: scrolls an enabled, visible

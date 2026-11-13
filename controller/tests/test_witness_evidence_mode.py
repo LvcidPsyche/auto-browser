@@ -631,7 +631,7 @@ async def test_a_type_cancelled_while_it_reads_its_fields_attributes_keeps_no_pr
         await asyncio.Event().wait()
 
     field = FakeLocator("#field")
-    field.evaluate_handle = AsyncMock(side_effect=never_answers)
+    field.element.evaluate_handle = AsyncMock(side_effect=never_answers)
     session.page.locators["#field"] = field
 
     typing = asyncio.create_task(manager.type("s1", selector="#field", text="hunter2-secret"))
@@ -747,7 +747,7 @@ async def test_a_read_once_the_text_is_in_that_fails_keeps_no_preview(tmp_path: 
         gone = PlaywrightError("Execution context was destroyed, most likely because of a navigation")
         read = hold.evaluate.side_effect
         hold.evaluate = AsyncMock(side_effect=lambda script: _raise(gone) if typed else read(script))
-        field.evaluate_handle = AsyncMock(return_value=hold)
+        field.element.evaluate_handle = AsyncMock(return_value=hold)
         page.locators["#login"] = field
         named = {"selector": "#login"}
     else:
@@ -767,9 +767,10 @@ async def test_a_read_once_the_text_is_in_that_fails_keeps_no_preview(tmp_path: 
     if by == "selector":
         # No wait for the field remains: the read is of the node held, which fails at once where the page took it
         # away, and no read finds the selector's field anew (each waited a second for one gone). The hold is given
-        # back all the same.
+        # back all the same, and the element it was made on.
         field.get_attribute.assert_not_awaited()
         hold.dispose.assert_awaited_once()
+        field.element.dispose.assert_awaited_once()
 
 
 def _raise(error: Exception) -> Any:
@@ -878,9 +879,9 @@ async def test_a_text_into_a_plain_field_that_keeps_focus_shows_its_preview(tmp_
 @pytest.mark.parametrize("ends", ["typed", "typing-fails", "cancelled"])
 @pytest.mark.parametrize("by", ["selector", "element_id"])
 async def test_a_type_gives_its_hold_of_the_field_back_however_it_ends(tmp_path: Path, by: str, ends: str) -> None:
-    # The hold is a handle of the page's (by selector) or a record in the element ids' world (by element_id), which
-    # the page keeps until it is given back: once, whether the text went in, a keystroke failed or the type was
-    # cancelled as it typed.
+    # The hold is a handle of the page's, made on the handle of the selector's element (by selector), or a record in
+    # the element ids' world (by element_id), which the page keeps until it is given back: once, whether the text
+    # went in, a keystroke failed or the type was cancelled as it typed.
     manager = _typing_manager(tmp_path)
     manager.settings.witness_enabled = True
     session = manager.sessions["s1"]
@@ -912,36 +913,40 @@ async def test_a_type_gives_its_hold_of_the_field_back_however_it_ends(tmp_path:
     if by == "selector":
         (hold,) = field.holds
         hold.dispose.assert_awaited_once()
+        field.element.dispose.assert_awaited_once()
         field.get_attribute.assert_not_awaited()  # no read finds the selector's field anew
     else:
         field.release_field.assert_awaited_once()
 
 
-@pytest.mark.parametrize("fails", ["taking-the-hold", "the-read-before-the-text"])
+@pytest.mark.parametrize("fails", ["finding-the-field", "taking-the-hold", "the-read-before-the-text"])
 async def test_a_field_by_selector_that_cannot_be_held_or_read_keeps_no_preview_and_is_typed_into(
     tmp_path: Path, fails: str
 ) -> None:
     # By selector a hold that cannot be taken, or read, says nothing of the node the text goes to: the text is typed,
     # as before, and its preview stays withheld. The wait for the field is FIELD_RECHECK_TIMEOUT_MS at most: it had
-    # focus a moment ago.
+    # focus a moment ago. What was taken before the step that failed is given back.
     manager = _typing_manager(tmp_path)
     manager.settings.witness_enabled = True
     page = manager.sessions["s1"].page
     field = FakeLocator("#note", attributes={"type": "text", "name": "note"})
     page.locators["#note"] = field
     gone = PlaywrightTimeoutError("Timeout 1000ms exceeded.")
-    if fails == "taking-the-hold":
-        field.evaluate_handle = AsyncMock(side_effect=gone)
+    if fails == "finding-the-field":
+        field.element_handle = AsyncMock(side_effect=gone)
+    elif fails == "taking-the-hold":
+        field.element.evaluate_handle = AsyncMock(side_effect=PlaywrightError("Execution context was destroyed"))
     else:
         hold = field._hold("")
         hold.evaluate = AsyncMock(side_effect=gone)
-        field.evaluate_handle = AsyncMock(return_value=hold)
+        field.element.evaluate_handle = AsyncMock(return_value=hold)
 
     with patch("asyncio.sleep", new=AsyncMock()):
         result = await manager.type("s1", selector="#note", text="hunter2-secret")
 
     assert "".join(call.args[0] for call in page.keyboard.type.await_args_list) == "hunter2-secret"
-    assert field.evaluate_handle.await_args.kwargs["timeout"] == FIELD_RECHECK_TIMEOUT_MS
+    assert field.element_handle.await_args.kwargs["timeout"] == FIELD_RECHECK_TIMEOUT_MS
+    assert field.element.dispose.await_count == (0 if fails == "finding-the-field" else 1)
     for hold in field.holds:
         hold.dispose.assert_awaited_once()
     targets, receipt = await _type_targets_and_receipt(manager)

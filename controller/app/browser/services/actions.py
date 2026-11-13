@@ -7,7 +7,7 @@ import random
 import re
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -405,10 +405,11 @@ _NOT_A_ONE_TIME_CODE = re.compile(
 # What a type's target says of its text where the text is shown (text_target_payload), and is withheld until the
 # field is known not to be secret (withhold_text_preview, give_back_text_preview).
 _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
-# How long a type's hold on the node its text goes to waits (_TypedField): by selector for the field as the hold is
-# taken, which had focus a moment before, and from then on for the page's answer to each read and give-back. No read
-# waits for a field once the text is in: a hold on a node the page took away (the text's Enter submitted its form)
-# fails at once, where a read by selector waited this long for each attribute of a field that was gone.
+# How long a type's hold on the node its text goes to waits (_TypedField): by selector for the whole take (the field
+# found, which had focus a moment before, the hold made on it and its first read), and from then on for the page's
+# answer to each read and give-back. No read waits for a field once the text is in: a hold on a node the page took
+# away (the text's Enter submitted its form) fails at once, where a read by selector waited this long for each
+# attribute of a field that was gone.
 # And how long the read of a type's field for its approval takes at most, before the approval is asked for
 # (_approval_field_read): one that has not answered by then leaves the field unread.
 FIELD_RECHECK_TIMEOUT_MS = 1000
@@ -483,6 +484,56 @@ async def _answered_soon(call: Awaitable[Any]) -> Any:
     return await asyncio.wait_for(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
 
 
+def _left_until(ends: float) -> float:
+    """The seconds left until the loop's time ``ends``: none once it has passed."""
+    return max(0.0, ends - asyncio.get_running_loop().time())
+
+
+async def _arrives_by(call: Awaitable[Any], ends: float, give_back: Callable[[Any], Coroutine[Any, Any, None]]) -> Any:
+    """The handle ``call`` answers, where it answers by the loop's time ``ends``: else the call's error, or the
+    bound's.
+
+    The call is a task of its own, which giving up on it (the bound passed, the caller was cancelled) does not
+    cancel. A cancelled call does not stop the page: the handle is made all the same, and the answer that carries it
+    finds nobody to give it back. One that arrives after it was given up on is given back as it arrives, by
+    ``give_back``, in the background: nothing waits for that.
+    """
+    step = asyncio.ensure_future(call)
+    try:
+        return await asyncio.wait_for(asyncio.shield(step), _left_until(ends))
+    except BaseException:
+        # Whether or not the step is done: one that finished in the iteration its caller was cancelled had its
+        # handle dropped by shield, and a done task still runs this callback (soon).
+        _GIVEN_UP.add(step)
+        step.add_done_callback(lambda arrived: _given_back_late(arrived, give_back))
+        raise
+
+
+# The steps given up on that have not answered yet: the loop keeps only a weak reference to a task.
+_GIVEN_UP: set["asyncio.Future[Any]"] = set()
+
+
+def _given_back_late(arrived: "asyncio.Future[Any]", give_back: Callable[[Any], Coroutine[Any, Any, None]]) -> None:
+    _GIVEN_UP.discard(arrived)
+    if arrived.cancelled() or arrived.exception() is not None:
+        return  # nothing arrived: the step failed, as its take already has
+    spawn_background_task(give_back(arrived.result()))
+
+
+async def _disposed_soon(handle: Any) -> None:
+    """Give a handle back, within the bound: one the page does not answer for goes with its document."""
+    with contextlib.suppress(Exception):
+        await _answered_soon(handle.dispose())
+
+
+async def _hold_released_soon(hold: Any) -> None:
+    """Give back a hold nothing reads any more: by its release script first, which takes its listeners off the node,
+    and then the handle, each within the bound and on its own."""
+    await _each_on_its_own(
+        [lambda: _answered_soon(hold.evaluate(FIELD_HOLD_RELEASE_SCRIPT)), lambda: _answered_soon(hold.dispose())]
+    )
+
+
 class _TypedField:
     """A type's hold on the node its text goes to, taken just before the first keystroke and given back once the text
     is in: the innermost focused element in the field the type names (element_scripts._HELD_FIELD_JS).
@@ -493,15 +544,22 @@ class _TypedField:
     rest of the text there unread, and by selector a field turned secret and then replaced read as its replacement.
 
     By element_id the hold is the element ids' world's, under a nonce, and a take that fails raises, as the element's
-    other steps do. By selector it is a handle of the page's, and one that cannot be taken or read says secret, the
-    text typed all the same, as when the field's attributes could not be read. That take, and on either path every
-    call after the take, answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
+    other steps do. By selector it is a handle of the page's, made on the handle of the element the selector finds
+    and then read: three calls of the type's own, within FIELD_RECHECK_TIMEOUT_MS together, and a handle that arrives
+    once its call was given up on (the bound passed, the type was cancelled) is given back as it arrives
+    (_arrives_by). In one Locator.evaluate_handle the timeout bounded only the wait for the element, and the hold was
+    the type's only once Playwright had disposed of the element's handle, with no bound either: a page that did not
+    answer held the type, and a type cancelled then had made a hold it could not give back. A hold that cannot be
+    taken or read says secret, the text typed all the same, as when the field's attributes could not be read. On
+    either path every call after the take answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
     """
 
     def __init__(self, element: Any, locator: Any) -> None:
         self._element = element
         self._locator = locator
         self._nonce = secrets.token_hex(16)
+        # By selector: the handle of the element the selector found, and the hold made on it.
+        self._found: Any = None
         self._handle: Any = None
         self.not_secret = False
 
@@ -509,15 +567,27 @@ class _TypedField:
         if self._element is not None:
             self.not_secret = _reads_not_secret(await self._element.hold_field(self._nonce))
             return
+        ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
         try:
-            self._handle = await self._locator.evaluate_handle(FIELD_HOLD_TAKE_SCRIPT, timeout=FIELD_RECHECK_TIMEOUT_MS)
-            self.not_secret = _reads_not_secret(await _answered_soon(self._handle.evaluate(FIELD_HOLD_READ_SCRIPT)))
+            finding = self._locator.element_handle(timeout=FIELD_RECHECK_TIMEOUT_MS)
+            self._found = await _arrives_by(finding, ends, _disposed_soon)
+            holding = self._found.evaluate_handle(FIELD_HOLD_TAKE_SCRIPT)
+            self._handle = await _arrives_by(holding, ends, _hold_released_soon)
+            read = self._handle.evaluate(FIELD_HOLD_READ_SCRIPT)
+            self.not_secret = _reads_not_secret(await asyncio.wait_for(read, _left_until(ends)))
         except Exception:
             self.not_secret = False
 
     async def release(self) -> None:
         """Read the node once more and give the hold back, whatever ended the type: each step on its own, and a
-        cancellation raised once all have run (_each_on_its_own). A step that fails says secret."""
+        cancellation raised once all have run (_each_on_its_own). A step that fails says secret.
+
+        What the controller holds is given back whatever the page does: by selector both handles are disposed of.
+        The page's side goes with the release script, which takes the hold's listeners off the node and, by
+        element_id, the hold out of the world's fieldHolds. Where that script never runs (a page that does not
+        answer it), the node keeps the listeners, and the world its entry, until the document goes. Nothing reads
+        such a hold: each type takes its own, by its own handle or under its own nonce.
+        """
         still_not_secret = False
 
         async def read_again() -> None:
@@ -531,8 +601,9 @@ class _TypedField:
         steps: list[Any] = []
         if self._element is not None or self._handle is not None:
             steps.append(read_again)
-        if self._handle is not None:
-            steps.append(lambda: _answered_soon(self._handle.dispose()))
+        for handle in (self._handle, self._found):
+            if handle is not None:
+                steps.append(lambda handle=handle: _answered_soon(handle.dispose()))
         await _each_on_its_own(steps)
         self.not_secret = self.not_secret and still_not_secret
 

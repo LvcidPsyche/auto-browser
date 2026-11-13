@@ -72,9 +72,11 @@ class FakeLocator:
     def __init__(self, selector: str, *, attributes: dict[str, str] | None = None) -> None:
         self.selector = selector
         self.attributes = attributes or {}
-        # Focus is in the field once it is clicked (evaluate, below), so the node a type takes hold of is the field.
+        # Focus is in the field once it is clicked (evaluate, below), so the node a type takes hold of is the field:
+        # the type finds the selector's element (element_handle) and makes its hold on that.
         self.holds: list[FakeFieldHold] = []
-        self.evaluate_handle = AsyncMock(side_effect=self._hold)
+        self.element = SimpleNamespace(evaluate_handle=AsyncMock(side_effect=self._hold), dispose=AsyncMock())
+        self.element_handle = AsyncMock(return_value=self.element)
         self.scroll_into_view_if_needed = AsyncMock()
         self.click = AsyncMock()
         self.hover = AsyncMock()

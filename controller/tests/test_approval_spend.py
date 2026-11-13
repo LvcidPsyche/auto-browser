@@ -77,8 +77,9 @@ class FakeLocator:
     async def get_attribute(self, _name: str, **_given: Any) -> None:
         return None
 
-    async def evaluate_handle(self, _script: str, **_given: Any) -> FakeFieldHold:
-        return FakeFieldHold({})  # a type's hold of the field its text goes to: a plain one that keeps focus
+    async def element_handle(self, **_given: Any) -> SimpleNamespace:
+        # A type finds its field's element and makes its hold on it: the hold of a plain field that keeps focus.
+        return SimpleNamespace(evaluate_handle=AsyncMock(return_value=FakeFieldHold({})), dispose=AsyncMock())
 
     async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:
         if script == _PRESS_PLACE_SCRIPT:

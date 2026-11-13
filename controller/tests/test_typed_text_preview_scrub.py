@@ -104,7 +104,7 @@ async def test_a_field_whose_attributes_could_not_be_read_keeps_no_preview(tmp_p
     # kept in the result, actions.jsonl, the audit log and the receipt. What is read now is the node the type holds
     # as the text begins (_TypedField), and a hold that cannot be taken says as little of it.
     field = FakeLocator("#pw", attributes={"type": "password"})
-    field.evaluate_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
+    field.element_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
     manager, page = _typing_manager(tmp_path, field)
 
     with patch("asyncio.sleep", new=AsyncMock()):

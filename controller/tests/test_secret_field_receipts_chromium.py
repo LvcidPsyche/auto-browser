@@ -5,7 +5,8 @@ A type decides whether its field is secret from the field's attributes as it run
 taken to say "not secret", so a password field that came in after the read had timed out kept the typed text as the
 action's preview: in the result, actions.jsonl, the audit log and the receipt; and a type into a field that never
 came kept the text it was to type in its failure record. The field read was the one the type named, where the text
-can go to another node (an Enter that moves focus on, a label or a component around the field). And what an
+can go to another node (an Enter that moves focus on, a label or a component around the field). The hold a type
+takes on that node waits a bounded time for the page, and leaves no listener on it. And what an
 approval asked for a type shows of its text, by how its field read. Only the page server is local
 (test_allowed_hosts_navigation's harness).
 """
@@ -21,6 +22,7 @@ import pytest
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
+from app.browser.element_scripts import ELEMENT_FIELD_RELEASE_SCRIPT
 from app.browser.element_world import READ
 from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
@@ -356,6 +358,90 @@ async def _holds_kept(env: Any, session: Any, element_id: str) -> int:
     """How many holds on a typed field the element ids' world still keeps: a type gives its own back."""
     element = env.manager.element_ids.element(session.page, element_id)
     return await element.evaluate("(el, arg, registry) => registry.fieldHolds.size", effect=READ)
+
+
+# A page that counts the capture listeners for focus events its own world has on its nodes (window.listening), as a
+# hold by selector puts them there, and can be told what else to do when one is put on (window.onHold).
+COUNTS_LISTENERS = (
+    "<script>window.listening = 0; window.onHold = () => {};"
+    "for (const [name, by] of [[`addEventListener`, 1], [`removeEventListener`, -1]]) {"
+    " const real = EventTarget.prototype[name];"
+    " EventTarget.prototype[name] = function (type, listener, options) {"
+    "  const counted = options === true && [`blur`, `focus`, `focusin`].includes(type);"
+    "  if (counted) { window.listening += by; if (by > 0) window.onHold(); }"
+    "  return real.call(this, type, listener, options); }; }</script>"
+)
+# How long the page below keeps its thread once a hold's first listener is put on: past FIELD_RECHECK_TIMEOUT_MS.
+BUSY_MS = 2000
+BUSY_AS_THE_HOLD_IS_MADE = (
+    f"<title>note</title>{COUNTS_LISTENERS}<script>window.onHold = () => {{ window.onHold = () => {{}}; "
+    f"const until = performance.now() + {BUSY_MS}; while (performance.now() < until); }};</script>"
+    '<textarea id="note" aria-label="Note"></textarea>'
+)
+# A page whose next read of an attribute, once text has gone into the field, throws: the hold's read as it is released.
+A_READ_THROWS_ONCE_TYPED = (
+    f'<title>note</title>{COUNTS_LISTENERS}<textarea id="note" aria-label="Note"></textarea><script>'
+    "document.getElementById(`note`).addEventListener(`input`, () => { const real = Element.prototype.getAttribute;"
+    " Element.prototype.getAttribute = function () { Element.prototype.getAttribute = real; throw new Error(`no`); };"
+    "}, { once: true });</script>"
+)
+
+
+async def _listening(session: Any) -> int:
+    return await session.page.evaluate("() => window.listening")
+
+
+async def test_a_take_by_selector_the_page_holds_up_past_its_bound_keeps_no_preview(tmp_path: Path) -> None:
+    # Locator.evaluate_handle(timeout=) bounds the wait for the element, not the evaluation on it: the type waited
+    # for the page however long it took, where its docstring said a second. The take is given up at its bound, the
+    # text is typed, and the hold, which the page made all the same, is released once its handle arrives.
+    async with browser_env(tmp_path, {"/note": BUSY_AS_THE_HOLD_IS_MADE}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_withheld(records)
+        for _ in range(100):
+            if await _listening(session) == 0:
+                break
+            await session.page.wait_for_timeout(50)
+        assert await _listening(session) == 0
+
+
+async def test_a_release_by_selector_whose_read_throws_still_takes_its_listeners_off(tmp_path: Path) -> None:
+    # The release script read before it released, and a read that threw skipped the release: the node kept the
+    # hold's listeners until its document went. It can throw in the page's own world, where the page may have
+    # replaced what it calls.
+    async with browser_env(tmp_path, {"/note": A_READ_THROWS_ONCE_TYPED}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_withheld(records)
+        assert await _listening(session) == 0
+
+
+async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_back(tmp_path: Path) -> None:
+    # The world's script took the hold out of the registry, read, and then released: a read that threw left the
+    # listeners on the node with nothing to find them by. No page can make a read throw in the element ids' world,
+    # so the script is run as it is on a hold whose node is no node of a document.
+    async with browser_env(tmp_path, {"/blank": "<title>blank</title>"}) as env:
+        session_id = await env.create("/blank")
+
+        released = await env.manager.sessions[session_id].page.evaluate(
+            f"""() => {{
+              const removed = [];
+              const node = {{ removeEventListener: (type) => removed.push(type) }};
+              const registry = {{ fieldHolds: new Map([['nonce', {{ node, left: false, listener: () => {{}} }}]]) }};
+              let threw = false;
+              try {{
+                ({ELEMENT_FIELD_RELEASE_SCRIPT})(null, 'nonce', registry);
+              }} catch (error) {{
+                threw = true;
+              }}
+              return {{ threw, kept: registry.fieldHolds.size, removed }};
+            }}"""
+        )
+
+        assert released == {"threw": True, "kept": 0, "removed": ["blur", "focus"]}
 
 
 # A note field the page puts in when the test says so (addNote), so its timing is the test's.
