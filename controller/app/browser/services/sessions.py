@@ -234,6 +234,9 @@ class BrowserSessionService(SessionCreation):
     async def _close_locked(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         session_id = session.id
         failed_steps: list[str] = []
+        # With the look at the tunnel below, and before the first await: a create still running on this session sees
+        # the mark at its next step, so a tunnel that reaches the session after this look is that create's to release.
+        session.closing = True
         try:
             if session.tunnel is not None:
                 await self._teardown_step(

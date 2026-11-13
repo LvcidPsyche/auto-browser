@@ -168,6 +168,9 @@ class BrowserSession:
     owner: str | None = None
     # The browserContextId the pre-request gate owns for this session's context (None while it is off).
     gate_context_id: str | None = None
+    # Set once, as close_session starts tearing the session down; the session stays in manager.sessions until that
+    # teardown has ended. A create_session still running on the session reads it after each of its awaits.
+    closing: bool = False
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from ...action_errors import SessionNotFoundError
 from ...browser_scripts import apply_stealth
 from ...models import resolve_totp_hosts
 from ...network_inspector import NetworkInspector
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
     from ...browser_manager import BrowserSession
     from ...session_isolation import IsolatedBrowserRuntime
+    from ...session_tunnel import IsolatedSessionTunnel
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,15 @@ def is_session_id(name: str) -> bool:
 
 class SessionLimitError(RuntimeError):
     """create_session refused because MAX_SESSIONS live sessions already exist (a fork counts too)."""
+
+
+class _ClosedWhileStarting(Exception):
+    """create()'s own: another call closed its session while it was starting. ``tunnel`` is the session's tunnel when
+    it came up after that close had looked for one, so that nothing else releases it."""
+
+    def __init__(self, tunnel: "IsolatedSessionTunnel | None" = None) -> None:
+        super().__init__()
+        self.tunnel = tunnel
 
 
 class SessionCreation:
@@ -216,7 +227,9 @@ class SessionCreation:
                 session.network_inspector = inspector
 
             self.manager.sessions[session_id] = session
-            # Counted by manager.sessions from here on.
+            # Counted by manager.sessions from here on. Another call finds the session there, and can close it before
+            # this one returns (a caller that listed it, the gate-loss containment, a shutdown): looked for after
+            # each await below.
             self._creating -= 1
             reserved = False
             if self.manager._session_created_hook is not None:
@@ -226,6 +239,7 @@ class SessionCreation:
                     await self.manager._session_created_hook(session_id, page)
                 except Exception as exc:
                     logger.warning("session created hook failed for %s: %s", session_id, error_text_for_log(exc))
+            self._stop_if_closed(session)
 
             if start_url:
                 # The lock keeps the page guard (diagnostics) from moving the page to
@@ -237,8 +251,12 @@ class SessionCreation:
                     # start URL can redirect somewhere that is not. Raising here rolls
                     # the session back below, so no live session is left on that host.
                     self.manager._assert_runtime_url_allowed(page.url)
+                self._stop_if_closed(session)
 
             await self.manager._maybe_provision_session_tunnel(session)
+            # Nothing awaits between the tunnel reaching the session and this look: a close that has started looked for
+            # the tunnel before it was there, and released none.
+            self._stop_if_closed(session, unreleased=session.tunnel)
             if gate is not None and not gate.live:
                 # Lost while this session started: the containment may have missed it (decision 2).
                 raise RequestGateUnavailable(
@@ -250,6 +268,7 @@ class SessionCreation:
                 session.metadata["memory_profile"] = memory_profile
                 logger.info("memory profile loaded: %s", quoted_for_log(memory_profile))
             await self.manager._persist_session(session, status="active")
+            self._stop_if_closed(session)
             await self.manager.witness_bridge.record_session_receipt(
                 session,
                 action="create_session",
@@ -263,8 +282,11 @@ class SessionCreation:
                     "totp_enabled": bool(totp_secret),
                 },
             )
+            self._stop_if_closed(session)
             await self.manager._persist_session(session, status="active")
+            self._stop_if_closed(session)
             summary = await self.manager._session_summary(session)
+            self._stop_if_closed(session)
             await self.manager.audit.append(
                 event_type="session_created",
                 status="ok",
@@ -282,8 +304,19 @@ class SessionCreation:
                     "totp_hosts": list(resolved_totp_hosts),
                 },
             )
+            self._stop_if_closed(session)
             return summary
-        except BaseException:
+        except BaseException as exc:
+            if session is not None and session.closing:
+                # Closed by another call meanwhile, which tears the session down and records it: nothing is rolled
+                # back. The rollback closed its context a second time, removed the closed session's directories and
+                # wrote create_failed over its close reason.
+                await run_to_completion(self._release_what_the_close_missed(session, exc, created_hook_started))
+                if isinstance(exc, Exception):
+                    # Answered as any call on a closed session is, with the close's reason where its record has it.
+                    _, reason = await self._recorded_end(session_id)
+                    raise SessionNotFoundError(session_id, status="closed", reason=reason) from None
+                raise  # a cancel is raised as itself
             # BaseException so a cancelled create (the caller gave up, shutdown)
             # also closes the context and releases the isolated runtime.
             await self.cleanup_failed(
@@ -298,6 +331,41 @@ class SessionCreation:
         finally:
             if reserved:
                 self._creating -= 1
+
+    @staticmethod
+    def _stop_if_closed(session: "BrowserSession", *, unreleased: "IsolatedSessionTunnel | None" = None) -> None:
+        """End a create whose session another call has started closing (A2-25). The create went on with the closed
+        session: it answered active, wrote session_created after session_closed, and left running a tunnel that came
+        up after the close. ``unreleased`` is that tunnel, at the one look that can tell."""
+        if session.closing:
+            raise _ClosedWhileStarting(unreleased)
+
+    async def _release_what_the_close_missed(
+        self, session: "BrowserSession", error: BaseException, created_hook_started: bool
+    ) -> None:
+        """What a create made on its session after another call closed it, which that close could not release. Run
+        to completion by its caller, each step bounded as the rollback's are."""
+        closed = isinstance(error, _ClosedWhileStarting)
+        if isinstance(error, Exception) and not closed:
+            logger.warning(
+                "session %s was closed while it was starting, and its create then failed: %s: %s",
+                session.id,
+                type(error).__name__,
+                error_text_for_log(error),
+            )
+        hook = self.manager._session_create_failed_hook
+        if created_hook_started and hook is not None:
+            # The closed hook may have run before the created hook had registered its state.
+            await self._teardown_step(
+                session.id, "run the create-failed hook of a session closed while it started", lambda: hook(session.id)
+            )
+        tunnel = error.tunnel if closed else None
+        if tunnel is not None:
+            await self._teardown_step(
+                session.id,
+                "release the tunnel that came up after the session closed",
+                lambda: self.manager.tunnel_broker.release(tunnel),
+            )
 
     def check_limit(self) -> None:
         if len(self.manager.sessions) + self._creating >= self.manager.settings.max_sessions:
@@ -365,6 +433,10 @@ class SessionCreation:
         """Roll back a create that failed: every step runs to its end even when the task awaiting it is cancelled
         during one (W7-2), and the cancel is raised once the rollback is done. A cancel at any step left the isolated
         runtime running, the directories in place and the record reading active."""
+        # Unregistered here, before the first await: the steps start a turn of the loop later, and a close that was
+        # waiting for this session (the gate-loss containment's, behind the start URL's load) began its own teardown
+        # in that turn, beside this one. It finds the session gone now, and answers that.
+        self.manager.sessions.pop(session_id, None)
         await run_to_completion(
             self._cleanup_failed_steps(
                 session_id,
@@ -386,7 +458,6 @@ class SessionCreation:
         runtime: "IsolatedBrowserRuntime | None",
         created_hook_started: bool,
     ) -> None:
-        self.manager.sessions.pop(session_id, None)
         if session is not None:
             # Registered with the window-birth watcher before the failure (watch runs early): a dead session
             # left there was held, and re-registered with every replacement watcher.

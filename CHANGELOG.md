@@ -748,6 +748,26 @@ All notable changes to auto-browser are documented here.
   without a token, a request for `/api/metrics` or a file under `/api/artifacts` with no token or a wrong one
   still counts against the limit, and a `session_id` on a path that needs the token is still checked. See the
   upgrade note for `REQUEST_RATE_LIMIT_EXEMPT_PATHS`.
+- **A session closed while it is being created stays as the close left it, and keeps no tunnel.** A create
+  registers its session before it has finished starting it: the first page loads, and with
+  `SESSION_ISOLATION_MODE=docker_ephemeral` and `ISOLATED_TUNNEL_ENABLED=true` the takeover tunnel then takes
+  `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS` (1 second) to come up. A close of the session in that time, by another
+  call or by the controller itself (a lost pre-request gate), released what the session had by then, and the create
+  went on beside it. Where it finished, it answered `active` for the closed session and wrote `session_created`
+  after `session_closed` in the audit log, and a tunnel that came up after the close had looked for one was
+  released by nothing: its SSH process and its remote port stayed until the controller stopped, and a caller who
+  repeated this used up the tunnel port range (60 ports by default), after which no session got a tunnel. Where the
+  session's pre-request gate was down by then (lost, or closed with an isolated session's browser by that close),
+  the create failed instead and rolled the closed session back: its context was closed a second time, its
+  directories were removed, and `create_failed` was written over its close reason.
+  A create now looks after each of its steps whether its session was closed. If it was, the create stops there,
+  releases the tunnel where it came up after the close had looked for one, rolls nothing back, and answers as any
+  call on a closed session does: `404` with `code: session_closed`, and the close's `reason` where its record holds
+  one by then (`request_gate_lost`), from `browser.create_session` as from `POST /sessions`. The close's record,
+  its audit event and the session's directories stay as the close left them. A create that fails by itself now
+  takes its session out of the controller's list before its rollback starts, so a close that arrives then finds no
+  session to close: a pre-request gate lost while the first page loaded had the controller's close and the create's
+  rollback each close the context.
 
 ### Fixed
 
