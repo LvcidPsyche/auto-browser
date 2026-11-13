@@ -1614,6 +1614,15 @@ All notable changes to auto-browser are documented here.
   said the close `took over 2.0s`, the line of a close that outlasts its two seconds. It now says the close was cut
   short when the probe was cancelled and is left to finish. A close that had ended in the same turn of the event
   loop as the cancel is not logged, where it too was reported as left to finish. (D6-3)
+- **The dashboard opens a session's replay page.** `GET /sessions/{id}/replay` and the `/artifacts` screenshots it
+  shows need the API token, which a browser sends neither for a page it navigates to nor for an `<img>`: the page
+  could not be opened in a browser, its screenshots were 401s, and nothing in the dashboard led to it. Each row of
+  the Sessions table now has an "Open replay" button. The dashboard reads the page and each screenshot with the
+  token and opens a copy that holds them, in a window that has no copy of the dashboard's tokens, under a policy
+  that lets the copy run no script and load nothing. A screenshot that cannot be read says so in its place, and a
+  page that cannot be read closes the window and says why on the dashboard. The dashboard keeps the last copy it
+  opened: an earlier one's window keeps what it shows and cannot be reloaded. The route and its page are as they
+  were. (AUTH-27)
 
 ### Changed
 

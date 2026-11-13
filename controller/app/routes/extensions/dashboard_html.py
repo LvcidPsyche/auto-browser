@@ -419,6 +419,11 @@ async function loadSessions() {
     appendCell(row, s.owner);
     appendCell(row, s.current_url || s.start_url, {className: 'mono', maxWidth: '200px'});
     const actionCell = document.createElement('td');
+    const actions = document.createElement('div');
+    actions.className = 'btn-row';
+    actions.style.alignItems = 'center';
+    const fullId = asText(s.session_id || s.id, '');
+    const note = document.getElementById('takeover-note');
     const href = safeHttpUrl(s.takeover_url);
     if (href) {
       const link = document.createElement('a');
@@ -428,14 +433,15 @@ async function loadSessions() {
       link.style.color = 'var(--accent)';
       link.style.textDecoration = 'none';
       link.textContent = 'Open noVNC';
-      const fullId = asText(s.session_id || s.id, '');
       const isolated = isIsolated(s);
-      const note = document.getElementById('takeover-note');
       if (fullId) link.addEventListener('click', (event) => openTakeover(event, fullId, href, isolated, note));
-      actionCell.appendChild(link);
-    } else {
-      actionCell.textContent = '—';
+      actions.appendChild(link);
     }
+    if (fullId) {
+      actions.appendChild(jobActionButton('Open replay', 'refresh-btn', () => openSessionReplay(fullId, note)));
+    }
+    if (actions.childNodes.length) actionCell.appendChild(actions);
+    else actionCell.textContent = '—';
     row.appendChild(actionCell);
     tbody.appendChild(row);
   });
@@ -458,6 +464,20 @@ function takeoverToken() {
 // browser-node session's takeover link carries none, so its listed URL is the link.
 const isIsolated = (session) => Boolean(session && session.isolation && session.isolation.mode === 'docker_ephemeral');
 const showTakeoverNote = (note, text) => { if (note) note.textContent = text; };
+// A blank window to point somewhere once an answer arrives, or null when the browser blocked it. A window opened
+// this way starts with a copy of this tab's sessionStorage, both tokens included: the copy is cleared, and the
+// window has no way back to this tab.
+function openClearedWindow() {
+  const win = window.open('about:blank', '_blank');
+  if (!win) return null;
+  try {
+    win.sessionStorage.clear();
+  } catch (err) {
+    console.warn(`new window: could not clear its session storage: ${err.message}`);
+  }
+  win.opener = null;
+  return win;
+}
 
 // No session record carries an isolated session's noVNC password (the model reads
 // those); GET /sessions/{id}/takeover-link, a human-only endpoint, returns the full
@@ -476,17 +496,11 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
   event.preventDefault();
   showTakeoverNote(note, '');
   const token = isolated ? takeoverToken() : '';
-  const win = window.open('about:blank', '_blank');
+  const win = openClearedWindow();
   if (!win) {
     showTakeoverNote(note, 'The browser blocked the noVNC window. Click Open noVNC again.');
     return;
   }
-  try {
-    win.sessionStorage.clear();  // a window opened this way starts with a copy of this tab's
-  } catch (err) {
-    console.warn(`takeover window: could not clear its session storage: ${err.message}`);
-  }
-  win.opener = null;
   let target = fallback;
   if (token) {
     const path = `/sessions/${encodeURIComponent(sessionId)}/takeover-link`;
@@ -513,6 +527,68 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
     }
   }
   win.location.href = target;
+}
+
+// --- Session replay --------------------------------------------------------
+// GET /sessions/{id}/replay and the /artifacts screenshots it names sit behind the bearer token, which neither a
+// navigation nor an <img src> can send. "Open replay" reads the page and each screenshot through apiResponse() and
+// opens a copy that holds them as data: URLs. The copy opens on this origin, so it gets a cleared window and a
+// policy under which it runs no script and loads nothing: the route's page has no script and escapes what it
+// shows, and the copy does not rest on that.
+const REPLAY_COPY_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+const asDataUrl = (blob) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.addEventListener('load', () => resolve(reader.result));
+  reader.addEventListener('error', () => reject(reader.error));
+  reader.readAsDataURL(blob);
+});
+// The token goes only to this controller's /artifacts. Any other image keeps its src, which the copy's policy
+// does not load.
+const isOwnArtifact = (url) => url.origin === window.location.origin && url.pathname.startsWith('/artifacts/');
+async function sessionReplayCopy(sessionId) {
+  const path = `/sessions/${encodeURIComponent(sessionId)}/replay`;
+  const page = await (await apiResponse(path, {}, {alerts: false})).text();
+  const copy = new DOMParser().parseFromString(page, 'text/html');
+  await Promise.all([...copy.querySelectorAll('img[src]')].map(async (img) => {
+    const url = new URL(img.getAttribute('src'), window.location.origin);
+    if (!isOwnArtifact(url)) return;
+    try {
+      img.src = await asDataUrl(await (await apiResponse(url.href, {}, {alerts: false})).blob());
+    } catch (err) {
+      img.removeAttribute('src');
+      img.alt = `screenshot unavailable: ${err.message}`;
+    }
+  }));
+  const policy = copy.createElement('meta');
+  policy.httpEquiv = 'Content-Security-Policy';
+  policy.content = REPLAY_COPY_POLICY;
+  copy.head.prepend(policy);
+  return new Blob(['<!DOCTYPE html>', copy.documentElement.outerHTML], {type: 'text/html;charset=utf-8'});
+}
+// The last copy opened. A copy holds every screenshot of its session, so the one before is let go when another is
+// opened: its window keeps what it shows, and cannot be reloaded.
+let replayCopyUrl = null;
+// The window opens on the click, before anything is read (a popup blocker refuses one opened after a slow
+// answer), and is pointed at the copy once it is built. A page that cannot be read closes it, with the reason in
+// the note and no alert(): the window may be in front of this tab.
+async function openSessionReplay(sessionId, note) {
+  showTakeoverNote(note, '');
+  const win = openClearedWindow();
+  if (!win) {
+    showTakeoverNote(note, 'The browser blocked the replay window. Click Open replay again.');
+    return;
+  }
+  let copy;
+  try {
+    copy = await sessionReplayCopy(sessionId);
+  } catch (err) {
+    win.close();
+    showTakeoverNote(note, `Could not open the replay of session ${sessionId}: ${err.message}`);
+    return;
+  }
+  if (replayCopyUrl) URL.revokeObjectURL(replayCopyUrl);
+  replayCopyUrl = URL.createObjectURL(copy);
+  win.location.href = replayCopyUrl;
 }
 
 const checkpointTimeline = (job) => {
