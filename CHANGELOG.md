@@ -274,7 +274,8 @@ All notable changes to auto-browser are documented here.
   started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
 - **An approval asked for a `type` shows its text only where its field read as plain.** An approval now says how
   the field of its `type` read when it was asked for, as `field_read`: `plain`, `secret`, or `unread` (the read
-  did not answer within a second, or an earlier release stored the approval). Unless it is `plain`,
+  did not answer within a second, what the type names has no field that takes text or has a frame in it, or an
+  earlier release stored the approval). Unless it is `plain`,
   `GET /approvals`, `GET /approvals/{id}`, the approval tools, a decision's and an execution's answer and the
   `approval_required` error give its `action.text` as "text hidden: its field reads as secret" or "text hidden:
   its field has not been read", as its webhook's and SSE event's summary do (see Security). A pending approval
@@ -675,9 +676,14 @@ All notable changes to auto-browser are documented here.
   when only that flag could say the text was secret, and such a receipt was `standard` with no `sensitive_input`
   concern, though 1.17.0's entry says "a field an action finds sensitive only as it runs restricts that action's
   own receipt": that now holds. What the run was decided by (a block, an approval) is still the policy's answer
-  before it. An approval asked for a type now reads the field first (the one its selector or `element_id` names:
-  no node has focus for the text yet), within a second, and says how it read as `field_read`: `plain`, `secret`,
-  or `unread` where the read did not answer in that time (a field not on the page yet, a busy page). Only `plain`
+  before it. An approval asked for a type now reads first every field its text could go to from the element its
+  selector or `element_id` names (no node has focus for the text yet): that element where it takes text (an
+  input that text is typed into, a textarea, a select, an editable element), the control of a `label`, and the
+  fields inside either, through open shadow roots, in one read, within a second. It says how they read as
+  `field_read`: `secret` if one of them does (a `label` or a form around a password field, a component with one
+  in its open shadow root), `plain` only where there is one and all of them do, and `unread` where there is none
+  (a component that takes its keys itself), where a frame is among what is named (its document is not read), or
+  where the read did not answer in that time (a field not on the page yet, a busy page). Only `plain`
   shows the text: else it reads "text hidden: its field reads as secret" or "text hidden: its field has not been
   read" in the approval's summary, the queue and the dialog, and in every answer that hands the approval out
   (`GET /approvals` and `GET /approvals/{id}`, the approval tools, an approve's, a reject's and an execution's
@@ -689,11 +695,12 @@ All notable changes to auto-browser are documented here.
   before: the action retried with the approval's id is matched against it. A text the caller marked `sensitive`
   is withheld everywhere, as before (its approval stores only a digest of it), and its field is not read for its
   approval. A typed text still shows: as the preview of a field read as not secret, and in the approval of one (a
-  post's or a message's text is what its approver must see; the approval reads the field its selector or
-  `element_id` names when it is asked for, whatever that field is by the time the type runs),
+  post's or a message's text is what its approver must see; the approval reads the fields as they are when it
+  is asked for, whatever they are by the time the type runs),
   which includes a field whose attributes do not say it is secret (a PIN field with no such type, name or
   label), one that turns secret and back again while the text goes in, one in a component's closed shadow root
-  (the component is read: the page shows no node past it), and a text whose focus goes to another field and back
+  (the page shows no node past the component: a preview reads the component, and an approval the fields it shows
+  outside that root, `unread` where it shows none), and a text whose focus goes to another field and back
   on a page that stops focus events before its nodes hear them; in an approval's reason, the agent's own
   words, which can quote it; and in an agent step's own `decision` (in its answer, `agent_steps.jsonl` and
   `agent_runs.jsonl`), which is what the model wrote. The case of attributes that could not be read by selector is

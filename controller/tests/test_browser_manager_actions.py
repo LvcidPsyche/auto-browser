@@ -75,7 +75,13 @@ class FakeLocator:
         # Focus is in the field once it is clicked (evaluate, below), so the node a type takes hold of is the field:
         # the type finds the selector's element (element_handle) and makes its hold on that.
         self.holds: list[FakeFieldHold] = []
-        self.element = SimpleNamespace(evaluate_handle=AsyncMock(side_effect=self._hold), dispose=AsyncMock())
+        self.element = SimpleNamespace(
+            evaluate_handle=AsyncMock(side_effect=self._hold),
+            # What is asked of the element itself: an approval's read of the fields its type's text could go to
+            # from there, which is this one field.
+            evaluate=AsyncMock(side_effect=self._named_fields),
+            dispose=AsyncMock(),
+        )
         self.element_handle = AsyncMock(return_value=self.element)
         self.scroll_into_view_if_needed = AsyncMock()
         self.click = AsyncMock()
@@ -98,6 +104,10 @@ class FakeLocator:
     def _hold(self, _script: str, **_given: object) -> FakeFieldHold:
         self.holds.append(FakeFieldHold(self.attributes))
         return self.holds[-1]
+
+    def _named_fields(self, _script: str) -> dict[str, object]:
+        names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
+        return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "frame": False}
 
     @property
     def first(self) -> "FakeLocator":

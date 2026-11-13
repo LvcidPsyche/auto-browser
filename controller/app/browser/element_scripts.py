@@ -447,6 +447,19 @@ ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
   return dom.within(active, el);
 }}"""
 
+# A field's own attributes, as is_sensitive_field reads them. Needs `dom`.
+_FIELD_ATTRIBUTES_JS = """(node) => {
+    const read = (name) => dom.attr(node, name) || '';
+    return {
+      type: read('type'),
+      name: read('name'),
+      id: read('id'),
+      placeholder: read('placeholder'),
+      'aria-label': read('aria-label'),
+      autocomplete: read('autocomplete'),
+    };
+  }"""
+
 # A type's hold on the node its text goes to. Defines `held`.
 # take(el): the node keys go to while focus is in the element: the innermost focused element from the element's
 # root, through open shadow roots, where it is the element or inside it. Not a frame: keys sent then go to its
@@ -478,15 +491,7 @@ const held = {{
   read(hold) {{
     const node = hold.node;
     if (!node || hold.left || held.focused(node) !== node) return null;
-    const read = (name) => dom.attr(node, name) || '';
-    return {{
-      type: read('type'),
-      name: read('name'),
-      id: read('id'),
-      placeholder: read('placeholder'),
-      'aria-label': read('aria-label'),
-      autocomplete: read('autocomplete'),
-    }};
+    return ({_FIELD_ATTRIBUTES_JS})(node);
   }},
   release(hold) {{
     if (!hold.node) return;
@@ -535,6 +540,46 @@ ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
     registry.fieldHolds.delete(nonce);
     held.release(hold);
   }}
+}}"""
+
+# What an approval reads of the element its type names, before the type runs: every field the text could go to from
+# there. No node has focus for the text yet, so there is none to hold; the type's focus can put the text in the
+# element itself where it takes text (an input, a textarea, a select, an editable element), in the control of the
+# label it is, or in a field inside either, through open shadow roots. All of it in one call: the attributes of
+# each such field, and whether a frame is among what is named (the element, or one inside it), whose document is
+# not read. An input no typed text goes into (a hidden one, a checkbox, a button) is no field: a form's hidden
+# token would say secret of the whole form. A closed shadow root shows no node past it. Run in the main world
+# too, on a selector's element (see _DOM_JS).
+NAMED_FIELDS_SCRIPT = f"""(el) => {{
+  {_DOM_JS}
+  const frames = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'];
+  const noText = ['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color'];
+  const takesText = (node) =>
+    dom.matches(node, 'input, textarea, select, [contenteditable]:not([contenteditable="false" i])') &&
+    (dom.tag(node) !== 'INPUT' || !noText.includes((dom.attr(node, 'type') || '').trim().toLowerCase()));
+  const fields = new Set();
+  let frame = false;
+  const look = (node) => {{
+    if (frames.includes(dom.tag(node))) frame = true;
+    else if (takesText(node)) fields.add(node);
+  }};
+  const lookInside = (root) => {{
+    for (const node of root.querySelectorAll('*')) {{
+      look(node);
+      const shadow = dom.shadowRoot(node);
+      if (shadow) lookInside(shadow);
+    }}
+  }};
+  const named = [el];
+  if (dom.tag(el) === 'LABEL' && el.control) named.push(el.control);
+  for (const node of named) {{
+    look(node);
+    const shadow = dom.shadowRoot(node);
+    if (shadow) lookInside(shadow);
+    lookInside(node);
+  }}
+  if (el.isContentEditable === true) fields.add(el);
+  return {{ fields: Array.from(fields, {_FIELD_ATTRIBUTES_JS}), frame }};
 }}"""
 
 # Playwright's selectOptions, on the element: scrolls an enabled, visible

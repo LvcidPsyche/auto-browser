@@ -74,12 +74,14 @@ class FakeLocator:
     async def bounding_box(self, **_given: Any):
         return self.box
 
-    async def get_attribute(self, _name: str, **_given: Any) -> None:
-        return None
-
     async def element_handle(self, **_given: Any) -> SimpleNamespace:
         # A type finds its field's element and makes its hold on it: the hold of a plain field that keeps focus.
-        return SimpleNamespace(evaluate_handle=AsyncMock(return_value=FakeFieldHold({})), dispose=AsyncMock())
+        # Its approval asks the element for the fields the text could go to: this one, which says nothing secret.
+        return SimpleNamespace(
+            evaluate_handle=AsyncMock(return_value=FakeFieldHold({})),
+            evaluate=AsyncMock(return_value={"fields": [{}], "frame": False}),
+            dispose=AsyncMock(),
+        )
 
     async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:
         if script == _PRESS_PLACE_SCRIPT:

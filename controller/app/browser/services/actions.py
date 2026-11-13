@@ -57,6 +57,7 @@ from ..element_scripts import (
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
     FIELD_HOLD_TAKE_SCRIPT,
+    NAMED_FIELDS_SCRIPT,
 )
 from ..element_world import READ
 from ..page_read import title_or_blank
@@ -1273,34 +1274,52 @@ class BrowserActionService:
         self, session: "BrowserSession | None", decision: BrowserActionDecision
     ) -> ApprovalFieldRead:
         """How the field of the type an approval is asked for reads (ApprovalRecord.field_read): "plain" or "secret"
-        by its attributes, "unread" where the read does not answer. Unread too, and nothing read: an action that is
-        no type, and a type the caller marked sensitive (that text is hidden and stored as a digest already).
+        by its attributes, "unread" where the read does not answer or finds no field to say. Unread too, and nothing
+        read: an action that is no type, and a type the caller marked sensitive (that text is hidden and stored as a
+        digest already).
 
         The approval is asked for before the type runs, so before any read of its field, and its summary (the
-        webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole. The field
-        read is the one the selector or the element_id names, as it is now: no node has focus for the text yet (the
-        type reads the node it holds: _TypedField). The whole read answers within FIELD_RECHECK_TIMEOUT_MS, the
-        approval not yet asked for: by selector it waited ACTION_TIMEOUT_MS for a field not on the page.
+        webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole. No node has
+        focus for the text yet (the type reads the node it holds: _TypedField), so what is read is every field the
+        text could go to from the element the selector or the element_id names, as they are now
+        (element_scripts.NAMED_FIELDS_SCRIPT): secret if one of them is, plain only where there is one and all are,
+        and unread where there is none or a frame is among them, whose document is not read. Read as the named
+        element's own attributes, a component, a label or a frame around a password field said plain, and the
+        approval showed the password. The whole read answers within FIELD_RECHECK_TIMEOUT_MS, the approval not yet
+        asked for: by selector it waited ACTION_TIMEOUT_MS for a field not on the page.
         """
         if session is None or decision.action != "type" or decision.sensitive:
             return "unread"
         try:
-            attributes = await _answered_soon(self._named_field_attributes(session.page, decision))
+            named = await _answered_soon(self._named_fields(session.page, decision))
+            fields = named["fields"]
+            if any(self.is_sensitive_field(field) for field in fields):
+                return "secret"
+            return "plain" if fields and not named["frame"] else "unread"
         except Exception:
             return "unread"
-        return "secret" if self.is_sensitive_field(attributes) else "plain"
 
-    async def _named_field_attributes(self, page: "Page", decision: BrowserActionDecision) -> Mapping[str, Any]:
-        """The attributes is_sensitive_field reads, of the field ``decision`` names, by element_id or by selector."""
+    async def _named_fields(self, page: "Page", decision: BrowserActionDecision) -> Mapping[str, Any]:
+        """What NAMED_FIELDS_SCRIPT answers of the element ``decision`` names, by element_id or by selector: one
+        question, so every field is read as it is at one moment.
+
+        By selector it is asked of the handle of the element the selector finds, as a type takes its hold
+        (_TypedField): the element found once, and its handle given back whatever the read does, in the background,
+        also where it arrives once the caller, whose bound is the read's, has given the read up. Six get_attribute
+        calls found the field anew each time, and one the page replaced between them read plain while it was a
+        password field.
+        """
         target = self.resolve_target(selector=decision.selector, element_id=decision.element_id)
         if target.get("element_id"):
             element = self.manager.element_ids.element(page, target["element_id"])
-            return await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ, within_ms=FIELD_RECHECK_TIMEOUT_MS)
-        locator = page.locator(target["selector"]).first
-        return {
-            name: await locator.get_attribute(name, timeout=FIELD_RECHECK_TIMEOUT_MS)
-            for name in ("type", "name", "id", "autocomplete", "placeholder", "aria-label")
-        }
+            return await element.evaluate(NAMED_FIELDS_SCRIPT, effect=READ, within_ms=FIELD_RECHECK_TIMEOUT_MS)
+        ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
+        finding = page.locator(target["selector"]).first.element_handle(timeout=FIELD_RECHECK_TIMEOUT_MS)
+        found = await _arrives_by(finding, ends, _disposed_soon)
+        try:
+            return await found.evaluate(NAMED_FIELDS_SCRIPT)
+        finally:
+            spawn_background_task(_disposed_soon(found))
 
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
         return {

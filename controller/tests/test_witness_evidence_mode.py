@@ -536,10 +536,10 @@ NOT_SECRET = {"type": "text", "name": "note", "id": "note", "placeholder": "", "
 
 
 def _fake_element(read: AsyncMock, *, released: AsyncMock | None = None) -> SimpleNamespace:
-    """An ElementTarget on the fake page. ``read`` answers every read of its field's attributes: one asked for
-    outright (an approval's), and a type's through its hold of the node its text goes to, which is the field; unless
-    ``released`` answers when the hold is given back (a text whose key has moved focus on by then)."""
-    return SimpleNamespace(evaluate=read, hold_field=read, release_field=released or read)
+    """An ElementTarget on the fake page. ``read`` answers a type's reads of its field's attributes, through its hold
+    of the node its text goes to, which is the field; unless ``released`` answers when the hold is given back (a text
+    whose key has moved focus on by then). An approval's read is tests/test_approval_secret_field_text.py's."""
+    return SimpleNamespace(hold_field=read, release_field=released or read)
 
 
 async def _type_targets_and_receipt(manager: BrowserManager) -> tuple[list[dict[str, Any]], Any]:

@@ -773,11 +773,16 @@ browser opens, and the controller logs why.
 
 A `type` the agent marked sensitive reads "text hidden at the agent's request (sensitive)":
 the agent can mark any text sensitive, so look at the field it types into. One it did not mark shows
-its text only where its field read as plain when the approval was asked for (`field_read: "plain"`).
-A field that read as secret (a password field, say) reads "text hidden: its field reads as secret"
-(`field_read: "secret"`), and stays so. One whose read did not answer within a second (a field not on
-the page yet), and any pending `type` approval stored before 1.18.0, reads "text hidden: its field has
-not been read" (`field_read: "unread"`) until the same action is asked for again and the read answers.
+its text only where every field the text could go to read as plain when the approval was asked for
+(`field_read: "plain"`): the element the `type` names where it takes text (an input that text is typed
+into, a textarea, a select, an editable element), the control of a `label`, and the fields inside
+either, through open shadow roots. Where one of them read as secret (a password field, say) it reads
+"text hidden: its field reads as secret" (`field_read: "secret"`), and stays so. It reads "text hidden:
+its field has not been read" (`field_read: "unread"`) where there is no such field (a component that
+takes its keys itself, or keeps its field in a closed shadow root), where a frame is among what is
+named (its document is not read), where the read did not answer within a second (a field not on the
+page yet), and for any pending `type` approval stored before 1.18.0, until the same action is asked
+for again and its read says plain or secret.
 `GET /approvals` answers that text for it; the approval keeps the text the action must be retried
 with. An operator's rejection
 stops the agent from approving the same request itself (`AUTONOMOUS_APPROVALS=true`) only within its

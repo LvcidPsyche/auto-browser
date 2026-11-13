@@ -84,7 +84,8 @@ NOT_USED_FOR = "(not used: {field} runs)"
 SENSITIVE_TEXT_HIDDEN = "text hidden at the agent's request (sensitive)"
 # Written for the text of a type the agent did not mark sensitive whose field did not read plain, by how it read
 # (ApprovalRecord.field_read), and answered as its text (shown_approval). "unread" is also what stands for a record
-# that does not say (stored before 1.18.0), and for a read that failed: asked for again, the approval reads the field.
+# that does not say (stored before 1.18.0), and for a read that failed or found no field the text could go to: asked
+# for again, the approval reads the field.
 FIELD_TEXT_HIDDEN: dict[str, str] = {
     "secret": "text hidden: its field reads as secret",
     "unread": "text hidden: its field has not been read",

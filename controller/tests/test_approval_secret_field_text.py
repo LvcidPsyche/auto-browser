@@ -50,10 +50,10 @@ async def _ask(tmp_path: Path, *, by: str, secret: bool, kind: str) -> SimpleNam
     if by == "selector":
         field = FakeLocator("#f", attributes=attributes)
         manager.sessions["s1"].page.locators["#f"] = field
-        reads = field.get_attribute
+        reads = field.element.evaluate
         named: dict[str, Any] = {"selector": "#f"}
     else:
-        reads = AsyncMock(return_value=attributes)
+        reads = AsyncMock(return_value=_named(attributes))
         manager.element_ids.element = Mock(return_value=SimpleNamespace(evaluate=reads))
         named = {"element_id": ELEMENT_ID}
     decision = BrowserActionDecision(action="type", reason="change it", text=TEXT, risk_category=kind, **named)
@@ -137,14 +137,21 @@ def _post(by: str) -> BrowserActionDecision:
     return BrowserActionDecision(action="type", reason="r", text=TEXT, risk_category="post", **named)
 
 
+def _named(*fields: dict[str, str], frame: bool = False) -> dict[str, Any]:
+    """What the approval's one read answers of what a type names (element_scripts.NAMED_FIELDS_SCRIPT): the fields
+    its text could go to from there, and whether a frame is among them."""
+    return {"fields": list(fields), "frame": frame}
+
+
 def _field(manager: Any, by: str, attributes: dict[str, str]) -> AsyncMock:
     """A field on the fake page, by selector or by element_id, whose attributes are ``attributes`` as they are when
-    read (a test changes them); the mock every read of them goes through, a test's to fail or to hang."""
+    read (a test changes them); the mock the approval's read of it goes through, a test's to fail or to hang: asked
+    of the element the selector finds, or of the element_id's."""
     if by == "selector":
         field = FakeLocator("#f", attributes=attributes)
         manager.sessions["s1"].page.locators["#f"] = field
-        return field.get_attribute
-    reads = AsyncMock(side_effect=lambda *_, **__: {**NOT_SECRET, **attributes})
+        return field.element.evaluate
+    reads = AsyncMock(side_effect=lambda *_, **__: _named({**NOT_SECRET, **attributes}))
     manager.element_ids.element = Mock(return_value=SimpleNamespace(evaluate=reads))
     return reads
 
@@ -319,7 +326,129 @@ async def test_an_approvals_read_of_a_field_that_does_not_answer_is_bounded(tmp_
 
     assert (approval["field_read"], approval["action"]["text"]) == ("unread", UNREAD)
     assert took < 5, took
-    assert given and given[0].get("timeout" if by == "selector" else "within_ms") == bound_ms, given
+    if by == "selector":
+        # The wait for the selector's element has the bound, and the question asked of it is given up on at it.
+        assert manager.sessions["s1"].page.locators["#f"].element_handle.await_args.kwargs == {"timeout": bound_ms}
+        assert len(given) == 1
+    else:
+        assert given[0].get("within_ms") == bound_ms, given
+
+
+PLAIN = {**NOT_SECRET}
+PASSWORD = {**NOT_SECRET, "type": "password"}
+
+
+@pytest.mark.parametrize(
+    ("answer", "read"),
+    [
+        (_named(PLAIN), "plain"),
+        (_named(PLAIN, PLAIN), "plain"),
+        (_named(PLAIN, PASSWORD), "secret"),
+        (_named(), "unread"),
+        (_named(PLAIN, frame=True), "unread"),
+        (_named(PASSWORD, frame=True), "secret"),
+        (_named(frame=True), "unread"),
+        (None, "unread"),
+        ({"fields": [None], "frame": False}, "unread"),
+    ],
+    ids=[
+        "one-plain-field",
+        "two-plain-fields",
+        "a-password-field-among-them",
+        "no-field",
+        "a-plain-field-and-a-frame",
+        "a-password-field-and-a-frame",
+        "a-frame-alone",
+        "no-answer",
+        "an-answer-of-another-shape",
+    ],
+)
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_an_approval_reads_plain_only_where_every_field_the_text_could_go_to_does(
+    tmp_path: Path, by: str, answer: Any, read: str
+) -> None:
+    # DeepSeek-V4.1-Flash-1017's read of FX9c4 (2): the approval read what the type names, where its text can go to
+    # a field inside that (a component, a label, a form). The read answers every field the text could go to from
+    # there: secret if one of them is, plain only if there is one and all are, and unread where there is none, a
+    # frame is among them (its document is not read), or the answer is none of that shape.
+    manager = _typing_manager(tmp_path)
+    await manager.approvals.startup()
+    reads = _field(manager, by, {})
+    reads.side_effect = None
+    reads.return_value = answer
+
+    approval = await _asked(manager, _post(by))
+
+    shown = {"plain": TEXT, "secret": SECRET, "unread": UNREAD}[read]
+    assert (approval["field_read"], approval["action"]["text"]) == (read, shown)
+    assert (TEXT in json.dumps(await manager.list_approvals())) is (read == "plain")
+
+
+async def _given_back(disposed: AsyncMock) -> None:
+    """Wait for what nothing awaits: an element's handle given back in the background."""
+    for _ in range(200):
+        if disposed.await_count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("not given back within 2 s")
+
+
+async def test_an_approvals_read_by_selector_is_one_question_asked_of_the_element_the_selector_finds(
+    tmp_path: Path,
+) -> None:
+    # The staged review of FX9c4 (16): by selector the read was six get_attribute calls, each of which found the
+    # selector's field anew, so a field the page replaced between them read plain while it was a password field.
+    # The element is found once, asked once for all its fields' attributes, and given back.
+    manager = _typing_manager(tmp_path)
+    await manager.approvals.startup()
+    _field(manager, "selector", {"type": "text", "name": "note"})
+    field = manager.sessions["s1"].page.locators["#f"]
+
+    approval = await _asked(manager, _post("selector"))
+    await _given_back(field.element.dispose)
+
+    assert approval["field_read"] == "plain"
+    assert (field.element_handle.await_count, field.element.evaluate.await_count) == (1, 1)
+    assert field.element_handle.await_args.kwargs == {"timeout": actions.FIELD_RECHECK_TIMEOUT_MS}
+    field.get_attribute.assert_not_awaited()
+    field.evaluate.assert_not_awaited()  # not through the locator, which would find the field again
+    field.element.dispose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("ends", ["the-read-fails", "the-read-does-not-answer", "the-element-comes-too-late"])
+async def test_the_element_an_approvals_read_found_by_selector_is_given_back_however_the_read_ends(
+    tmp_path: Path, ends: str
+) -> None:
+    # The handle of the selector's element is the controller's to give back: also where the question asked of it
+    # fails or is given up on at the bound, and where the element arrives once the read was given up on.
+    manager = _typing_manager(tmp_path)
+    await manager.approvals.startup()
+    reads = _field(manager, "selector", {"type": "text", "name": "note"})
+    field = manager.sessions["s1"].page.locators["#f"]
+    arrives = asyncio.Event()
+
+    async def never(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    async def late(**_kwargs: Any) -> Any:
+        await arrives.wait()
+        return field.element
+
+    if ends == "the-read-fails":
+        reads.side_effect = PlaywrightTimeoutError("Execution context was destroyed")
+    elif ends == "the-read-does-not-answer":
+        reads.side_effect = never
+    else:
+        field.element_handle = AsyncMock(side_effect=late)
+
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", 200):
+        approval = await asyncio.wait_for(_asked(manager, _post("selector")), 10)
+        arrives.set()
+        await _given_back(field.element.dispose)
+
+    assert approval["field_read"] == "unread"
+    field.element.dispose.assert_awaited_once()
+    assert reads.await_count == (0 if ends == "the-element-comes-too-late" else 1)
 
 
 async def test_a_text_the_caller_marked_sensitive_is_hidden_as_the_callers_and_not_read_for(tmp_path: Path) -> None:
@@ -333,7 +462,7 @@ async def test_a_text_the_caller_marked_sensitive_is_hidden_as_the_callers_and_n
     with pytest.raises(ApprovalRequiredError) as asked:
         await manager.execute_decision("s1", decision)
 
-    page.locators["#pw"].get_attribute.assert_not_awaited()
+    page.locators["#pw"].element_handle.assert_not_awaited()
     # Not read, and nothing rests on it: the caller's mark hides the text, and the record keeps only its digest.
     assert asked.value.payload["approval"]["field_read"] == "unread"
     assert asked.value.payload["approval"]["action"]["text"] not in (TEXT, SECRET, UNREAD)

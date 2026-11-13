@@ -506,3 +506,113 @@ async def test_an_approval_asked_for_a_type_into_a_password_field_hides_its_text
             "text hidden: its field reads as secret",
         )
         assert TEXT not in json.dumps(await env.manager.list_approvals())
+
+
+# What stands for a type's text in its approval where its field did not read plain.
+HIDDEN = {"secret": "text hidden: its field reads as secret", "unread": "text hidden: its field has not been read"}
+PASSWORD_IN = "attachShadow({mode: `open`}).innerHTML = `<input type=password>`"
+# What the selector of an approval's type can name, and how the approval then reads: by every field the text could
+# go to from there (the element itself, a label's control, the fields inside it through open shadow roots), all of
+# them plain for the text to show. A frame's document and a closed shadow root are not read.
+NAMED_BY_AN_APPROVAL = {
+    "a component whose open shadow root holds a password field": (AROUND_THE_FIELD["component"][0], "secret"),
+    "a label around a password field": (AROUND_THE_FIELD["label"][0], "secret"),
+    "a frame whose document holds a password field": (AROUND_THE_FIELD["frame"][0], "unread"),
+    "a label around a plain field": ('<label id="named">Note <textarea></textarea></label>', "plain"),
+    "a form with a user field and a password field": (
+        '<form id="named"><input name="user"><input type="password"></form>',
+        "secret",
+    ),
+    "a label for a password field elsewhere": (
+        '<label id="named" for="pw">Secret</label><input id="pw" type="password">',
+        "secret",
+    ),
+    "a component with a password field two open shadow roots down": (
+        '<div id="named"></div><script>const outer = document.getElementById(`named`).attachShadow({mode: `open`});'
+        f"outer.innerHTML = `<span></span>`; outer.firstChild.{PASSWORD_IN};</script>",
+        "secret",
+    ),
+    "a form whose hidden input is named as a secret": (
+        '<form id="named"><input type="hidden" name="csrf_token"><textarea name="note"></textarea></form>',
+        "plain",
+    ),
+    "an element that holds no field": ('<div id="named" tabindex="0" aria-label="Note">note</div>', "unread"),
+    "a plain field beside a frame": (
+        '<div id="named"><textarea></textarea><iframe srcdoc="<input>"></iframe></div>',
+        "unread",
+    ),
+    "a password field beside a frame": (
+        '<div id="named"><input type="password"><iframe srcdoc="<input>"></iframe></div>',
+        "secret",
+    ),
+    "a component whose shadow root is closed": (
+        '<div id="named"></div><script>document.getElementById(`named`)'
+        ".attachShadow({mode: `closed`}).innerHTML = `<input type=password>`;</script>",
+        "unread",
+    ),
+    "an element the page made editable": ('<div id="named" contenteditable aria-label="Note"></div>', "plain"),
+    "a paragraph of an editable element": ('<div contenteditable><p id="named">note</p></div>', "plain"),
+    "an element around an editable one": ('<section id="named"><div contenteditable></div></section>', "plain"),
+    "an element around one the page made not editable": (
+        '<section id="named"><span contenteditable="false">fixed</span></section>',
+        "unread",
+    ),
+    "a label around a select": ('<label id="named">Pick <select><option>a</option></select></label>', "plain"),
+}
+
+
+async def test_an_approval_reads_every_field_its_types_text_could_go_to_from_what_is_named(tmp_path: Path) -> None:
+    # DeepSeek-V4.1-Flash-1017's read of FX9c4 (2): the approval read the attributes of what the selector named, and
+    # the wrappers a type's own receipt withholds its text for (AROUND_THE_FIELD) say nothing of the password field
+    # inside, so the approval said plain and showed the password, as its listing, webhook and SSE summary did.
+    cases = list(NAMED_BY_AN_APPROVAL.items())
+    pages = {f"/{index}": f"<title>named</title>{page}" for index, (_name, (page, _read)) in enumerate(cases)}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/0")
+        reads = {}
+        for index, (name, _case) in enumerate(cases):
+            if index:
+                await env.manager.navigate(session_id, f"{env.allowed}/{index}")
+            # A text of its own each, so no approval is reused for the next page.
+            change = BrowserActionDecision(
+                action="type", reason="change it", selector="#named", text=f"{index:02d} {TEXT}", risk_category="post"
+            )
+            approval = await _asked_for(env, session_id, change)
+            reads[name] = (approval["field_read"], approval["action"]["text"])
+        listed = json.dumps(await env.manager.list_approvals())
+
+    assert reads == {
+        name: (read, f"{index:02d} {TEXT}" if read == "plain" else HIDDEN[read])
+        for index, (name, (_page, read)) in enumerate(cases)
+    }
+    for index, (name, (_page, read)) in enumerate(cases):
+        assert (f"{index:02d} {TEXT}" in listed) is (read == "plain"), name
+
+
+# A focusable component whose open shadow root holds a password field: observe gives the component an element_id.
+HOLDS_A_PASSWORD_FIELD = (
+    '<title>login</title><div id="box" tabindex="0" role="textbox" aria-label="User"></div>'
+    f"<script>document.getElementById(`box`).{PASSWORD_IN};</script>"
+)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_an_approval_for_a_type_into_a_component_reads_the_password_field_inside_it(
+    tmp_path: Path, by: str
+) -> None:
+    # The same read in the element ids' world: the component's own attributes say it is a text box called User.
+    async with browser_env(tmp_path, {"/login": HOLDS_A_PASSWORD_FIELD}) as env:
+        session_id = await env.create("/login")
+        named = {"selector": "#box"}
+        if by == "element_id":
+            items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+            (field,) = [item for item in items if item.get("label") == "User"]
+            named = {"element_id": field["element_id"]}
+        change = BrowserActionDecision(
+            action="type", reason="change it", text=TEXT, risk_category="account_change", **named
+        )
+
+        approval = await _asked_for(env, session_id, change)
+
+        assert (approval["field_read"], approval["action"]["text"]) == ("secret", HIDDEN["secret"])
+        assert TEXT not in json.dumps(await env.manager.list_approvals())
