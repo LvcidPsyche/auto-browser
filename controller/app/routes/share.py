@@ -52,13 +52,21 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         return require_safe_segment(str(info["session_id"]), field="session_id")
 
     async def _audit_first_view(token: str, session_id: str) -> None:
-        """Called once a route has something of the session to show the token's holder, before it answers."""
+        """Called once a route has something of the session to show the token's holder, before it answers.
+
+        The token is checked again on each side of the event. A route waits after its own check (a poll for its
+        frame, as long as the session's agent holds the lock; the page for the session's lookup), and a first view
+        waits for its event: a link revoked or expired during either wait is refused as it is now, and one refused
+        before its event is no view. One revoked while its event is written is refused with the event written.
+        """
+        _shared_session_id(token)
         try:
             await share_manager.record_view(manager.audit, token, session_id)
         except Exception:
             raise internal_error(
                 logger, "the first view of a share link of session %s was not audited", session_id
             ) from None
+        _shared_session_id(token)
 
     @router.post("/sessions/{session_id}/share")
     async def share_session(session_id: str, payload: ShareSessionRequest | None = None) -> dict[str, Any]:

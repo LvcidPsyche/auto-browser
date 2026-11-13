@@ -18,6 +18,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -25,6 +27,7 @@ import app.main as main_module
 from app import session_share
 from app.browser_manager import BrowserSession
 from app.models import McpToolCallRequest, ShareSessionRequest
+from app.routes.share import create_share_router
 from app.session_share import (
     SHARE_REVOCATIONS_UNAVAILABLE,
     SHARE_REVOKED_EVENT,
@@ -504,6 +507,157 @@ class RevokeRouteTests(_Links):
         self.assertEqual(response.status_code, 500)
         self.audit.fail_with = None
         self.assertEqual(self.views(token), [403, 403, 403])
+
+
+class _HeldViewAudit(_Audit):
+    """The audit log, whose ``share_viewed`` waits for ``hold_view`` while a test sets one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold_view: asyncio.Event | None = None
+        self.view_begun = asyncio.Event()
+
+    async def append(self, **event: Any) -> None:
+        if event["event_type"] == SHARE_VIEWED_EVENT and self.hold_view is not None:
+            self.view_begun.set()
+            await self.hold_view.wait()
+        await super().append(**event)
+
+
+class RevokeWhileAViewWaitsTests(unittest.IsolatedAsyncioTestCase):
+    """A share route checks its token and then waits: a poll for the session's frame (for as long as the session's
+    agent holds its lock), the page for the session's lookup, and a first view for its event. A link revoked or expired
+    during a wait is refused all the same, and one refused before its event is no view. No sleeps: each wait is held
+    open by the test, and the expiry moves a clock the test owns."""
+
+    async def asyncSetUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        artifact_root = Path(directory.name)
+        (artifact_root / SESSION_ID).mkdir()
+        self.frame = artifact_root / SESSION_ID / "20260101T000000000000Z-share-frame.png"
+        self.frame.write_bytes(b"png")
+        self.frame_asked, self.frame_ready = asyncio.Event(), asyncio.Event()
+        self.lookup_held, self.lookup_asked, self.lookup_ready = False, asyncio.Event(), asyncio.Event()
+        manager = _manager(self.frame)
+        lookup = manager.get_session
+
+        async def share_snapshot(session_id: str) -> dict[str, Any]:
+            self.frame_asked.set()
+            await self.frame_ready.wait()  # a capture queued behind the session's lock
+            return {"url": "https://example.com/after", "title": "after", "screenshot_path": str(self.frame)}
+
+        async def get_session(session_id: str) -> Any:
+            if self.lookup_held:  # the page's lookup, and not the revoke's after it
+                self.lookup_held = False
+                self.lookup_asked.set()
+                await self.lookup_ready.wait()
+            return await lookup(session_id)
+
+        manager.share_snapshot, manager.get_session = share_snapshot, get_session
+        self.audit = manager.audit = _HeldViewAudit()
+        self.share_manager = SessionShareManager(secret=SECRET, ttl_minutes=10)
+        api = FastAPI()
+        api.include_router(
+            create_share_router(
+                manager=manager,
+                share_manager=self.share_manager,
+                settings=SimpleNamespace(artifact_root=str(artifact_root)),
+            )
+        )
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test")
+        self.addAsyncCleanup(self.client.aclose)
+
+    def mint(self, *, ttl_seconds: int = 300) -> str:
+        return self.share_manager.create_token(SESSION_ID, ttl_seconds=ttl_seconds)["token"]
+
+    async def waiting(self, path: str, asked: asyncio.Event) -> asyncio.Future[httpx.Response]:
+        """The request to ``path``, started, once it waits where ``asked`` says."""
+        request = asyncio.ensure_future(self.client.get(path))
+        await asyncio.wait_for(asked.wait(), 5)
+        return request
+
+    async def revoke(self) -> None:
+        response = await self.client.delete(f"/sessions/{SESSION_ID}/share")
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_a_viewed_link_revoked_while_its_poll_waits_for_the_frame_is_refused(self) -> None:
+        token = self.mint()
+        self.frame_ready.set()
+        self.assertEqual((await self.client.get(f"/share/{token}/observe")).status_code, 200)
+        self.frame_ready.clear()
+        self.frame_asked.clear()
+        poll = await self.waiting(f"/share/{token}/observe", self.frame_asked)
+        await self.revoke()
+
+        self.frame_ready.set()
+
+        self.assertEqual((await poll).status_code, 403)
+
+    async def test_a_link_revoked_while_its_first_poll_waits_for_the_frame_is_refused_and_no_view(self) -> None:
+        token = self.mint()
+        poll = await self.waiting(f"/share/{token}/observe", self.frame_asked)
+        await self.revoke()
+
+        self.frame_ready.set()
+
+        self.assertEqual((await poll).status_code, 403)
+        self.assertEqual(self.audit.of(SHARE_VIEWED_EVENT), [])
+
+    async def test_a_link_that_expires_while_its_poll_waits_for_the_frame_is_refused_and_no_view(self) -> None:
+        clock = _Clock()
+        with patch.object(session_share, "time", clock):
+            token = self.mint(ttl_seconds=60)
+            poll = await self.waiting(f"/share/{token}/observe", self.frame_asked)
+            clock.now += 61
+
+            self.frame_ready.set()
+
+            self.assertEqual((await poll).status_code, 403)
+        self.assertEqual(self.audit.of(SHARE_VIEWED_EVENT), [])
+
+    async def test_a_link_revoked_while_its_first_poll_is_audited_is_refused_with_the_view_written(self) -> None:
+        token = self.mint()
+        self.frame_ready.set()
+        self.audit.hold_view = asyncio.Event()
+        poll = await self.waiting(f"/share/{token}/observe", self.audit.view_begun)
+        await self.revoke()
+
+        self.audit.hold_view.set()
+
+        self.assertEqual((await poll).status_code, 403)
+        self.assertEqual(len(self.audit.of(SHARE_VIEWED_EVENT)), 1)
+
+    async def test_a_link_revoked_while_its_first_image_is_audited_is_refused(self) -> None:
+        token = self.mint()
+        self.audit.hold_view = asyncio.Event()
+        image = await self.waiting(f"/share/{token}/screenshots/{self.frame.name}", self.audit.view_begun)
+        await self.revoke()
+
+        self.audit.hold_view.set()
+
+        self.assertEqual((await image).status_code, 403)
+
+    async def test_a_link_revoked_while_its_page_looks_the_session_up_is_refused_and_no_view(self) -> None:
+        token = self.mint()
+        self.lookup_held = True
+        page = await self.waiting(f"/share/{token}", self.lookup_asked)
+        await self.revoke()
+
+        self.lookup_ready.set()
+
+        self.assertEqual((await page).status_code, 403)
+        self.assertEqual(self.audit.of(SHARE_VIEWED_EVENT), [])
+
+    async def test_a_link_revoked_while_its_first_page_is_audited_is_refused(self) -> None:
+        token = self.mint()
+        self.audit.hold_view = asyncio.Event()
+        page = await self.waiting(f"/share/{token}", self.audit.view_begun)
+        await self.revoke()
+
+        self.audit.hold_view.set()
+
+        self.assertEqual((await page).status_code, 403)
 
 
 class UnreadableStoreRouteTests(_Links):
