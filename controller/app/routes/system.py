@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -33,9 +32,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEEP_HEALTH_FIXTURE = _REPO_ROOT / "evals" / "fixtures" / "deep_health.html"
-_DEEP_HEALTH_FALLBACK = """<!doctype html>
+# The page the deep probe renders. It is carried here: the image holds only the controller, so no file is read for it.
+_DEEP_HEALTH_HTML = """<!doctype html>
 <html lang="en">
   <head><meta charset="utf-8"><title>Auto Browser deep health</title></head>
   <body><main data-ab-deep-health="ready">Deep health ready</main></body>
@@ -159,15 +157,13 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
     started = time.perf_counter()
     checks: list[dict[str, Any]] = []
 
-    fixture_html, fixture_source = _load_deep_health_fixture()
-    if 'data-ab-deep-health="ready"' not in fixture_html:
-        raise RuntimeError("deep health fixture missing ready marker")
+    fixture_html = _DEEP_HEALTH_HTML
     checks.append(
         {
             "name": "fixture",
             "status": "pass",
             "details": {
-                "source": fixture_source,
+                "source": "embedded",
                 "bytes": len(fixture_html.encode("utf-8")),
             },
         }
@@ -249,15 +245,6 @@ def _log_failed_close(closing: "asyncio.Future[Any]") -> None:
             "deep health probe: the browser context it gave up closing failed to close: %s",
             error_text_for_log(closing.exception()),
         )
-
-
-def _load_deep_health_fixture() -> tuple[str, str]:
-    try:
-        # The source is named, not its path: the answer goes to any caller of an authenticated endpoint.
-        return _DEEP_HEALTH_FIXTURE.read_text(encoding="utf-8"), "fixture"
-    except OSError:
-        logger.warning("deep health fixture unavailable at %s; using embedded fallback", _DEEP_HEALTH_FIXTURE)
-        return _DEEP_HEALTH_FALLBACK, "embedded"
 
 
 def create_system_router(

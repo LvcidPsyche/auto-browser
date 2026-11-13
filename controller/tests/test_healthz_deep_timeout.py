@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 import time
 import unittest
 from contextlib import ExitStack
@@ -239,35 +238,23 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeepHealthAnswerTests(unittest.IsolatedAsyncioTestCase):
-    # The fixture is patched, so both branches run wherever the suite does (the controller image has no evals/).
-    async def _answer(self, fixture: Path) -> dict:
+    async def test_the_probe_renders_its_embedded_page_and_reads_no_file(self) -> None:
+        # The probe read evals/fixtures/deep_health.html, which the controller image does not hold, and warned of
+        # it at every probe before it used the page it carries.
         async def ensure_browser() -> object:
-            return _rendering_browser()
+            return browser
 
+        browser = _rendering_browser()
         manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
-        with mock.patch.object(system, "_DEEP_HEALTH_FIXTURE", fixture):
-            async with _client(manager) as client:
-                response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
-        self.assertEqual(response.status_code, 200)
-        return response.json()
+        # As in the image, where no such file exists.
+        with mock.patch.object(Path, "read_text", side_effect=FileNotFoundError("no fixture")) as read_text:
+            with self.assertNoLogs(system.logger, level="WARNING"):
+                answer = await asyncio.wait_for(system.run_deep_health_probe(manager), timeout=5)
 
-    async def test_a_readable_fixture_is_named_fixture_not_by_its_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "deep_health.html"
-            fixture.write_text(system._DEEP_HEALTH_FALLBACK, encoding="utf-8")
-
-            body = await self._answer(fixture)
-
-        self.assertEqual(body["checks"][0]["details"]["source"], "fixture")
-        # In the parsed values: a search of the raw text misses a path whose backslashes JSON escaped.
-        self.assertFalse([text for text in _strings(body) if tmp in text or fixture.name in text])
-
-    async def test_a_missing_fixture_is_named_embedded(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            body = await self._answer(Path(tmp) / "missing.html")
-
-        self.assertEqual(body["checks"][0]["details"]["source"], "embedded")
-        self.assertFalse([text for text in _strings(body) if tmp in text])
+        read_text.assert_not_called()
+        self.assertEqual(answer["checks"][0]["details"]["source"], "embedded")
+        page = (await (await browser.new_context()).new_page()).set_content
+        self.assertIn('data-ab-deep-health="ready"', page.await_args.args[0])
 
 
 class ReadyzConnectTests(unittest.IsolatedAsyncioTestCase):
@@ -497,14 +484,6 @@ class ReadyzRestartTests(unittest.TestCase):
                 self.assertEqual(client.get("/readyz").status_code, 200)
 
         self.assertEqual(ensure_browser.await_count, 2)
-
-
-def _strings(value: object) -> list[str]:
-    if isinstance(value, dict):
-        return [text for item in value.values() for text in _strings(item)]
-    if isinstance(value, list):
-        return [text for item in value for text in _strings(item)]
-    return [value] if isinstance(value, str) else []
 
 
 def _rendering_browser() -> object:

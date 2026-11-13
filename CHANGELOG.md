@@ -1566,6 +1566,11 @@ All notable changes to auto-browser are documented here.
   as a shutdown records one, and stopped if a worker had begun it, and the caller is told as before. A job a worker
   had already run to its end (`completed` or `failed`) is answered as queued, with a line in the log, since only the
   audit failed; one an operator cancelled or discarded meanwhile stays so, and the caller is told.
+- **`GET /healthz/deep` no longer warns of a missing fixture at every probe.** The probe read its page from
+  `evals/fixtures/deep_health.html`, which the controller image does not hold, so every probe there logged a warning
+  that named the path and then rendered the page the controller carries. It now always renders that page: no file is
+  read, no warning is written, and `checks[0].details.source` in the answer is always `embedded`, where a controller
+  run from a checkout answered `fixture`. The file is removed from `evals/fixtures/`. (AUTH-12)
 
 ### Changed
 
