@@ -316,7 +316,6 @@ async def test_a_check_through_the_clear_that_cannot_be_made_refuses_the_type_at
 
 # A step given up on at its bound is nobody's to hear of once it fails or arrives, and a cancel the caller took is
 # the caller's, whenever the step answered.
-LATE = 0.05  # how long past its bound a step fails, as Playwright's own timeout, of the bound's length, does
 
 
 @pytest.mark.parametrize("stalls", ["finding-the-element", "making-the-hold"])
@@ -326,10 +325,14 @@ async def test_a_step_that_fails_just_after_its_bound_is_reported_to_the_loop_by
     # loop's exception handler, and asyncio's default one logs it at ERROR with a traceback that names the selector
     # (red there before the step was waited for by asyncio.wait; on 3.12 and 3.11 nothing is reported either way).
     field = FoundField()
+    given_up_on = asyncio.Event()
     failed = asyncio.Event()
 
     async def fails_late(*_given: Any, **_by_name: Any) -> Any:
-        await asyncio.sleep(BOUND_MS / 1000 + LATE)
+        # Playwright's own timeout comes a moment after the bound. Here it comes when the test says the take is
+        # back, and by no clock: a sleep just past the bound fails the step before the take has given it up where
+        # the loop stalls that long (a slow runner), and the test then fails over code that is right.
+        await given_up_on.wait()
         failed.set()
         raise PlaywrightTimeoutError(f"Timeout {BOUND_MS}ms exceeded.")
 
@@ -345,7 +348,7 @@ async def test_a_step_that_fails_just_after_its_bound_is_reported_to_the_loop_by
     try:
         await asyncio.wait_for(typed.take(), 5)
         taken = typed.not_secret
-        assert not failed.is_set()  # given up on at the bound: the step has not failed yet
+        given_up_on.set()  # the take is back, given up at its bound: now the step fails
         await asyncio.wait_for(failed.wait(), 5)
         for _ in range(20):
             await asyncio.sleep(0)
