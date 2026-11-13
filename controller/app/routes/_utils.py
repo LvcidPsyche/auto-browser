@@ -14,6 +14,7 @@ from ..auth_policy import is_bearer_exempt_path
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE, UNJUDGED_TAB_MESSAGE
 from ..cron_service import CronStoreUnreadableError
+from ..middleware.http import _route_path
 from ..proxy_personas import (
     PROXY_PERSONA_DUPLICATE_ENTRIES,
     PROXY_PERSONA_FILE_UNREADABLE,
@@ -66,7 +67,7 @@ async def require_session_access(request: Request) -> None:
         return
     # A route the token gate lets through names no session it could check (W2-19's shape): a ?session_id= on /healthz
     # told any caller which ids exist. The docs pages read no session in any deployment, hence True.
-    if is_bearer_exempt_path(str(request.scope.get("path") or ""), docs_are_public=True):
+    if is_bearer_exempt_path(_route_path(request), docs_are_public=True):
         return
     if session_id and manager is not None and not listing_controller:
         await manager.ensure_session_accessible(session_id)

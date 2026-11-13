@@ -284,7 +284,7 @@ def install_controller_http_middleware(
 
     @application.middleware("http")
     async def require_api_bearer_token(request: Request, call_next):
-        path = _request_path(request)
+        path = _route_path(request)
         if not _auth_policy().required or _is_exempt_path(path):
             return await call_next(request)
 
@@ -298,7 +298,7 @@ def install_controller_http_middleware(
 
     @application.middleware("http")
     async def enforce_rate_limits(request: Request, call_next):
-        path = _request_path(request)
+        path = _route_path(request)
         if rate_limiter is None:
             return await call_next(request)
         # An exempt path skips the limiter only when it needs no token (healthchecks
@@ -346,7 +346,7 @@ def install_controller_http_middleware(
 
     @application.middleware("http")
     async def bind_operator_identity(request: Request, call_next):
-        path = _request_path(request)
+        path = _route_path(request)
         exempt_prefixes = (
             "/healthz",
             "/readyz",
@@ -464,7 +464,7 @@ def install_controller_http_middleware(
 
     @application.middleware("http")
     async def require_loopback_host_when_unauthenticated(request: Request, call_next):
-        if configured_hosts or _auth_policy().required or _request_path(request) == "/healthz":
+        if configured_hosts or _auth_policy().required or _route_path(request) == "/healthz":
             return await call_next(request)
         host = request.headers.get("host", "")
         if is_loopback_host(host):
@@ -560,10 +560,11 @@ _ARTIFACT_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 's
 def install_security_headers(application: FastAPI) -> None:
     @application.middleware("http")
     async def apply_security_headers(request: Request, call_next):
+        # Read before the router runs: the Mount that serves /artifacts adds its own prefix to the scope's root_path.
+        path = _route_path(request)
         response = await call_next(request)
         for name, value in _BASELINE_SECURITY_HEADERS.items():
             response.headers.setdefault(name, value)
-        path = _request_path(request)
         if path == "/artifacts" or path.startswith("/artifacts/"):
             response.headers["Content-Security-Policy"] = _ARTIFACT_CSP
         return response

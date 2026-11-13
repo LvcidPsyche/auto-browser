@@ -293,6 +293,13 @@ All notable changes to auto-browser are documented here.
   empties, now gets the retryable `focus_lost` with no text typed, where the text went into whatever had focus;
   so does a type whose element is not found again, or does not answer, within a second. Where the page replaced
   the field, a second type finds the new node. `clear_first: false` skips the clear and its checks.
+- **Behind a path prefix, `REQUEST_RATE_LIMIT_EXEMPT_PATHS` names paths as the router matches them.** Only a
+  controller served behind an ASGI `root_path` (`uvicorn --root-path /api`, `UVICORN_ROOT_PATH`) is affected. The
+  list is now compared with the path that follows the prefix, as every other path rule is (see Security), so the
+  default list works there as it stands. A deployment that wrote its prefix into the list (for example
+  `/api/healthz`) loses that exemption: write each entry without the prefix (`/healthz`). Behind a prefix the
+  paths that answer without a token (`/healthz`, `/readyz`, `/version`, `/dashboard` and the rest of that list)
+  now do, as they do without one, where each answered `401`.
 
 ### Security
 
@@ -719,6 +726,28 @@ All notable changes to auto-browser are documented here.
   in every release from 0.1.0 (the function was `BrowserManager._locator_is_sensitive_input` before 1.1.0); the
   `standard` receipt in 1.16.0 and 1.17.0; the other paths in 1.17.0 (by their code; the probes ran on this
   release's).
+- **Behind a `root_path`, a file under `/artifacts` keeps its sandbox.** The controller serves every file under
+  `/artifacts` with `Content-Security-Policy: sandbox; ...`, so that an HTML file a visited page made the browser
+  download is shown as an inert document and never runs as the controller's origin. The header was chosen by the
+  request's whole path, and behind a path prefix (an ASGI `root_path`, which `uvicorn --root-path /api` or
+  `UVICORN_ROOT_PATH` sets) that path starts with the prefix: the rule missed, and the file was served without the
+  header. The rule now reads the path the router matches, which is what follows the prefix, and reads it before the
+  router runs. A controller served without a prefix always sent the header, and one that requires a token answered
+  a request for such a file that carries none with `401` either way.
+- **Behind a `root_path`, the paths that need no token, no operator id and no rate-limit budget are the router's.**
+  Five more rules compared the request's whole path, prefix included, with paths written without one: the token
+  gate's list of paths that answer without a token, the operator-id exemptions, `REQUEST_RATE_LIMIT_EXEMPT_PATHS`,
+  `/healthz` in the loopback `Host` check of a controller with no token and no `CONTROLLER_ALLOWED_HOSTS`, and the
+  rule that a path which answers without a token asks about no session. So behind a prefix `/api/healthz`,
+  `/api/version` and `/api/dashboard` answered `401` with no token; with one, `/api/healthz` answered `400` for a
+  missing `X-Operator-Id` where `REQUIRE_OPERATOR_ID` is on; such a tokenless controller refused `/api/healthz`
+  under a `Host` that is no loopback name; and no entry of the rate limiter's list matched, so a healthcheck and
+  each artifact a token holder loaded counted against the limit. All five now read the path the router matches.
+  The rules failed closed, and this opens nothing that is closed without a prefix: `/api/sessions`, `/api/metrics`,
+  a file under `/api/artifacts`, `/api/healthz/` and a path that only starts with the prefix still answer `401`
+  without a token, a request for `/api/metrics` or a file under `/api/artifacts` with no token or a wrong one
+  still counts against the limit, and a `session_id` on a path that needs the token is still checked. See the
+  upgrade note for `REQUEST_RATE_LIMIT_EXEMPT_PATHS`.
 
 ### Fixed
 
