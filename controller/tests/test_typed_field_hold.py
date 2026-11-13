@@ -21,11 +21,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from playwright._impl._locator import Locator
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT, FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT
 from app.browser.services import actions
-from app.browser.services.actions import _TypedField
+from app.browser.services.actions import _arrives_by, _TypedField
 
 BOUND_MS = 200
 PLAIN = {"type": "text", "name": "note", "id": "note", "placeholder": "", "aria-label": "", "autocomplete": ""}
@@ -311,3 +312,106 @@ async def test_a_check_through_the_clear_that_cannot_be_made_refuses_the_type_at
     assert refused.value.code == "focus_lost"
     assert took < 2, took
     await _until(lambda: field.given_back() == (0, 0, 1))
+
+
+# A step given up on at its bound is nobody's to hear of once it fails or arrives, and a cancel the caller took is
+# the caller's, whenever the step answered.
+LATE = 0.05  # how long past its bound a step fails, as Playwright's own timeout, of the bound's length, does
+
+
+@pytest.mark.parametrize("stalls", ["finding-the-element", "making-the-hold"])
+async def test_a_step_that_fails_just_after_its_bound_is_reported_to_the_loop_by_nobody(stalls: str) -> None:
+    # An element_handle(timeout=) whose selector matches nothing answers with its own timeout a moment after the bound
+    # of the same length: the type has gone on by then. Python 3.14's asyncio.shield hands such a failure to the
+    # loop's exception handler, and asyncio's default one logs it at ERROR with a traceback that names the selector
+    # (red there before the step was waited for by asyncio.wait; on 3.12 and 3.11 nothing is reported either way).
+    field = FoundField()
+    failed = asyncio.Event()
+
+    async def fails_late(*_given: Any, **_by_name: Any) -> Any:
+        await asyncio.sleep(BOUND_MS / 1000 + LATE)
+        failed.set()
+        raise PlaywrightTimeoutError(f"Timeout {BOUND_MS}ms exceeded.")
+
+    if stalls == "finding-the-element":
+        field.locator.element_handle = AsyncMock(side_effect=fails_late)
+    else:
+        field.element.evaluate_handle = AsyncMock(side_effect=fails_late)
+    typed = _TypedField(None, field.locator)
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context["message"]))
+    try:
+        await asyncio.wait_for(typed.take(), 5)
+        taken = typed.not_secret
+        assert not failed.is_set()  # given up on at the bound: the step has not failed yet
+        await asyncio.wait_for(failed.wait(), 5)
+        for _ in range(20):
+            await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+        await typed.release()
+
+    assert taken is False
+    assert reported == []
+
+
+async def test_a_cancel_the_caller_took_is_never_answered_with_the_handle() -> None:
+    # Cancelled k loop iterations after the step answered, for each k until the caller has its answer. Python 3.11's
+    # asyncio.wait_for answered a caller cancelled in the iterations just after the step had answered with that answer
+    # (red there for k of 1 to 3): the cancel was swallowed, and the caller went on with the handle. A cancel that
+    # Task.cancel accepted must end the caller as cancelled, and the handle is given back instead.
+    loop = asyncio.get_running_loop()
+    for k in range(8):
+        gate: asyncio.Future[None] = loop.create_future()
+        given_back: list[object] = []
+        handle = object()
+
+        async def step() -> object:
+            await gate
+            return handle
+
+        async def give_back(arrived: object) -> None:
+            given_back.append(arrived)
+
+        caller = asyncio.ensure_future(_arrives_by(step(), loop.time() + 5, give_back))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        gate.set_result(None)
+        for _ in range(k):
+            await asyncio.sleep(0)
+
+        took = caller.cancel()
+        if took:
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            await _until(lambda: given_back == [handle])
+        else:
+            # The cancel came after the caller had its answer: the handle is its own, and nothing is given back.
+            assert await caller is handle
+        await asyncio.sleep(0.01)
+        assert given_back == ([handle] if took else []), k
+
+
+async def test_a_step_that_has_not_answered_by_its_bound_is_a_timeout_and_is_given_back_when_it_arrives() -> None:
+    # The bound's own error, which every caller of _arrives_by reads as a step that did not arrive; the step goes on,
+    # and what it answers once it was given up on is handed to the give-back.
+    loop = asyncio.get_running_loop()
+    gate: asyncio.Future[None] = loop.create_future()
+    given_back: list[object] = []
+    handle = object()
+
+    async def step() -> object:
+        await gate
+        return handle
+
+    async def give_back(arrived: object) -> None:
+        given_back.append(arrived)
+
+    with pytest.raises(TimeoutError):
+        await _arrives_by(step(), loop.time() + BOUND_MS / 1000, give_back)
+    assert given_back == []
+    gate.set_result(None)
+
+    await _until(lambda: given_back == [handle])

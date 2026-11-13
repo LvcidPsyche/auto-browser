@@ -505,10 +505,16 @@ async def _arrives_by(call: Awaitable[Any], ends: float, give_back: Callable[[An
     """
     step = asyncio.ensure_future(call)
     try:
-        return await asyncio.wait_for(asyncio.shield(step), _left_until(ends))
+        # Not wait_for(shield(step)): on Python 3.11 wait_for answered a caller cancelled once the step had answered
+        # with that answer, and on 3.14 shield hands a failure of a step given up on to the loop's exception
+        # handler, which logs it at ERROR. asyncio.wait neither cancels the step nor raises its error.
+        done, _ = await asyncio.wait({step}, timeout=_left_until(ends))
+        if not done:
+            raise TimeoutError
+        return step.result()
     except BaseException:
-        # Whether or not the step is done: one that finished in the iteration its caller was cancelled had its
-        # handle dropped by shield, and a done task still runs this callback (soon).
+        # Whether or not the step is done: one that finished in the iteration its caller was cancelled was not
+        # handed to it, and a done task still runs this callback (soon).
         _GIVEN_UP.add(step)
         step.add_done_callback(lambda arrived: _given_back_late(arrived, give_back))
         raise
