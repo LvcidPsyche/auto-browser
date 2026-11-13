@@ -150,6 +150,10 @@ class RunCliTests(unittest.IsolatedAsyncioTestCase):
         with spy:
             task = asyncio.create_task(self._run_holding_the_pipes())
             await self._started()
+            # The grandchild can be up before the spawn has returned (a process's first spawn is slow). A cancel that
+            # lands there is asyncio's to clean up, not run_cli's, and is not what this test is about.
+            while not started:
+                await asyncio.sleep(0.02)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
