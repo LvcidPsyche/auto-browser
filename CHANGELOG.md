@@ -1575,6 +1575,11 @@ All notable changes to auto-browser are documented here.
   a context that Chromium creates after the probe's total has run out, but it arranged that only while the creation
   was unfinished. A cancel that landed in the turn of the event loop in which Chromium answered found the creation
   done, so nothing closed the context and it stayed open in the browser. It is closed in that case too. (D6-2)
+- **`GET /healthz/deep` logs a cancelled close of its context as cut short, not as one that took too long.** When the
+  probe was cancelled while it closed its browser context (its total ran out, or its request ended), the warning
+  said the close `took over 2.0s`, the line of a close that outlasts its two seconds. It now says the close was cut
+  short when the probe was cancelled and is left to finish. A close that had ended in the same turn of the event
+  loop as the cancel is not logged, where it too was reported as left to finish. (D6-3)
 
 ### Changed
 

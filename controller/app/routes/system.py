@@ -231,13 +231,21 @@ async def _close_context(context: Any) -> None:
     closing = _hold(asyncio.ensure_future(context.close()))
     try:
         await asyncio.wait_for(asyncio.shield(closing), timeout=_DEEP_HEALTH_CLOSE_SECONDS)
-    except (TimeoutError, asyncio.CancelledError) as stopped:
+    except TimeoutError:
         logger.warning(
             "deep health probe: closing its browser context took over %ss; left to finish", _DEEP_HEALTH_CLOSE_SECONDS
         )
         closing.add_done_callback(_log_failed_close)
-        if isinstance(stopped, asyncio.CancelledError):
-            raise
+    except asyncio.CancelledError:
+        # The close did not take too long: its wait was cancelled, by the probe's total or with the request. One that
+        # ended in the same turn of the loop was not cut short, and only a failure of it is logged.
+        if not closing.done():
+            logger.warning(
+                "deep health probe: closing its browser context was cut short when the probe was cancelled "
+                "(its total ran out, or its request ended); left to finish"
+            )
+        closing.add_done_callback(_log_failed_close)
+        raise
 
 
 def _log_failed_close(closing: "asyncio.Future[Any]") -> None:

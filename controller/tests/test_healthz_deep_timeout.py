@@ -278,6 +278,60 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(len(system._CLOSING), 0)
 
+    async def test_a_cancel_during_the_close_is_logged_as_cut_short_not_as_a_close_that_took_too_long(self) -> None:
+        # No clock: the test cancels the close's waiter once the close has begun.
+        release, began = asyncio.Event(), asyncio.Event()
+
+        async def close() -> None:
+            began.set()
+            await release.wait()
+
+        with self.assertLogs(system.logger, level="WARNING") as logged:
+            waiter = asyncio.ensure_future(system._close_context(SimpleNamespace(close=close)))
+            await asyncio.wait_for(began.wait(), timeout=5)
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(waiter, timeout=5)
+
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("cut short", logged.output[0])
+        self.assertIn("left to finish", logged.output[0])
+        self.assertNotIn("took over", logged.output[0])
+        (closing,) = system._CLOSING
+        self.assertFalse(closing.done())  # not cancelled with its waiter
+        release.set()
+        await _closing_drained()
+
+    async def test_a_close_that_outlasts_its_grace_is_still_logged_as_one_that_took_too_long(self) -> None:
+        release = asyncio.Event()
+
+        with (
+            mock.patch.object(system, "_DEEP_HEALTH_CLOSE_SECONDS", 0.01),
+            self.assertLogs(system.logger, level="WARNING") as logged,
+        ):
+            await asyncio.wait_for(system._close_context(SimpleNamespace(close=self._never(release))), timeout=5)
+
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("took over 0.01s", logged.output[0])
+        self.assertNotIn("cut short", logged.output[0])
+        release.set()
+        await _closing_drained()
+
+    async def test_a_close_that_ended_in_the_turn_it_was_cancelled_is_not_logged_as_left_to_finish(self) -> None:
+        release = asyncio.Event()
+        waiters: list[asyncio.Future[None]] = []
+
+        async def close() -> None:
+            await release.wait()
+            waiters[0].cancel()
+
+        with self.assertNoLogs(system.logger, level="WARNING"):
+            waiters.append(asyncio.ensure_future(system._close_context(SimpleNamespace(close=close))))
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(waiters[0], timeout=5)
+            await _closing_drained()
+
 
 class DeepHealthAnswerTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_probe_renders_its_embedded_page_and_reads_no_file(self) -> None:
