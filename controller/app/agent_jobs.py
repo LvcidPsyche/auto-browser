@@ -605,33 +605,53 @@ class AgentJobQueue:
             record.error = "Job queue is full (max 100 queued jobs)"
             await self.store.update(record)
             raise AgentJobQueueFull("Job queue is at capacity. Try again later.")
+        # The admission audit decides whether a job runs (_audit_quietly): where it cannot be written, or its caller is
+        # cancelled while it is, the job is taken back for every caller, a cron run's (whose session its callback closes)
+        # as a REST caller's, an MCP caller's and a resume's. A caller that is told of a failure is told truly.
         try:
             await self._audit("agent_job_enqueued", "queued", record)
         except BaseException as exc:
             ran_to_its_end = False
-            if on_finish is not None:
-                # The caller is about to close the session this job runs in: take the job back first.
-                try:
-                    await self._withdraw(record.id)
-                except _AlreadyFinished:
-                    # There is nothing to take back. If a worker had it, a caller told of a failure (not a cancellation)
-                    # would say it never ran, and invite a second run. One no worker holds whose callback is still here
-                    # never ran: it was cancelled or discarded in the queue, and what is here is the stand-in of a
-                    # callback run there, or a callback that was not here yet to run.
-                    ran_to_its_end = isinstance(exc, Exception) and (
-                        record.id in self._running_tasks or record.id not in self._on_finish
-                    )
-                except Exception:
-                    logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
-                finally:
-                    # A caller answered with an error closes the session itself. One answered with success leaves that
-                    # to the finish callback, which the worker may not have reached yet: it stays.
-                    if not ran_to_its_end:
-                        self._on_finish.pop(record.id, None)
+            try:
+                await self._withdraw(record.id)
+            except _AlreadyFinished:
+                # There is nothing to take back. If a worker had it, a caller told of a failure (not a cancellation)
+                # would say it never ran, and invite a second run.
+                ran_to_its_end = isinstance(exc, Exception) and await self._ran_to_its_end(
+                    record.id, registered=on_finish is not None
+                )
+            except Exception:
+                logger.exception(
+                    "agent job %s could not be withdrawn after its queuing could not be audited", record.id
+                )
+            finally:
+                # A caller answered with an error closes the session itself. One answered with success leaves that to
+                # the finish callback, which the worker may not have reached yet: it stays.
+                if not ran_to_its_end:
+                    self._on_finish.pop(record.id, None)
             if not ran_to_its_end:
                 raise
             logger.exception("agent job %s has finished, but its queuing could not be audited", record.id)
         return self._public_record(record)
+
+    async def _ran_to_its_end(self, job_id: str, *, registered: bool) -> bool:
+        """Whether a job that cannot be withdrawn any more was run by a worker, as against ended in the queue.
+
+        A worker has it while its task is here. One no worker holds, for a caller that registered a finish callback,
+        never ran if the callback is still here: what is here is the stand-in of a callback run when it was cancelled
+        or discarded in the queue, or a callback that was not here yet to run. A caller with no callback has nothing
+        to tell by, so its record does: a job that completed or failed ran, one cancelled, discarded or interrupted
+        did not.
+        """
+        if job_id in self._running_tasks:
+            return True
+        if registered:
+            return job_id not in self._on_finish
+        try:
+            return (await self.store.get(job_id)).status in {"completed", "failed"}
+        except Exception:
+            logger.exception("agent job %s: its record could not be read to tell whether it ran", job_id)
+            return False
 
     async def _worker_loop(self, worker_index: int) -> None:
         while True:

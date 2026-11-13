@@ -1524,6 +1524,14 @@ All notable changes to auto-browser are documented here.
   `agent_job_resumed`. When that write failed (a full disk) the call failed, `500` over REST, with the job queued and
   running, and a caller who tried the resume again ran the run twice. The failure is now logged and the resume
   answers as it does when the write succeeds.
+- **A job whose queuing cannot be audited is taken back for every caller, and no longer runs while its caller is
+  told it failed.** `agent_job_enqueued` is the write that admits a job. When it failed, or the caller was cancelled
+  while it was written, only a cron run's job was withdrawn. The REST routes that queue a step or a run, the two MCP
+  queue tools and a resume (`POST /agent/jobs/{id}/resume`, `browser.resume_agent_job`) raised, `500` over REST, and
+  left the job queued, and it ran, so a caller who tried again ran it twice. The job is now recorded `interrupted`,
+  as a shutdown records one, and stopped if a worker had begun it, and the caller is told as before. A job a worker
+  had already run to its end (`completed` or `failed`) is answered as queued, with a line in the log, since only the
+  audit failed; one an operator cancelled or discarded meanwhile stays so, and the caller is told.
 
 ### Changed
 
