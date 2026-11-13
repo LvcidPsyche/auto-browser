@@ -1425,6 +1425,13 @@ All notable changes to auto-browser are documented here.
   ends the retries at once, as the controller's shutdown does, and they stop where a new session's own attach has
   replaced the watcher or the browser's last watched session is gone. After the last of them the watcher stays
   lost until the next session is created there, as before.
+- **An MCP call that names an agent job or an auth profile the controller does not hold is told what is missing.**
+  `browser.get_agent_job`, `browser.resume_agent_job`, `browser.discard_agent_job`, `browser.cancel_agent_job` and
+  `browser.get_auth_profile` answered an id no record answers to with the id alone (`nope123`), the text of the
+  lookup's `KeyError`. They now answer in the wording of an unknown session id:
+  `No agent job with id nope123. List agent jobs to find one.` and
+  `No auth profile named nope123. List auth profiles to find one.` A job in a session the caller may not use, and
+  another operator's auth profile, read as one that never was, as before. The REST routes' `404`s are unchanged.
 
 ### Changed
 

@@ -160,6 +160,17 @@ SESSION_STARTER_TOOLS = (
 IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
 # The tools whose approval_id is what they act on, not an approval presented for the call itself.
 APPROVAL_DECISION_TOOLS = frozenset({"browser.approve_approval", "browser.reject_approval", "browser.execute_approval"})
+# The tools whose lookup answers an id it does not hold with a KeyError that names the id and nothing else: the
+# argument that holds the id, and what the call is told (_unknown_id_message), in the wording of an unknown session.
+# By tool: job_id is a cron job's argument too, and profile_name a memory profile's.
+_NO_AGENT_JOB = ("job_id", "No agent job with id {}. List agent jobs to find one.")
+UNKNOWN_ID_ANSWERS: dict[str, tuple[str, str]] = {
+    "browser.get_agent_job": _NO_AGENT_JOB,
+    "browser.resume_agent_job": _NO_AGENT_JOB,
+    "browser.discard_agent_job": _NO_AGENT_JOB,
+    "browser.cancel_agent_job": _NO_AGENT_JOB,
+    "browser.get_auth_profile": ("profile_name", "No auth profile named {}. List auth profiles to find one."),
+}
 
 
 # Characters of a governed tool call's arguments shown to the approving operator.
@@ -451,6 +462,8 @@ class McpToolGateway:
             message = error_text(exc.args[0]) if exc.args else exc.__class__.__name__
             if isinstance(exc, KeyError) and (presented_as := self._presented_as(payload, message)):
                 message = self._unknown_approval_message(spec, message, presented_as)
+            elif isinstance(exc, KeyError):
+                message = self._unknown_id_message(payload, message) or message
             return self._refusal_response(message, {"error": message}, exc)
         except FileNotFoundError as exc:
             # Lookups that miss raise FileNotFoundError with a message naming
@@ -698,6 +711,24 @@ class McpToolGateway:
             for name in ("approval_id", "governed_approval_id")
             if (value := arguments.get(name)) and str(value).strip() == wanted
         ]
+
+    @staticmethod
+    def _unknown_id_message(payload: McpToolCallRequest, missing: str) -> str | None:
+        """What a call is told of an agent job id or an auth profile name no record answers to, where it was told the
+        id and nothing else; None for any other KeyError, which keeps its own text.
+
+        ``missing`` is the KeyError's text, and the miss is the one meant only where that is the id the call sent in
+        the tool's argument (UNKNOWN_ID_ANSWERS), compared stripped as _presented_as compares, since the auth profile
+        store looks up the stripped name. A job the caller may not use raises the same KeyError as one that never
+        was, so they read alike here, as on the REST routes. The id is cut as a session's is in the wording this
+        matches (action_errors.SessionNotFoundError); the two input models bound it at 120 characters today.
+        """
+        argument, wording = UNKNOWN_ID_ANSWERS.get(payload.name, ("", ""))
+        arguments = payload.arguments if isinstance(payload.arguments, dict) else {}
+        sent = arguments.get(argument)
+        if not isinstance(sent, str) or sent.strip() != missing.strip():
+            return None
+        return wording.format(capped_for_log(missing))
 
     def _unknown_approval_message(self, spec: ToolSpec, approval_id: str, presented_as: list[str]) -> str:
         """What a call is told of an approval id no record answers to, where it was told the id and nothing else.
