@@ -8,9 +8,20 @@ from fastapi import APIRouter, HTTPException
 from ..agent_jobs import AgentJobQueueFull
 from ..models import AgentResumeRequest, AgentRunRequest, AgentStepRequest
 from ..utils import error_text
-from ._utils import queue_full, typed_route_errors
+from ._utils import log_hidden_cause, queue_full, typed_route_errors
 
 logger = logging.getLogger(__name__)
+
+
+def runtime_unavailable(cause: RuntimeError, message: str, *args: object) -> HTTPException:
+    """The 503 a RuntimeError that left the orchestrator is answered with, after the line in the log that names it.
+
+    A provider's failure never gets here (a step ends as an error result, and the route answers its status), so what
+    does is a fault or a state that is not available (a busy session, a store that is down): the caller is told to
+    try again, in a fixed text, and the cause is written once (log_hidden_cause).
+    """
+    log_hidden_cause(logger, 503, cause, message, *args)
+    return HTTPException(status_code=503, detail="Service unavailable")
 
 
 def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> APIRouter:
@@ -46,8 +57,8 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
                 return result.model_dump()
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown session") from None
-            except RuntimeError:
-                raise HTTPException(status_code=503, detail="Service unavailable") from None
+            except RuntimeError as exc:
+                raise runtime_unavailable(exc, "agent step failed for session %s", session_id) from None
 
     @router.post("/sessions/{session_id}/agent/jobs/step", status_code=202)
     async def enqueue_agent_step(session_id: str, payload: AgentStepRequest) -> dict[str, Any]:
@@ -77,8 +88,8 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
                 return result.model_dump()
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown session") from None
-            except RuntimeError:
-                raise HTTPException(status_code=503, detail="Service unavailable") from None
+            except RuntimeError as exc:
+                raise runtime_unavailable(exc, "agent run failed for session %s", session_id) from None
 
     @router.post("/sessions/{session_id}/agent/jobs/run", status_code=202)
     async def enqueue_agent_run(session_id: str, payload: AgentRunRequest) -> dict[str, Any]:

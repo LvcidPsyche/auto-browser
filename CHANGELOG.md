@@ -1506,6 +1506,12 @@ All notable changes to auto-browser are documented here.
   home that stayed unusable wrote its warning and its error each time. Each warning and the final error are now
   written once, and the check goes on without a word, so the call still fails with the same error each time. A home
   that fails for another reason is logged when it does. (D1-8)
+- **`POST /sessions/{id}/agent/step` and `/agent/run` log the error behind a `503`.** Both answered every
+  `RuntimeError` that left the orchestrator as `503 Service unavailable` and wrote nothing, so a fault read as "try
+  again later" with no trace of what it was. The answer is the same fixed text. The route now also logs one warning
+  that names the session and the error's class and text, quoted and cut, as the other routes log a cause they hide.
+  A step that failed inside (the provider's failure, or any other) is not among these: it ends as an error result,
+  and the answer is its `error_code`.
 
 ### Changed
 
