@@ -869,11 +869,17 @@ All notable changes to auto-browser are documented here.
   controller: docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
-  can: the checkout's `.env`, `data/api-token`, `data/takeover-token` and the keys under `data/`.
-  `ops/systemd/codex-host-bridge.service` now has, commented out, `InaccessiblePaths=` lines for those, each with a
-  leading `-`, and the `PrivateUsers=yes` that goes with them in a user unit. The data directory itself is not among
-  them, since the bridge's socket is in it. The option is off as shipped and no CI runs a systemd unit: "Closing the
-  checkout's secrets to the bridge" in docs/deployment.md says how to turn it on and what to check afterwards. (N1)
+  can: the checkout's `.env`, `data/api-token`, `data/takeover-token`, the keys under `data/` and the sign-ins of the
+  container's CLIs in `data/cli-home`. `ops/systemd/codex-host-bridge.service` now has, commented out,
+  `InaccessiblePaths=` lines for those, each with a leading `-`, the `PrivateUsers=yes` that goes with them in a user
+  unit, and an `ExecStartPre=` check that refuses to start the bridge while one of those paths can still be read. The
+  data directory itself is not among them, since the bridge's socket is in it. The option hides what is at those
+  paths when the bridge starts and nothing that comes there later, so the bridge is to be restarted after the
+  controller's first start and after any change to `.env` or to the proxy personas. Run by hand in user units on
+  GitHub-hosted runners (no CI job runs the unit): on Ubuntu 22.04 the option closes the paths; on Ubuntu 24.04 and
+  later, which restrict unprivileged user namespaces by default, it hides nothing, and the check refuses the start.
+  The option is off as shipped: "Closing the checkout's secrets to the bridge" in docs/deployment.md says how to turn
+  it on and what to check afterwards. (N1)
 - **A share link's mint and its first view are in the audit log.** `POST /sessions/{id}/share` and
   `browser.share_session` hand out a link that lets anyone who holds it watch the session, and nothing recorded that
   one was made or that it was used. A mint now writes `share_minted`, as the operator who made the link, before the

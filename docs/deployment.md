@@ -715,19 +715,45 @@ In `APP_ENV=production`, startup now fails fast if:
 
 The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and a page shown to the model can
 prompt-inject it as it can any CLI: what that user can read, it can read. The unit template
-(`ops/systemd/codex-host-bridge.service`) carries an option against that, off as shipped: `InaccessiblePaths=` lines,
-commented out, that name the checkout's `.env` and the default places of the controller's secrets under `data/`
-(`api-token`, `takeover-token`, `proxy-personas.json`, `auth`, `witness`, `mesh/identity`, `ssh` and
-`browser-profile`), each with a leading `-` so that one that is not there is passed over. To turn it on, take the
-comment marks off those lines and off the `PrivateUsers=yes` line above them, change the paths with
-`WorkingDirectory=` if your checkout is elsewhere, add any other place you keep a secret, then reload and restart
-the unit. The data directory itself is not named, and must not be: the bridge's socket is
-`data/host-bridge/codex.sock`, and systemd cannot nest a writable path inside an inaccessible one.
+(`ops/systemd/codex-host-bridge.service`) carries an option against that, off as shipped. Its `InaccessiblePaths=`
+lines, commented out, name the checkout's `.env`; the places of the controller's secrets under `data/` (`api-token`,
+`takeover-token`, `auth`, `witness`, `mesh/identity`, `ssh` and `browser-profile` are their settings' defaults, and
+`proxy-personas.json` is the place `.env.example` gives `PROXY_PERSONA_FILE`, which has no default); and
+`data/cli-home`, which holds the sign-ins of the container's CLIs (the bridge's Codex signs in under the bridge's own
+home). Each has a leading `-`, so that one that is not there is passed over. An `ExecStartPre=` line, commented out
+too, refuses to start the bridge while one of those paths can still be read. To turn the option on, take the comment
+marks off the `PrivateUsers=yes`, `InaccessiblePaths=` and `ExecStartPre=` lines, change the paths with
+`WorkingDirectory=` if your checkout is elsewhere, add any other place you keep a secret, then reload and restart the
+unit. A path added to the `InaccessiblePaths=` lines, or taken out of them, goes into the check's list or out of it
+too. The data directory itself is not named, and must not be: the bridge's socket is `data/host-bridge/codex.sock`,
+and systemd cannot nest a writable path inside an inaccessible one.
 
-In a user unit these settings need unprivileged user namespaces, which some hosts restrict, and no CI runs the unit.
-After turning the option on, check that a step through the bridge still works and that a command the bridge's Codex
-runs cannot read `data/api-token`. The option closes the paths it names and nothing else: the rest of what the
-bridge's user can read stays open to its Codex.
+In a user unit these settings work inside a user namespace (`PrivateUsers=`). No CI job runs the unit; it was run by
+hand in user units on GitHub-hosted runners on 2026-11-13. On Ubuntu 22.04 (systemd 249) the option closes the paths
+it names. With the `PrivateUsers=yes` line left commented, the unit starts and the paths stay readable. Where the host
+restricts unprivileged user namespaces (Ubuntu 24.04 and later do by default:
+`kernel.apparmor_restrict_unprivileged_userns=1`), the unit starts with the whole option on and the paths stay
+readable, with no error: that is what the `ExecStartPre=` check is for. There it refuses the start, and the journal
+(`journalctl --user -u codex-host-bridge`) has "the option is on and .env is still readable: this host does not let a
+user unit hide paths" (the first path it finds readable). A refused start is tried again every `RestartSec=`, as any
+failed start of the unit is, and each try writes the message again.
+
+The option hides what is at a named path when the unit starts, and nothing that comes there later. A path made after
+the start (the controller's first start writes `data/api-token`), a file replaced by a rename (the controller writes
+`proxy-personas.json` that way at every change, and most editors save `.env` that way) and a file removed and made
+again are readable to the bridge's Codex until the bridge is restarted. A file rewritten in place, and whatever is
+made inside a directory that was hidden at the start, stay hidden. The check runs at a start only and passes a path
+that is not there, so it sees none of this. Start the controller once before the bridge, and restart the bridge
+(`systemctl --user restart codex-host-bridge`) after the controller's first start and after any change to `.env` or
+to the proxy personas.
+
+After turning the option on, check that a step through the bridge still works, and that a command the bridge's Codex
+runs cannot read `data/api-token`: make that check once the file is there, outside the unit, since a file that is not
+there cannot be read either. The option closes the paths it names and nothing else: the rest of what the bridge's
+user can read stays open to its Codex, under `data/` the session records (`sessions`), the approvals and their
+digest key (`approvals`), the jobs and the audit log among it. And it speaks of reading only: where the checkout is
+the bridge's user's, what it does not hide is the bridge's Codex's to write as well, `data/mesh/peers.json` (the list
+of peers `/mesh/receive` trusts) among it.
 
 ## Generate an auth-state encryption key
 
