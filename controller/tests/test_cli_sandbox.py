@@ -560,6 +560,23 @@ async def test_an_entry_of_cli_sandbox_writable_in_the_root_is_given_and_a_secre
     assert "WITNESS_ROOT" in line and "AUTH_ROOT" not in line
 
 
+async def test_a_directory_a_cli_may_write_inside_a_secrets_directory_leaves_that_secret_open(
+    data, monkeypatch, caplog
+) -> None:
+    # AUTH_ROOT is a directory, and what a CLI may write anywhere in it is the auth root's to read.
+    _probe_says(monkeypatch, None)
+    changed = {"CLI_SANDBOX_WRITABLE": _directories(data.root / "auth" / "sub")[0]}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, **changed), data)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data)
+
+    assert _given_to_write(command) == [str(data.home), changed["CLI_SANDBOX_WRITABLE"]]
+    (line,) = _written(caplog)
+    assert "AUTH_ROOT" in line and "WITNESS_ROOT" not in line
+
+
 async def test_of_two_directories_one_inside_the_other_only_the_outer_is_given(data, monkeypatch) -> None:
     # The outer rule covers the inner, and the inner is the one a CLI could swap for a link.
     _probe_says(monkeypatch, None)

@@ -25,8 +25,8 @@ Each of these is reported:
   write, but for a CLI home in it clear of the home's .ssh and Python's user base. The CLI is started under the
   launcher.
 - a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT, or a path that lies
-  in a directory the CLI may write, as written or once resolved (the CLI can replace a link written there). The CLI
-  is started under the launcher, which does not close that place.
+  in a directory the CLI may write, as written or once resolved (the CLI can replace a link written there), or a
+  directory that holds one. The CLI is started under the launcher, which does not close that place.
 
 Each is one WARNING for the process (one for each distinct text) that names the condition, and the CLI runs: a
 secret's setting by its name and never its value, a home or a directory by its path. Where several hold, only the
@@ -270,13 +270,16 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
 def _open_settings(settings: Settings, given: list[tuple[str, str]]) -> list[str]:
     """The names of the settings whose secret the ruleset leaves open: each one that is set and resolves to a place
     outside PROTECTED_ROOT as it is written (a root that is a link holds nothing itself), or whose path, as written or
-    once resolved, lies in a directory the CLI may write as written or once resolved. A path written there is the
-    CLI's to replace, wherever it resolves now."""
+    once resolved, lies in a directory the CLI may write as written or once resolved, or holds one (a secret that is
+    a directory). A path written there is the CLI's to replace, wherever it resolves now."""
     return [
         name
         for attribute, name in SECRET_PATH_SETTINGS.items()
         if (value := getattr(settings, attribute))
-        and (not _within(value, PROTECTED_ROOT) or any(_lies_in(_ways(value), entry) for entry in given))
+        and (
+            not _within(value, PROTECTED_ROOT)
+            or any(_lies_in(_ways(value), entry) or _lies_in(entry, _ways(value)) for entry in given)
+        )
     ]
 
 
