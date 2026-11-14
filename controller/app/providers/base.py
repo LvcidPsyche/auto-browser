@@ -124,8 +124,8 @@ _LOGGED_HOME_FAILURES: set[tuple[str, str]] = set()
 _LOGGED_NO_HOME_ERRORS: set[str] = set()
 
 
-# The one error a caller gets when no private CLI home can be used. It names no server path (it can reach agent
-# step results and MCP answers); the paths, owners and modes refused are in the log.
+# The one error a provider call raises when no private CLI home can be used. It names no server path; the paths,
+# owners and modes refused are in the log, and a step that fails on it says only `Agent step failed`.
 PRIVATE_CLI_HOME_ERROR = (
     "provider CLIs have no usable private working directory (see the controller log for why); "
     "set CLI_HOME to a writable directory"

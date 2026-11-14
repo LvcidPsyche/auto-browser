@@ -1,8 +1,9 @@
 """What POST /sessions/{id}/agent/step and /agent/run answer for the errors a step can end in.
 
-A RuntimeError that left the orchestrator was answered 503 and written nowhere, whatever it was (A5). A step given an
-approval id no record answers to was a failed provider step, 502 with an ERROR and its traceback, where the action
-routes answer it 404 and write nothing (A10).
+A RuntimeError that left the orchestrator was answered 503 and written nowhere, whatever it was (A5). Given an approval
+id no record answers to, a step whose action needed the approval failed (502 from /agent/step, a run ending in that
+step from /agent/run, with an ERROR and its traceback) and one whose action needed none ran; both routes now answer
+such an id with the action routes' 404, before any step, and write nothing (A10).
 """
 
 from __future__ import annotations

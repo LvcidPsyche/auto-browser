@@ -326,8 +326,9 @@ class OpenAIAdapter(BaseProviderAdapter):
         """The directory one Codex call works in, under the CLI home and not the shared system temp dir, whose other
         users could plant config in a parent.
 
-        One error that names no path when it cannot be made: the OSError's text carries the path (and it would reach
-        a step's error and a job's record), so it goes to the log alone, as the failures of the CLI home itself do.
+        One error that names no path when it cannot be made, the one the CLI home's own failures raise. A step that
+        fails on it says only orchestrator.STEP_FAILED_ERROR: what this changes is the log, where the path and the
+        cause get a line of their own.
         """
         home = self.effective_cli_home()
         try:

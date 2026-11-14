@@ -815,9 +815,10 @@ class AgentJobQueue:
         """Audit something that has already taken effect (a cancellation, an interruption, a resume's own event): a
         failure is logged, never raised.
 
-        The rule for the queue's audit: the `agent_job_enqueued` audit in _enqueue admits a job, and a job whose
-        admission cannot be written does not run. An audit written after that describes what happened, and cannot
-        undo it.
+        The rule for the queue's audit: the `agent_job_enqueued` audit in _enqueue admits a job. One whose admission
+        cannot be written is withdrawn (a worker can have taken it off the queue meanwhile), and one a worker had
+        already run to its end by then is answered as run (_ran_to_its_end). An audit written after that describes
+        what happened, and cannot undo it.
         """
         try:
             await self._audit(event_type, status, record)

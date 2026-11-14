@@ -29,8 +29,10 @@ def create_agent_router(*, manager: Any, orchestrator: Any, job_queue: Any) -> A
 
     async def require_known_approval(approval_id: str | None) -> None:
         """Answer an approval id no record answers to (the store answers another operator's so) with the 404 the
-        action routes answer it with, before a step is made of it: left to the step, it was a failed provider step,
-        502, with an ERROR and its traceback in the log, for a caller's typo. A step that has no id has none to check."""
+        action routes answer such an id with, before any step. Left to the steps, one whose action needed the
+        approval failed: a 502 from /agent/step, a run ending in that step from /agent/run, and an ERROR with its
+        traceback in the log, for a caller's typo. One whose action needed none ran. A step that has no id has none
+        to check."""
         if approval_id is None:
             return
         with unknown_id_is_404(approval_id):

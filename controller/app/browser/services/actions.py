@@ -407,8 +407,9 @@ _NOT_A_ONE_TIME_CODE = re.compile(
 # field is known not to be secret (withhold_text_preview, give_back_text_preview).
 _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
 # How long a type's hold on the node its text goes to waits (_TypedField): by selector for the whole take (the field
-# found, which had focus a moment before, the hold made on it and its first read), and from then on for the page's
-# answer to each read and give-back. No read waits for a field once the text is in: a hold on a node the page took
+# found, which had focus a moment before, the hold made on it and its first read; a type that clears its field first
+# finds it earlier, under a bound of its own, and the take's two other calls share this one), and from then on for the
+# page's answer to each read and give-back. No read waits for a field once the text is in: a hold on a node the page took
 # away (the text's Enter submitted its form) fails at once, where a read by selector waited this long for each
 # attribute of a field that was gone.
 # And how long the read of a type's field for its approval takes at most, before the approval is asked for
@@ -633,7 +634,9 @@ class _TypedField:
 
     async def release(self) -> None:
         """Read the node once more and give the hold back, whatever ended the type: each step on its own, and a
-        cancellation raised once all have run (_each_on_its_own). A step that fails says secret.
+        cancellation raised once all have run (_each_on_its_own). The read, which gives the page's side back in the
+        same call, says secret when it fails or does not answer; by selector, a handle's disposal that fails or does
+        not answer leaves the read's answer as it was.
 
         What the controller holds is given back whatever the page does: by selector both handles are disposed of.
         The page's side goes with the release script, which takes the hold's listeners off the node and, by
