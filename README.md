@@ -68,7 +68,8 @@ docker compose up --build
 
 That is enough for local development with the default settings. On first start the controller
 generates an API token and saves it to `data/api-token` in this folder (git ignores it), and
-every API and MCP request must send it as `Authorization: Bearer <token>`. The dashboard asks
+every API and MCP request must send it as `Authorization: Bearer <token>`, apart from the health
+checks, `/version`, the dashboard page, share links and `/mesh/receive`. The dashboard asks
 for it once, the examples below read it with `$(cat data/api-token)`, and the MCP clients take
 it as shown under [MCP Clients](#mcp-clients). `API_ALLOW_TOKENLESS_LOOPBACK=true` runs the
 controller without a token, as it ran before, but then any container on the compose network
@@ -119,7 +120,7 @@ In the other order, the isolation overlay's default wins, and isolated sessions 
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/LvcidPsyche/auto-browser?quickstart=1)
 
-Codespaces provisions the stack automatically. The dashboard and noVNC tabs are usually ready in about 90 seconds.
+Codespaces provisions the stack automatically. The dashboard and noVNC tabs are ready once both images have built and started; the first start builds them from source.
 
 ## First Useful Demo
 
@@ -199,7 +200,7 @@ Cursor, VS Code, Claude Desktop through the stdio bridge (which reads the file n
 URL), and pairing Auto Browser with a web-search MCP server are covered in
 [`docs/mcp-clients.md`](./docs/mcp-clients.md).
 
-The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, `wait_for_selector`, `eval_js`, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:
+The default MCP tool profile is `curated`: the 20 tools (21 with a vision model) a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, `wait_for_selector`, `eval_js`, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:
 
 ```bash
 MCP_TOOL_PROFILE=full
