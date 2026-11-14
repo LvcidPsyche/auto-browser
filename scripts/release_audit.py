@@ -228,15 +228,21 @@ def _secret_lines(grep_output: str) -> list[str]:
     # At git's own line ends alone: str.splitlines() also ends a line at \v, \f, U+2028 and others a line can hold.
     for line in filter(None, grep_output.split("\n")):
         digests = [hashlib.sha256(match.group(0).encode()).hexdigest() for match in re.finditer(SECRET_PATTERN, line)]
-        if not digests or any(digest not in SECRET_EXAMPLE_SHA256 for digest in digests):
+        # git shows none of a binary file it found a match in: an example in the line is only in the file's name.
+        if _shown(line) is None or not digests or any(digest not in SECRET_EXAMPLE_SHA256 for digest in digests):
             found.append(line)
     return found
 
 
+def _shown(line: str) -> re.Match[str] | None:
+    """The path and line number of a match `git grep -n` shows; None for "Binary file ... matches", which shows none."""
+    return None if line.startswith("Binary file ") else re.match(r"(.+?):([0-9]+):", line)
+
+
 def _secret_place(line: str) -> str:
     """Where `git grep -n` found ``line``, as path:line, and never its text; a path that holds a token is withheld."""
-    place = re.match(r"(.+?):([0-9]+):", line)
-    if place is None:  # "Binary file ... matches", which names no line
+    place = _shown(line)
+    if place is None:
         return "a match git names no line of"
     path, number = place.groups()
     return f"{'(a path that holds one)' if re.search(SECRET_PATTERN, path) else path}:{number}"

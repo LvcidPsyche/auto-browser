@@ -328,6 +328,9 @@ def test_aws_documented_example_key_is_the_one_token_the_scan_lets_through() -> 
     assert release_audit._secret_lines(f"a.py:3:{example} {real}\n") == [f"a.py:3:{example} {real}"]
     # A line git found and Python's reading of the pattern does not is kept: the two engines must not disagree quietly.
     assert release_audit._secret_lines("a.py:4:nothing Python finds\n") == ["a.py:4:nothing Python finds"]
+    # git shows none of a binary file it found a match in, so the example in its path lets nothing through.
+    banner = f"Binary file assets/{example}.bin matches"
+    assert release_audit._secret_lines(banner + "\n") == [banner]
 
 
 def _scan(
@@ -448,10 +451,27 @@ def test_the_secret_scan_reads_what_git_prints_as_utf_8_whatever_the_code_page(
     assert (code, "Release audit passed." in out, example in out or example in err) == (0, True, False)
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_a_binary_match_fails_the_audit_whatever_its_path_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # git names a binary file's match by the file's path alone, which here holds the one token let through as itself.
+    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
+    (example,) = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    token = SECRET_SHAPES["a GitHub classic token"]
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {f"{example}.bin": b"\0key = " + token.encode()})
+
+    failed = "potential secret-shaped token found" in str(code)
+    printed = any(value in out or value in err for value in (token, example))
+    named = err.splitlines() == ["a match git names no line of: secret-shaped token (value withheld)"]
+    assert (failed, printed, named) == (True, False, True)
+
+
 def test_a_match_is_placed_by_its_path_and_line_alone() -> None:
     token = SECRET_SHAPES["a GitHub classic token"]
-    lines = ["a:b.py:4:x = 1", f"notes-{token}.txt:2:x", "Binary file a.bin matches"]
-    places = ["a:b.py:4", "(a path that holds one):2", "a match git names no line of"]
+    lines = ["a:b.py:4:x = 1", f"notes-{token}.txt:2:x", "Binary file a.bin matches", "Binary file b:3:c.bin matches"]
+    places = ["a:b.py:4", "(a path that holds one):2", "a match git names no line of", "a match git names no line of"]
     assert [release_audit._secret_place(line) for line in lines] == places
 
 
