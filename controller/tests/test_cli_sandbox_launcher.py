@@ -781,7 +781,9 @@ def test_beside_the_root_the_cli_reads_lists_and_runs_and_writes_nothing(layout)
     if LANDLOCK_ABI >= 3:
         refused.append(["truncate", str(note)])  # the third ABI's right: below it, Landlock cannot refuse it
 
-    report = _stand_in(layout, works + refused)
+    # /dev as the controller gives it to every CLI (SHARED_WRITABLE): the run's stdin is /dev/null, which Python opens
+    # to read and write, and without /dev to write that open is refused before the program starts.
+    report = _stand_in(layout, works + refused, "--rw", "/dev")
 
     assert report["results"] == ["content of note.txt", "ok", "ok", "ok", *["EACCES"] * len(refused)]
     assert note.read_text(encoding="utf-8") == "content of note.txt"
