@@ -771,9 +771,9 @@ home). Each has a leading `-`, so that one that is not there is passed over. An 
 too, refuses to start the bridge while one of those paths can still be read. To turn the option on, take the comment
 marks off the `PrivateUsers=yes`, `InaccessiblePaths=` and `ExecStartPre=` lines, change the paths with
 `WorkingDirectory=` if your checkout is elsewhere, add any other place you keep a secret, then reload and restart the
-unit. A path added to the `InaccessiblePaths=` lines, or taken out of them, goes into the check's list or out of it
-too. The data directory itself is not named, and must not be: the bridge's socket is `data/host-bridge/codex.sock`,
-and systemd cannot nest a writable path inside an inaccessible one.
+unit. The check's list is not made from the `InaccessiblePaths=` lines: add a path to it, or take one out of it, as
+you do there. The data directory itself is not named, and must not be: the bridge's socket is
+`data/host-bridge/codex.sock`, and systemd cannot nest a writable path inside an inaccessible one.
 
 In a user unit these settings work inside a user namespace (`PrivateUsers=`). No CI job runs the unit; it was run by
 hand in user units on GitHub-hosted runners on 2026-11-13. On Ubuntu 22.04 (systemd 249) the option closes the paths
@@ -1574,9 +1574,10 @@ the token as the link carries it, never by the token: the digest ties a view to 
   frame's image. Once per token while the controller runs: it remembers the 4,096 tokens viewed last, so after a
   restart, or once a token is forgotten, its next view is recorded again. A view whose event cannot be written is
   answered `500`; so is one whose audit fails after its event is written (the trim of the log that follows it,
-  say). A link revoked or expired while its first view's event is being written is refused, with that event
-  written. The event's operator is `anonymous` unless the viewer also proved a named credential
-  (`API_BEARER_TOKENS`), whatever an `X-Operator-Id` header on the request says.
+  say): that event is written again at the link's next view, so the log can hold it twice. A link revoked or expired
+  while its first view's event is being written is refused, with that event written. The event's operator is
+  `anonymous` unless the viewer also proved a named credential (`API_BEARER_TOKENS`), whatever an `X-Operator-Id`
+  header on the request says.
 
 ## Backups
 
