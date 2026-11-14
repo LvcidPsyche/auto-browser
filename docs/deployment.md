@@ -70,8 +70,8 @@ Every API and MCP request carries `Authorization: Bearer <token>`. `API_BEARER_T
 (or named `API_BEARER_TOKENS`) sets it. Without either, the controller uses the token in
 `API_TOKEN_FILE` (`/data/api-token`, which the shipped compose maps to `./data/api-token`
 on the host), and a loopback controller outside production generates one there on first
-start: 0600, and given to the data directory's owner when the controller runs as root
-(the shipped image does), so host clients can read it.
+start: 0600 and owned by the user the controller runs as (see "Who the controller runs as" below), or, when it
+runs as root (`CONTROLLER_RUN_AS=root`), given to the data directory's owner, so host clients can read it.
 An exposed or production controller never generates one; it refuses to start without a
 token, from either source.
 
@@ -1497,7 +1497,10 @@ lists or whose load the pre-request gate stops, a stored field of a type a run c
 that cannot be decrypted; `503` for a full job queue, for a browser that cannot be reached and, in one fixed text
 that says the key was accepted and to try again, for a `start_url` that did not load or a browser that was not ready
 for a session. The server log has the cause of that fixed `409` and of that `503`. A `400` is the request itself: its
-body, or a job id in the path that is blank or longer than 50 characters.
+body, or a job id in the path that is blank or longer than 50 characters. Two more answers start nothing and are
+`200`, so read `triggered` and not the status alone: `"reason": "previous_run_active"` while the job's last run
+is still queued or running, and `"reason": "owner_credential_removed"` when no named credential in
+`API_BEARER_TOKENS` names the job's owner any more, each beside `"triggered": false`.
 
 Each change writes one audit event (`cron_webhook_key_rotated`, `cron_webhook_key_revoked`) without the key or its hash, and
 another operator's job answers as one that does not exist. A key made before 1.18.0 is replaced by its hash on the
@@ -1506,7 +1509,7 @@ the plaintext key still in the file, and the failure is logged and retried at th
 
 A job's `last_status` reads `queued` from the fire that queued a run until that run is over, and then the agent
 job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`), or `unknown` when its record
-cannot say.
+cannot say; a fire refused for its owner's credential writes `refused: owner credential removed`.
 `completed` means the run ended without an error, not that it reached its goal: a run that stopped at its step limit,
 or to wait for an approval or a takeover, reads `completed` too, and the agent job's `result.status` says which.
 
