@@ -226,7 +226,8 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
     SHARED_WRITABLE and the temp directories of its environment, and the entries of CLI_SANDBOX_WRITABLE. Only those
     with no '..' part (_climbs) that _not_given passes, none twice and none that lies in another (whose rule covers
     it, and which a CLI could swap for a link). And why the CLI home is not among them, where it is refused or where,
-    once resolved, it lies in none of them ("" where it does)."""
+    once resolved, it lies in none of them ("" where it does). An entry refused, or that once resolved lies in none of
+    them, is one warning."""
     shared = [env.get("HOME", ""), *SHARED_WRITABLE, *(env.get(name, "") for name in TEMP_VARIABLES)]
     candidates = [
         ("home", cli_home),
@@ -238,23 +239,31 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
         "write (a CLI_HOME that is a link on purpose is to be set to its real path, one with a '..' part written "
         "without it, and one that is not a directory made one)"
     )
+    not_given = "CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write"
+    unheld = "resolves to %s, which no directory given to provider CLIs holds"
     given: list[tuple[str, str]] = []
     home_refused = ""
+    entries: list[tuple[str, str]] = []
     for kind, path in candidates:
         entry = _ways(path)
         why = "has a '..' part, read after any link before it" if _climbs(path) else _not_given(kind, *entry)
         if why and kind == "home":
             home_refused = refused % (path, why)
         elif why and kind == "setting":
-            _warn_once("CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write" % (path, why))
+            _warn_once(not_given % (path, why))
+        elif kind == "setting":
+            entries.append((path, entry[1]))
         if why or any(_lies_in(entry, other) for other in given):
             continue
         given = [other for other in given if not _lies_in(other, entry)] + [entry]
-    # A directory that holds the home as written takes its place (/tmp, for a home in /tmp), and covers where it is
-    # written and not where it leads: a link there, which a CLI may have made.
+    # A directory that holds an entry or the home as written takes its place (/tmp, for one in /tmp), and covers where
+    # it is written and not where it leads: a link there, which a CLI may have made.
+    for path, real in entries:
+        if not any(Path(real).is_relative_to(other) for _, other in given):
+            _warn_once(not_given % (path, unheld % real))
     home = _ways(cli_home)
     if not home_refused and not any(Path(home[1]).is_relative_to(real) for _, real in given):
-        home_refused = refused % (cli_home, "resolves to %s, which no directory given to provider CLIs holds" % home[1])
+        home_refused = refused % (cli_home, unheld % home[1])
     return given, home_refused
 
 

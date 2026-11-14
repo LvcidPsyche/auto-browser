@@ -855,7 +855,9 @@ All notable changes to auto-browser are documented here.
   that lies there, and what `CLI_SANDBOX_WRITABLE` names there to read and write, and the one screenshot the call
   names to read. Another session's screenshot, a listing of `/data` and every secret kept in its default place there
   are refused, to root too. No directory whose path has a `..` part is given: Linux reads the `..` after any link
-  before it, which a CLI may have made, and `CLI_SANDBOX_WRITABLE` refuses one when the settings are read. A CLI
+  before it, which a CLI may have made, and `CLI_SANDBOX_WRITABLE` refuses one when the settings are read. An entry
+  of it that is not a directory, or that once resolved lies in no directory given (one in `/tmp` linked elsewhere),
+  is passed over with a warning that refuses nothing. A CLI
   writes nowhere else because the controller is not sandboxed: what a CLI could leave in the controller's own home
   (a `usercustomize.py` in its Python user site, an ssh config) ran at the controller's next start, outside the
   sandbox. The ruleset handles only the rights the running kernel knows, and the launcher never execs without it: a

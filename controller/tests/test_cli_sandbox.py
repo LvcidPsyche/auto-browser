@@ -687,7 +687,8 @@ async def test_an_entry_in_the_cli_home_that_leads_to_a_secret_of_the_root_leave
     data, monkeypatch, caplog
 ) -> None:
     # The entry lies in the home as written, so it has no rule of its own: nothing a CLI is given reaches where it
-    # leads, and the controller reads AUTH_ROOT at its own path, not through the link.
+    # leads, and the controller reads AUTH_ROOT at its own path, not through the link. The entry is said not to be
+    # given, as one that is not a directory is, and no secret is said to be open.
     _probe_says(monkeypatch, None)
     (auth,) = _directories(data.root / "auth")
     _link_to_directory(data.home / "x", Path(auth))
@@ -698,7 +699,8 @@ async def test_an_entry_in_the_cli_home_that_leads_to_a_secret_of_the_root_leave
     lines, refused = await _warned_and_refused(data, caplog, changed)
 
     assert _given_to_write(command) == [str(data.home)]
-    assert (lines, refused) == ([], False)
+    assert [("not given it to write" in line, "AUTH_ROOT" in line) for line in lines] == [(True, False)]
+    assert not refused
 
 
 @pytest.mark.parametrize(
@@ -980,6 +982,35 @@ async def test_a_cli_home_in_tmp_that_is_a_link_elsewhere_is_said_to_be_refused_
     assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
     (line,) = _written(caplog)
     assert "CLI_HOME /tmp/cli-home resolves to /opt/cli-state" in line
+
+
+@pytest.mark.parametrize("linked", [True, False], ids=["a link out of /tmp", "a directory in /tmp"])
+async def test_an_entry_of_cli_sandbox_writable_in_tmp_that_is_a_link_elsewhere_is_said_not_to_be_given(
+    linux_links, caplog, linked: bool
+) -> None:
+    # /tmp's rule covers where the entry is written, and not where the link leads, which a CLI may swap: the entry is
+    # not given there, and that is said. Like an entry that is not a directory, it refuses nothing.
+    if linked:
+        linux_links.dirs.add("/opt/toolcache")
+        linux_links.links["/tmp/out"] = "/opt/toolcache"
+    else:
+        linux_links.dirs.add("/tmp/out")
+    env = {"HOME": "/data/cli-home"}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(CLI_SANDBOX_WRITABLE="/tmp/out"), "/data/cli-home", env)
+        required = await _launch_on_linux(
+            _linux_settings(CLI_SANDBOX_WRITABLE="/tmp/out", CLI_SANDBOX_REQUIRED="true"), "/data/cli-home", env
+        )
+
+    assert _given_to_write(command) == _given_to_write(required) == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
+    lines = _written(caplog)
+    if not linked:
+        assert lines == []
+        return
+    (line,) = lines
+    assert "CLI_SANDBOX_WRITABLE names /tmp/out, which resolves to /opt/toolcache" in line
+    assert "not given it to write" in line
 
 
 @pytest.mark.parametrize(

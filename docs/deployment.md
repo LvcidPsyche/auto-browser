@@ -542,7 +542,9 @@ its home, the temp directories and `/dev` (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR`
 the adapters pass on; a directory a tool of yours writes) has to be named in `CLI_SANDBOX_WRITABLE`, comma-separated
 absolute paths. `/data`, a directory that holds it and a path with a `..` part are refused when the settings are
 read. An entry under `/data` is yours to choose (a secret kept in it is reported, below), and one that is not a
-directory when a call is made is passed over with one warning. A CLI that cannot run under the ruleset (it needs
+directory when a call is made is passed over with one warning. So is one that, once resolved, lies in no directory
+given to the CLI: one in `/tmp` linked to `/opt/toolcache`, say, since `/tmp`'s rule covers where the entry is
+written and not where it leads, which a CLI may swap. A CLI that cannot run under the ruleset (it needs
 something under `/data` that cannot move into `CLI_HOME`, or it fails there) can be started without it:
 `CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI without the launcher, and a CLI then reads
 and writes what the controller's user can, as before 1.18.0.
