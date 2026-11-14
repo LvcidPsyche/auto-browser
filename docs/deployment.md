@@ -20,6 +20,7 @@ API_BEARER_TOKEN=<strong-random-secret>
 REQUIRE_OPERATOR_ID=true
 AUTH_STATE_ENCRYPTION_KEY=<44-char-fernet-key>
 REQUIRE_AUTH_STATE_ENCRYPTION=true
+SHARE_TOKEN_SECRET=<strong-random-secret>
 REQUEST_RATE_LIMIT_ENABLED=true
 METRICS_ENABLED=true
 CONTROLLER_ALLOWED_HOSTS=<controller-ingress-hosts>
@@ -1403,7 +1404,8 @@ If a workflow types real credentials into a page, scrubbing does not protect the
 ### Production boot fails closed
 
 - this is intentional in `APP_ENV=production`
-- check required env vars first: bearer token, operator ID enforcement, encryption key, rate limiting
+- check required env vars first: bearer token, operator ID enforcement, encryption key, `SHARE_TOKEN_SECRET`,
+  `CONTROLLER_ALLOWED_HOSTS`, `ALLOWED_HOSTS` (not empty, not `*`), rate limiting
 - if using `*_AUTH_MODE=cli` or `host_bridge`, verify the expected auth files or socket actually exist
 
 ### Actions fail after redirects or external handoffs
