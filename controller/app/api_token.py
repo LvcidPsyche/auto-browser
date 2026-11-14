@@ -490,10 +490,11 @@ def _warn_about_an_open_link_target(path: Path, name: str) -> None:
 def _match_parent_owner(path: Path) -> None:
     """Give a root-written token file to whoever owns its directory.
 
-    The controller image runs as root and ./data belongs to the user who cloned
-    the repo, so without this the host user, the stdio bridge and CI's runner
-    could not read a 0600 root-owned file. Docker Desktop, rootless Docker and
-    userns-remap map ownership their own way (not verified per platform).
+    The controller image runs as root only with CONTROLLER_RUN_AS=root, and ./data
+    belongs to the user who cloned the repo, so without this the host user, the
+    stdio bridge and CI's runner could not read a 0600 root-owned file. Docker
+    Desktop, rootless Docker and userns-remap map ownership their own way (not
+    verified per platform).
     """
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None or geteuid() != 0:

@@ -486,8 +486,8 @@ class Settings(BaseSettings):
     # next to every secret the controller holds, and the shipped image has
     # neither a browser nor a display for it anyway.
     shadow_browse_enabled: bool = Field(False, alias="SHADOW_BROWSE_ENABLED")
-    # Post-session skill review by an LLM. Off unless asked for: it calls a paid
-    # model on every session close.
+    # Post-session skill review by an LLM. Off unless asked for; nothing calls
+    # the model yet.
     curator_enabled: bool = Field(False, alias="CURATOR_ENABLED")
     curator_provider: str = Field("claude", alias="CURATOR_PROVIDER")
     curator_model: str | None = Field(None, alias="CURATOR_MODEL")
