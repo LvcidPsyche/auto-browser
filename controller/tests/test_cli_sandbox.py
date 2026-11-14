@@ -630,6 +630,76 @@ async def test_a_directory_written_through_a_link_into_a_directory_already_given
     assert _given_to_write(command) == ([temp] if home != data.home else [str(data.home), temp])
 
 
+async def _warned_and_refused(data, caplog, changed: dict[str, str], **launch) -> tuple[list[str], bool]:
+    """The warnings of a call with these settings, and whether CLI_SANDBOX_REQUIRED=true refuses it."""
+    with caplog.at_level(logging.WARNING):
+        await _launch(_settings(data, **changed), data, **launch)
+    try:
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data, **launch)
+    except cli_sandbox.SandboxRequired:
+        return _written(caplog), True
+    return _written(caplog), False
+
+
+@pytest.mark.parametrize("temp", [False, True], ids=["no temp directory", "a temp directory holds the home's target"])
+async def test_a_secret_written_through_a_cli_home_a_temp_directory_takes_the_place_of_is_open(
+    data, monkeypatch, caplog, temp: bool
+) -> None:
+    # The home is a link into a temp directory, which then takes its place among the directories given: the secret,
+    # written through the home's link, leads into that temp directory, where a CLI can swap what lies past the link.
+    _probe_says(monkeypatch, None)
+    (tmp,) = _directories(data.outside / "tmp")
+    real_home = Path(_directories(Path(tmp) / "cli-home")[0])
+    home = data.outside / "cli-home"
+    _link_to_directory(home, real_home)
+    (data.root / "auth").mkdir()
+    _link_to_directory(real_home / "auth", data.root / "auth")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (tmp,) if temp else ())
+    changed = {"CLI_HOME": str(home), "AUTH_ROOT": str(home / "auth")}
+
+    lines, refused = await _warned_and_refused(data, caplog, changed, home=home)
+
+    assert len(lines) == 1 and "AUTH_ROOT" in lines[0] and refused
+
+
+@pytest.mark.parametrize("temp", [False, True], ids=["no temp directory", "a temp directory holds the entry's target"])
+async def test_a_secret_written_through_an_entry_that_lies_in_a_temp_directory_once_resolved_is_open(
+    data, monkeypatch, caplog, temp: bool
+) -> None:
+    # The entry of CLI_SANDBOX_WRITABLE is a link into a temp directory, and gets no rule of its own beside it.
+    _probe_says(monkeypatch, None)
+    (tmp,) = _directories(data.outside / "tmp")
+    real_state = Path(_directories(Path(tmp) / "state")[0])
+    state = data.outside / "state"
+    _link_to_directory(state, real_state)
+    (data.root / "witness").mkdir()
+    _link_to_directory(real_state / "witness", data.root / "witness")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (tmp,) if temp else ())
+    changed = {"CLI_SANDBOX_WRITABLE": str(state), "WITNESS_ROOT": str(state / "witness")}
+
+    lines, refused = await _warned_and_refused(data, caplog, changed)
+
+    assert len(lines) == 1 and "WITNESS_ROOT" in lines[0] and refused
+
+
+async def test_an_entry_in_the_cli_home_that_leads_to_a_secret_of_the_root_leaves_that_secret_closed(
+    data, monkeypatch, caplog
+) -> None:
+    # The entry lies in the home as written, so it has no rule of its own: nothing a CLI is given reaches where it
+    # leads, and the controller reads AUTH_ROOT at its own path, not through the link.
+    _probe_says(monkeypatch, None)
+    (auth,) = _directories(data.root / "auth")
+    _link_to_directory(data.home / "x", Path(auth))
+    changed = {"CLI_SANDBOX_WRITABLE": str(data.home / "x")}  # AUTH_ROOT stays data/auth
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, **changed), data)
+    lines, refused = await _warned_and_refused(data, caplog, changed)
+
+    assert _given_to_write(command) == [str(data.home)]
+    assert (lines, refused) == ([], False)
+
+
 @pytest.mark.parametrize(
     "entry", ["relative/dir", "/", "/data", "/data/", "/data/../", "//", "/./data"], ids=lambda entry: repr(entry)
 )
