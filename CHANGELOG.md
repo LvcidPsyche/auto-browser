@@ -900,10 +900,10 @@ All notable changes to auto-browser are documented here.
   after its event is written (the trim of the log that follows it, say). The first time a valid token is shown
   something of its session (the share page, a frame or a frame's image) `share_viewed` is written, once per token
   while the controller runs: it remembers the 4,096 tokens viewed last, so after a restart, or once a token is
-  forgotten, its next view is recorded again. A view whose event cannot be written answers `500`. Both events name
-  the token by `token_sha256`, its SHA-256, and never hold it. A `share_viewed` event is the `anonymous` operator's
-  unless the viewer also proved a named credential, whatever its `X-Operator-Id` header says. "Share links" in
-  docs/deployment.md describes both. (AUTH-23)
+  forgotten, its next view is recorded again. A view whose event cannot be written answers `500`, as does one whose
+  audit fails after its event is written. Both events name the token by `token_sha256`, its SHA-256, and never hold
+  it. A `share_viewed` event is the `anonymous` operator's unless the viewer also proved a named credential,
+  whatever its `X-Operator-Id` header says. "Share links" in docs/deployment.md describes both. (AUTH-23)
 - **A share link can be revoked.** A link worked until it expired, up to 24 hours, with no way to end it short of
   changing `SHARE_TOKEN_SECRET`. `DELETE /sessions/{id}/share`, and `browser.revoke_session_share` over MCP (in the
   `session_admin` pack, governed as `destructive`), now end every link of a session minted so far: each answers `403`

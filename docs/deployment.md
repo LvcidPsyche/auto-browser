@@ -1570,8 +1570,9 @@ the token as the link carries it, never by the token: the digest ties a view to 
 - `share_viewed` is written the first time a valid token is shown something of its session: the page, a frame or a
   frame's image. Once per token while the controller runs: it remembers the 4,096 tokens viewed last, so after a
   restart, or once a token is forgotten, its next view is recorded again. A view whose event cannot be written is
-  answered `500`. A link revoked or expired while its first view's event is being written is refused, with that
-  event written. The event's operator is `anonymous` unless the viewer also proved a named credential
+  answered `500`; so is one whose audit fails after its event is written (the trim of the log that follows it,
+  say). A link revoked or expired while its first view's event is being written is refused, with that event
+  written. The event's operator is `anonymous` unless the viewer also proved a named credential
   (`API_BEARER_TOKENS`), whatever an `X-Operator-Id` header on the request says.
 
 ## Backups
