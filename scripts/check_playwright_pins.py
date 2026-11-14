@@ -8,7 +8,12 @@ the matched-pair invariant machine-enforced instead of tribal knowledge: any
 single-side bump (e.g. a Dependabot PR touching only one) fails here until the
 other side is bumped to match.
 
-Exit 0 when the pins match, 1 (with a diff) when they don't.
+What is installed is read too: controller/constraints.txt, which the image and
+the host tests install under, and browser-node/package-lock.json, which
+`npm ci` installs from (playwright and the playwright-core it runs). And
+package.json must name an exact version: a range lets npm take another one.
+
+Exit 0 when the pins match, 1 (listing every pin) when they don't.
 """
 
 from __future__ import annotations
@@ -20,21 +25,22 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS = REPO_ROOT / "controller" / "requirements.txt"
+CONSTRAINTS = REPO_ROOT / "controller" / "constraints.txt"
 PACKAGE_JSON = REPO_ROOT / "browser-node" / "package.json"
+PACKAGE_LOCK = REPO_ROOT / "browser-node" / "package-lock.json"
 
-# Strip a leading npm range operator (^, ~, >=, <=, >, <, =) so "^1.61.0" and
-# "1.61.0" compare equal. The pins are expected to be exact, but tolerate ranges.
-_RANGE_PREFIX = re.compile(r"^[\^~=><]+")
+# An exact npm version (a pre-release suffix allowed): no range operator, wildcard or space.
+_EXACT_NPM_VERSION = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 
 
-def _controller_pin() -> str:
-    for raw in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+def _pip_pin(path: Path) -> str:
+    for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         # Matches "playwright==1.61.0" and "playwright[extra]==1.61.0".
         match = re.match(r"^playwright(?:\[[^\]]*\])?==([^\s;]+)", line)
         if match:
             return match.group(1)
-    raise SystemExit(f"could not find a pinned 'playwright==' in {REQUIREMENTS}")
+    raise SystemExit(f"could not find a pinned 'playwright==' in {path}")
 
 
 def _browser_node_pin() -> str:
@@ -42,23 +48,48 @@ def _browser_node_pin() -> str:
     for section in ("dependencies", "devDependencies", "optionalDependencies"):
         version = data.get(section, {}).get("playwright")
         if version:
-            return _RANGE_PREFIX.sub("", version.strip())
+            return version.strip()
     raise SystemExit(f"could not find a 'playwright' dependency in {PACKAGE_JSON}")
 
 
+def _lock_pins() -> list[tuple[str, str]]:
+    packages = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8")).get("packages", {})
+    found = []
+    for name in ("playwright", "playwright-core"):
+        version = packages.get(f"node_modules/{name}", {}).get("version")
+        if not version:
+            raise SystemExit(f"could not find node_modules/{name} in {PACKAGE_LOCK}")
+        found.append((f"browser-node/package-lock.json ({name})", version))
+    return found
+
+
 def main() -> int:
-    controller = _controller_pin()
     browser_node = _browser_node_pin()
-    if controller == browser_node:
-        print(f"OK: playwright pinned to {controller} in both controller and browser-node.")
+    if not _EXACT_NPM_VERSION.match(browser_node):
+        print(
+            f"ERROR: browser-node/package.json pins playwright as {browser_node!r}, a range, not an exact version.\n"
+            "npm could install another version than the controller's. Pin the exact version both sides use.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pins = [
+        ("controller/requirements.txt", _pip_pin(REQUIREMENTS)),
+        ("controller/constraints.txt", _pip_pin(CONSTRAINTS)),
+        ("browser-node/package.json", browser_node),
+        *_lock_pins(),
+    ]
+    if len({version for _, version in pins}) == 1:
+        print(f"OK: playwright pinned to {browser_node} in all {len(pins)} places, controller and browser-node.")
         return 0
 
+    print("ERROR: Playwright version mismatch between controller and browser-node.", file=sys.stderr)
+    for location, version in pins:
+        print(f"  {location:44} {version}", file=sys.stderr)
     print(
-        "ERROR: Playwright version mismatch between controller and browser-node.\n"
-        f"  controller/requirements.txt : playwright=={controller}\n"
-        f"  browser-node/package.json   : playwright  {browser_node}\n"
         "\nThey must move as a matched pair (they share the CDP protocol). Bump both\n"
-        "to the same version. See scripts/check_playwright_pins.py for why.",
+        "to the same version, regenerate controller/constraints.txt and run npm install\n"
+        "in browser-node. See scripts/check_playwright_pins.py for why.",
         file=sys.stderr,
     )
     return 1

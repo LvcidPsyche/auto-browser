@@ -1725,6 +1725,12 @@ All notable changes to auto-browser are documented here.
   `scripts/check_version_parity.py` did not read it, so a hand edit or a missed bump could leave the metapackage
   requiring an older client unnoticed. It is now the tenth location: one that differs fails the check, which names the
   file with the floor and the version the others agree on. (HARN-35)
+- **The Playwright pin check reads what is installed and refuses a range.** `scripts/check_playwright_pins.py`
+  compared `controller/requirements.txt` with `browser-node/package.json` only, and stripped a range operator there,
+  so `^1.64.1` passed while npm could take another 1.x. It now also reads `controller/constraints.txt`, which the
+  image installs under, and the `playwright` and `playwright-core` versions in `browser-node/package-lock.json`, which
+  `npm ci` installs, and fails unless all five agree; and it fails when `package.json` names anything but an exact
+  version. (HARN-36)
 
 ### Changed
 
