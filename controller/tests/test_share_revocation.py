@@ -405,6 +405,39 @@ class RevocationStoreTests(_Stores):
         new = unreadable.create_token(SESSION_ID)["token"]
         self.assertEqual([unreadable.token_info(token)["valid"] for token in (old, kept, new)], [False, True, True])
 
+    def restart_that_could_not_read_the_store(self, clock: _Clock) -> SessionShareManager:
+        """A restart, with the host's clock stepped back, that finds a directory where the store was; the store is a
+        file again before the next mint or revoke."""
+        stored = self.path.read_text(encoding="utf-8")
+        clock.now -= 600
+        self.path.unlink()
+        self.path.mkdir()
+        with self.assertLogs(LOGGER, level="ERROR"):
+            restarted = self.manager(self.path)
+        self.path.rmdir()
+        self.path.write_text(stored, encoding="utf-8")
+        return restarted
+
+    def test_a_revoke_that_reads_the_store_again_ends_a_link_minted_before_the_restart(self) -> None:
+        # The stamp is later than the stored ones only because the store is read before it is taken.
+        clock = self.clock()
+        token = self.manager(self.path).create_token(SESSION_ID)["token"]
+        restarted = self.restart_that_could_not_read_the_store(clock)
+
+        revoked_before = restarted.revoke(SESSION_ID)
+
+        self.assertGreater(revoked_before, _payload(token)["iat"])
+        self.assertFalse(restarted.token_info(token)["valid"])
+
+    def test_a_mint_that_reads_the_store_again_hands_out_a_link_no_stored_revocation_ends(self) -> None:
+        clock = self.clock()
+        self.manager(self.path).revoke(SESSION_ID)
+        restarted = self.restart_that_could_not_read_the_store(clock)
+
+        token = restarted.create_token(SESSION_ID)["token"]
+
+        self.assertTrue(restarted.token_info(token)["valid"])
+
     def test_a_corrupt_store_ends_every_link_minted_before_it_was_found(self) -> None:
         corrupt = (
             b"not json",
