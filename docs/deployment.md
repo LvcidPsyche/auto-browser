@@ -564,13 +564,14 @@ setting until Landlock is there):
   call waits 30 seconds before it starts, and then runs without the launcher.
 - **`CLI_HOME` is `/data` or a directory that holds it,** as written, with no `..` part. The CLI starts without the
   launcher.
-- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or is not a directory, or has
-  a `..` part:** a link, which a CLI that may write where the home is written can have made (a home in `/tmp`,
-  swapped for a link to `/data/approvals` or to `/`), or a `..`, which Linux reads after any link before it
-  (`/data/x/..` is not `/data` where `x` is a link). The CLI starts under the launcher without it, and cannot write
-  its home. The warning names `CLI_HOME`, its path and where it resolves (or that it is not a directory, or has a
-  `..` part); a `CLI_HOME` linked into `/data` on purpose is to be set to its real path, and one with a `..` part
-  written without it.
+- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or to a place no directory
+  given to the CLI holds, or is not a directory, or has a `..` part:** a link, which a CLI that may write where the
+  home is written can have made (a home in `/tmp`, swapped for a link to `/data/approvals`, to `/` or to any
+  directory outside `/tmp`: `/tmp`'s rule covers where the home is written, not where it leads), or a `..`, which
+  Linux reads after any link before it (`/data/x/..` is not `/data` where `x` is a link). The CLI starts under the
+  launcher without it, and cannot write its home. The warning names `CLI_HOME`, its path and where it resolves (or
+  that it is not a directory, or has a `..` part); a `CLI_HOME` that is a link on purpose is to be set to its real
+  path, and one with a `..` part written without it.
 - **A CLI may write the controller's own home, or a directory in it, or a place the controller reads at its start.**
   The home is judged as `HOME` names it and as the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank
   (the CLI's `HOME` is then the controller's), or a directory a CLI may write (`CLI_HOME`, an entry of

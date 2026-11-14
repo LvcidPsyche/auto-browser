@@ -19,10 +19,10 @@ Each of these is reported:
   the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
 - the CLI home is PROTECTED_ROOT or holds it, as written with no '..' part: a rule on that home would open the root,
   and the launcher refuses it. The CLI is started without the launcher.
-- the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it (a link, which a CLI that may write
-  where the home is written may have made), or is not a directory, or has a '..' part (Linux reads it after the
-  link before it, which the text cannot say). The CLI is started under the launcher without it, and cannot write
-  its home: closed, not open.
+- the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it, or to a place no directory given holds
+  (a link, which a CLI that may write where the home is written may have made), or is not a directory, or has a
+  '..' part (Linux reads it after the link before it, which the text cannot say). The CLI is started under the
+  launcher without it, and cannot write its home: closed, not open.
 - the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
   write, but for a CLI home in it clear of what the controller reads at its start; or what it reads there (each
   home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere) is, holds or lies in such a
@@ -223,30 +223,36 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
     """The directories a CLI under the launcher may write, each as written and once resolved: its home, its HOME,
     SHARED_WRITABLE and the temp directories of its environment, and the entries of CLI_SANDBOX_WRITABLE. Only those
     with no '..' part (_climbs) that _not_given passes, none twice and none that lies in another (whose rule covers
-    it, and which a CLI could swap for a link). And why the CLI home is not among them, where it is refused ("" where
-    it is not)."""
+    it, and which a CLI could swap for a link). And why the CLI home is not among them, where it is refused or where,
+    once resolved, it lies in none of them ("" where it does)."""
     shared = [env.get("HOME", ""), *SHARED_WRITABLE, *(env.get(name, "") for name in TEMP_VARIABLES)]
     candidates = [
         ("home", cli_home),
         *(("shared", path) for path in shared if os.path.isabs(path)),
         *(("setting", path) for path in settings.cli_sandbox_writable_paths),
     ]
+    refused = (
+        "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox without a home they can "
+        "write (a CLI_HOME that is a link on purpose is to be set to its real path, one with a '..' part written "
+        "without it, and one that is not a directory made one)"
+    )
     given: list[tuple[str, str]] = []
     home_refused = ""
     for kind, path in candidates:
         entry = _ways(path)
         why = "has a '..' part, read after any link before it" if _climbs(path) else _not_given(kind, *entry)
         if why and kind == "home":
-            home_refused = (
-                "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox without a home "
-                "they can write (a CLI_HOME linked into %s on purpose is to be set to its real path, one with a '..' "
-                "part written without it, and one that is not a directory made one)"
-            ) % (path, why, PROTECTED_ROOT)
+            home_refused = refused % (path, why)
         elif why and kind == "setting":
             _warn_once("CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write" % (path, why))
         if why or any(_lies_in(entry, other) for other in given):
             continue
         given = [other for other in given if not _lies_in(other, entry)] + [entry]
+    # A directory that holds the home as written takes its place (/tmp, for a home in /tmp), and covers where it is
+    # written and not where it leads: a link there, which a CLI may have made.
+    home = _ways(cli_home)
+    if not home_refused and not any(Path(home[1]).is_relative_to(real) for _, real in given):
+        home_refused = refused % (cli_home, "resolves to %s, which no directory given to provider CLIs holds" % home[1])
     return given, home_refused
 
 

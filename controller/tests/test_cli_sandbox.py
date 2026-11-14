@@ -701,7 +701,9 @@ def test_a_cli_home_written_with_two_slashes_in_tmp_and_swapped_for_a_link_is_tm
 
     given, refused = cli_sandbox._writable(_linux_settings(), "//tmp/cli-home", {})
 
-    assert (given, refused) == ([("/tmp", "/tmp")], "")
+    # The CLI writes /tmp, and not where its home leads: it runs without a home it can write, and that is said.
+    assert given == [("/tmp", "/tmp")]
+    assert "CLI_HOME //tmp/cli-home resolves to /home/controller/.local/lib/python3.12/site-packages" in refused
 
 
 def test_a_cli_home_written_with_two_slashes_in_the_root_is_given(linux_paths) -> None:
@@ -859,6 +861,46 @@ async def test_a_cli_home_with_no_dots_in_the_root_is_given(linux_links, caplog)
 
     assert _given_to_write(command) == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
     assert _written(caplog) == []
+
+
+async def test_a_cli_home_in_tmp_that_is_a_link_elsewhere_is_said_to_be_refused_and_required_refuses(
+    linux_links, caplog
+) -> None:
+    # /tmp's rule covers the home's place, and not where the link leads, which a CLI may swap: the CLI runs with no
+    # home it can write, as where the home resolves into the root.
+    linux_links.dirs.add("/opt/cli-state")
+    linux_links.links["/tmp/cli-home"] = "/opt/cli-state"
+    env = {"HOME": "/tmp/cli-home"}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(), "/tmp/cli-home", env)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), "/tmp/cli-home", env)
+
+    assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
+    (line,) = _written(caplog)
+    assert "CLI_HOME /tmp/cli-home resolves to /opt/cli-state" in line
+
+
+@pytest.mark.parametrize(
+    "home, home_variable",
+    [
+        ("/tmp/cli-home", "/tmp/cli-home"),
+        ("/data/cli-home", "/data/cli-home"),
+        ("/home/botuser", "/home/botuser"),
+        ("/home/controller/.cache/auto-browser/cli-home", "/home/controller"),
+    ],
+    ids=["a directory in /tmp", "the image's", "a host user's home", "the private one of a blank CLI_HOME"],
+)
+def test_a_cli_home_that_a_directory_given_holds_once_resolved_is_not_refused(
+    linux_links, home: str, home_variable: str
+) -> None:
+    linux_links.dirs |= {home, home_variable}
+
+    given, refused = cli_sandbox._writable(_linux_settings(), home, {"HOME": home_variable})
+
+    assert refused == ""
+    assert any(PurePosixPath(home).is_relative_to(real) for _, real in given)
 
 
 @pytest.mark.parametrize(
