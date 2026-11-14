@@ -289,7 +289,9 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
     own = _ways(cli_home)
     found = (
         "provider CLIs may write %s under the Landlock sandbox, %s, the controller, which is not under the sandbox, "
-        "can run at its next start (a Python user site, an ssh config). Keep CLI_HOME and CLI_SANDBOX_WRITABLE out of it"
+        "may run at its next start, where it is a Python user site or an ssh config. Keep the controller's home, and "
+        "what it reads at its start, out of what CLIs may write: CLI_HOME, CLI_SANDBOX_WRITABLE, the CLI's TMPDIR, "
+        "TEMP and TMP, its HOME where CLI_HOME is blank, and the shared temp directories"
     )
     for entry, home in ((entry, home) for entry in given for home in homes):
         if _lies_in(home, entry):
@@ -350,8 +352,8 @@ async def launch_command(
     the directories of _writable to read and write and ``image_path``, where the call has one, to read; ``command``
     itself elsewhere.
 
-    ``env`` is the CLI's, which the probe is started with too. SandboxRequired where a secret would stay open and
-    CLI_SANDBOX_REQUIRED is set. Where several conditions hold, the first is named.
+    ``env`` is the CLI's, which the probe is started with too. SandboxRequired where one of the module's conditions
+    holds and CLI_SANDBOX_REQUIRED is set. Where several conditions hold, the first is named.
     """
     if not settings.cli_sandbox_enabled:
         missing = "CLI_SANDBOX_ENABLED is false"
@@ -369,8 +371,8 @@ async def launch_command(
         given, found = _writable(settings, cli_home, env)
         found = found or _controllers_home_open(given, cli_home)
         if not found and (names := _open_settings(settings, given)):
-            found = "the Landlock sandbox of provider CLIs does not close what these settings name, which lies "
-            found += "outside %s or in a directory the CLIs may write: %s" % (PROTECTED_ROOT, ", ".join(names))
+            found = "the Landlock sandbox of provider CLIs does not close what these settings name, which lies outside "
+            found += "%s, in a directory the CLIs may write, or holds one: %s" % (PROTECTED_ROOT, ", ".join(names))
     if found:
         _report(settings.cli_sandbox_required, found)
         if settings.cli_sandbox_required:

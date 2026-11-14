@@ -872,12 +872,14 @@ All notable changes to auto-browser are documented here.
   secret's setting names a place outside `/data`, in a directory a CLI may write or holding one, it runs under the
   sandbox with that left open. With `CLI_SANDBOX_REQUIRED=true` it runs under none of them (see the upgrade note). A
   launcher that fails at a real start after that fails the call, and the CLI is never started without it. The
-  controller takes Codex's `decision.json` only as a regular file of at most 1 MiB and not through a link at its own
-  name, and makes the call's schema file rather than write through what is at its name, so a CLI cannot have the
-  controller read a closed file for it, or write one. The sandbox does not stop `stat` and other metadata calls on a
-  file under `/data`, an inotify watch there, one CLI call reaching another's files in `CLI_HOME`, signals and TCP
-  connections to the controller, or a connection to a Unix socket under `/data`, the Codex host bridge's among them:
-  docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs outside it. (N1)
+  controller takes Codex's `decision.json` only as a regular file of at most 1 MiB at its own name (a link there, a
+  FIFO or a larger file fails the call), and makes the call's schema file rather than write through what is at its
+  name; a link put in place of the call's directory is followed, so the controller can take a closed file named
+  `decision.json` there for the call's decision, or make its schema file in a closed directory. The sandbox does not
+  stop `stat` and other metadata calls on a file under `/data`, an inotify watch there, one CLI call reaching
+  another's files in `CLI_HOME`, signals and TCP connections to the controller, or a connection to a Unix socket
+  under `/data`, the Codex host bridge's among them: docs/deployment.md lists these and the rest. The Codex host
+  bridge's Codex runs outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
   can: the checkout's `.env`, `data/api-token`, `data/takeover-token`, the keys under `data/` and the sign-ins of the

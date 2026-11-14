@@ -576,6 +576,7 @@ async def test_a_directory_a_cli_may_write_inside_a_secrets_directory_leaves_tha
     assert _given_to_write(command) == [str(data.home), changed["CLI_SANDBOX_WRITABLE"]]
     (line,) = _written(caplog)
     assert "AUTH_ROOT" in line and "WITNESS_ROOT" not in line
+    assert "which lies outside %s, in a directory the CLIs may write, or holds one" % data.root in line
 
 
 async def test_of_two_directories_one_inside_the_other_only_the_outer_is_given(data, monkeypatch) -> None:
@@ -1078,6 +1079,10 @@ async def test_where_a_cli_may_write_the_controllers_home_one_warning_says_so_an
     assert commands[0] == commands[1] and commands[0][3] == cli_sandbox.LAUNCHER, "it runs, under the launcher"
     (line,) = _written(caplog)
     assert str(data.controller_home) in line and "next start" in line
+    # What it may run is what Python or ssh reads there, and the line says what to keep apart, the blank CLI_HOME's
+    # HOME and a TMPDIR among it.
+    assert "may run at its next start, where it is a Python user site or an ssh config" in line
+    assert "TMPDIR" in line and "its HOME where CLI_HOME is blank" in line
     (refusal,) = _written(caplog, logging.ERROR)
     assert str(data.controller_home) in refusal
 

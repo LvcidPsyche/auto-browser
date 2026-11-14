@@ -581,7 +581,7 @@ setting until Landlock is there):
   is (a `PYTHONUSERBASE` in `/tmp`, say). A `CLI_HOME` in the controller's home is the CLI's own, as is the private
   directory there that a host run falls back to when its `CLI_HOME` cannot be made, and is not reported unless it is,
   holds or lies in one of those places. The CLI starts under the launcher, and what it leaves there the controller
-  can run at its next start.
+  may run at its next start, where it is a Python user site or an ssh config.
 - **A secret is kept outside `/data`, in a directory a CLI may write, or is a directory that holds one.**
   `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`, `WITNESS_ROOT`, `MESH_IDENTITY_DIR`,
   `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so

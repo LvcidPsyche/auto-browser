@@ -24,8 +24,8 @@ RestartSec=2
 #   runs this unit.
 # - The ExecStartPre= line checks for that: it refuses to start the bridge while a path the option names can still be
 #   read. A refused start is tried again every RestartSec=, and each try writes the line's message to the journal
-#   (journalctl --user -u codex-host-bridge). A path taken out of the InaccessiblePaths= lines comes out of the
-#   check's list too.
+#   (journalctl --user -u codex-host-bridge). The check's list is not made from the InaccessiblePaths= lines: add a
+#   path to it, or take one out of it, as you do there.
 # - The option hides what is at a named path when the unit starts, and nothing that comes there later: a path made
 #   after the start (the controller's first start writes data/api-token), a file replaced by a rename (the controller
 #   writes data/proxy-personas.json that way, and most editors save .env that way) or removed and made again is
