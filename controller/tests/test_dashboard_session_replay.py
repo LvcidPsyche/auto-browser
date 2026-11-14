@@ -215,11 +215,19 @@ NAVIGATING_PAGE = f"""<!DOCTYPE html>
 REFRESH_PAGE = f"""<!DOCTYPE html>
 <html><head><title>Replay</title><meta http-equiv="refresh" content="1;url={ELSEWHERE_ORIGIN}/refreshed"></head>
 <body><h1>Session Replay</h1></body></html>"""
+# The copy is parsed with scripting off and the window parses it with scripting on: in the copy the refresh is the
+# text of a <style>, and in the window a tag after a <noscript> that ends at its first </noscript>.
+NOSCRIPT_REFRESH_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title>
+<noscript><style></noscript><meta http-equiv="refresh" content="1;url={ELSEWHERE_ORIGIN}/refreshed"></style></noscript>
+</head>
+<body><h1>Session Replay</h1></body></html>"""
 # Each way a page could move the copy's window elsewhere with no script: its markup, and what is clicked.
 NAVIGATIONS = {
     "a form": (NAVIGATING_PAGE, "#submit"),
     "a base": (NAVIGATING_PAGE, "#relative"),
     "a refresh": (REFRESH_PAGE, None),
+    "a refresh behind a noscript": (NOSCRIPT_REFRESH_PAGE, None),
 }
 # Longer than the refresh's second: a window that is moving has moved by then.
 NAVIGATION_WAIT_MS = 2500

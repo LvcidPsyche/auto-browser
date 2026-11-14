@@ -534,9 +534,11 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
 // navigation nor an <img src> can send. "Open replay" reads the page and each screenshot through apiResponse() and
 // opens a copy that holds them as data: URLs. The copy opens on this origin, so it gets a cleared window and a
 // policy under which it runs no script, loads nothing, submits no form and takes no <base>. The page's own
-// http-equiv tags are left out of it: a refresh is one, and no policy stops it. The route's page has no script and
-// escapes what it shows, and for none of these does the copy rest on that. It does for what the page shows: a link
-// in it, for one, goes where it points when it is clicked, as the page's link to the session's URL is meant to.
+// http-equiv tags are left out of it: a refresh is one, and no policy stops it. So are its <noscript> elements:
+// DOMParser reads the page with scripting off and the window reads the copy with it on, so what one holds as text
+// in a <noscript> the other can take for a tag, a refresh among them. The route's page has no script and escapes
+// what it shows, and for none of these does the copy rest on that. It does for what the page shows: a link in it,
+// for one, goes where it points when it is clicked, as the page's link to the session's URL is meant to.
 const REPLAY_COPY_POLICY =
   "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
 const asDataUrl = (blob) => new Promise((resolve, reject) => {
@@ -562,7 +564,7 @@ async function sessionReplayCopy(sessionId) {
       img.alt = `screenshot unavailable: ${err.message}`;
     }
   }));
-  copy.querySelectorAll('meta[http-equiv]').forEach((tag) => tag.remove());
+  copy.querySelectorAll('meta[http-equiv], noscript').forEach((tag) => tag.remove());
   const policy = copy.createElement('meta');
   policy.httpEquiv = 'Content-Security-Policy';
   policy.content = REPLAY_COPY_POLICY;

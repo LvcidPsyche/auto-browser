@@ -1685,8 +1685,9 @@ All notable changes to auto-browser are documented here.
   the Sessions table now has an "Open replay" button. The dashboard reads the page and each screenshot with the
   token and opens a copy that holds them, in a window that has no copy of the dashboard's tokens, under a policy
   that lets the copy run no script, load nothing, submit no form and take no `<base>`; the page's `http-equiv`
-  tags, a refresh among them, are left out of it. A screenshot that cannot be read says so in its place, and a
-  page that cannot be read closes the window and says why on the dashboard. The dashboard keeps the last copy it
+  tags, a refresh among them, are left out of it, and so are its `<noscript>` elements, whose content the window
+  can read as tags where the copy read text. A screenshot that cannot be read says so in its place, and a page
+  that cannot be read closes the window and says why on the dashboard. The dashboard keeps the last copy it
   opened: an earlier one's window keeps what it shows and cannot be reloaded. The route and its page are as they
   were. (AUTH-27)
 - **The network inspector gives up on a response body that does not end.** Playwright's `response.body()` waits
