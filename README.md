@@ -155,36 +155,6 @@ curl -s "${AUTH[@]}" http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 
 ## Recent Changes
 
-**1.10.1**
-
-- **Rebuilt Docker images** with updated dependencies (Pillow 13.0.0). Image tags now publish only
-  from a `main` commit whose CI run succeeded.
-
-**1.10.0**
-
-- **Operators can no longer reach each other's work.** With named credentials (`API_BEARER_TOKENS`), saved auth state, exported archives, harness runs, skill candidates, memory profiles, uploads, MCP resource lists and controller-wide approvals belong to the operator who made them.
-- **`ALLOWED_HOSTS` holds wherever a page ends up:** after a redirect, a tab switch, a cookie written through `browser.set_cookies`, or a page that navigates itself or opens a popup (a popup's first page is held from 1.11.2). A page that gets off the list on its own is sent back to `about:blank` once it has navigated, not before its request goes out.
-- **Witness verification rejects a chain with its signatures stripped**, and the top-level `valid` now covers signatures. Read the upgrade notes in the changelog before upgrading.
-- **Fixes** for the Playwright export, stealth mode, REST error statuses, text-only agent steps, private-key scrubbing and the dashboard's error reporting, plus an opt-in `FORCE_GOVERNED_APPROVALS`.
-
-**1.9.1**
-
-- **Prebuilt Docker images** on GHCR (thanks @FRFlo): run a release without building it. See [Prebuilt images](#prebuilt-images).
-
-**1.9.0**
-
-- **Operators no longer share sessions.** With named credentials (`API_BEARER_TOKENS`), a session belongs to the operator who created it, as auth profiles already did.
-- **Every setting in `.env` reaches the controller.** Compose used to forward only the keys it listed, so settings like `API_BEARER_TOKENS` and `PII_SCRUB_*` were ignored. Check your `.env` before upgrading.
-- **Governed approvals run**, a page stuck in a script loop can no longer hang the controller, and the Claude and OpenAI providers work on current models.
-- **Security fixes** for approvals, navigation, TOTP autofill, PII scrubbing and witness bundle verification ([GHSA-37hm-f6gf-q7vx](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-37hm-f6gf-q7vx)).
-
-**1.8.1**
-
-- **Sturdier sessions and stores.** Actions that ran are no longer reported as failed when the page navigates right after, two requests carrying one approval no longer both run its action, `MAX_SESSIONS` holds under concurrent creates, and sessions, tabs, cron jobs and the JSON stores no longer leak or lose writes.
-- **The stdio MCP bridge survives a controller restart** and reports auth and rate-limit errors instead of hanging. The SDK, bridge and LangChain adapters can send an operator id for controllers with `REQUIRE_OPERATOR_ID=true`.
-- **Faster actions and observations**, fewer browser round trips per observation, and a controller image without the test tooling.
-- **Security fixes** for the noVNC socket, TOTP autofill, auth-profile paths, approvals and witness receipts. `create_session` with `totp_secret` now needs `totp_hosts` or a `start_url`.
-
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 
 ## MCP Clients
@@ -295,7 +265,7 @@ METRICS_ENABLED=true
 STEALTH_ENABLED=false
 ```
 
-With `APP_ENV=production` the controller refuses to start while any of these is missing, and the startup log names the missing ones.
+With `APP_ENV=production` the controller refuses to start while the token, `REQUIRE_OPERATOR_ID`, either encryption setting, `SHARE_TOKEN_SECRET` or `CONTROLLER_ALLOWED_HOSTS` is missing, rate limiting is off, or `ALLOWED_HOSTS` is empty or `*`, and the startup log names each one; `ALLOWED_HOSTS` left out or at its example value, `METRICS_ENABLED=false` and `STEALTH_ENABLED=true` only warn.
 
 By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container, takeover surface and Docker network (`docker_ephemeral`), so one session's browser cannot reach another's Playwright server. [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
 
@@ -330,7 +300,7 @@ the operator's own tabs too, while the controller is attached. Details:
 
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:
 
-| Preset | Auth Encryption | Operator ID | PII Scrub | Isolation | Max Session Age |
+| Preset | Auth Encryption | Operator ID | PII Scrub | Isolation | Max Auth-State Age |
 | --- | --- | --- | --- | --- | --- |
 | `strict` | required | required | all layers | `docker_ephemeral` | 4h |
 | `balanced` | - | required | network + text | shared | 24h |
@@ -423,6 +393,9 @@ Core components:
 | review production constraints | [`docs/production-hardening.md`](./docs/production-hardening.md) |
 | see what session isolation does and does not separate | [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) |
 | run the convergence harness | [`docs/convergence-harness.md`](./docs/convergence-harness.md) |
+| run the agent evals | [`docs/agent-evals.md`](./docs/agent-evals.md) |
+| drive the built-in agent loop and its model providers | [`docs/llm-adapters.md`](./docs/llm-adapters.md) |
+| let a peer node ask this controller to run a tool (mesh) | [`docs/mesh.md`](./docs/mesh.md) |
 | inspect release history | [`CHANGELOG.md`](./CHANGELOG.md) |
 | see where the project is headed | [`ROADMAP.md`](./ROADMAP.md) |
 
