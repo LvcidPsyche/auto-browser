@@ -407,15 +407,20 @@ class RevocationStoreTests(_Stores):
             b"not json",
             b"\xff\xfe",
             b"[]",
-            b'{"sessions": []}',
-            b'{"sessions": {"session-1": "soon"}}',
-            b'{"sessions": {"session-1": true}}',
-            b'{"all": -1}',
+            b'{"all": 0, "sessions": []}',
+            b'{"all": 0, "sessions": {"session-1": "soon"}}',
+            b'{"all": 0, "sessions": {"session-1": true}}',
+            b'{"all": -1, "sessions": {}}',
             b'{"all": 1.5, "sessions": {}}',
-            b'{"sessions": {}, "minted": "soon"}',
-            b'{"sessions": {}, "minted": true}',
-            b'{"minted": -1}',
-            b'{"minted": 1.5}',
+            b'{"all": 0, "sessions": {}, "minted": "soon"}',
+            b'{"all": 0, "sessions": {}, "minted": true}',
+            b'{"all": 0, "sessions": {}, "minted": -1}',
+            b'{"all": 0, "sessions": {}, "minted": 1.5}',
+            # Times, without a key every save writes or with one no save writes.
+            b"{}",
+            b'{"all": 0, "minted": 0}',
+            b'{"sessions": {}, "minted": 0}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "revoked": {}}',
         )
         clock = self.clock()
         for number, content in enumerate(corrupt):

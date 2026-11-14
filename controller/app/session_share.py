@@ -106,7 +106,9 @@ def _revocations_read(data: object) -> _Revocations:
     first 1.18.0 builds wrote none) has seen no mint."""
     if not isinstance(data, dict):
         raise ValueError(f"it holds a JSON {type(data).__name__}, not an object")
-    every_session, sessions, minted = data.get("all", 0), data.get("sessions", {}), data.get("minted", 0)
+    if set(data) - {"minted"} != {"all", "sessions"}:
+        raise ValueError("its keys are not the ones a save writes")
+    every_session, sessions, minted = data["all"], data["sessions"], data.get("minted", 0)
     if not _is_stamp(every_session) or not isinstance(sessions, dict) or not all(map(_is_stamp, sessions.values())):
         raise ValueError("it holds something other than the times of revocations")
     if not _is_stamp(minted):
