@@ -158,6 +158,7 @@ HOSTILE_PAGE = f"""<!DOCTYPE html>
 <img id="climbs" src="/artifacts/../sessions/{SESSION}/replay">
 <img id="elsewhere" src="{ELSEWHERE}">
 <img id="handler" src="/artifacts/{SESSION}/step-2.png" onload="window.ran = 'an image handler'">
+<svg id="drawing"><title>a drawing</title></svg><math><mi>x</mi></math>
 <script>window.ran = 'a script in the body';</script>
 </body></html>"""
 
@@ -181,12 +182,15 @@ def test_the_copy_runs_no_script_and_the_token_goes_only_to_this_controllers_art
             "widths": await popup.evaluate(
                 "Object.fromEntries([...document.images].map((img) => [img.id, img.naturalWidth]))"
             ),
+            # Foreign content, whose <style> a second reading can read as tags, is left out of the copy.
+            "foreign": await popup.evaluate("document.querySelectorAll('svg, math').length"),
         }
 
     seen = drive(stub, scenario)
 
     assert seen["ran"] is None
     assert seen["policy"] == REPLAY_COPY_POLICY
+    assert seen["foreign"] == 0
     assert seen["widths"] == {
         "shot": 1,
         "off-artifacts": 0,
