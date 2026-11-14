@@ -52,9 +52,10 @@ SHARE_REVOKED_EVENT = "share_revoked"
 SHARE_TOKEN_MAX_TTL_SECONDS = 24 * 60 * 60
 
 SHARE_REVOCATIONS_UNAVAILABLE = (
-    "the store of revoked share links (SHARE_REVOCATION_STORE_PATH) cannot be read or written. While it cannot be "
-    "read, no share link is honoured, minted or revoked; a mint that cannot be saved hands out no link, and a revoke "
-    "that cannot be saved revokes nothing. The server log has the cause and where the file is."
+    "the store of revoked share links (SHARE_REVOCATION_STORE_PATH) cannot be read or written. One that could not be "
+    "read at a start is read again at each mint and revoke, and until then no share link is honoured, minted or "
+    "revoked; a mint that cannot be saved hands out no link, and a revoke that cannot be saved revokes nothing. The "
+    "server log has the cause and where the file is."
 )
 
 
