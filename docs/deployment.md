@@ -571,7 +571,8 @@ setting until Landlock is there):
   home is written can have made (a home in `/tmp`, swapped for a link to `/data/approvals`, to `/` or to any
   directory outside `/tmp`: `/tmp`'s rule covers where the home is written, not where it leads), or a `..`, which
   Linux reads after any link before it (`/data/x/..` is not `/data` where `x` is a link). The CLI starts under the
-  launcher without it, and cannot write its home. The warning names `CLI_HOME`, its path and where it resolves (or
+  launcher without it, with no rule for its home: it writes there only where another directory given holds where it
+  resolves. The warning names `CLI_HOME`, its path and where it resolves (or
   that it is not a directory, or has a `..` part); a `CLI_HOME` that is a link on purpose is to be set to its real
   path, and one with a `..` part written without it.
 - **A CLI may write the controller's own home, or a directory in it, or a place the controller reads at its start.**

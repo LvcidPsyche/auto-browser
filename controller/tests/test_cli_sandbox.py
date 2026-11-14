@@ -929,6 +929,30 @@ async def test_a_cli_home_whose_path_climbs_out_of_a_link_is_not_given_and_the_c
     assert f"CLI_HOME {home} has a '..' part" in line
 
 
+@pytest.mark.parametrize(
+    "home, entry",
+    [("/tmp/work/..", ""), ("/tmp/h", "/data/w")],
+    ids=["a '..' that leads to /tmp", "a link to a directory CLI_SANDBOX_WRITABLE names in the root"],
+)
+async def test_a_refused_cli_home_that_another_directory_given_holds_once_resolved_is_said_to_have_no_rule_of_its_own(
+    linux_links, caplog, home: str, entry: str
+) -> None:
+    # The home has no rule, and the CLI still writes it, through the rule of the directory that holds where it leads:
+    # the line says the first and not that the CLI cannot write its home.
+    linux_links.dirs |= {"/tmp/work", "/data/w"}
+    linux_links.links["/tmp/h"] = "/data/w"
+    env = {"HOME": home}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(CLI_SANDBOX_WRITABLE=entry), home, env)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(_linux_settings(CLI_SANDBOX_WRITABLE=entry, CLI_SANDBOX_REQUIRED="true"), home, env)
+
+    assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev", *([entry] if entry else [])]
+    (line,) = _written(caplog)
+    assert f"CLI_HOME {home} " in line and "run under the Landlock sandbox with no rule for their home (" in line
+
+
 async def test_a_cli_home_with_no_dots_in_the_root_is_given(linux_links, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         command = await _launch_on_linux(_linux_settings(), "/data/cli-home", {"HOME": "/data/cli-home"})

@@ -22,7 +22,8 @@ Each of these is reported:
 - the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it, or to a place no directory given holds
   (a link, which a CLI that may write where the home is written may have made), or is not a directory, or has a
   '..' part (Linux reads it after the link before it, which the text cannot say). The CLI is started under the
-  launcher without it, and cannot write its home: closed, not open.
+  launcher without it, with no rule for its home: it writes there only where another directory given holds where it
+  resolves. Closed, not open.
 - the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
   write, but for a CLI home in it clear of what the controller reads at its start; or what it reads there (each
   home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere) is, holds or lies in such a
@@ -235,8 +236,8 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
         *(("setting", path) for path in settings.cli_sandbox_writable_paths),
     ]
     refused = (
-        "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox without a home they can "
-        "write (a CLI_HOME that is a link on purpose is to be set to its real path, one with a '..' part written "
+        "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox with no rule for their "
+        "home (a CLI_HOME that is a link on purpose is to be set to its real path, one with a '..' part written "
         "without it, and one that is not a directory made one)"
     )
     not_given = "CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write"
