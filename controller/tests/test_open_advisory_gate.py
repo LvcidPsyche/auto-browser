@@ -151,7 +151,9 @@ class FetchAdvisoriesTests(unittest.TestCase):
             child = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(bytes.fromhex({printed.hex()!r}))"]
 
             def gh(argv: list[str], child: list[str] = child, **kwargs: object) -> subprocess.CompletedProcess:
-                return run(child, **kwargs)
+                # A read that names no encoding decodes in that code page here, whatever the host: on a UTF-8 locale
+                # (CI's Linux runners) the check passed without its own encoding.
+                return run(child, **{"encoding": "cp1252", **kwargs})
 
             with (
                 self.subTest(summary=summary),
