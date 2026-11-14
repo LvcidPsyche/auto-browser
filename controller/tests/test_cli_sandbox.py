@@ -682,7 +682,8 @@ def linux_paths(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 
 
 def _linux_settings(**values: str) -> Settings:
-    with patch.dict(os.environ, {}, clear=True):
+    """Settings read as on Linux, where /home/x is absolute (Windows takes it for none from Python 3.13 on)."""
+    with patch.dict(os.environ, {}, clear=True), patch.object(os.path, "isabs", posixpath.isabs):
         return Settings(_env_file=None, **values)
 
 
