@@ -1526,11 +1526,12 @@ does not.
   A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links are
   revoked, which ends it too.
 - Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
-  so a restart does not bring a revoked link back. One is kept at least as long as a link can live, 24 hours, or
-  `SHARE_TOKEN_TTL_MINUTES` where that is longer, and dropped by the first revoke after that. The age is read from
-  the controller's clock: a revoke made while the clock runs ahead drops revocations that much too soon, and their
-  links work again once it is set right. A restart without the file brings back the revoked links that have not
-  expired, and ends every link minted since the file was last found corrupt (below).
+  so a restart does not bring a revoked link back. One is kept at least 24 hours, the longest a link lives, or
+  `SHARE_TOKEN_TTL_MINUTES` where that is longer (no link is minted for longer than 24 hours, whatever it says), and
+  dropped by the first revoke after that. The age is read from the controller's clock: a revoke made while the
+  clock runs ahead drops revocations that much too soon, and their links work again once it is set right. A restart
+  without the file brings back the revoked links that have not expired, and ends every link minted since the file
+  was last found corrupt (below).
 - The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
   revoke that cannot be saved revokes nothing: each answers `503` (over MCP, the tool's error with the same text), as
   while the file cannot be read.
