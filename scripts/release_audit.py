@@ -111,6 +111,9 @@ def main() -> int:
         # Not git's own words: they can name a path, or a setting's value, that holds a token.
         print(f"git grep exited with status {secret_scan.returncode}; run it by hand to see why.", file=sys.stderr)
         raise SystemExit(secret_scan.returncode)
+    if secret_scan.stderr:
+        # git says a file it could not read ("failed to stat ...") there alone, and exits as its matches elsewhere say.
+        raise SystemExit("Release audit failed: git grep wrote to its error stream; run it by hand to see why.")
     found = _secret_lines(secret_scan.stdout.decode("utf-8", "replace"))
     if found:
         # Where each one is, and never the line, which holds the token and whatever else is beside it: the output can

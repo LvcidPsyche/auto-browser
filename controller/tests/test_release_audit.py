@@ -454,6 +454,28 @@ def test_a_failed_scan_prints_not_what_git_said_but_its_status(
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("status", [0, 1])  # 0: beside a match, as the real tree's AWS example always is
+def test_a_scan_git_wrote_an_error_in_fails_and_prints_not_what_git_said(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], status: int
+) -> None:
+    # git reads a tracked file it cannot open as one with no match, says so on its error stream alone, and exits as
+    # its matches elsewhere say: the audit passed. Here the file's name holds a token.
+    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
+    (example,) = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    token = SECRET_SHAPES["a GitHub classic token"]
+    found = f"CHANGELOG.md:1:  `{example}` is AWS's example\n".encode() if status == 0 else b""
+
+    def unreadable(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(command, status, found, f"error: failed to stat '{token}.py'\n".encode())
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {}, run=unreadable)
+
+    failed = code == "Release audit failed: git grep wrote to its error stream; run it by hand to see why."
+    printed = any(value in out or value in err for value in (token, "failed to stat"))
+    assert (failed, printed) == (True, False)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 @pytest.mark.parametrize("encoding", ["utf-8", "latin-1"])
 def test_the_secret_scan_reads_what_git_prints_as_utf_8_whatever_the_code_page(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], encoding: str
