@@ -36,7 +36,8 @@ LAUNCH_FILES = [
     "scripts/doctor.sh",
     "scripts/mcp_stdio_bridge.py",
 ]
-# Every directory release.yml builds, plus the controller (not published yet).
+# Every directory release.yml builds, plus the controller, whose wheel is built only to be inspected (not published:
+# see controller/pyproject.toml).
 WHEEL_PACKAGES = ("controller", "client", "integrations/langchain", "packaging/auto-browser-mcp")
 MCP_CONSOLE_SCRIPT = "auto_browser_client.mcp_bridge:main"
 # The wheels release.yml publishes: each must carry the repository's LICENSE, which its backend takes from the package
