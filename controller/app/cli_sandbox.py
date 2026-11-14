@@ -101,8 +101,9 @@ _reported: set[tuple[bool | None, str]] = set()
 
 
 class SandboxRequired(Exception):
-    """CLI_SANDBOX_REQUIRED is set and the sandbox would leave a secret open, or the CLI without its home: the CLI is
-    not to be started."""
+    """CLI_SANDBOX_REQUIRED is set and one of the conditions the module's docstring lists holds: no sandbox, or one
+    that leaves a secret, the controller's own home or what the controller reads at its start open to the CLI, or the
+    CLI without its home. The CLI is not to be started."""
 
 
 def _probe(env: dict[str, str]) -> tuple[str | None, bool]:
