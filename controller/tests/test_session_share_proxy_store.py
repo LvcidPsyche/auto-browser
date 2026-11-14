@@ -61,6 +61,17 @@ class SessionShareManagerTests(unittest.TestCase):
         self.assertFalse(info["valid"])
         self.assertEqual(info["error"], "Invalid token")
 
+    def test_a_signed_payload_that_is_not_an_object_is_invalid(self) -> None:
+        # Only a holder of the signing key can make one; token_info raised AttributeError for it.
+        manager = SessionShareManager(secret="secret123", ttl_minutes=10)
+        for payload in ([1], "session-1", 1, None):
+            payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            token = f"{payload_b64}.{manager._sign(payload_b64)}"
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "invalid share token: payload is not an object"):
+                    manager.validate_token(token)
+                self.assertEqual(manager.token_info(token), {"valid": False, "error": "Invalid token"})
+
     def test_rejects_unsupported_scope(self) -> None:
         manager = SessionShareManager(secret="secret123", ttl_minutes=10)
 

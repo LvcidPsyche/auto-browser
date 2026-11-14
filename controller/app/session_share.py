@@ -256,6 +256,8 @@ class SessionShareManager:
             padding = "=" * (-len(payload_b64) % 4)
             payload_json = base64.urlsafe_b64decode(payload_b64 + padding).decode()
             payload = json.loads(payload_json)
+            if not isinstance(payload, dict):
+                raise ValueError("payload is not an object")
 
         except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid share token: {error_text(exc)}") from exc
