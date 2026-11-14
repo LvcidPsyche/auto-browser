@@ -1,11 +1,12 @@
 """The record of a state change the gateway makes itself: browser.set_viewport, set_cookies and set_local_storage.
 
 These tools change a session outside the action pipeline, so they left no audit entry and no witness receipt in the
-fast profile. Each call now leaves one of each, on success and on failure, written as a takeover's record is
-(app.action_records): a cancellation does not cut the writes short, and what records next on the session waits for
-them. A record names what changed and never a cookie or storage value, nor a hash of one: a hash of a short value can
-be guessed offline. They follow the witness policy an action does, before anything touches the page, and a receipt says
-what an action's would: the policy's evidence mode and concerns, and the approval a governed call ran under.
+fast profile. Each call now leaves an audit entry, and a receipt with WITNESS_ENABLED (the default), on success and on
+failure, written as a takeover's record is (app.action_records): a cancellation does not cut the writes short, and what
+records next on the session waits for them. A record names what changed and never a cookie or storage value, nor a hash
+of one: a hash of a short value can be guessed offline. They follow the witness policy an action does, before anything
+touches the page, and a receipt says what an action's would: the policy's evidence mode and concerns, and the approval a
+governed call ran under.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ class RecordedWrite:
 async def recorded_write(
     manager: Any, session: Any, tool: str, digest: dict[str, Any], *, risk_category: str | None = None
 ) -> AsyncIterator[RecordedWrite]:
-    """One audit entry and one witness receipt for ``tool``'s write on ``session``, however it ends.
+    """One audit entry and, with WITNESS_ENABLED, one receipt for ``tool``'s write on ``session``, however it ends.
 
     As the action pipeline treats an action: a call that fails records ``failed`` and the class of its error (its text
     can hold a page's content or a value), then the error goes on unchanged; a call cancelled before it reached the

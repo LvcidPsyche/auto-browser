@@ -291,7 +291,7 @@ def _offset_field() -> Any:
     )
 
 
-# The most characters one tool result may return, whatever max_chars asks for (the MCP DOM resource's cap too).
+# The most characters a tool's max_chars accepts (the MCP DOM resource's cap too).
 MAX_TOOL_RESULT_CHARS = 1_000_000
 
 

@@ -574,9 +574,9 @@ class McpHttpTransport:
     ):
         """GET /mcp's body: a stream of update notifications until stop is set, the client goes or the body is closed.
 
-        A stopped stream says nothing more, but the stop wakes only the wait for an event: a stream in an owner lookup
-        ends when that returns, and one blocked in sending to a client that has stopped reading ends when that send
-        returns or the connection goes.
+        A stopped stream sends no further notification or keepalive, but the stop wakes only the wait for an event: a
+        stream in an owner lookup ends when that returns, and one blocked in sending to a client that has stopped
+        reading ends when that send returns or the connection goes.
         """
         queue = _events.subscribe_all()
         try:
