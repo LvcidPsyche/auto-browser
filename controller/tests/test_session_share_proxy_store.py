@@ -72,6 +72,22 @@ class SessionShareManagerTests(unittest.TestCase):
                     manager.validate_token(token)
                 self.assertEqual(manager.token_info(token), {"valid": False, "error": "Invalid token"})
 
+    def test_a_signed_payload_too_deep_to_read_or_whose_exp_is_infinite_is_invalid(self) -> None:
+        # Only a holder of the signing key can make one; token_info raised RecursionError and OverflowError for them.
+        manager = SessionShareManager(secret="secret123", ttl_minutes=10)
+        depth = 1_000_000  # deeper than json.loads reads on any Python
+        infinite = [
+            f'{{"session_id": "session-1", "exp": {exp}, "scope": "observe"}}'
+            for exp in ("Infinity", "-Infinity", "1e309")
+        ]
+        for payload in ("[" * depth + "]" * depth, *infinite):
+            payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+            token = f"{payload_b64}.{manager._sign(payload_b64)}"
+            with self.subTest(payload=payload[:60]):
+                with self.assertRaisesRegex(ValueError, "^invalid share token: "):
+                    manager.validate_token(token)
+                self.assertEqual(manager.token_info(token), {"valid": False, "error": "Invalid token"})
+
     def test_rejects_unsupported_scope(self) -> None:
         manager = SessionShareManager(secret="secret123", ttl_minutes=10)
 

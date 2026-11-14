@@ -119,8 +119,11 @@ def _revocations_read(data: object) -> _Revocations:
     if set(data) not in ({"all", "sessions"}, {"all", "sessions", "minted"}, {"all", "sessions", "minted", "era"}):
         raise ValueError("its keys are not the ones a save writes")
     every_session, sessions, minted, era = data["all"], data["sessions"], data.get("minted", 0), data.get("era", "")
-    # A revoke's stamp is later than the one before it, so above 0, which "all" and "minted" hold for none.
-    revoked = isinstance(sessions, dict) and all(_is_stamp(stamp) and stamp > 0 for stamp in sessions.values())
+    # A revoke's stamp is later than the one before it, so above 0, which "all" and "minted" hold for none; it keeps
+    # its session's id stripped, and refuses one that is then empty.
+    revoked = isinstance(sessions, dict) and all(
+        key and key == key.strip() and _is_stamp(stamp) and stamp > 0 for key, stamp in sessions.items()
+    )
     if not _is_stamp(every_session) or not revoked:
         raise ValueError("it holds something other than the stamps of revocations")
     if not _is_stamp(minted):
@@ -259,7 +262,7 @@ class SessionShareManager:
             if not isinstance(payload, dict):
                 raise ValueError("payload is not an object")
 
-        except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ValueError(f"invalid share token: {error_text(exc)}") from exc
 
         session_id = str(payload.get("session_id") or "").strip()
@@ -273,7 +276,7 @@ class SessionShareManager:
             raise ValueError("invalid share token: token exp must be an integer")
         try:
             exp = int(exp_raw)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("invalid share token: token exp must be an integer") from exc
 
         # Check expiry
