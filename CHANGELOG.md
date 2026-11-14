@@ -292,9 +292,11 @@ All notable changes to auto-browser are documented here.
   client must then send it), or list the exact host names clients use, whose DNS you control. On any controller,
   an entry in brackets round anything but an IPv6 address (`[localhost]`, `[127.0.0.1]`, `[*]`), an IPv6 address
   in brackets with a port (`[::1]:8000`, which never matched a Host), an entry with a stray bracket (`local]host`)
-  or a bare `*.` now stops startup too: write a name without brackets, and an IPv6 address without a port. The
-  compose files' default no longer lists `testserver`: a client that sends `Host: testserver` to a controller
-  started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
+  or a bare `*.` is now refused too: the controller then serves nothing, and every request, `/healthz` included,
+  answers `500` with a log line that names the entry (started with `uvicorn --lifespan on`, it does not start).
+  Write a name without brackets, and an IPv6 address without a port. The compose files' default no longer lists
+  `testserver`: a client that sends `Host: testserver` to a controller started by compose needs it in
+  `CONTROLLER_ALLOWED_HOSTS`.
 - **An approval asked for a `type` shows its text only where its field read as plain.** An approval now says how
   the field of its `type` read when it was asked for, as `field_read`: `plain`, `secret`, or `unread` (the read
   did not answer within a second, what the type names has no field that takes text, or has a frame in it and no

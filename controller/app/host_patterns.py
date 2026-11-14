@@ -21,13 +21,13 @@ def is_wildcard_pattern(pattern: str) -> bool:
     """Whether a CONTROLLER_ALLOWED_HOSTS entry is a wildcard, read as the Host check reads it.
 
     On the check's own normalization, so no spelling escapes it: case and brackets change nothing the match reads,
-    and a malformed wildcard is refused at start (pattern_error), not read as an exact name.
+    and a malformed wildcard is refused when the app is built (pattern_error), not read as an exact name.
     """
     return "*" in normalize_pattern(pattern)
 
 
 def pattern_error(pattern: str) -> str | None:
-    """Why the Host check refuses ``pattern`` at start, or None for a pattern it takes."""
+    """Why the Host check refuses ``pattern`` when the app is built, or None for a pattern it takes."""
     stripped = pattern.strip()
     if "[" in stripped or "]" in stripped:
         # Brackets are how an IPv6 address is written in a Host. Round anything else they were stripped all the same,
