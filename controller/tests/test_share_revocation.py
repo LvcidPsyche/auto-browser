@@ -35,6 +35,7 @@ from app.session_share import (
     SHARE_VIEWED_EVENT,
     SessionShareManager,
     ShareRevocationStoreError,
+    token_digest,
 )
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import ShareSessionInput
@@ -646,6 +647,21 @@ class _HeldViewAudit(_Audit):
         await super().append(**event)
 
 
+class _SecondAskSignalled(asyncio.Lock):
+    """The share manager's view lock, which says when a second view asks for it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.asked = 0
+        self.second_asked = asyncio.Event()
+
+    async def acquire(self) -> bool:
+        self.asked += 1
+        if self.asked == 2:
+            self.second_asked.set()
+        return await super().acquire()
+
+
 class RevokeWhileAViewWaitsTests(unittest.IsolatedAsyncioTestCase):
     """A share route checks its token and then waits: a poll for the session's frame (for as long as the session's
     agent holds its lock), the page for the session's lookup, and a first view for its event. A link revoked or expired
@@ -749,6 +765,23 @@ class RevokeWhileAViewWaitsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((await poll).status_code, 403)
         self.assertEqual(len(self.audit.of(SHARE_VIEWED_EVENT)), 1)
+
+    async def test_a_link_revoked_while_its_first_poll_waits_for_another_links_event_is_refused_and_no_view(
+        self,
+    ) -> None:
+        first, second = self.mint(), self.mint()
+        self.frame_ready.set()
+        lock = self.share_manager._viewed_lock = _SecondAskSignalled()
+        self.audit.hold_view = asyncio.Event()
+        first_poll = await self.waiting(f"/share/{first}/observe", self.audit.view_begun)
+        second_poll = await self.waiting(f"/share/{second}/observe", lock.second_asked)
+        await self.revoke()
+
+        self.audit.hold_view.set()
+
+        self.assertEqual([(await first_poll).status_code, (await second_poll).status_code], [403, 403])
+        viewed = [event["details"]["token_sha256"] for event in self.audit.of(SHARE_VIEWED_EVENT)]
+        self.assertEqual(viewed, [token_digest(first)])
 
     async def test_a_link_revoked_while_its_first_image_is_audited_is_refused(self) -> None:
         token = self.mint()

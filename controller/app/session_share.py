@@ -414,8 +414,9 @@ class SessionShareManager:
 
         For a share route that is about to show the session to the token's holder. The event is written before the
         view is answered, so a view whose event cannot be written fails, and the next one tries again. Views that
-        arrive together write one event, and the others wait for it. A view cancelled while its event is written can
-        be audited twice (the write goes on in a worker thread), never left out.
+        arrive together write one event, and the others wait for it; a token no longer valid when its turn comes is
+        not audited. A view cancelled while its event is written can be audited twice (the write goes on in a worker
+        thread), never left out.
 
         The viewer holds the share token and no credential, so a name in its headers is its own text: the event is
         the anonymous operator's unless a named credential proved one.
@@ -425,6 +426,9 @@ class SessionShareManager:
             return
         async with self._viewed_lock:
             if self._viewed_before(digest):
+                return
+            # Revoked or expired while it waited for another token's event: no view, and the route refuses it.
+            if not self.token_info(token)["valid"]:
                 return
             await audit.append(
                 event_type=SHARE_VIEWED_EVENT,
