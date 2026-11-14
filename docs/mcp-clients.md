@@ -29,7 +29,8 @@ The controller speaks MCP protocol versions `2025-11-25` and `2025-06-18`
 for another is offered `2025-11-25`, and a client that cannot use it disconnects.
 
 The controller keeps the `clientInfo` and the `capabilities` of an `initialize`
-with the MCP session it makes. Each may be nested at most 32 levels (the object
+with the MCP session it makes, each an object (a value that is no object is
+kept as `{}`). Each may be nested at most 32 levels (the object
 itself is the first, and a list is a level as an object is) and take at most
 64 KiB written compactly as JSON in UTF-8. An `initialize` past either bound is
 answered with JSON-RPC error `-32602`, whose message names the field and the

@@ -14,8 +14,9 @@ All notable changes to auto-browser are documented here.
   `initialize` and keeps the answer, so a `2025-03-26` client behind it goes on at `2025-11-25` without being told;
   the controller answers a session the same at either version. On a session at any other version a `2025-03-26`
   header is refused with `400` and `-32602`.
-- **An MCP `initialize` whose `clientInfo` or `capabilities` is past a bound is refused.** Each may be nested at most
-  32 levels and take at most 64 KiB as JSON; one past either answers JSON-RPC error `-32602` and makes no session.
+- **An MCP `initialize` whose `clientInfo` or `capabilities` object is past a bound is refused.** Each may be nested
+  at most 32 levels and take at most 64 KiB as JSON (a value that is no object is kept as `{}`, as before); one past
+  either answers JSON-RPC error `-32602` and makes no session.
   What MCP defines for the two takes a few levels and well under a kilobyte, so a client is refused only for
   something large of its own that it sends there (an icon as a data URI, for one). A session that an older version
   stored past a bound is dropped at this version's start, which then writes the file of sessions once without it:
@@ -30,7 +31,7 @@ All notable changes to auto-browser are documented here.
   `browser://audit/events` read whose listing raised was an unhandled `500` (one whose listing could not be
   encoded answered `-32002`). A client that took `-32002` to mean a resource is gone now
   gets `-32603` for those, and should retry or report them. `browser://<id>/dom` now returns at most 1,000,000
-  characters, the most a tool result may return; a longer page ends in an HTML comment that says so and names
+  characters, the most `max_chars` accepts; a longer page ends in an HTML comment that says so and names
   `browser.get_html`, which pages through the rest.
 - **A session's second `GET /mcp` ends its first.** A client that keeps two event streams open for one MCP session now
   loses the older one when it opens the newer, and a stream also ends when its session is deleted or evicted. Open one
@@ -138,14 +139,14 @@ All notable changes to auto-browser are documented here.
   replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds; a key or a
   hash it cannot read (a store edited by hand) is left as it is, with a WARNING, or a readable key beside such a hash
   removed, and that job's webhook refuses every key until the key is rotated. A store that
-  cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
-  no usable key. A 1.17.0 controller started over a 1.18.0 cron store hands out each stored record whole, so its
-  cron answers show `webhook_key_hash` (a hash of the key, not the key) and, for a job that was refused (below),
-  `refusal_audited`. A backup or quarantined copy of the store from before the upgrade still holds the keys, and so
-  does a `.crons.json.*.tmp` file beside the store, which a 1.17.0 save that was killed part-way leaves there and
-  nothing removes: delete any such file, and rotate the keys if a copy may have been read. `GET /crons`,
-  `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and `browser.create_cron_job` answered the key's first
-  8 characters in `webhook_key_preview`: they now answer
+  cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves each job whose
+  key is stored hashed with no usable key. A 1.17.0 controller started over a 1.18.0 cron store hands out each
+  stored record whole, so its cron answers show `webhook_key_hash` (a hash of the key, not the key) and, for a job
+  that was refused (below), `refusal_audited`. A backup or quarantined copy of the store from before the upgrade
+  still holds the keys, and so does a `.crons.json.*.tmp` file beside the store, which a 1.17.0 save that was killed
+  part-way leaves there and nothing removes: delete any such file, and rotate the keys if a copy may have been read.
+  `GET /crons`, `GET /crons/{id}`, `POST /crons`, `browser.list_cron_jobs` and `browser.create_cron_job` answered the
+  key's first 8 characters in `webhook_key_preview`: they now answer
   `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key
   cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
   makes a new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
@@ -173,7 +174,7 @@ All notable changes to auto-browser are documented here.
   A job fires as the token-verified operator who created it, and went on doing so after their token was removed. Each
   fire now checks `API_BEARER_TOKENS` as it is then, where a token listed twice proves only the first operator
   listed with it. An owner no credential names is refused: the answer is
-  `{"triggered": false, "reason": "owner_credential_removed"}`, `last_status` reads
+  `{"triggered": false, "job_id": "<id>", "reason": "owner_credential_removed"}`, `last_status` reads
   `refused: owner credential removed`, no session is opened, and a `cron_job_refused` audit event is written when
   the job becomes refused, as the operator `system` for a scheduled fire and as its caller for a trigger; later
   fires of a job still refused write no event and are logged at debug. The job's entry in the cron store records
@@ -190,9 +191,9 @@ All notable changes to auto-browser are documented here.
   the credential back for the delete, or stop the controller and remove the job's entry from the cron store
   (`CRON_STORE_PATH`, `/data/crons/crons.json` by default). A job created on the shared token or with no token is
   unowned and runs as before, as does a job queued by an operator named only by a header.
-- **A resumed agent run now gets its first run's `max_steps`, where it got what was left of them.**
+- **A resumed agent run now gets the `max_steps` of the run it resumes, where it got what was left of them.**
   `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` with no `max_steps` queued a run of the steps the
-  first had not used, and of one step when it had used them all. They now queue a run of the first run's whole
+  first had not used, and of one step when it had used them all. They now queue a run of that run's whole
   `max_steps`, so a resumed run can take more steps than were left: pass `max_steps` to set the number. A resumed run
   also no longer presents the `approval_id` its first run was queued with, so a step of it that needs an approval asks
   for a new one. After a downgrade to 1.17.0, every run job this version left queued fails when it runs, and no run
@@ -372,7 +373,9 @@ All notable changes to auto-browser are documented here.
   the controller asks Codex for needs no command. Where any of this cannot be done, or a CLI fails under the ruleset,
   `CLI_SANDBOX_ENABLED=false` starts provider CLIs without it, as 1.17.0 did, which also gives a CLI `/data` again. A
   CLI cannot list `/` itself, on a Linux host run now runs with `no_new_privs` (the image already set it), and on a
-  kernel older than 5.19 cannot rename or link a file from one directory to another. Where the sandbox is off or
+  kernel older than 5.19 cannot rename or link a file from one directory to another. On a kernel older than 6.2 it
+  can still empty any file the controller's user may write (Landlock refuses `truncate` from 6.2). Where the sandbox
+  is off or
   cannot be used, or would leave something open (the list is the Security entry's), the controller logs a warning that
   names the condition, once per process for each distinct line, and still runs the CLI: a host run that uses a `cli`
   provider and keeps its data outside `/data` gets that warning at its first CLI call, and so does one on macOS or
@@ -390,9 +393,10 @@ All notable changes to auto-browser are documented here.
 ### Security
 
 - **`browser.set_viewport`, `browser.set_cookies` and `browser.set_local_storage` now leave an audit entry and a
-  witness receipt, and follow the witness policy an action does.** These three tools change a session outside the
-  action pipeline, and in the fast profile they recorded nothing and no policy applied to them. Each call now writes
-  one audit event (`mcp_tool_write`) and one receipt, on success and on failure (a host off `ALLOWED_HOSTS`, a
+  witness receipt (with `WITNESS_ENABLED`, the default), and follow the witness policy an action does.** These three
+  tools change a session outside the action pipeline, and in the fast profile they recorded nothing and no policy
+  applied to them. Each call now writes one audit event (`mcp_tool_write`) and, with Witness on, one receipt, on
+  success and on failure (a host off `ALLOWED_HOSTS`, a
   Playwright error, a page that moved), naming the tool, the session and what changed: the viewport size, the
   cookies' names and domains or URL origins, the storage type and key. Neither a value nor a hash of one goes in the
   record: a short value's hash can be guessed offline. Before anything touches the page the policy is evaluated as an
@@ -603,9 +607,9 @@ All notable changes to auto-browser are documented here.
   described by its length, a short key with a digit or a hyphen in it included. On any other `APP_ENV` the start
   says nothing of such a value, and it was handed out whole in three more places: as the provider's `auth_mode` and
   in its `detail`, both in `GET /agent/providers` (to any holder of a bearer token) and in `browser.list_providers`
-  (to the agent), and in the error of an agent step that names the provider. Each now reads
-  `<a value of 43 characters, not printed>` where the value stood.
-- **Another operator's auth profile no longer tells a caller that it exists, or whose it is.**
+  (to the agent), and in the error of an agent step that names the provider. The provider listings now read
+  `<a value of 43 characters, not printed>` where the value stood, and the step's error says `Agent step failed`.
+- **A read of another operator's auth profile no longer tells a caller that it exists, or whose it is.**
   `GET /auth-profiles/{name}`, `GET /auth-profiles/{name}/export` and `POST /sessions` with `auth_profile` or a
   `storage_state_path` under `profiles/` answered `403` for a foreign profile and `404` for a missing one, and
   `browser.get_auth_profile` and `browser.create_session` named the owner. Each now answers as it does for a profile
@@ -1254,7 +1258,7 @@ All notable changes to auto-browser are documented here.
   run failed. The reply now gets U+FFFD in its place, keys included, so the verdict stands, and `run.json` is
   written as the other stores write a record.
 - **`browser://<id>/dom` is capped, and says when it was cut.** The whole page was returned however long it was. A
-  read now returns at most 1,000,000 characters, the most a tool result may return, so a normal page is unaffected,
+  read now returns at most 1,000,000 characters, the most `max_chars` accepts, so a normal page is unaffected,
   and a longer page ends in an HTML comment, counted in that limit, that names the cap, the page's length and
   `browser.get_html`, which pages through the rest. A screenshot read stays a fresh, redacted, page-checked capture.
   (MCP-35)
@@ -1553,7 +1557,8 @@ All notable changes to auto-browser are documented here.
 - **A resumed agent run gets the step budget of the run it resumes, and not its approval.** A resume with no
   `max_steps` queued a run of the steps the first had left, which could be one, too few to finish anything, and the
   new run kept the `approval_id` the first was queued with, so each of its steps presented an approval given for
-  another run. The resumed run now gets the first run's `max_steps` unless the caller gives one, and no `approval_id`.
+  another run. The resumed run now gets the `max_steps` of the run it resumes unless the caller gives one, and no
+  `approval_id`.
   See the upgrade note. (STORE-23)
 - **Cancelling an agent job whose run is already over no longer cuts short the close of its session.** A run whose
   end could not be written (a full disk) still read `running` while its worker ran the finish callback that closes
@@ -1630,9 +1635,9 @@ All notable changes to auto-browser are documented here.
   `POST /mcp` could send one, and a client that decodes its own name with `surrogateescape` sends one by accident.
   Capabilities nested some hundreds of objects deep did the same. Nothing bounded the
   size of either, and the file is written whole at every write of it by anybody. A lone surrogate is now stored as
-  U+FFFD, and that `initialize` is answered as any other. An `initialize` whose `clientInfo` or `capabilities` is
-  nested deeper than 32 levels (the object itself is the first, and a list is a level as an object is) or takes
-  more than 64 KiB written compactly as JSON in UTF-8, as it is kept, is refused with JSON-RPC error `-32602`,
+  U+FFFD, and that `initialize` is answered as any other. An `initialize` whose `clientInfo` or `capabilities`
+  object is nested deeper than 32 levels (the object itself is the first, and a list is a level as an object is) or
+  takes more than 64 KiB written compactly as JSON in UTF-8, as it is kept, is refused with JSON-RPC error `-32602`,
   whose message names the field and the bound and nothing of the value: no session is made and nothing is
   written. What is kept can be longer than what was sent, and it is what the next start measures: keys that differ
   only in a lone surrogate meet once it is replaced, and all but one of them are numbered (`" (2)"`, `" (3)"`, ...).
