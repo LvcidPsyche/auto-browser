@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,14 @@ LAUNCH_FILES = [
 # Every directory release.yml builds, plus the controller (not published yet).
 WHEEL_PACKAGES = ("controller", "client", "integrations/langchain", "packaging/auto-browser-mcp")
 MCP_CONSOLE_SCRIPT = "auto_browser_client.mcp_bridge:main"
+# The client's and the LangChain integration's suites, as ci.yml's client-tests and langchain-tests run them:
+# (directory, extras, coverage module, coverage gate, PYTHONPATH). Each runs in a fresh environment of its own, where
+# its package is installed editable with those extras, from releases at least PACKAGE_HOLD_HOURS old, as in CI.
+PACKAGE_SUITES = (
+    ("client", "dev", "auto_browser_client", 85, "."),
+    ("integrations/langchain", "langchain,dev", "auto_browser_langchain", 90, None),
+)
+PACKAGE_HOLD_HOURS = 72
 SECRET_PATTERN = (
     r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}"
@@ -56,6 +65,7 @@ def main() -> int:
     _check_launch_files()
     _require("git")
     _require("npm")
+    _require("uv")
 
     # Early, because it is the cheapest possible failure and the one most likely
     # to mean "do not ship yet".
@@ -116,6 +126,10 @@ def main() -> int:
         cwd=ROOT / "controller",
         env=env,
     )
+
+    for directory, extras, module, gate, pythonpath in PACKAGE_SUITES:
+        print(f"Running {directory} tests with coverage gate...")
+        _run_package_suite(directory, extras, module, gate, pythonpath)
 
     print("Running compile checks...")
     _run([PYTHON, "-m", "compileall", "-q", "controller/app", "client/auto_browser_client", "integrations/langchain"])
@@ -198,6 +212,42 @@ def _read_dist_info(archive: zipfile.ZipFile, names: list[str], filename: str) -
     return archive.read(matches[0]).decode("utf-8") if matches else ""
 
 
+def _run_package_suite(directory: str, extras: str, module: str, gate: int, pythonpath: str | None) -> None:
+    """Run one package's tests in an environment of its own, as CI does.
+
+    The controller's environment holds what the package's tests need and much more, so a dependency the package uses
+    without declaring it would pass here and fail in CI and for its users.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=PACKAGE_HOLD_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with tempfile.TemporaryDirectory(prefix="auto-browser-suite-") as temp_dir:
+        venv = Path(temp_dir) / "venv"
+        python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        _run([PYTHON, "-m", "venv", "--without-pip", venv])
+        _run(["uv", "pip", "install", "--python", python, "--exclude-newer", cutoff, "-e", f"./{directory}[{extras}]"])
+        env = None
+        if pythonpath is not None:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = pythonpath
+        _run(
+            [
+                python,
+                "-m",
+                "pytest",
+                "tests",
+                "-q",
+                f"--cov={module}",
+                "--cov-report=term-missing",
+                f"--cov-fail-under={gate}",
+                # As the controller's step above: pytest's shared default under the system temp directory can be
+                # unusable on Windows.
+                "--basetemp",
+                Path(temp_dir) / "basetemp",
+            ],
+            cwd=ROOT / directory,
+            env=env,
+        )
+
+
 def _require(command: str) -> None:
     if shutil.which(command) is None:
         raise SystemExit(f"Missing required command: {command}")
@@ -210,7 +260,10 @@ def _run(command: list[object], *, cwd: Path | None = None, env: dict[str, str] 
         resolved[0] = executable
     printable = " ".join(resolved)
     print(f"$ {printable}")
-    subprocess.run(resolved, cwd=cwd or ROOT, env=env, check=True)
+    directory = cwd or ROOT
+    result = subprocess.run(resolved, cwd=directory, env=env)
+    if result.returncode != 0:
+        raise SystemExit(f"Release audit failed: `{printable}` in {directory} exited with status {result.returncode}.")
 
 
 if __name__ == "__main__":

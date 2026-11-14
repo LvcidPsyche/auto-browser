@@ -1700,6 +1700,12 @@ All notable changes to auto-browser are documented here.
   `"timed_out"`; a text body over `NETWORK_INSPECTOR_BODY_MAX_BYTES`, whether its length was declared or read, now
   says `"too_large"` there. Every other entry has no such field, and the two streaming types are still never read.
   (N9)
+- **The release audit runs the client's and the LangChain integration's tests as CI does.** `scripts/release_audit.py`
+  ran only the controller's suite, so a release could pass it with either package's tests failing or under their
+  coverage gate. Each suite now runs from its package's directory with CI's gate (85% for the client, 90% for the
+  integration), in a fresh environment the audit makes for it, where `uv` installs the package editable with CI's
+  extras, taking no release from the last 72 hours; so the audit now needs `uv`. A step that fails now ends the audit
+  with its command, its directory and its exit status, where it ended in a traceback. (HARN-31)
 
 ### Changed
 
