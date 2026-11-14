@@ -103,9 +103,10 @@ def main() -> int:
     # the files .gitignore names.
     # As bytes, decoded below: text mode reads a lone \r in a line as the line's end, and on Windows decodes in the ANSI
     # code page, which stops at a byte such as the 0x9D that ends a UTF-8 ”. The tokens are ASCII, so a byte the
-    # decoding replaces never hides one.
+    # decoding replaces never hides one. Without colour, which color.grep or color.ui set to always in a maintainer's
+    # config adds even into a pipe, and which hides where git's path and line number end.
     secret_scan = subprocess.run(
-        ["git", "grep", "--untracked", "-nE", SECRET_PATTERN, "--", "."], cwd=ROOT, capture_output=True
+        ["git", "grep", "--no-color", "--untracked", "-nE", SECRET_PATTERN, "--", "."], cwd=ROOT, capture_output=True
     )
     if secret_scan.returncode not in {0, 1}:
         # Not git's own words: they can name a path, or a setting's value, that holds a token.

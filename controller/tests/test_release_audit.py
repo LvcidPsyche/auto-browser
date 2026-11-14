@@ -476,6 +476,29 @@ def test_a_scan_git_wrote_an_error_in_fails_and_prints_not_what_git_said(
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("setting", ["color.grep=always", "color.ui=always"])
+def test_a_colour_setting_leaves_the_place_whole_and_prints_no_escape_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], setting: str
+) -> None:
+    # Set in a maintainer's git config, either colours the path, the separators and the line number even into a pipe:
+    # the place was then read from the line's own text, its first `:<digits>:`, and printed with the escape codes.
+    token = SECRET_SHAPES["a GitHub classic token"]
+    password = "hunter2-" + "not-real"
+    run = subprocess.run
+
+    def coloured(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        return run([command[0], "-c", setting, *command[1:]], **kwargs)
+
+    line = f"password={password} at 10:30:00 key={token}\n"
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {"settings.py": line.encode()}, run=coloured)
+
+    failed = "potential secret-shaped token found" in str(code)
+    printed = any(value in out or value in err for value in (token, password, "\x1b"))
+    named = err.splitlines() == ["settings.py:1: secret-shaped token (value withheld)"]
+    assert (failed, printed, named) == (True, False, True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 @pytest.mark.parametrize("encoding", ["utf-8", "latin-1"])
 def test_the_secret_scan_reads_what_git_prints_as_utf_8_whatever_the_code_page(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], encoding: str
