@@ -4,6 +4,35 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-11-14
+
+A security and correctness release over 1.17.0, from the findings the reviews of 1.17.0 left open and from reviews of
+this release's own changes. A controller with no API token now refuses a write that a web page sends from another
+origin, and no longer answers a DNS-rebound page through a wildcard in `CONTROLLER_ALLOWED_HOSTS`; behind a
+`root_path`, a file under `/artifacts` keeps its sandbox. In the fast profile a click on a pay, delete, post or
+account button the controller can read asks for approval whatever the model labelled it; a typed text is previewed
+only where a read of its field has found it not secret; more log lines quote and cut the text a web page or a mesh
+peer sends; and a session closed while it is being created keeps no tunnel. On Linux with Landlock, provider CLIs now
+start under a sandbox that closes the controller's data directory to them, outside their own home. Cron webhook keys
+are stored hashed, share links can be revoked, and an approval records the operator who decided it where a named
+credential proved them.
+
+Read the upgrade notes first, since several change what a running deployment does; among them: a tokenless controller
+refuses cross-origin writes and does not start with a wildcard in `CONTROLLER_ALLOWED_HOSTS`; what a CLI reads or
+writes under `/data` moves into `CLI_HOME` (or `CLI_SANDBOX_ENABLED=false` keeps 1.17.0's behaviour); MCP `2025-03-26`
+is no longer negotiated; the first start hashes the cron webhook keys, schedules run in `CRON_TIMEZONE` (`UTC` by
+default), and a job whose owner's named credential is gone is refused; decided approvals are pruned 30 days after
+their decision from the first start (`APPROVAL_RETENTION_DAYS=0` keeps them); the new `.tool-call-digest.key` in
+`APPROVAL_ROOT` needs a backup; a resumed agent run gets the full `max_steps` of the run it resumes; and a stop waits
+at most 5 seconds for the requests in flight, so a uvicorn started your own way needs `--timeout-graceful-shutdown 5`
+too.
+
+The controller image changes; the client, LangChain and MCP bridge packages now carry the MIT license text in their
+wheels and sdists and otherwise change only in version, and the MCP bridge package requires this client; the
+browser-node image changes only in version. Advisories: GHSA-7wq9-v3c2-7x2c, GHSA-h2q4-pwpr-qp4j, GHSA-hvjj-c398-6g72,
+GHSA-jv4w-prgx-557p, GHSA-5p5g-q85f-m693, GHSA-5wf5-v2cm-mr2j and GHSA-vq4x-w2m7-hj4f, fixed in this release, and
+GHSA-786v-hrgx-6wcx, fixed in 1.8.0 and published with them.
+
 ### Upgrade notes
 
 - **MCP protocol `2025-03-26` is no longer negotiated.** A client that initializes with it is offered `2025-11-25`, as
