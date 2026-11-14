@@ -59,6 +59,23 @@ class ReleaseWorkflowCoverageTests(unittest.TestCase):
         missing = [directory for directory in built if directory not in release_audit.WHEEL_PACKAGES]
         self.assertEqual(missing, [])
 
+    @unittest.skipUnless(RELEASE_WORKFLOW.is_file(), "release workflow is not in this tree")
+    def test_the_build_job_requires_the_release_notes_before_anything_is_published(self) -> None:
+        # github-release reads the notes only after publish-pypi has published: a tag without its CHANGELOG section
+        # failed there, with the packages already on PyPI.
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        def job(name: str) -> str:
+            match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", text)
+            self.assertIsNotNone(match, f"no {name} job in release.yml")
+            return match.group(1)
+
+        build = job("build")
+        notes = build.find('run: python scripts/extract_changelog.py "${GITHUB_REF_NAME#v}" > /dev/null\n')
+        self.assertNotEqual(notes, -1, "the build job does not check for the tag's CHANGELOG section")
+        self.assertLess(notes, build.index("python -m build"))
+        self.assertIn("    needs: build\n", job("publish-pypi"))
+
 
 class InspectMcpWheelTests(unittest.TestCase):
     def _inspect(self, files: dict[str, str] | None) -> None:

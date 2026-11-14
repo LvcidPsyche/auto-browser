@@ -1716,6 +1716,10 @@ All notable changes to auto-browser are documented here.
   from a gh that prints each page as an array of its own, once the list runs past one page. It now passes `--slurp`
   and reads every advisory on every page; a reply that is not a list of pages fails the check, as does a gh that
   does not know `--slurp`, with gh's error. (HARN-33)
+- **A release tag without its CHANGELOG section stops before anything is published to PyPI.** The release workflow
+  read the section as the GitHub release's notes only after the three packages were on PyPI, so a tag with no section
+  of its own, or an empty one, published them and then failed. Its build job now checks for the section before it
+  builds. The image workflow, which publishes on the same tag, does not check it. (HARN-34)
 
 ### Changed
 
