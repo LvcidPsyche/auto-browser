@@ -3,12 +3,13 @@ launcher cannot keep it from the controller's files.
 
 A provider CLI runs as the controller's user, and a page the model was shown can talk it into reading what that user
 can: the API token, the takeover token, the auth profiles, the witness and mesh keys. Started under the launcher it
-can open, list and run nothing in PROTECTED_ROOT but its own home and the screenshot of its call; a stat, an inotify
-watch and a connection to a Unix socket there are not refused (docs/deployment.md, "The CLI sandbox", lists what the
-sandbox does not stop). Outside the root it reads, lists and runs what it did before, and writes only the directories
-_writable gives it: its home, its HOME, the temp directories, /dev, and what CLI_SANDBOX_WRITABLE names. The
-controller is not under the launcher, and what a CLI could leave in the controller's own home (a Python user site,
-an ssh config) the controller would run at its next start.
+can open, list and run nothing in PROTECTED_ROOT but its own home, what CLI_SANDBOX_WRITABLE names there and the
+screenshot of its call; a stat, an inotify watch and a connection to a Unix socket there are not refused
+(docs/deployment.md, "The CLI sandbox", lists what the sandbox does not stop). Outside the root it reads, lists and
+runs what it did before, and writes only the directories _writable gives it: its home, its HOME, the temp
+directories, /dev, and what CLI_SANDBOX_WRITABLE names. The controller is not under the launcher, and what a CLI
+could leave in the controller's own home (a Python user site, an ssh config) the controller would run at its next
+start.
 
 Each of these is reported:
 
@@ -18,9 +19,9 @@ Each of these is reported:
   the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
 - the CLI home is PROTECTED_ROOT or holds it, as written: a rule on that home would open the root, and the launcher
   refuses it. The CLI is started without the launcher.
-- the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it: a link, which a CLI that may write
-  where the home is written may have made. The CLI is started under the launcher without it, and cannot write its
-  home: closed, not open.
+- the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it (a link, which a CLI that may write
+  where the home is written may have made), or is not a directory. The CLI is started under the launcher without
+  it, and cannot write its home: closed, not open.
 - the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
   write, but for a CLI home in it clear of the home's .ssh and Python's user base. The CLI is started under the
   launcher.
@@ -78,7 +79,10 @@ SECRET_PATH_SETTINGS = {
 }
 PROBE_TIMEOUT_SECONDS = 30
 # What the caller of a refused call is told. Neither names a path: the detail is in the controller log.
-REQUIRED_MESSAGE = "CLI_SANDBOX_REQUIRED is set and the CLI sandbox would leave the controller's files open to the CLI"
+REQUIRED_MESSAGE = (
+    "CLI_SANDBOX_REQUIRED is set and the CLI sandbox would leave the controller's files open to the CLI, or run it "
+    "without its home"
+)
 NOT_APPLIED_MESSAGE = "the CLI sandbox could not be applied, and the CLI was not run"
 
 _LINUX = sys.platform.startswith("linux")
@@ -94,7 +98,8 @@ _reported: set[tuple[bool | None, str]] = set()
 
 
 class SandboxRequired(Exception):
-    """CLI_SANDBOX_REQUIRED is set and the sandbox would leave a secret open: the CLI is not to be started."""
+    """CLI_SANDBOX_REQUIRED is set and the sandbox would leave a secret open, or the CLI without its home: the CLI is
+    not to be started."""
 
 
 def _probe(env: dict[str, str]) -> tuple[str | None, bool]:
@@ -225,7 +230,8 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
         if why and kind == "home":
             home_refused = (
                 "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox without a home "
-                "they can write (a CLI_HOME linked into %s on purpose is to be set to its real path)"
+                "they can write (a CLI_HOME linked into %s on purpose is to be set to its real path, and one that is "
+                "not a directory made one)"
             ) % (path, why, PROTECTED_ROOT)
         elif why and kind == "setting":
             _warn_once("CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write" % (path, why))

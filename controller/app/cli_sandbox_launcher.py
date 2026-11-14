@@ -15,8 +15,9 @@ Landlock only allows, so the ruleset names what stays open:
   opened, gets no rule, which allows nothing. The controller is not under this ruleset, and what a CLI could write
   there it could leave for the controller to run or read: in its home, a Python user site or an ssh config;
 - each --rw directory with every right: what app.cli_sandbox lets a CLI write (its home, wherever that is, the temp
-  directories, /dev). Each is opened following links and must then be the path given: the controller gives resolved
-  paths, so a link on the way means the path changed since, and its rule is not made;
+  directories, /dev, the entries of CLI_SANDBOX_WRITABLE). Each is opened following links and must then be the path
+  given: the controller gives resolved paths, so a link on the way means the path changed since, and its rule is not
+  made;
 - each --ro-file to read, and no more (the screenshot of this call).
 
 So outside ROOT a CLI reads, lists and runs what it did before, and writes only in the --rw directories: as root

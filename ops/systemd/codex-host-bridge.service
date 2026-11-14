@@ -19,8 +19,9 @@ RestartSec=2
 #   CLIs, and the bridge's Codex signs in under the bridge's own home.
 # - In a user unit these settings work inside a user namespace (PrivateUsers=). Where the host restricts unprivileged
 #   user namespaces (Ubuntu 24.04 and later do by default: kernel.apparmor_restrict_unprivileged_userns=1) the unit
-#   starts with the whole option on and hides nothing, with no error; without the PrivateUsers= line it hides nothing
-#   anywhere. Measured by hand in user units on GitHub-hosted runners on 2026-11-13; no CI job runs this unit.
+#   starts with PrivateUsers= and InaccessiblePaths= on and hides nothing, with no error; without the PrivateUsers=
+#   line it hides nothing anywhere. Measured by hand in user units on GitHub-hosted runners on 2026-11-13; no CI job
+#   runs this unit.
 # - The ExecStartPre= line checks for that: it refuses to start the bridge while a path the option names can still be
 #   read. A refused start is tried again every RestartSec=, and each try writes the line's message to the journal
 #   (journalctl --user -u codex-host-bridge). A path taken out of the InaccessiblePaths= lines comes out of the

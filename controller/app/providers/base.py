@@ -728,8 +728,8 @@ class BaseProviderAdapter(ABC):
         """Run a provider CLI to its end, in a process group of its own, and return what it printed.
 
         Where Landlock works the CLI is started under the launcher of app.cli_sandbox: of the controller's data
-        directory it can open its home, and ``image_path`` to read (the screenshot its command names, if any). The
-        launcher execs the CLI, so the child is one process either way.
+        directory it can open its home and what CLI_SANDBOX_WRITABLE names there, and ``image_path`` to read (the
+        screenshot its command names, if any). The launcher execs the CLI, so the child is one process either way.
 
         Stdout past CLI_STDOUT_LIMIT_BYTES is an error and the start of stderr is kept (CLI_STDERR_KEEP_BYTES). On a
         timeout, on that error and on a cancel the whole group is killed and the child reaped, bounded by the drain of

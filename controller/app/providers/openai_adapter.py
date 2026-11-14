@@ -29,8 +29,9 @@ logger = logging.getLogger(__name__)
 # A codex config can name a /home/<user>/.codex home from another machine or container; that one place outside the CLI
 # home is worth linking to the real one. Anything else is skipped.
 _HOME_ROOT_PARTS = 4  # ("/", "home", "<user>", ".codex")
-# How the controller opens what a Codex call left at its decision file's name: never through a link, never waiting for
-# a writer, and as bytes on Windows too. One code path everywhere: a flag the platform lacks is 0.
+# How the controller opens what a Codex call left at its decision file's name: on POSIX never through a link at that
+# name, never waiting for a writer, and as bytes on Windows too. One code path everywhere: a flag the platform lacks
+# is 0.
 _DECISION_FILE_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
 )

@@ -61,9 +61,10 @@ Unix socket (`scripts/codex_host_bridge.py`, which gives Codex an allowlisted en
 
 A `cli` provider's CLI gets an allowlisted environment, and on Linux the controller (and the bridge) is
 non-dumpable, so the CLI cannot read the controller's environment through `/proc`. On Linux with Landlock the
-controller also starts the CLI in a sandbox: of `/data` it can open only `CLI_HOME` and the screenshot of its own
-call, so it cannot read `data/api-token`, `data/takeover-token` or the mesh and witness keys kept in their default
-places, though it runs as the controller's uid; outside `/data` it reads what it did before and writes only its home,
+controller also starts the CLI in a sandbox: of `/data` it can open only `CLI_HOME`, what `CLI_SANDBOX_WRITABLE`
+names there and the screenshot of its own call, so it cannot read `data/api-token`, `data/takeover-token` or the
+mesh and witness keys kept in their default places, though it runs as the controller's uid; outside `/data` it reads
+what it did before and writes only its home,
 the temp directories, `/dev` and the directories `CLI_SANDBOX_WRITABLE` names. Where the sandbox is not in use, or is
 in use and would leave a secret open (a secret's setting outside `/data`, for one), the controller says so in one
 warning, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI instead ("The CLI sandbox" in docs/deployment.md,

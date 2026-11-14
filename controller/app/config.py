@@ -368,8 +368,8 @@ class Settings(BaseSettings):
     # false: provider CLIs start without their Landlock sandbox (app/cli_sandbox.py), as before 1.18.0, with one
     # warning; with CLI_SANDBOX_REQUIRED=true no provider CLI runs at all.
     cli_sandbox_enabled: bool = Field(True, alias="CLI_SANDBOX_ENABLED")
-    # true: no provider CLI is run where its Landlock sandbox would leave one of the controller's secrets open to it
-    # (app/cli_sandbox.py). false: one warning, and the CLI runs.
+    # true: no provider CLI is run where its Landlock sandbox would leave one of the controller's secrets open to it,
+    # or run it without its home (app/cli_sandbox.py). false: one warning, and the CLI runs.
     cli_sandbox_required: bool = Field(False, alias="CLI_SANDBOX_REQUIRED")
     # Directories (comma-separated, absolute) a sandboxed provider CLI may write besides its home, the temp
     # directories and /dev: a CODEX_HOME or CLAUDE_CONFIG_DIR kept elsewhere, a directory a tool of yours writes.

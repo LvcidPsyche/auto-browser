@@ -510,12 +510,12 @@ through `/proc/PID/environ`.
 A provider CLI (`OPENAI_AUTH_MODE=cli` and the others) runs as the controller's user, and page content it is shown
 can prompt-inject it. On Linux with Landlock (kernel 5.13 or later, with Landlock enabled) the controller starts each
 provider CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a Landlock ruleset and then
-execs the CLI. Of `/data` the CLI can then open only `CLI_HOME`, to read and write, and the screenshot its own call
-names (Codex's `--image`), to read. Kept in their default places, `data/api-token`, `data/takeover-token`, the auth
-profiles, the witness and mesh keys and the tunnel key cannot be opened, and neither can another session's
-screenshots or anything else under `/data`; nothing there can be listed or run. Each answers `EACCES`, to a CLI that
-runs as root as to any other. A `stat`, an inotify watch and a connection to a Unix socket under `/data` are not
-refused (below), and the conditions below say where a secret is left open.
+execs the CLI. Of `/data` the CLI can then open only `CLI_HOME` and what `CLI_SANDBOX_WRITABLE` names there, to read
+and write, and the screenshot its own call names (Codex's `--image`), to read. Kept in their default places,
+`data/api-token`, `data/takeover-token`, the auth profiles, the witness and mesh keys and the tunnel key cannot be
+opened, and neither can another session's screenshots or anything else under `/data`; nothing there can be listed or
+run. Each answers `EACCES`, to a CLI that runs as root as to any other. A `stat`, an inotify watch and a connection to
+a Unix socket under `/data` are not refused (below), and the conditions below say where a secret is left open.
 
 Outside `/data` a CLI can read, list and run what it could before, and write only in its home (wherever that is),
 the temp directories (`/tmp`, `/var/tmp`, and those its own `TMPDIR`, `TEMP` and `TMP` name where they lie outside
@@ -616,15 +616,16 @@ What the sandbox does not stop, and what does not work under it:
   sandboxed `claude` or `gemini` can ask the bridge's Codex, which runs outside the sandbox.
 - **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the
   next CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller
-  takes only as a regular file of at most 1 MiB and never through a link, and Codex's `config.toml`, which the
-  controller reads for the paths it names. The temp directories are shared with the controller's own children: the
-  OCR's input image is there while it runs.
+  takes only as a regular file of at most 1 MiB and never through a link at its own name, and Codex's `config.toml`,
+  which the controller reads for the paths it names. The temp directories are shared with the controller's own
+  children: the OCR's input image is there while it runs.
 - **What the controller's user can read outside `/data`, and the sockets it can connect to.** With the isolation
   overlay that includes the Docker socket.
 - **Truncation, on a kernel older than 6.2.** Landlock could not deny `truncate` before its third ABI. There a CLI
   can empty a file under `/data` that the controller's user may write, though it can neither read nor write it, and
   so a file outside `/data` that the controller's user may write.
-- **A tool that builds its own mount namespace.** Landlock refuses mounting to every process it restricts.
+- **A tool that builds its own mount namespace.** Landlock refuses mounting or unmounting to every process it
+  restricts.
 - **Codex's own sandbox.** Codex wraps each command its model asks for in a sandbox of its own, whose helper opens
   `/` for reading before it makes its rules. This sandbox refuses that open (`/` itself has no rule, and a rule there
   would make every name under `/data` listable), the helper goes on without its rule on `/`, and the command ends with
@@ -761,13 +762,13 @@ and systemd cannot nest a writable path inside an inaccessible one.
 
 In a user unit these settings work inside a user namespace (`PrivateUsers=`). No CI job runs the unit; it was run by
 hand in user units on GitHub-hosted runners on 2026-11-13. On Ubuntu 22.04 (systemd 249) the option closes the paths
-it names. With the `PrivateUsers=yes` line left commented, the unit starts and the paths stay readable. Where the host
-restricts unprivileged user namespaces (Ubuntu 24.04 and later do by default:
-`kernel.apparmor_restrict_unprivileged_userns=1`), the unit starts with the whole option on and the paths stay
-readable, with no error: that is what the `ExecStartPre=` check is for. There it refuses the start, and the journal
-(`journalctl --user -u codex-host-bridge`) has "the option is on and .env is still readable: this host does not let a
-user unit hide paths" (the first path it finds readable). A refused start is tried again every `RestartSec=`, as any
-failed start of the unit is, and each try writes the message again.
+it names. With the `PrivateUsers=yes` line left commented, the paths stay readable, and the `ExecStartPre=` check
+refuses the start. Where the host restricts unprivileged user namespaces (Ubuntu 24.04 and later do by default:
+`kernel.apparmor_restrict_unprivileged_userns=1`), the unit starts with `PrivateUsers=` and `InaccessiblePaths=` on
+and the paths stay readable, with no error: that is what the `ExecStartPre=` check is for. There it refuses the
+start, and the journal (`journalctl --user -u codex-host-bridge`) has "the option is on and .env is still readable:
+this host does not let a user unit hide paths" (the first path it finds readable). A refused start is tried again
+every `RestartSec=`, as any failed start of the unit is, and each try writes the message again.
 
 The option hides what is at a named path when the unit starts, and nothing that comes there later. A path made after
 the start (the controller's first start writes `data/api-token`), a file replaced by a rename (the controller writes
