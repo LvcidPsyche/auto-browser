@@ -683,7 +683,9 @@ Records that 1.17.0 and earlier stored with the plain SHA-256 are rewritten at t
 finds them, in both stores, and cover the same call as before; one that cannot be rewritten is logged,
 still matches its call, and is taken at the next start. Until then, or until a decision or a call writes
 that record, what is stored of it (its file, and its row with `STATE_DB_PATH`) holds the plain digest,
-and the controller lists and answers it keyed all the same.
+and the controller lists and answers it keyed all the same. A start that cannot use the key file (it
+keys with a key of its own) rewrites none, and a decision or a call there writes the plain digest back:
+it stays until a start that can use the file.
 
 An approval kept under a key the controller no longer holds (the file was removed or replaced before a
 start; a running controller goes on with the key it read) cannot be matched to any call. Approving it is
@@ -785,7 +787,8 @@ either, through open shadow roots. Where one of them read as secret (a password 
 "text hidden: its field reads as secret" (`field_read: "secret"`), and stays so. It reads "text hidden:
 its field has not been read" (`field_read: "unread"`) where there is no such field (a component that
 takes its keys itself, or keeps its field in a closed shadow root), where a frame is among what is
-named (its document is not read), where the read did not answer within a second (a field not on the
+named and none of them reads as secret (its document is not read), where the read did not answer
+within a second (a field not on the
 page yet), and for any pending `type` approval stored before 1.18.0, until the same action is asked
 for again and its read says plain or secret.
 `GET /approvals` answers that text for it; the approval keeps the text the action must be retried
@@ -819,12 +822,14 @@ created it, and every run, scheduled or triggered, starts under it, so a job cre
 caller cannot be used to run writes without approval. Likewise, a run or step queued by a `governed`
 `browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.
 These three tools refuse a `workflow_profile` (or `policy_profile`) other than `fast` or `governed`, as
-every governed tool does, and create or queue nothing: read as `fast`, a mistyped value stored or queued
-`fast`. `policy_profile` is a second name for the same argument, for these tools and for every governed
-one: a call that gives both is `governed` when either says `governed`, and is refused when either holds
+every governed tool does, and create or queue nothing: read as `fast`, a mistyped value stored the job
+`fast`, and left a queued run or step at its request's own profile. `policy_profile` is a second name
+for the same argument, for these tools and for every governed one: a call that gives both is `governed`
+when either says `governed`, and is refused when either holds
 another value (`null` reads as left out). The two queue tools are not governed: their `tools/list` schema
 shows `workflow_profile`, with what it does there, and no `approval_id`, since queuing a run or step asks
-for no approval.
+for no approval. That description does not name `FORCE_GOVERNED_APPROVALS`, under which a queued run or
+step runs governed whatever either profile says.
 A job created through REST (`POST /crons`) stores the `workflow_profile` the request body names, `fast`
 by default. A job created before this release stores `fast`: it keeps running as `fast` unless
 `FORCE_GOVERNED_APPROVALS=true` (below). A job's profile is fixed when it is created (jobs cannot be

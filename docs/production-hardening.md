@@ -343,7 +343,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - A click by coordinates lands a little off its point, as a hand's does, only while the same element is under
     the moved point. Otherwise, or when that cannot be told (half a second to set the comparison up, half a
     second to make it), it lands on the point itself. Two points inside a frame of another origin, or off the
-    page, are never taken for one element.
+    page, are never taken for one element. Points are compared through open shadow roots only: in a closed one
+    both find its host, so two of its controls, or two points in a frame inside it, are taken for one element.
   - A press holds the mouse button down for 20 to 80 ms, as a hand does, and the browser sends no click where the
     element the press went down on is gone by the release. A page that draws the element under the pointer again
     within the hold (a list or a counter that a framework renders again on a timer, a button whose label it

@@ -857,17 +857,19 @@ one open always waits the 5 seconds. The log then shows uvicorn's
 `Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR, and one INFO line from the controller for
 each stream it ended (`the event stream on '/mcp' was still open at the shutdown limit: ended`). That is a normal
 stop, not a crash: the stream's body is finished and its connection closed, and a client can open it again when
-the controller is back. A client that is still connected and has stopped reading cannot be sent the end of the body:
-the controller waits up to one second for it and logs that the stream was `left unfinished`, and uvicorn logs
-`ASGI callable returned without completing response.` at ERROR and asks the transport to close. A connection that
+the controller is back. A client that is still connected and has stopped reading is sent the end of the body while
+its buffers have room. Once they are full it cannot be: the controller waits up to one second for it and logs that
+the stream was `left unfinished`, and uvicorn asks the transport to close (and logs
+`ASGI callable returned without completing response.` at ERROR, where it writes that line). A connection that
 still holds bytes its client has not taken stays until they are gone or the process ends. A call still running at
 the limit is cancelled too, and for that one uvicorn logs `Exception in ASGI application` with a traceback that ends
 in `CancelledError`.
 
 If you start uvicorn yourself (your own image or command, a process manager), give it the limit too, in seconds and
 well under what your supervisor waits before it kills the process:
-`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5`. Without it uvicorn waits for an
-open stream without limit and the cleanup never runs.
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5`. Without it uvicorn waits for
+every open stream, so the cleanup runs only once each stream's client has gone, and never where the supervisor
+kills the process first.
 
 ## What ALLOWED_HOSTS refuses, and what it does not
 
@@ -1074,11 +1076,12 @@ once reached, is final. (A judgement still running when `activate_tab`'s 10 seco
 clean later; nothing known runs that long, since a target id read that hangs gives up after 7.5 seconds: three
 reads of at most 2 seconds, and the waits between them.) It is blanked rather than kept open because,
 unjudged, it may be a refused page's window with a script planted in it. If the watcher's session dies while
-the browser lives and has a watched session, a replacement attaches at once; until it is up, every popup
+the browser lives and has a watched session, a replacement's attach starts at once (behind another browser's attach
+in progress); until it is up, every popup
 reported in those sessions is refused as unjudged, and stays so until the agent navigates it (a replacement
 cannot judge a window born before it). An attach that fails is tried three more times, about 2 seconds apart,
-while the browser still has a watched session; after the last one, and where the watcher was lost with no
-session watched, the watcher stays lost until a session is created on that browser.
+while the browser still has that lost watcher and a watched session; after the last one, and where the watcher was
+lost with no session watched, the watcher stays lost until a session is created on that browser.
 The replacement registers every live session on that browser before it discovers the browser's
 targets, so the windows that exist by then are its entries too: a page the controller knows (its target id
 cached) counts as reported and clean; a window with an opener is unjudged, refused if it is reported and swept
@@ -1482,16 +1485,19 @@ scheduler reaches more than five minutes late is not made and several it missed 
 
 A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (on a controller with a
 token, the bearer token is needed as well, as on any route). The key is 256 random bits, answered once by the call that
-makes it, `POST /crons` or a rotation. The store keeps only its SHA-256 hash, and reads answer `webhook_key_id`, a short
-non-secret id derived from the hash that tells keys apart:
+makes it, `POST /crons` or a rotation. The store keeps only its SHA-256 hash (a store edited by hand can hold a key or
+a hash that cannot be read: such a job's webhook refuses every key until it is rotated), and reads answer
+`webhook_key_id`, a short non-secret id derived from the hash that tells keys apart:
 
 - **Rotate** with `POST /crons/{job_id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`: a new key, answered
   once; the old key stops working at once, and a job with no webhook gets its first.
 - **Revoke** with `DELETE /crons/{job_id}/webhook-key` or `browser.revoke_cron_webhook_key`: the key is removed, and
-  a trigger is refused as for a job that never had one. A rotation brings the webhook back.
+  a trigger is refused as for a job that never had one (a stored key that cannot be read stays: `revoked: false`).
+  A rotation brings the webhook back.
 
-A trigger answers `403` for the key and for nothing else: an unknown job, a job with no key and a wrong key, with
-nothing to say which. With the key proved, what stops the run is answered as itself and never as `403`: among them
+A trigger answers `403` for the key and for nothing else: an unknown job, a job with no key, a wrong key and a job
+whose stored key cannot be read, with nothing to say which. With the key proved, what stops the run is answered as
+itself and never as `403`: among them
 `409` for a disabled job, for the session cap, for an auth profile that is gone or has become another operator's and,
 in one fixed text that names no cause, for anything else the controller refuses of the run's session or of the job
 as it is stored (an auth state older than `AUTH_STATE_MAX_AGE_HOURS`, a `start_url` that `ALLOWED_HOSTS` no longer
