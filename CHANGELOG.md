@@ -671,7 +671,8 @@ All notable changes to auto-browser are documented here.
   token's, unless it holds a whole token of eight characters or more. Each length and each run is of the token's
   characters as it is configured, though a sharp s or the ligature fi folds to two (`boss123` is named beside a
   token of a sharp s and `12345`), and a token of dotless i (U+0131) is kept back in upper case too. (AUTH-36)
-- **The fast profile no longer takes a model's word for a click on a dangerous button.** A click labelled `read`,
+- **The fast profile no longer takes a model's word for a click on a dangerous button it can read.** A click labelled
+  `read`,
   `write` or `upload` asked for no approval, and that label is written by a model reading the page, which text on
   the page can steer. Before the approval decision the target of such a click is now read, found as the click will
   find it: an `element_id` or a point in the controller's isolated world, where no page script runs (a point
@@ -715,7 +716,8 @@ All notable changes to auto-browser are documented here.
   - A link in no button or menu item, bare `Close` or `Cancel`, and a target that cannot be read (the action then
     goes on as labelled, and an info-level log line says so) are not classified, and an action inside a governed
     run's approval is not read. See the upgrade note. (STORE-42)
-- **A click by coordinates is pressed on the element at its point.** The press landed up to 2.5 pixels from the
+- **A click by coordinates is pressed on the element at its point, closed shadow roots aside.** The press landed up to
+  2.5 pixels from the
   point each way, as a hand's does, on whatever was there: a click aimed at a small control could press its
   neighbour, which the read above had never seen. The moved point is now kept only while the same element is under
   it (compared in the isolated world once the pointer has arrived); otherwise, or when that cannot be told (half a
@@ -723,7 +725,8 @@ All notable changes to auto-browser are documented here.
   a frame of another origin are never taken for one element, unless the frame is in a closed shadow root: points
   are compared through open shadow roots only, and in a closed one both find its host, so two of its controls, or
   two points in a frame inside it, are taken for one element and the moved point is kept.
-- **A tool call's approval no longer stores a digest that its arguments alone reproduce.** An approval for a governed
+- **A new tool call's approval no longer stores a digest that its arguments alone reproduce.** An approval for a
+  governed
   tool call binds the call through a stand-in action whose text was `<tool> sha256:<digest>`, a plain SHA-256 of the
   call's whole arguments, the credentials its preview leaves out included. `GET /approvals`, `browser.list_approvals`
   and the `approval_required` answer serve that text, so whoever could read an approval could guess a short cookie
@@ -768,8 +771,9 @@ All notable changes to auto-browser are documented here.
   three runs in Chromium).
   The order is the same in every release since the autofill was bound to the session's hosts, 1.8.1 to 1.17.0 (by
   their code; the probe ran on this release's).
-- **A type's text is shown only where a read of its field has found the field not secret, and its receipt is
-  restricted where it is not shown.** A `type` keeps a preview of its text (`text_preview`, its first 80 characters,
+- **A type's text is previewed or shown in its approval only where a read of its field has found the field not
+  secret, and its receipt is restricted where it is not previewed.** A `type` keeps a preview of its text
+  (`text_preview`, its first 80 characters,
   scrubbed) in its answer, `actions.jsonl`, the session's audit log and its witness receipt, and an approval asked
   for a type shows the text in its summary (the webhook's and the SSE event's), the dashboard's queue and confirm
   dialog, and what `GET /approvals` answers. Whether the text is secret is read from the field's attributes, and the
@@ -830,7 +834,8 @@ All notable changes to auto-browser are documented here.
   pending approval for a type that an earlier release stored does not say how its field read, so it is `unread`,
   its text hidden until such a request reads the field as plain. The approval's stored record keeps the text, as
   before: the action retried with the approval's id is matched against it. A text the caller marked `sensitive`
-  is withheld everywhere, as before (its approval stores only a digest of it), and its field is not read for its
+  is withheld everywhere but in an agent step's `decision`, as before (its approval stores only a digest of it), and
+  its field is not read for its
   approval (`field_read` is `unread`). A typed text still shows: as the preview of a field read as not secret, and in
   the approval of one (a
   post's or a message's text is what its approver must see; the approval reads the fields as they are when it
@@ -908,7 +913,8 @@ All notable changes to auto-browser are documented here.
   parent's record (none where that record is gone or cannot be read); that job's record keeps what was written. Such a
   job still fails at its session, which a restart does not keep, before any planner is asked: the cut and the
   checkpoints are what the worker would hand a planner. (STORE-24)
-- **A failed agent step no longer hands the provider's status, or an error's text, to the caller.** The step's
+- **A failed agent step no longer hands the provider's status, or an error's text, to the caller, but for a page it
+  could not observe.** The step's
   `error_code` was the status the provider had answered with, and any failure that was no provider's put its class and
   text, up to 300 characters, into the step's `error`: a `PermissionError` from the CLI home named its path. A
   provider's failure is now `503` where trying again may help (a `429`, a `5xx`, a timeout, a connection that could
@@ -920,7 +926,8 @@ All notable changes to auto-browser are documented here.
   (one raised outside the provider call, such as a log file that could not be written) recorded the error's class
   and text, a path among them, in the record that anyone who lists the jobs reads: it records `Agent job failed`
   now. See the upgrade note. (STORE-27)
-- **A provider CLI is started under a Landlock sandbox that closes the controller's data directory to it.** A `cli`
+- **A provider CLI can now be started under a Landlock sandbox that closes the controller's data directory to it but
+  for its own files.** A `cli`
   provider's CLI ran as the controller's user with nothing between it and the controller's files, and a page shown
   to the model could prompt-inject it into reading `data/api-token`, `data/takeover-token`, an auth profile or the
   witness and mesh keys: 1.17.0 recorded that as a known limit. On Linux with Landlock the controller now starts the
@@ -954,7 +961,8 @@ All notable changes to auto-browser are documented here.
   name (a link there, a FIFO or a larger file fails the call), and makes the call's schema file rather than write
   through what is at its name; a link put in place of the call's directory is followed, so the controller can take a
   closed file named `decision.json` there for the call's decision, or make its schema file in a closed directory. The
-  sandbox does not stop `stat` and other metadata calls on a file under `/data`, an inotify watch there, one CLI call
+  sandbox does not stop `stat` and other metadata calls on a file under `/data`, an inotify watch there, `truncate` on
+  a kernel older than 6.2, one CLI call
   reaching another's files in `CLI_HOME`, signals and TCP connections to the controller, or a connection to a Unix
   socket under `/data`, the Codex host bridge's among them: docs/deployment.md lists these and the rest. The Codex
   host bridge's Codex runs outside it. (N1)
@@ -1046,7 +1054,8 @@ All notable changes to auto-browser are documented here.
   `type`, since 1.9.0. A click listener a site keeps on `window` in the capture phase saw the trial click as one
   more click too. The checks are now made with no click: a wait for the element to be enabled, then a trial
   hover, which sends the pointer's move and nothing else. The approval read of a fast-profile click depends on
-  it: nothing is pressed before the target has been read. Enabled is asked once more as the pointer arrives,
+  it: nothing is pressed before the target is read (or its read has failed). Enabled is asked once more as the pointer
+  arrives,
   about half a second later: a button the page had turned off by then got a mouse down that the browser gives to
   nobody, under an action that ended as done. Such a click now waits for the button, as Playwright's own does,
   and fails when it stays off. That gap is older than this release, and so is this one: a disabled button that
@@ -1057,7 +1066,8 @@ All notable changes to auto-browser are documented here.
   where the element under the pointer is drawn again within that time the browser sends no click, and the
   action ends as done (10 of 20 read clicks on a button replaced every 250 ms). The docs say what the action's
   `verification` shows of it.
-- **A click on an element inside a frame is pressed only where the pointer finds that element.** A selector that
+- **A click on an element inside a frame is pressed only where the pointer finds that element, but in the cases
+  below.** A selector that
   goes into a frame names an element there, and its click is pressed at the middle of the element's box once the
   pointer is found to be on it. For an element in a frame that was never asked: the check ran in the frame's own
   document, which cannot tell where it lies on the screen, and answered yes. Where the element is wider or taller
@@ -1105,7 +1115,8 @@ All notable changes to auto-browser are documented here.
   pointer once Playwright's hover has passed, within that much of a frame inside the element, can be pressed, as
   can what a document that runs no script shows under the pointer on hover (CSS can), short of that point. In a
   frame CSS turns such a click can end so as well. Before, that press went down unchecked at the middle of the box.
-- **A selector click has one time limit for all its waits.** The scroll into view, the read of the element's box,
+- **A selector click has one time limit for all its waits for its target.** The scroll into view, the read of the
+  element's box,
   the checks, the question what the pointer finds and the click Playwright places each waited up to
   `ACTION_TIMEOUT_MS` of their own. A target that left the page once the checks had passed held its session for
   7 seconds under a limit of 3, and one that kept every step waiting could hold it for several limits. The
@@ -1133,7 +1144,7 @@ All notable changes to auto-browser are documented here.
   typed in time stays in its field with the tab a character of it, since Playwright's `keyboard.type` has no key
   for a tab and inserts it. A tab past the time is now inserted with the text around it; a newline or a carriage
   return there is still pressed as Enter.
-- **A type by selector no longer empties, or types into, a field the page moved focus to during its clear.** A
+- **A type by selector now checks, through its clear, that focus stays in its field.** A
   type clears its field first unless `clear_first` is false: it presses select-all, then Delete, then types. By
   `element_id` it has checked since 1.11.1 that focus is still in its element after each of the two keys; by
   selector it checked neither, since 0.1.0 (by its code; the probe ran on this release's). A page whose select-all
@@ -1182,7 +1193,7 @@ All notable changes to auto-browser are documented here.
   hold a page URL with a token in it. The controller logs each one at WARNING with the URI, quoted and cut at 200
   characters, and the exception's class, where it was a debug line. A resource whose content cannot be encoded as
   JSON (not a page's lone surrogate, which goes out as U+FFFD: see below) is `-32603` too. (MCP-35)
-- **A lone surrogate from a page no longer fails a response.** A page can hand one over (a JSON escape decodes to
+- **A lone surrogate from a page no longer fails a JSON response.** A page can hand one over (a JSON escape decodes to
   one), and UTF-8 cannot carry it, so a response holding one raised after its handler had run: `tools/call` and any
   REST route returning page text answered `500`, whatever the tool had done by then. What a route returns, the MCP
   responses and the REST error answers (a `404`, a `BrowserActionError`, an `HTTPException`'s detail, a `422` quoting
@@ -1198,7 +1209,8 @@ All notable changes to auto-browser are documented here.
   answered `500` in place of its own status. The writer of `GET /sessions/{id}/events` wrote the bare `NaN` or
   `Infinity`, which a strict parser (a browser's `JSON.parse`) refuses with the whole event, and writes `null` too:
   no event the controller sends today carries a number read from a page, so this one is a guard.
-- **A NaN or an infinity in a request body is refused naming its field.** The controller's JSON reader takes the bare
+- **A NaN or an infinity in a request body is refused naming its field, but in a field that takes any JSON value (a
+  task contract's `metadata`).** The controller's JSON reader takes the bare
   words `NaN`, `Infinity` and `-Infinity`, and a number too large for a float (`1e999`), as numbers. The `422` that
   refuses a body quotes each value it refused, and with such a number in one the answer itself failed: a `500`, for
   `{"limit": NaN}` sent to `POST /sessions/{id}/observe`, and as much for one in a field of another type, in an
@@ -1266,7 +1278,8 @@ All notable changes to auto-browser are documented here.
   another stream and another subscription to every browser event for the same session, and `DELETE` or an eviction
   left them all running for a session that no longer existed. A new `GET` now ends the session's previous stream, and
   `DELETE` or an eviction past the session caps ends it, while it waits for an event at once rather than at its next
-  15-second keepalive, and a stopped stream sends nothing more. A stream looking up an event's owner ends when that
+  15-second keepalive, and a stopped stream sends no further notification or keepalive. A stream looking up an event's
+  owner ends when that
   returns; one blocked sending to a client that has stopped reading, which 1.17.0 could not stop either, ends when
   that send returns or the connection goes. Its event queue is released however the stream ends. Among the sessions a
   cap covers (one operator's, or the whole table), eviction now takes every session without a live stream before any
@@ -1322,8 +1335,9 @@ All notable changes to auto-browser are documented here.
   in an outage. An answer now stands for three seconds from when its probe finished, a failing one as long as a
   passing one, and callers that miss together share one probe, which a caller that disconnects cannot cancel. A
   readiness change can show up to three seconds late. (AUTH-26)
-- **The `Authorization` scheme is read as HTTP defines it, and a missing credential is the first thing a caller is
-  told.** `bearer <token>` was refused with `401` and only `Bearer <token>` passed; any case of the scheme now passes,
+- **The `Authorization` scheme is read as HTTP defines it, and a missing credential is told before a missing
+  operator header.** `bearer <token>` was refused with `401` and only `Bearer <token>` passed; any case of the scheme
+  now passes,
   while the token stays an exact comparison, and both spellings share one rate-limit bucket. With
   `REQUIRE_OPERATOR_ID` on and a token configured, a request with no valid credential and no operator header now
   answers the token's `401` instead of `400` naming the operator header. (AUTH-38)
