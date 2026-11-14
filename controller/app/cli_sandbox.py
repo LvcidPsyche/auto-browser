@@ -164,9 +164,16 @@ def _within(path: str, directory: str) -> bool:
     return Path(os.path.realpath(path)).is_relative_to(directory)
 
 
+def _as_written(path: str) -> str:
+    """``path`` absolute and normalised, two leading slashes read as one, as Linux reads them and config.py's check
+    of CLI_SANDBOX_WRITABLE does: POSIX's abspath keeps them, and "//data/x" would lie in no "/data"."""
+    written = os.path.abspath(path)
+    return "/" + written.lstrip("/") if written.startswith("//") else written
+
+
 def _ways(path: str) -> tuple[str, str]:
-    """``path`` as written (absolute and normalised) and once resolved."""
-    return os.path.abspath(path), os.path.realpath(path)
+    """``path`` as written (_as_written) and once resolved."""
+    return _as_written(path), os.path.realpath(path)
 
 
 def _lies_in(place: tuple[str, str], directory: tuple[str, str]) -> bool:
@@ -315,7 +322,7 @@ async def launch_command(
         asked = _asked if _asked is not None else _landlock_missing(env)
         missing = asked.result() if asked.done() else await asyncio.wrap_future(asked)
     # As written: a home that only resolves to the root or above it is a link a CLI may have made (_writable).
-    if missing is None and Path(PROTECTED_ROOT).is_relative_to(os.path.abspath(cli_home)):
+    if missing is None and Path(PROTECTED_ROOT).is_relative_to(_as_written(cli_home)):
         missing = "CLI_HOME is %s or holds it, which the launcher refuses" % PROTECTED_ROOT
     given: list[tuple[str, str]] = []
     if missing:

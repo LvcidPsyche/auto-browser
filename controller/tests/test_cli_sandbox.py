@@ -13,6 +13,7 @@ import errno
 import json
 import logging
 import os
+import posixpath
 import site
 import subprocess
 import sys
@@ -647,6 +648,87 @@ def test_cli_sandbox_writable_takes_absolute_paths_in_the_data_directory_and_out
 
     assert settings.cli_sandbox_writable_paths == entries
     assert Settings(_env_file=None).cli_sandbox_writable_paths == []
+
+
+@pytest.fixture
+def linux_paths(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """app.cli_sandbox's paths as Linux has them, on any host: posixpath and PurePosixPath, /data the root and /tmp
+    the one shared directory, every path a directory, and realpath answered from the links a test names (as the
+    triage's probe_slashes had them). Linux reads two leading slashes as one."""
+    links: dict[str, str] = {}
+
+    def realpath(path: str) -> str:
+        resolved = posixpath.normpath("/" + str(path).lstrip("/"))
+        for link, target in links.items():
+            if resolved == link or resolved.startswith(link + "/"):
+                return target + resolved[len(link) :]
+        return resolved
+
+    paths = SimpleNamespace(
+        abspath=posixpath.abspath,
+        realpath=realpath,
+        isabs=posixpath.isabs,
+        isdir=lambda path: True,
+        join=posixpath.join,
+        expanduser=lambda path: "/home/controller",
+    )
+    monkeypatch.setattr(cli_sandbox, "os", SimpleNamespace(path=paths))
+    monkeypatch.setattr(cli_sandbox, "Path", PurePosixPath)
+    monkeypatch.setattr(cli_sandbox, "PROTECTED_ROOT", "/data")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ("/tmp",))
+    monkeypatch.setattr(cli_sandbox, "_passwd_home", lambda: "/home/controller")
+    monkeypatch.setattr(site, "getuserbase", lambda: "/home/controller/.local")
+    return links
+
+
+def _linux_settings(**values: str) -> Settings:
+    with patch.dict(os.environ, {}, clear=True):
+        return Settings(_env_file=None, **values)
+
+
+def test_a_secret_written_with_two_slashes_in_the_cli_home_is_open_wherever_it_resolves(linux_paths) -> None:
+    linux_paths["/data/cli-home/token"] = "/data/api-token"
+
+    names = cli_sandbox._open_settings(
+        _linux_settings(API_TOKEN_FILE="//data/cli-home/token"), [("/data/cli-home",) * 2]
+    )
+
+    assert names == ["API_TOKEN_FILE"]
+
+
+def test_a_cli_home_written_with_two_slashes_in_tmp_and_swapped_for_a_link_is_tmps(linux_paths) -> None:
+    linux_paths["/tmp/cli-home"] = "/home/controller/.local/lib/python3.12/site-packages"
+
+    given, refused = cli_sandbox._writable(_linux_settings(), "//tmp/cli-home", {})
+
+    assert (given, refused) == ([("/tmp", "/tmp")], "")
+
+
+def test_a_cli_home_written_with_two_slashes_in_the_root_is_given(linux_paths) -> None:
+    given, refused = cli_sandbox._writable(_linux_settings(), "//data/cli-home", {})
+
+    assert (given, refused) == ([("/data/cli-home",) * 2, ("/tmp", "/tmp")], "")
+
+
+def test_an_entry_written_with_two_slashes_in_the_root_is_given(linux_paths, caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        given, _ = cli_sandbox._writable(_linux_settings(CLI_SANDBOX_WRITABLE="//data/shared"), "/data/cli-home", {})
+
+    assert given == [("/data/cli-home",) * 2, ("/tmp", "/tmp"), ("/data/shared",) * 2]
+    assert _written(caplog) == []
+
+
+async def test_a_cli_home_written_as_two_slashes_and_the_root_is_the_root(linux_paths, monkeypatch, caplog) -> None:
+    _probe_says(monkeypatch, None)
+
+    with caplog.at_level(logging.WARNING):
+        command = await cli_sandbox.launch_command(
+            _linux_settings(), COMMAND, cli_home="//data", image_path=None, env=CLI_ENV
+        )
+
+    assert command == COMMAND
+    (line,) = _written(caplog)
+    assert "CLI_HOME is /data or holds it" in line
 
 
 @pytest.mark.parametrize("swap", ["a directory in the root", "what holds the root"])
