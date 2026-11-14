@@ -120,37 +120,78 @@ class InspectMcpWheelTests(unittest.TestCase):
             self._inspect(files)
 
 
-def _audit_commands(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> list[tuple[list[str], Path | None, str | None, bool]]:
-    """The commands main() runs, in order, with every step stubbed: `_run` records instead of running.
+Call = tuple[list[str], Path | None, str | None, bool]
 
-    Each is kept with its directory, the PYTHONPATH it runs with (None: none) and whether any AUTO_BROWSER_* name
-    reaches it, never its whole environment, so a failing assertion cannot print the environment's values. This
-    process's environment holds a made-up PYTHONPATH and AUTO_BROWSER_BASE_URL meanwhile, as a developer's can.
+
+def _stub_steps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, calls: list[Call]) -> None:
+    """Every step main() takes before the secret scan stubbed, each kept in ``calls`` instead of run, in order.
+
+    A command `_run` is given is kept with its directory, the PYTHONPATH it runs with (None: none) and whether any
+    AUTO_BROWSER_* name reaches it, never its whole environment, so a failing assertion cannot print the environment's
+    values; the launch-file check, `_require` and the wheel inspections are kept by name.
     """
-    calls: list[tuple[list[str], Path | None, str | None, bool]] = []
-    monkeypatch.setenv("PYTHONPATH", "made-up-host-pythonpath")
-    monkeypatch.setenv("AUTO_BROWSER_BASE_URL", "http://made-up-remote.invalid:9000/mcp")
 
     def record(command: list[object], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
         seen = os.environ if env is None else env
         reached = any(name.startswith("AUTO_BROWSER_") for name in seen)
         calls.append(([str(part) for part in command], cwd, seen.get("PYTHONPATH"), reached))
 
+    def step(name: str) -> None:
+        calls.append(([name], None, None, False))
+
     monkeypatch.setattr(release_audit, "_run", record)
-    monkeypatch.setattr(release_audit, "_check_launch_files", lambda: None)
-    monkeypatch.setattr(release_audit, "_require", lambda command: None)
-    monkeypatch.setattr(release_audit, "_inspect_controller_wheel", lambda wheelhouse: None)
-    monkeypatch.setattr(release_audit, "_inspect_mcp_wheel", lambda wheelhouse: None)
-    monkeypatch.setattr(release_audit, "_inspect_licenses", lambda wheelhouse: None)
+    monkeypatch.setattr(release_audit, "_check_launch_files", lambda: step("launch files"))
+    monkeypatch.setattr(release_audit, "_require", lambda command: step(f"require {command}"))
+    for name in ("_inspect_controller_wheel", "_inspect_mcp_wheel", "_inspect_licenses"):
+        monkeypatch.setattr(release_audit, name, lambda wheelhouse, name=name: step(name))
     monkeypatch.setattr(release_audit.os, "chdir", lambda path: None)
-    # The secret scan is the one subprocess main() starts itself: it finds nothing.
-    monkeypatch.setattr(release_audit.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, b"", b""))
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-advisory-check", "--skip-doctor"])
+    # The advisory check runs through `_run`, so it is kept, not run. The doctor needs bash, which main() looks for.
+    monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-doctor"])
+
+
+def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Call]:
+    """The steps main() takes, in order, every one stubbed (_stub_steps), the secret scan last, which finds nothing.
+
+    This process's environment holds a made-up PYTHONPATH and AUTO_BROWSER_BASE_URL meanwhile, as a developer's can.
+    """
+    calls: list[Call] = []
+    monkeypatch.setenv("PYTHONPATH", "made-up-host-pythonpath")
+    monkeypatch.setenv("AUTO_BROWSER_BASE_URL", "http://made-up-remote.invalid:9000/mcp")
+    _stub_steps(monkeypatch, tmp_path, calls)
+
+    def secret_scan(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append((["git grep"], None, None, False))
+        return subprocess.CompletedProcess(args, 1, b"", b"")
+
+    # The secret scan is the one subprocess main() starts itself.
+    monkeypatch.setattr(release_audit.subprocess, "run", secret_scan)
     assert release_audit.main() == 0
     return calls
+
+
+def _step(command: list[str], cwd: Path | None) -> str:
+    """What a kept call runs: the module or script an interpreter runs, else its first word; and where, if set."""
+    if command[1:2] == ["-m"]:
+        name = command[2]
+    elif command[1:2] and command[1].endswith(".py"):
+        name = Path(command[1]).name
+    else:
+        name = command[0]
+    return f"{name} {cwd.relative_to(release_audit.ROOT).as_posix()}" if cwd else name
+
+
+def test_main_runs_every_step_once_in_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The audit's steps, in order: a step main() dropped, doubled or moved passes every stubbed test but this one."""
+    assert [_step(command, cwd) for command, cwd, *_ in _audit_commands(monkeypatch, tmp_path)] == [
+        "launch files", "require git", "require npm", "require uv",
+        "check_open_advisories.py",
+        "ruff", "check_version_parity.py", "check_playwright_pins.py", "check_bridge_parity.py",
+        "agent_eval.py", "fixture_eval.py", "pip_audit", "npm browser-node",
+        "build", "build", "build", "build", "_inspect_controller_wheel", "_inspect_mcp_wheel", "_inspect_licenses",
+        "pytest controller", "venv", "uv", "pytest client", "venv", "uv", "pytest integrations/langchain",
+        "compileall", "git grep",
+    ]  # fmt: skip
 
 
 def _ci_job(name: str) -> str:
@@ -297,7 +338,7 @@ def _scan(
     run: Callable[..., subprocess.CompletedProcess] | None = None,
 ) -> tuple[object, str, str]:
     """main()'s exit (what it returns, or the code it exits with) and what it printed, with every step before the
-    secret scan stubbed, as in _audit_commands, on a repository that tracks ``files``; ``run`` stands in for git."""
+    secret scan stubbed (_stub_steps), on a repository that tracks ``files``; ``run`` stands in for git."""
     repo = tmp_path / "repo"
     (repo / "controller").mkdir(parents=True)
     (repo / "controller" / "constraints.txt").write_text("idna==3.10\n", encoding="utf-8")
@@ -307,15 +348,7 @@ def _scan(
     subprocess.run([git, "init", "-q", str(repo)], check=True)
     subprocess.run([git, "-c", "core.autocrlf=false", "-C", str(repo), "add", "--", *files, "controller"], check=True)
     monkeypatch.setattr(release_audit, "ROOT", repo)
-    monkeypatch.setattr(release_audit, "_run", lambda *a, **k: None)
-    monkeypatch.setattr(release_audit, "_check_launch_files", lambda: None)
-    monkeypatch.setattr(release_audit, "_require", lambda command: None)
-    monkeypatch.setattr(release_audit, "_inspect_controller_wheel", lambda wheelhouse: None)
-    monkeypatch.setattr(release_audit, "_inspect_mcp_wheel", lambda wheelhouse: None)
-    monkeypatch.setattr(release_audit, "_inspect_licenses", lambda wheelhouse: None)
-    monkeypatch.setattr(release_audit.os, "chdir", lambda path: None)
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-advisory-check", "--skip-doctor"])
+    _stub_steps(monkeypatch, tmp_path, [])
     if run is not None:
         monkeypatch.setattr(release_audit.subprocess, "run", run)
     try:
