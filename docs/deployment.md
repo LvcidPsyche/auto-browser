@@ -522,8 +522,9 @@ the temp directories (`/tmp`, `/var/tmp`, and those its own `TMPDIR`, `TEMP` and
 `/data`), `/dev`, and the directories `CLI_SANDBOX_WRITABLE` names: root too, since the ruleset binds root as it
 binds anyone. That is what the list is for: the controller is not under the sandbox, and what a CLI could leave in
 the controller's own home (a `usercustomize.py` in its Python user site, an ssh config with a `ProxyCommand`) ran at
-the controller's next start, outside it. Each directory is given as its resolved path, and one written outside
-`/data` that resolves into it is not given. Beyond that a CLI cannot list `/` itself or make, remove or rename an
+the controller's next start, outside it. Each directory is given as its resolved path. One written outside `/data`
+that resolves into it is not given, and neither is one whose path has a `..` part: Linux reads the `..` after any
+link before it, which a CLI may have made. Beyond that a CLI cannot list `/` itself or make, remove or rename an
 entry directly in it, and an entry made directly in `/` after the CLI started has no rule and stays closed to it. It
 cannot mount or unmount anything (Landlock refuses that to every process it restricts). It runs with `no_new_privs`,
 so a setuid program it starts gains nothing: in the image that is no change, since the entrypoint and compose set it
@@ -539,12 +540,12 @@ binary that `which` finds under `/data` outside `CLI_HOME` cannot be run under t
 the CLI is started directly fails the step as `Agent step failed` (`502` either way). Whatever a CLI writes outside
 its home, the temp directories and `/dev` (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory elsewhere, which
 the adapters pass on; a directory a tool of yours writes) has to be named in `CLI_SANDBOX_WRITABLE`, comma-separated
-absolute paths. `/data` and a directory that holds it are refused when the settings are read. An entry under `/data`
-is yours to choose (a secret kept in it is reported, below), and one that is not a directory when a call is made is
-passed over with one warning. A CLI that cannot run under the ruleset (it needs something under `/data` that cannot
-move into `CLI_HOME`, or it fails there) can be started without it: `CLI_SANDBOX_ENABLED=false` (default `true`)
-starts every provider CLI without the launcher, and a CLI then reads and writes what the controller's user can, as
-before 1.18.0.
+absolute paths. `/data`, a directory that holds it and a path with a `..` part are refused when the settings are
+read. An entry under `/data` is yours to choose (a secret kept in it is reported, below), and one that is not a
+directory when a call is made is passed over with one warning. A CLI that cannot run under the ruleset (it needs
+something under `/data` that cannot move into `CLI_HOME`, or it fails there) can be started without it:
+`CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI without the launcher, and a CLI then reads
+and writes what the controller's user can, as before 1.18.0.
 
 Where the sandbox would leave a secret open, or would not hold, the controller writes a warning, once in the life of
 the process for each distinct line, which names the condition (a secret's setting by its name and never its value, a
@@ -561,12 +562,15 @@ setting until Landlock is there):
   after 30 seconds, or could not be started) is run again at the next CLI call; the calls that started while it ran
   take its answer. The probe runs outside the call's own timeout, so on a host where it keeps timing out every CLI
   call waits 30 seconds before it starts, and then runs without the launcher.
-- **`CLI_HOME` is `/data` or a directory that holds it,** as written. The CLI starts without the launcher.
-- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or is not a directory:** a
-  link, which a CLI that may write where the home is written can have made (a home in `/tmp`, swapped for a link to
-  `/data/approvals` or to `/`). The CLI starts under the launcher without it, and cannot write its home. The warning
-  names `CLI_HOME`, its path and where it resolves (or that it is not a directory); a `CLI_HOME` linked into `/data`
-  on purpose is to be set to its real path.
+- **`CLI_HOME` is `/data` or a directory that holds it,** as written, with no `..` part. The CLI starts without the
+  launcher.
+- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or is not a directory, or has
+  a `..` part:** a link, which a CLI that may write where the home is written can have made (a home in `/tmp`,
+  swapped for a link to `/data/approvals` or to `/`), or a `..`, which Linux reads after any link before it
+  (`/data/x/..` is not `/data` where `x` is a link). The CLI starts under the launcher without it, and cannot write
+  its home. The warning names `CLI_HOME`, its path and where it resolves (or that it is not a directory, or has a
+  `..` part); a `CLI_HOME` linked into `/data` on purpose is to be set to its real path, and one with a `..` part
+  written without it.
 - **A CLI may write the controller's own home, or a directory in it.** The home is judged as `HOME` names it and as
   the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank (the CLI's `HOME` is then the controller's),
   or a directory a CLI may write (`CLI_HOME`, an entry of `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's

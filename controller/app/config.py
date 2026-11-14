@@ -371,8 +371,9 @@ class Settings(BaseSettings):
     # true: no provider CLI is run where its Landlock sandbox would leave one of the controller's secrets open to it,
     # or run it without its home (app/cli_sandbox.py). false: one warning, and the CLI runs.
     cli_sandbox_required: bool = Field(False, alias="CLI_SANDBOX_REQUIRED")
-    # Directories (comma-separated, absolute) a sandboxed provider CLI may write besides its home, the temp
-    # directories and /dev: a CODEX_HOME or CLAUDE_CONFIG_DIR kept elsewhere, a directory a tool of yours writes.
+    # Directories (comma-separated, absolute, with no '..' part) a sandboxed provider CLI may write besides its home,
+    # the temp directories and /dev: a CODEX_HOME or CLAUDE_CONFIG_DIR kept elsewhere, a directory a tool of yours
+    # writes.
     cli_sandbox_writable: str = Field("", alias="CLI_SANDBOX_WRITABLE")
 
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
@@ -602,6 +603,9 @@ class Settings(BaseSettings):
                     f"CLI_SANDBOX_WRITABLE must not name {CLI_SANDBOX_PROTECTED_ROOT} or a directory that holds it, "
                     f"got {entry!r}"
                 )
+            # Linux reads a '..' after the link before it, which a CLI may have made: where it leads is not the text's.
+            if ".." in PurePosixPath(entry).parts:
+                raise ValueError(f"CLI_SANDBOX_WRITABLE takes no path with a '..' part, got {entry!r}")
             if not os.path.isabs(entry):
                 raise ValueError(f"CLI_SANDBOX_WRITABLE takes absolute paths, got {entry!r}")
         return value

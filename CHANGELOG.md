@@ -845,36 +845,37 @@ All notable changes to auto-browser are documented here.
   and text, a path among them, in the record that anyone who lists the jobs reads: it records `Agent job failed`
   now. See the upgrade note. (STORE-27)
 - **A provider CLI is started under a Landlock sandbox that closes the controller's data directory to it.** A `cli`
-  provider's CLI ran as the controller's user with nothing between it and the controller's files, and a page shown to
-  the model could prompt-inject it into reading `data/api-token`, `data/takeover-token`, an auth profile or the
+  provider's CLI ran as the controller's user with nothing between it and the controller's files, and a page shown
+  to the model could prompt-inject it into reading `data/api-token`, `data/takeover-token`, an auth profile or the
   witness and mesh keys: 1.17.0 recorded that as a known limit. On Linux with Landlock the controller now starts the
   CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a ruleset, sets `no_new_privs` and
   execs the CLI, so the process, its group and the way it is stopped are what they were. The ruleset allows every
-  entry beside `/data` to read, list and run, and only the CLI's home (wherever that is), the temp directories, `/dev`
-  and what `CLI_SANDBOX_WRITABLE` names to write as well; of `/data` it allows only the CLI's home, where that lies
-  there, and what `CLI_SANDBOX_WRITABLE` names there to read and write, and the one screenshot the call names to
-  read. Another session's screenshot, a listing of `/data` and every secret kept in its default place there are
-  refused, to root too. A CLI writes nowhere else because the controller is not sandboxed: what a CLI could leave in
-  the controller's own home (a `usercustomize.py` in its
-  Python user site, an ssh config) ran at the controller's next start, outside the sandbox. The ruleset handles only
-  the rights the running kernel knows, and the launcher never execs without it: a kernel call that fails ends it with
-  status `125` and a line that names the call. The controller runs it to apply a ruleset and exit at its first CLI
-  call, and keeps that answer for the process where the launcher gave it (a probe that timed out or could not be
-  started is run again at the next call). Each of these is a warning, once for each distinct line: with
-  `CLI_SANDBOX_ENABLED=false`, where the host is not Linux or that probe fails, and where `CLI_HOME` is `/data` or
-  holds it, the CLI runs without the sandbox; where `CLI_HOME` only resolves into `/data` or to what holds it, it runs
-  under the sandbox without its home; where a CLI may write the controller's own home or a directory in it, as
-  `HOME` or the passwd entry names that home (as with a blank `CLI_HOME`; a `CLI_HOME` in it clear of its `.ssh` and
-  Python's user base is the CLI's own), or a secret's setting names a place outside `/data`, in a directory a CLI may
-  write or holding one, it runs under the sandbox with that left open. With `CLI_SANDBOX_REQUIRED=true` it runs under
-  none of them (see the upgrade note). A launcher that fails at a real start after that fails the call, and the CLI
-  is never started without it. The controller takes Codex's `decision.json` only as a regular file of at most 1 MiB
-  and not through a link at its own name, and makes the call's schema file rather than write through what is at its
-  name, so a CLI cannot have the controller read a closed file for it, or write one. The sandbox does not stop
-  `stat` and other metadata calls on a file under `/data`, an inotify watch there, one CLI call reaching another's
-  files in `CLI_HOME`, signals and TCP connections to the controller, or a connection to a Unix socket under
-  `/data`, the Codex host bridge's among them: docs/deployment.md lists these and the rest. The Codex host bridge's
-  Codex runs outside it. (N1)
+  entry beside `/data` to read, list and run, and only the CLI's home (wherever that is), the temp directories,
+  `/dev` and what `CLI_SANDBOX_WRITABLE` names to write as well; of `/data` it allows only the CLI's home, where
+  that lies there, and what `CLI_SANDBOX_WRITABLE` names there to read and write, and the one screenshot the call
+  names to read. Another session's screenshot, a listing of `/data` and every secret kept in its default place there
+  are refused, to root too. No directory whose path has a `..` part is given: Linux reads the `..` after any link
+  before it, which a CLI may have made, and `CLI_SANDBOX_WRITABLE` refuses one when the settings are read. A CLI
+  writes nowhere else because the controller is not sandboxed: what a CLI could leave in the controller's own home
+  (a `usercustomize.py` in its Python user site, an ssh config) ran at the controller's next start, outside the
+  sandbox. The ruleset handles only the rights the running kernel knows, and the launcher never execs without it: a
+  kernel call that fails ends it with status `125` and a line that names the call. The controller runs it to apply a
+  ruleset and exit at its first CLI call, and keeps that answer for the process where the launcher gave it (a probe
+  that timed out or could not be started is run again at the next call). Each of these is a warning, once for each
+  distinct line: with `CLI_SANDBOX_ENABLED=false`, where the host is not Linux or that probe fails, and where
+  `CLI_HOME` is `/data` or holds it as written, the CLI runs without the sandbox; where `CLI_HOME` only resolves
+  into `/data` or to what holds it, or has a `..` part, it runs under the sandbox without its home; where a CLI may
+  write the controller's own home or a directory in it, as `HOME` or the passwd entry names that home (as with a
+  blank `CLI_HOME`; a `CLI_HOME` in it clear of its `.ssh` and Python's user base is the CLI's own), or a secret's
+  setting names a place outside `/data`, in a directory a CLI may write or holding one, it runs under the sandbox
+  with that left open. With `CLI_SANDBOX_REQUIRED=true` it runs under none of them (see the upgrade note). A
+  launcher that fails at a real start after that fails the call, and the CLI is never started without it. The
+  controller takes Codex's `decision.json` only as a regular file of at most 1 MiB and not through a link at its own
+  name, and makes the call's schema file rather than write through what is at its name, so a CLI cannot have the
+  controller read a closed file for it, or write one. The sandbox does not stop `stat` and other metadata calls on a
+  file under `/data`, an inotify watch there, one CLI call reaching another's files in `CLI_HOME`, signals and TCP
+  connections to the controller, or a connection to a Unix socket under `/data`, the Codex host bridge's among them:
+  docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
   can: the checkout's `.env`, `data/api-token`, `data/takeover-token`, the keys under `data/` and the sign-ins of the

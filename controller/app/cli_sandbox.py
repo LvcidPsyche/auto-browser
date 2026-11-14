@@ -17,11 +17,12 @@ Each of these is reported:
 - the launcher cannot restrict a process here: this is not Linux, the kernel has no Landlock, or a probe of the
   launcher failed. The CLI is started as it always was, without the launcher. The launcher's own answer is kept for
   the process; a probe that timed out, could not be started or ended any other way is run again at the next call.
-- the CLI home is PROTECTED_ROOT or holds it, as written: a rule on that home would open the root, and the launcher
-  refuses it. The CLI is started without the launcher.
+- the CLI home is PROTECTED_ROOT or holds it, as written with no '..' part: a rule on that home would open the root,
+  and the launcher refuses it. The CLI is started without the launcher.
 - the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it (a link, which a CLI that may write
-  where the home is written may have made), or is not a directory. The CLI is started under the launcher without
-  it, and cannot write its home: closed, not open.
+  where the home is written may have made), or is not a directory, or has a '..' part (Linux reads it after the
+  link before it, which the text cannot say). The CLI is started under the launcher without it, and cannot write
+  its home: closed, not open.
 - the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
   write, but for a CLI home in it clear of the home's .ssh and Python's user base. The CLI is started under the
   launcher.
@@ -176,6 +177,12 @@ def _as_written(path: str) -> str:
     return "/" + written.lstrip("/") if written.startswith("//") else written
 
 
+def _climbs(path: str) -> bool:
+    """Whether ``path`` has a '..' part. Linux reads it after the link before it, where _as_written drops it with the
+    part before: a CLI that made that link would choose where the path leads."""
+    return ".." in Path(path).parts
+
+
 def _ways(path: str) -> tuple[str, str]:
     """``path`` as written (_as_written) and once resolved."""
     return _as_written(path), os.path.realpath(path)
@@ -214,11 +221,12 @@ def _not_given(kind: str, written: str, real: str) -> str:
 def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[list[tuple[str, str]], str]:
     """The directories a CLI under the launcher may write, each as written and once resolved: its home, its HOME,
     SHARED_WRITABLE and the temp directories of its environment, and the entries of CLI_SANDBOX_WRITABLE. Only those
-    that _not_given passes, none twice and none that lies in another (whose rule covers it, and which a CLI could
-    swap for a link). And why the CLI home is not among them, where _not_given refuses it ("" elsewhere)."""
+    with no '..' part (_climbs) that _not_given passes, none twice and none that lies in another (whose rule covers
+    it, and which a CLI could swap for a link). And why the CLI home is not among them, where it is refused ("" where
+    it is not)."""
     shared = [env.get("HOME", ""), *SHARED_WRITABLE, *(env.get(name, "") for name in TEMP_VARIABLES)]
     candidates = [
-        ("home", os.path.abspath(cli_home)),
+        ("home", cli_home),
         *(("shared", path) for path in shared if os.path.isabs(path)),
         *(("setting", path) for path in settings.cli_sandbox_writable_paths),
     ]
@@ -226,12 +234,12 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
     home_refused = ""
     for kind, path in candidates:
         entry = _ways(path)
-        why = _not_given(kind, *entry)
+        why = "has a '..' part, read after any link before it" if _climbs(path) else _not_given(kind, *entry)
         if why and kind == "home":
             home_refused = (
                 "CLI_HOME %s %s: provider CLIs are not given it, and run under the Landlock sandbox without a home "
-                "they can write (a CLI_HOME linked into %s on purpose is to be set to its real path, and one that is "
-                "not a directory made one)"
+                "they can write (a CLI_HOME linked into %s on purpose is to be set to its real path, one with a '..' "
+                "part written without it, and one that is not a directory made one)"
             ) % (path, why, PROTECTED_ROOT)
         elif why and kind == "setting":
             _warn_once("CLI_SANDBOX_WRITABLE names %s, which %s: provider CLIs are not given it to write" % (path, why))
@@ -327,8 +335,9 @@ async def launch_command(
     else:
         asked = _asked if _asked is not None else _landlock_missing(env)
         missing = asked.result() if asked.done() else await asyncio.wrap_future(asked)
-    # As written: a home that only resolves to the root or above it is a link a CLI may have made (_writable).
-    if missing is None and Path(PROTECTED_ROOT).is_relative_to(_as_written(cli_home)):
+    # As written: a home that only resolves to the root or above it is a link a CLI may have made (_writable), and
+    # one with a '..' part need not be what the text says (/data/x/.. is what holds x's target where x is a link).
+    if missing is None and not _climbs(cli_home) and Path(PROTECTED_ROOT).is_relative_to(_as_written(cli_home)):
         missing = "CLI_HOME is %s or holds it, which the launcher refuses" % PROTECTED_ROOT
     given: list[tuple[str, str]] = []
     if missing:

@@ -731,6 +731,136 @@ async def test_a_cli_home_written_as_two_slashes_and_the_root_is_the_root(linux_
     assert "CLI_HOME is /data or holds it" in line
 
 
+@pytest.fixture
+def linux_links(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """app.cli_sandbox on a Linux file system held in memory, on any host, whose realpath reads a path one part at a
+    time and follows a link before the parts after it, a '..' among them, as Linux does (the triage's probe_sandbox).
+    linux_paths normalises a path before it reads a link, as abspath does, so it cannot say where a '..' after a link
+    leads; a junction on Windows cannot either, where a '..' is read off the text first. /data is the root, /tmp,
+    /var/tmp and /dev the shared directories, /home/controller the controller's home as HOME and its passwd entry name
+    it, with Python's user base in it. A test adds ``dirs`` (each with its parents) and ``links`` (each to its target)."""
+    disk = SimpleNamespace(
+        dirs={"/data/cli-home", "/tmp", "/var/tmp", "/dev", "/home/controller/.ssh", "/home/controller/.local"},
+        links={},
+        home="/home/controller",
+        passwd_home="/home/controller",
+        user_base="/home/controller/.local",
+    )
+
+    def realpath(path: str) -> str:
+        pending = [part for part in str(path).split("/") if part not in ("", ".")][::-1]
+        resolved, followed = "/", 0
+        while pending:
+            part = pending.pop()
+            if part == "..":
+                resolved = posixpath.dirname(resolved)
+                continue
+            candidate = posixpath.join(resolved, part)
+            if candidate not in disk.links:
+                resolved = candidate
+                continue
+            followed += 1
+            assert followed < 40, "a loop of links"
+            target = disk.links[candidate]
+            resolved = "/" if target.startswith("/") else resolved
+            pending.extend([part for part in target.split("/") if part not in ("", ".")][::-1])
+        return resolved
+
+    def isdir(path: str) -> bool:
+        real = realpath(path)
+        return real == "/" or any(directory == real or directory.startswith(real + "/") for directory in disk.dirs)
+
+    paths = SimpleNamespace(
+        abspath=posixpath.abspath,
+        realpath=realpath,
+        isabs=posixpath.isabs,
+        isdir=isdir,
+        join=posixpath.join,
+        expanduser=lambda path: disk.home,
+    )
+    monkeypatch.setattr(cli_sandbox, "os", SimpleNamespace(path=paths))
+    monkeypatch.setattr(cli_sandbox, "Path", PurePosixPath)
+    monkeypatch.setattr(cli_sandbox, "PROTECTED_ROOT", "/data")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ("/tmp", "/var/tmp", "/dev"))
+    monkeypatch.setattr(cli_sandbox, "_passwd_home", lambda: disk.passwd_home)
+    monkeypatch.setattr(site, "getuserbase", lambda: disk.user_base)
+    _probe_says(monkeypatch, None)
+    return disk
+
+
+async def _launch_on_linux(settings: Settings, cli_home: str, env: dict[str, str]) -> list[str]:
+    return await cli_sandbox.launch_command(settings, COMMAND, cli_home=cli_home, image_path=None, env=env)
+
+
+# A link a CLI can make in /tmp, to a directory the controller runs code from, and a '..' after it.
+_SLOT_LINK = {"/tmp/slot": "/opt/venv/lib/python3.11"}
+_CLIMBS_PAST_THE_SLOT = "/tmp/slot/../../lib/python3.11/site-packages"
+
+
+@pytest.mark.parametrize("dots", [True, False], ids=["with a '..' after the link", "the link alone"])
+async def test_a_temp_directory_whose_path_climbs_back_out_of_a_link_is_not_given(linux_links, dots: bool) -> None:
+    # Text first, /tmp/slot/../.. is /, and the path lies in no directory given; Linux follows the link first, and a
+    # CLI that made it chooses which directory beside its target is given.
+    linux_links.dirs.add("/opt/venv/lib/python3.11/site-packages")
+    linux_links.links.update(_SLOT_LINK)
+    tmpdir = _CLIMBS_PAST_THE_SLOT if dots else "/tmp/slot/site-packages"
+    env = {"HOME": "/data/cli-home", "TMPDIR": tmpdir}
+
+    command = await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), "/data/cli-home", env)
+
+    assert _given_to_write(command) == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
+
+
+async def test_an_entry_of_cli_sandbox_writable_whose_path_climbs_out_of_a_link_is_refused_and_not_given(
+    linux_links, caplog
+) -> None:
+    linux_links.dirs.add("/opt/venv/lib/python3.11/site-packages")
+    linux_links.links.update(_SLOT_LINK)
+    with pytest.raises(ValueError, match=r"CLI_SANDBOX_WRITABLE.*'\.\.'"):
+        _linux_settings(CLI_SANDBOX_WRITABLE=_CLIMBS_PAST_THE_SLOT)
+    # Read past the setting's own check (a Settings made without it): the sandbox does not give it either.
+    settings = SimpleNamespace(cli_sandbox_writable_paths=[_CLIMBS_PAST_THE_SLOT])
+
+    with caplog.at_level(logging.WARNING):
+        given, refused = cli_sandbox._writable(settings, "/data/cli-home", {"HOME": "/data/cli-home"})
+
+    assert ([real for _, real in given], refused) == (["/data/cli-home", "/tmp", "/var/tmp", "/dev"], "")
+    (line,) = _written(caplog)
+    assert _CLIMBS_PAST_THE_SLOT in line and "'..'" in line
+
+
+@pytest.mark.parametrize(
+    "home, link",
+    [(_CLIMBS_PAST_THE_SLOT, _SLOT_LINK), ("/data/link/..", {"/data/link": "/tmp/foo"})],
+    ids=["through a link a CLI can make", "through an operator's link in the root"],
+)
+async def test_a_cli_home_whose_path_climbs_out_of_a_link_is_not_given_and_the_cli_starts_under_the_launcher(
+    linux_links, caplog, home: str, link: dict[str, str]
+) -> None:
+    # As text, /data/link/.. is /data, and a CLI_HOME that is /data starts the CLI without the launcher: Linux reads
+    # /tmp/foo/.. there, which is /tmp.
+    linux_links.dirs |= {"/opt/venv/lib/python3.11/site-packages", "/tmp/foo"}
+    linux_links.links.update(link)
+    env = {"HOME": home}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(), home, env)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), home, env)
+
+    assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
+    (line,) = _written(caplog)
+    assert f"CLI_HOME {home} has a '..' part" in line
+
+
+async def test_a_cli_home_with_no_dots_in_the_root_is_given(linux_links, caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(), "/data/cli-home", {"HOME": "/data/cli-home"})
+
+    assert _given_to_write(command) == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
+    assert _written(caplog) == []
+
+
 @pytest.mark.parametrize("swap", ["a directory in the root", "what holds the root"])
 async def test_a_home_a_cli_swapped_for_a_link_is_not_given_and_the_cli_still_starts_under_the_launcher(
     data, monkeypatch, caplog, swap: str
