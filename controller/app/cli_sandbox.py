@@ -162,8 +162,14 @@ def _ways(path: str) -> tuple[str, str]:
 
 
 def _lies_in(place: tuple[str, str], directory: tuple[str, str]) -> bool:
-    """Whether ``place`` is ``directory`` or lies in it, each as written or once resolved."""
-    return any(Path(mine).is_relative_to(theirs) for mine in place for theirs in directory)
+    """Whether ``place`` is ``directory`` or lies in it, each as written or once resolved, and ``place`` also with
+    each leading part of it resolved and the rest as written: a link part-way along it (an alias such as /var/tmp
+    linked to /tmp, which _writable keeps only resolved, or an operator's) can lead into ``directory``, where what
+    lies past the link is the CLI's to swap."""
+    written, real = place
+    parts = Path(written).parts
+    leads = [os.path.join(os.path.realpath(Path(*parts[:end])), *parts[end:]) for end in range(2, len(parts))]
+    return any(Path(mine).is_relative_to(theirs) for mine in (written, real, *leads) for theirs in directory)
 
 
 def _not_given(kind: str, written: str, real: str) -> str:

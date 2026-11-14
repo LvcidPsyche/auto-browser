@@ -571,6 +571,44 @@ async def test_of_two_directories_one_inside_the_other_only_the_outer_is_given(d
 
 
 @pytest.mark.parametrize(
+    "layout", ["an alias of /tmp", "an operator's link to /tmp", "an operator's link from the root", "no link"]
+)
+async def test_a_directory_written_through_a_link_into_a_directory_already_given_lies_in_it(
+    data, monkeypatch, layout: str
+) -> None:
+    # A link part-way along a written path (/var/tmp linked to /tmp, which is given only resolved, or an operator's
+    # link) leads into a directory a CLI may write, and what lies past it there a CLI of an earlier call can have
+    # swapped for a link of its own: to the controller's user site, or into the root. Its rule is that directory's.
+    _probe_says(monkeypatch, None)
+    (temp,) = _directories(data.outside / "tmp")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (temp,))
+    site = Path(_directories(data.controller_home / ".local" / "lib" / "python3.12" / "site-packages")[0])
+    env, home, changed = CLI_ENV, data.home, {}
+    if layout == "an alias of /tmp":
+        alias = data.outside / "var-tmp"
+        _link_to_directory(alias, Path(temp))
+        _link_to_directory(Path(temp) / "work", site)
+        monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (temp, str(alias)))  # production's order
+        env = {**CLI_ENV, "TMPDIR": str(alias / "work")}
+    elif layout == "an operator's link to /tmp":
+        _link_to_directory(data.outside / "opt-link", Path(temp))
+        _link_to_directory(Path(temp) / "work", site)
+        changed = {"CLI_SANDBOX_WRITABLE": str(data.outside / "opt-link" / "work")}
+    elif layout == "an operator's link from the root":
+        (moved,) = _directories(Path(temp) / "x")
+        _link_to_directory(data.root / "x", Path(moved))
+        _link_to_directory(Path(moved) / "home", Path(_directories(data.root / "auth")[0]))
+        home = data.root / "x" / "home"
+        changed = {"CLI_HOME": str(home)}
+    else:
+        env = {**CLI_ENV, "TMPDIR": _directories(Path(temp) / "work")[0]}
+
+    command = await _launch(_settings(data, **changed), data, home=home, env=env)
+
+    assert _given_to_write(command) == ([temp] if home != data.home else [str(data.home), temp])
+
+
+@pytest.mark.parametrize(
     "entry", ["relative/dir", "/", "/data", "/data/", "/data/../", "//", "/./data"], ids=lambda entry: repr(entry)
 )
 def test_cli_sandbox_writable_refuses_a_relative_path_and_the_data_directory_or_what_holds_it(entry: str) -> None:
