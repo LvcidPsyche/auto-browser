@@ -95,6 +95,7 @@ The project aims to:
 "Quickly" was once seven weeks. GHSA-xmh3-cw7j-9gp5 was reported privately on
 2026-06-17 and sat in triage until 2026-08-08, because a private report shows up
 in none of the views a maintainer opens day to day. So acknowledgement is no
-longer left to attention: `scripts/check_open_advisories.py` fails the release
-audit while any report is still waiting in triage, which puts the check on the
-one process that is guaranteed to run before users are affected by anything.
+longer left to attention alone: `scripts/check_open_advisories.py` fails the
+release audit (`make release-audit`, run by hand before a release PR) while any
+report is still waiting in triage. CI does not run it: listing the repository's
+private advisories needs a token secret the workflows do not have.

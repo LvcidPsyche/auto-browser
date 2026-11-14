@@ -19,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_REPO = Path(__file__).resolve().parents[2]
+_SCRIPTS = _REPO / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
@@ -114,6 +115,29 @@ class FetchAdvisoriesTests(unittest.TestCase):
     def test_a_failed_call_still_fails(self) -> None:
         with self.assertRaisesRegex(SystemExit, "Could not list security advisories for o/r"):
             self._fetch("", returncode=1)
+
+
+SECURITY = _REPO / "SECURITY.md"
+WORKFLOWS = _REPO / ".github" / "workflows"
+
+
+@unittest.skipUnless(SECURITY.is_file() and WORKFLOWS.is_dir(), "the repository root is not in this tree")
+class AdvisoryCheckWordingTests(unittest.TestCase):
+    """The check runs in the release audit, which is run by hand: the texts must say so while no workflow runs it."""
+
+    def test_the_texts_say_where_the_check_runs(self) -> None:
+        in_ci = any(
+            name in path.read_text(encoding="utf-8")
+            for path in WORKFLOWS.glob("*.yml")
+            for name in ("check_open_advisories", "release_audit")
+        )
+        texts = {"SECURITY.md": SECURITY.read_text(encoding="utf-8"), "docstring": check_open_advisories.__doc__ or ""}
+        for label, text in texts.items():
+            flat = " ".join(text.split())
+            with self.subTest(label):
+                self.assertEqual("CI does not run it" in flat, not in_ci)
+                if not in_ci:
+                    self.assertNotIn("guaranteed", flat)
 
 
 if __name__ == "__main__":

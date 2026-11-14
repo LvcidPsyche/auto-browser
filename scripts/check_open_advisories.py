@@ -8,10 +8,10 @@ maintainer routinely opens, and it was found only by listing advisories through
 the API while publishing an unrelated one. Meanwhile SECURITY.md promises to
 "acknowledge reports quickly".
 
-The fix has to attach to a process that is guaranteed to happen. Cutting a
-release is the only one, so the check lives in the release audit: a report still
-in `triage` means nobody has accepted it, and shipping past that is how seven
-weeks happen.
+So the check lives in the release audit, run by hand before a release PR. CI
+does not run it: listing the repository's private advisories needs a token
+secret the workflows do not have. A report still in `triage` means nobody has
+accepted it, and shipping past that is how seven weeks happen.
 
 `draft` advisories are reported but do not block — accepted-and-being-fixed is a
 legitimate place to be mid-release.

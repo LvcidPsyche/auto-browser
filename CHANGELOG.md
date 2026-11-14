@@ -1736,6 +1736,10 @@ All notable changes to auto-browser are documented here.
   at the repository's root, outside every package. Each package directory now has a copy, which the build puts in
   the sdist and in the wheel's `.dist-info/licenses/`. A test fails when a copy differs from the root's, and the
   release audit fails when a built wheel lacks it. (MCP-17)
+- **`SECURITY.md` no longer says the advisory check is guaranteed to run before a release.** The check that blocks a
+  release while a privately reported advisory waits in triage runs in the release audit, which is run by hand; no
+  workflow runs it, as listing private advisories needs a token secret the workflows do not have. `SECURITY.md` and
+  the script's own text now say so. (INFRA-40)
 
 ### Changed
 
