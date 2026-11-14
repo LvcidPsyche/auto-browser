@@ -177,7 +177,7 @@ def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Cal
     _stub_steps(monkeypatch, tmp_path, calls)
 
     def secret_scan(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
-        calls.append((["git grep"], None, None, False))
+        calls.append((["git grep --untracked" if "--untracked" in command else "git grep"], None, None, False))
         return subprocess.CompletedProcess(command, 1, b"", b"")
 
     _stand_in_for_git_grep(monkeypatch, secret_scan)
@@ -200,7 +200,7 @@ def test_main_runs_every_step_once_in_order(monkeypatch: pytest.MonkeyPatch, tmp
     """The audit's steps, in order: a step main() dropped, doubled or moved passes every stubbed test but this one."""
     assert [_step(command, cwd) for command, cwd, *_ in _audit_commands(monkeypatch, tmp_path)] == [
         "launch files", "require git", "require npm", "require uv",
-        "git grep",
+        "git grep", "git grep --untracked",
         "check_open_advisories.py",
         "ruff", "check_version_parity.py", "check_playwright_pins.py", "check_bridge_parity.py",
         "agent_eval.py", "fixture_eval.py", "pip_audit", "npm browser-node",
@@ -357,10 +357,12 @@ def _scan(
     run: Callable[..., subprocess.CompletedProcess] | None = None,
     untracked: dict[str, bytes] | None = None,
     environ: dict[str, str] | None = None,
+    exclude: str | None = None,
 ) -> tuple[object, str, str]:
     """main()'s exit (what it returns, or the code it exits with) and what it printed, with every step but the
-    secret scan stubbed (_stub_steps), on a repository that tracks ``files`` and holds ``untracked`` beside them;
-    ``run`` stands in for git, and ``environ`` is set in this process's environment once the repository is made."""
+    secret scan stubbed (_stub_steps), on a repository that tracks ``files``, whatever ignore rule names them, and
+    holds ``untracked`` beside them; ``exclude`` is its .git/info/exclude, ``run`` stands in for git, and ``environ``
+    is set in this process's environment once the repository is made."""
     repo = tmp_path / "repo"
     (repo / "controller").mkdir(parents=True)
     (repo / "controller" / "constraints.txt").write_text("idna==3.10\n", encoding="utf-8")
@@ -368,7 +370,12 @@ def _scan(
         (repo / name).write_bytes(data)
     git = shutil.which("git")
     subprocess.run([git, "init", "-q", str(repo)], check=True)
-    subprocess.run([git, "-c", "core.autocrlf=false", "-C", str(repo), "add", "--", *files, "controller"], check=True)
+    if exclude is not None:
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "exclude").write_text(exclude, encoding="utf-8")
+    subprocess.run(
+        [git, "-c", "core.autocrlf=false", "-C", str(repo), "add", "-f", "--", *files, "controller"], check=True
+    )
     for name, data in (untracked or {}).items():
         (repo / name).write_bytes(data)
     monkeypatch.setattr(release_audit, "ROOT", repo)
@@ -534,6 +541,26 @@ def test_the_secret_scan_reads_the_untracked_files_ruff_and_pytest_read(
 
     failed = "potential secret-shaped token found" in str(code)
     named = err.splitlines() == ["scratch.py:1: secret-shaped token (value withheld)"]
+    assert (failed, token in out or token in err, named) == (True, False, True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("rule", [".gitignore", ".git/info/exclude"])
+def test_the_secret_scan_reads_a_tracked_file_an_ignore_rule_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], rule: str
+) -> None:
+    # Under --untracked, git leaves out every file an ignore rule names, a tracked one too: a token in a tracked file
+    # that .gitignore names (it was added with -f) or .git/info/exclude does passed the audit.
+    token = SECRET_SHAPES["a GitHub classic token"]
+    files = {"notes.md": f"key = {token}\n".encode()}
+    if rule == ".gitignore":
+        files[".gitignore"] = b"notes.md\n"
+    exclude = "notes.md\n" if rule == ".git/info/exclude" else None
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, files, exclude=exclude)
+
+    failed = "potential secret-shaped token found" in str(code)
+    named = err.splitlines() == ["notes.md:1: secret-shaped token (value withheld)"]
     assert (failed, token in out or token in err, named) == (True, False, True)
 
 

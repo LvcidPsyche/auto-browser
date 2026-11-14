@@ -99,28 +99,10 @@ def main() -> int:
 
     print("Scanning tracked and untracked files for obvious secret-shaped tokens...")
     # First: the steps below print source lines and paths (ruff's diagnostics, pytest's tracebacks, compileall's
-    # syntax errors), a token's among them. Untracked files too, which ruff and pytest read; like ruff, git leaves out
-    # the files .gitignore names.
-    # As bytes, decoded below: text mode reads a lone \r in a line as the line's end, and on Windows decodes in the ANSI
-    # code page, which stops at a byte such as the 0x9D that ends a UTF-8 ”. The tokens are ASCII, so a byte the
-    # decoding replaces never hides one. Without colour, which color.grep or color.ui set to always in a maintainer's
-    # config adds even into a pipe, and which hides where git's path and line number end. Without the shell's GIT_*
-    # settings, which can point git at another repository or index, or add exclude rules to its config (GIT_DIR,
-    # GIT_INDEX_FILE, GIT_CONFIG_*); Windows upper-cases every name, so the prefix catches each spelling.
-    secret_scan = subprocess.run(
-        ["git", "grep", "--no-color", "--untracked", "-nE", SECRET_PATTERN, "--", "."],
-        cwd=ROOT,
-        env={name: value for name, value in os.environ.items() if not name.startswith("GIT_")},
-        capture_output=True,
-    )
-    if secret_scan.returncode not in {0, 1}:
-        # Not git's own words: they can name a path, or a setting's value, that holds a token.
-        print(f"git grep exited with status {secret_scan.returncode}; run it by hand to see why.", file=sys.stderr)
-        raise SystemExit(secret_scan.returncode)
-    if secret_scan.stderr:
-        # git says a file it could not read ("failed to stat ...") there alone, and exits as its matches elsewhere say.
-        raise SystemExit("Release audit failed: git grep wrote to its error stream; run it by hand to see why.")
-    found = _secret_lines(secret_scan.stdout.decode("utf-8", "replace"))
+    # syntax errors), a token's among them. Every tracked file, and untracked files too, which ruff and pytest read;
+    # like ruff, git leaves out the untracked files .gitignore names. In two runs: under --untracked, git leaves out a
+    # tracked file an ignore rule names as well. A line both runs find is named once.
+    found = list(dict.fromkeys(_scan_for_secrets() + _scan_for_secrets("--untracked")))
     if found:
         # Where each one is, and never the line, which holds the token and whatever else is beside it: the output can
         # land in a log or an agent's transcript.
@@ -230,6 +212,30 @@ def _image_pins(lock: str) -> list[str]:
             requirement.marker = None
             pins.append(str(requirement))
     return pins
+
+
+def _scan_for_secrets(*options: str) -> list[str]:
+    """The lines `git grep`, given ``options``, finds in this tree that hold a secret-shaped token (_secret_lines)."""
+    # As bytes, decoded below: text mode reads a lone \r in a line as the line's end, and on Windows decodes in the ANSI
+    # code page, which stops at a byte such as the 0x9D that ends a UTF-8 ”. The tokens are ASCII, so a byte the
+    # decoding replaces never hides one. Without colour, which color.grep or color.ui set to always in a maintainer's
+    # config adds even into a pipe, and which hides where git's path and line number end. Without the shell's GIT_*
+    # settings, which can point git at another repository or index, or add exclude rules to its config (GIT_DIR,
+    # GIT_INDEX_FILE, GIT_CONFIG_*); Windows upper-cases every name, so the prefix catches each spelling.
+    secret_scan = subprocess.run(
+        ["git", "grep", "--no-color", *options, "-nE", SECRET_PATTERN, "--", "."],
+        cwd=ROOT,
+        env={name: value for name, value in os.environ.items() if not name.startswith("GIT_")},
+        capture_output=True,
+    )
+    if secret_scan.returncode not in {0, 1}:
+        # Not git's own words: they can name a path, or a setting's value, that holds a token.
+        print(f"git grep exited with status {secret_scan.returncode}; run it by hand to see why.", file=sys.stderr)
+        raise SystemExit(secret_scan.returncode)
+    if secret_scan.stderr:
+        # git says a file it could not read ("failed to stat ...") there alone, and exits as its matches elsewhere say.
+        raise SystemExit("Release audit failed: git grep wrote to its error stream; run it by hand to see why.")
+    return _secret_lines(secret_scan.stdout.decode("utf-8", "replace"))
 
 
 def _secret_lines(grep_output: str) -> list[str]:
