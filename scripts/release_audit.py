@@ -39,6 +39,9 @@ LAUNCH_FILES = [
 # Every directory release.yml builds, plus the controller (not published yet).
 WHEEL_PACKAGES = ("controller", "client", "integrations/langchain", "packaging/auto-browser-mcp")
 MCP_CONSOLE_SCRIPT = "auto_browser_client.mcp_bridge:main"
+# The wheels release.yml publishes: each must carry the repository's LICENSE, which its backend takes from the package
+# directory's own copy (PEP 639's license files; setuptools and hatchling both look for LICEN[CS]E* by default).
+LICENSED_WHEELS = ("auto_browser_client", "auto_browser_langchain", "auto_browser_mcp")
 # The client's and the LangChain integration's suites, as ci.yml's client-tests and langchain-tests run them:
 # (directory, extras, coverage module, coverage gate, PYTHONPATH). Each runs in a fresh environment of its own, where
 # its package is installed editable with those extras, from releases at least PACKAGE_HOLD_HOURS old, as in CI.
@@ -115,6 +118,7 @@ def main() -> int:
             _run([PYTHON, "-m", "build", "--wheel", "--outdir", str(wheelhouse), package_dir])
         _inspect_controller_wheel(wheelhouse)
         _inspect_mcp_wheel(wheelhouse)
+        _inspect_licenses(wheelhouse)
 
     print("Running controller tests with coverage gate...")
     env = os.environ.copy()
@@ -229,6 +233,23 @@ def _inspect_mcp_wheel(wheelhouse: Path) -> None:
     script = parser.get("console_scripts", "auto-browser-mcp", fallback=None)
     if script != MCP_CONSOLE_SCRIPT:
         raise SystemExit(f"MCP metapackage wheel must map auto-browser-mcp to {MCP_CONSOLE_SCRIPT}, found {script!r}")
+
+
+def _inspect_licenses(wheelhouse: Path) -> None:
+    """Each published wheel carries the repository's LICENSE in its .dist-info/licenses."""
+    expected = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    for name in LICENSED_WHEELS:
+        wheels = sorted(wheelhouse.glob(f"{name}-*.whl"))
+        if not wheels:
+            raise SystemExit(f"{name} wheel was not built")
+        with zipfile.ZipFile(wheels[-1]) as archive:
+            licenses = [entry for entry in archive.namelist() if entry.endswith(".dist-info/licenses/LICENSE")]
+            if len(licenses) != 1:
+                raise SystemExit(f"{wheels[-1].name} does not carry LICENSE in its .dist-info/licenses")
+            # A checkout with CRLF line endings builds the same text with them.
+            text = archive.read(licenses[0]).decode("utf-8").replace("\r\n", "\n")
+        if text != expected:
+            raise SystemExit(f"{wheels[-1].name}'s LICENSE is not the repository's LICENSE")
 
 
 def _read_dist_info(archive: zipfile.ZipFile, names: list[str], filename: str) -> str:

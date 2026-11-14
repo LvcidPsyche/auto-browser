@@ -1731,6 +1731,11 @@ All notable changes to auto-browser are documented here.
   image installs under, and the `playwright` and `playwright-core` versions in `browser-node/package-lock.json`, which
   `npm ci` installs, and fails unless all five agree; and it fails when `package.json` names anything but an exact
   version. (HARN-36)
+- **The client, LangChain and MCP packages carry the license text.** Their metadata said MIT, but the MIT license
+  asks for its text to go with the software, and none of the three wheels or sdists held it: the only `LICENSE` was
+  at the repository's root, outside every package. Each package directory now has a copy, which the build puts in
+  the sdist and in the wheel's `.dist-info/licenses/`. A test fails when a copy differs from the root's, and the
+  release audit fails when a built wheel lacks it. (MCP-17)
 
 ### Changed
 

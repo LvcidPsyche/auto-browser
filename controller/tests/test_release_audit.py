@@ -134,6 +134,7 @@ def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tup
     monkeypatch.setattr(release_audit, "_require", lambda command: None)
     monkeypatch.setattr(release_audit, "_inspect_controller_wheel", lambda wheelhouse: None)
     monkeypatch.setattr(release_audit, "_inspect_mcp_wheel", lambda wheelhouse: None)
+    monkeypatch.setattr(release_audit, "_inspect_licenses", lambda wheelhouse: None)
     monkeypatch.setattr(release_audit.os, "chdir", lambda path: None)
     # The secret scan is the one subprocess main() starts itself: it finds nothing.
     monkeypatch.setattr(release_audit.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", ""))
@@ -274,6 +275,69 @@ def test_aws_documented_example_key_is_the_one_token_the_scan_lets_through() -> 
     assert release_audit._secret_lines(f"a.py:3:{example} {real}\n") == [f"a.py:3:{example} {real}"]
     # A line git found and Python's reading of the pattern does not is kept: the two engines must not disagree quietly.
     assert release_audit._secret_lines("a.py:4:nothing Python finds\n") == ["a.py:4:nothing Python finds"]
+
+
+ROOT_LICENSE = _REPO / "LICENSE"
+
+
+@pytest.mark.skipif(
+    not (ROOT_LICENSE.is_file() and RELEASE_WORKFLOW.is_file()), reason="the repository root is not in this tree"
+)
+def test_each_published_package_holds_the_repository_license() -> None:
+    published = re.findall(r"python -m build --outdir dist (\S+)", RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+    assert len(published) == 3, published
+    expected = ROOT_LICENSE.read_text(encoding="utf-8")
+    for directory in published:
+        package_license = _REPO / directory / "LICENSE"
+        assert package_license.is_file(), f"{directory} has no LICENSE, so its wheel and sdist carry none"
+        assert package_license.read_text(encoding="utf-8") == expected, f"{directory}/LICENSE is not the root's"
+
+
+LICENSE_TEXT = "MIT License\n\nCopyright (c) 2026 Example\n"
+LICENSED_WHEELS = ("auto_browser_client", "auto_browser_langchain", "auto_browser_mcp")
+
+
+def _inspect_licenses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, licenses: dict[str, str | None]) -> None:
+    """Wheels named as release.yml's builds name them, each with the given LICENSE text (None: no LICENSE)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "LICENSE").write_text(LICENSE_TEXT, encoding="utf-8")
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    for name, text in licenses.items():
+        with zipfile.ZipFile(wheelhouse / f"{name}-1.0.0-py3-none-any.whl", "w") as archive:
+            archive.writestr(f"{name}-1.0.0.dist-info/METADATA", f"Name: {name}\nLicense-File: LICENSE\n")
+            if text is not None:
+                archive.writestr(f"{name}-1.0.0.dist-info/licenses/LICENSE", text)
+    monkeypatch.setattr(release_audit, "ROOT", root)
+    release_audit._inspect_licenses(wheelhouse)
+
+
+def test_the_audit_accepts_wheels_that_carry_the_license(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    licenses = dict.fromkeys(LICENSED_WHEELS, LICENSE_TEXT)
+    licenses["auto_browser_mcp"] = LICENSE_TEXT.replace("\n", "\r\n")  # built from a Windows checkout
+    _inspect_licenses(monkeypatch, tmp_path, licenses)
+
+
+@pytest.mark.parametrize("name", LICENSED_WHEELS)
+def test_the_audit_rejects_a_wheel_without_the_license(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    licenses = dict.fromkeys(LICENSED_WHEELS, LICENSE_TEXT) | {name: None}
+    with pytest.raises(SystemExit, match=f"{name}-1.0.0-py3-none-any.whl does not carry LICENSE"):
+        _inspect_licenses(monkeypatch, tmp_path, licenses)
+
+
+def test_the_audit_rejects_a_wheel_whose_license_is_another(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    licenses = dict.fromkeys(LICENSED_WHEELS, LICENSE_TEXT) | {"auto_browser_langchain": "Apache License 2.0\n"}
+    with pytest.raises(SystemExit, match="auto_browser_langchain-1.0.0-py3-none-any.whl's LICENSE is not"):
+        _inspect_licenses(monkeypatch, tmp_path, licenses)
+
+
+def test_the_audit_rejects_a_missing_wheel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    licenses = {name: LICENSE_TEXT for name in LICENSED_WHEELS if name != "auto_browser_client"}
+    with pytest.raises(SystemExit, match="auto_browser_client wheel was not built"):
+        _inspect_licenses(monkeypatch, tmp_path, licenses)
 
 
 if __name__ == "__main__":
