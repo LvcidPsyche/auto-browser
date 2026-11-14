@@ -150,6 +150,22 @@ def _stub_steps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, calls: list[Cal
     monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-doctor"])
 
 
+def _stand_in_for_git_grep(monkeypatch: pytest.MonkeyPatch, answer: Callable[..., subprocess.CompletedProcess]) -> None:
+    """``answer`` stands in for the secret scan's git grep, the one subprocess main() starts itself.
+
+    The patch replaces subprocess.run for every module, so any other call (on Windows, 3.11's platform runs `ver`
+    through it for packaging's markers) goes to the real one.
+    """
+    run = subprocess.run
+
+    def git_grep_or_run(command: object, *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        if isinstance(command, list) and command[:2] == ["git", "grep"]:
+            return answer(command, *args, **kwargs)
+        return run(command, *args, **kwargs)
+
+    monkeypatch.setattr(release_audit.subprocess, "run", git_grep_or_run)
+
+
 def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Call]:
     """The steps main() takes, in order, every one stubbed (_stub_steps), the secret scan first, which finds nothing.
 
@@ -160,12 +176,11 @@ def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Cal
     monkeypatch.setenv("AUTO_BROWSER_BASE_URL", "http://made-up-remote.invalid:9000/mcp")
     _stub_steps(monkeypatch, tmp_path, calls)
 
-    def secret_scan(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+    def secret_scan(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         calls.append((["git grep"], None, None, False))
-        return subprocess.CompletedProcess(args, 1, b"", b"")
+        return subprocess.CompletedProcess(command, 1, b"", b"")
 
-    # The secret scan is the one subprocess main() starts itself.
-    monkeypatch.setattr(release_audit.subprocess, "run", secret_scan)
+    _stand_in_for_git_grep(monkeypatch, secret_scan)
     assert release_audit.main() == 0
     return calls
 
@@ -358,7 +373,7 @@ def _scan(
     monkeypatch.setattr(release_audit, "ROOT", repo)
     _stub_steps(monkeypatch, tmp_path, [])
     if run is not None:
-        monkeypatch.setattr(release_audit.subprocess, "run", run)
+        _stand_in_for_git_grep(monkeypatch, run)
     try:
         code = release_audit.main()
     except SystemExit as exited:
