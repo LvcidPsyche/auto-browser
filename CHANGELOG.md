@@ -1697,9 +1697,9 @@ All notable changes to auto-browser are documented here.
   whose content the window can read as tags where the copy read text, and its `<svg>`. The copy's markup is read
   again before it is opened, and one that then holds any of these, its own policy aside, is not: markup no parser
   writes can read otherwise the second time. A screenshot that cannot be read says so in its place, and a page that
-  cannot be read, or that changes when it is read again, closes the window and says why on the dashboard. The
-  dashboard keeps the last copy it opened: an earlier one's window keeps what it shows and cannot be reloaded. The
-  route and its page are as they were. (AUTH-27)
+  cannot be read, or whose copy, read again, holds one of these besides its own policy, closes the window and says
+  why on the dashboard. The dashboard keeps the last copy it opened: an earlier one's window keeps what it shows and
+  cannot be reloaded. The route and its page are as they were. (AUTH-27)
 - **The network inspector gives up on a response body that does not end.** Playwright's `response.body()` waits
   for the end of a response, and the inspector left out only `text/event-stream` and `multipart/x-mixed-replace`,
   so any other response a page kept open, a chunked `application/x-ndjson` or a long poll, held the read and its
