@@ -10,17 +10,21 @@ here, with the API response shape taken from a real
 from __future__ import annotations
 
 import io
+import json
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 try:
+    import check_open_advisories  # noqa: E402
     from check_open_advisories import age_days, report  # noqa: E402
 except ModuleNotFoundError as exc:  # scripts/ is not shipped in the controller image
     raise unittest.SkipTest(f"check_open_advisories unavailable: {exc}") from exc
@@ -72,6 +76,44 @@ class OpenAdvisoryGateTests(unittest.TestCase):
         # The real GHSA-xmh3-cw7j-9gp5 submission timestamp: 51 whole days by
         # 2026-08-08T00:00Z, and the count truncates rather than rounds.
         self.assertEqual(age_days("2026-06-17T04:40:04Z", NOW), 51)
+
+
+class FetchAdvisoriesTests(unittest.TestCase):
+    """`gh api --paginate` prints each page as its own JSON array, one after another, which is not one JSON document.
+
+    With `--slurp` it prints one array of the pages, and the check reads every advisory on every page.
+    """
+
+    def _fetch(self, stdout: str, returncode: int = 0) -> tuple[list[dict], list[str]]:
+        completed = subprocess.CompletedProcess(["gh"], returncode, stdout, "HTTP 404")
+        with (
+            mock.patch.object(check_open_advisories.shutil, "which", return_value="/usr/bin/gh"),
+            mock.patch.object(check_open_advisories.subprocess, "run", return_value=completed) as run,
+        ):
+            advisories = check_open_advisories.fetch_advisories("o/r")
+        return advisories, run.call_args.args[0]
+
+    def test_every_page_is_read(self) -> None:
+        first, second = advisory("published", ghsa_id="GHSA-aaaa"), advisory("triage", ghsa_id="GHSA-bbbb")
+        advisories, argv = self._fetch(json.dumps([[first], [second]]))
+        self.assertIn("--paginate", argv)
+        self.assertIn("--slurp", argv)
+        self.assertEqual(advisories, [first, second])
+
+    def test_a_triage_advisory_on_a_later_page_blocks_the_release(self) -> None:
+        pages = [[advisory("published", ghsa_id=f"GHSA-{n:04d}") for n in range(30)], [advisory("triage")]]
+        advisories, _ = self._fetch(json.dumps(pages))
+        with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            report(advisories, now=NOW)
+
+    def test_a_reply_that_is_not_a_list_of_pages_fails(self) -> None:
+        for stdout in (json.dumps({"message": "Not Found"}), json.dumps([{"ghsa_id": "GHSA-x"}])):
+            with self.subTest(stdout=stdout), self.assertRaisesRegex(SystemExit, "not a list of pages"):
+                self._fetch(stdout)
+
+    def test_a_failed_call_still_fails(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Could not list security advisories for o/r"):
+            self._fetch("", returncode=1)
 
 
 if __name__ == "__main__":

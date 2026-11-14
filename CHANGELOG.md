@@ -1711,6 +1711,11 @@ All notable changes to auto-browser are documented here.
   (`sk-proj-`), AWS access key IDs (`AKIA`, `ASIA`), GitLab tokens (`glpat-`) and GitHub's other tokens (`gho_`,
   `ghs_`, `ghu_`, `ghr_`). One value is let through, and only as itself: AWS's documented example key ID, which the
   PII scrubber's tests use. (HARN-32)
+- **The release audit's advisory check reads the advisory list in one shape, whatever the gh version.**
+  `scripts/check_open_advisories.py` read the output of `gh api --paginate` as one JSON document, which it is not
+  from a gh that prints each page as an array of its own, once the list runs past one page. It now passes `--slurp`
+  and reads every advisory on every page; a reply that is not a list of pages fails the check, as does a gh that
+  does not know `--slurp`, with gh's error. (HARN-33)
 
 ### Changed
 

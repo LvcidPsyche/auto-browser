@@ -79,15 +79,20 @@ def fetch_advisories(repo: str) -> list[dict]:
             "GitHub CLI; pass --skip-advisory-check to the release audit only if you "
             "have just checked the advisory list by hand."
         )
+    # Without --slurp, how the pages are printed depends on the gh version: one array per page, which is not one JSON
+    # document, or one merged array. With it, gh prints one array of the pages, each an array of advisories.
     result = subprocess.run(
-        ["gh", "api", f"repos/{repo}/security-advisories", "--paginate"],
+        ["gh", "api", f"repos/{repo}/security-advisories", "--paginate", "--slurp"],
         cwd=ROOT,
         text=True,
         capture_output=True,
     )
     if result.returncode != 0:
         raise SystemExit(f"Could not list security advisories for {repo}:\n{result.stderr.strip()}")
-    return json.loads(result.stdout)
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        raise SystemExit(f"The security advisories gh listed for {repo} are not a list of pages.")
+    return [entry for page in pages for entry in page]
 
 
 def age_days(timestamp: str | None, now: datetime) -> int | None:
