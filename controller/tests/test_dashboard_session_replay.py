@@ -236,6 +236,20 @@ TEMPLATE_IN_BODY_PAGE = f"""<!DOCTYPE html>
 <body><h1>Session Replay</h1>
 {TEMPLATE_NOSCRIPT}
 </body></html>"""
+# The <mglyph> is put beside the table in the copy, an HTML element, and its <style> is HTML, whose text is written
+# out as it is; in the window it is MathML, in the <mtext>, and so is the <style>, whose text is tags: the <meta>
+# leaves MathML for the document.
+MATHML_REFRESH_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title></head>
+<body><h1>Session Replay</h1>
+<math><mtext><table><mglyph><style>{REFRESH_TAG}</style></mglyph></table></mtext></math>
+</body></html>"""
+# The same by a form in a form, which the copy's markup nests and a parser does not.
+MGLYPH_REFRESH_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title></head>
+<body><h1>Session Replay</h1>
+<form><math><mtext></form><form><mglyph><style></math>{REFRESH_TAG}</style></mglyph></form></mtext></math></form>
+</body></html>"""
 # Each way a page could move the copy's window elsewhere with no script: its markup, and what is clicked.
 NAVIGATIONS = {
     "a form": (NAVIGATING_PAGE, "#submit"),
@@ -244,6 +258,8 @@ NAVIGATIONS = {
     "a refresh behind a noscript": (NOSCRIPT_REFRESH_PAGE, None),
     "a refresh behind a noscript in a template in the head": (TEMPLATE_IN_HEAD_PAGE, None),
     "a refresh behind a noscript in a template in the body": (TEMPLATE_IN_BODY_PAGE, None),
+    "a refresh behind MathML, by a table": (MATHML_REFRESH_PAGE, None),
+    "a refresh behind MathML, by a form in a form": (MGLYPH_REFRESH_PAGE, None),
 }
 # Longer than the refresh's second: a window that is moving has moved by then.
 NAVIGATION_WAIT_MS = 2500
@@ -280,24 +296,36 @@ def test_the_copy_is_not_moved_elsewhere_by_a_form_a_base_or_a_refresh(case: str
     assert [path for path in stub.asked if path.startswith(ELSEWHERE_ORIGIN)] == []
 
 
-# Not the scripting flag: the copy's markup nests one form in another, which a parser does not, so the window reads
-# the mglyph as MathML and the <style> in it as markup, where the copy held the refresh as the style's text.
-MGLYPH_REFRESH_PAGE = f"""<!DOCTYPE html>
-<html><head><title>Replay</title></head>
-<body><h1>Session Replay</h1>
-<form><math><mtext></form><form><mglyph><style></math>{REFRESH_TAG}</style></mglyph></form></mtext></math></form>
-</body></html>"""
+# No page is known whose copy, read again, holds a tag the copy left out, once its MathML and SVG are left out: with
+# no foreign content a <style> is HTML in both readings, and its text is text. So the second reading is made to
+# differ here, in the parser the dashboard reads with: its reading of the copy's markup, which holds the policy,
+# gains a refresh.
+SECOND_READING_GAINS_A_REFRESH = """(content) => {
+  const parse = DOMParser.prototype.parseFromString;
+  DOMParser.prototype.parseFromString = function (markup, type) {
+    const read = parse.call(this, markup, type);
+    if (markup.includes('Content-Security-Policy')) {
+      const refresh = read.createElement('meta');
+      refresh.httpEquiv = 'refresh';
+      refresh.content = content;
+      read.head.append(refresh);
+    }
+    return read;
+  };
+}"""
+PLAIN_PAGE = "<!DOCTYPE html><html><head><title>Replay</title></head><body><h1>Session Replay</h1></body></html>"
 
 
 @requires_chromium
-def test_a_page_that_reads_otherwise_when_it_is_read_again_is_not_opened() -> None:
-    stub = ReplayStub(MGLYPH_REFRESH_PAGE)
+def test_a_copy_whose_markup_reads_otherwise_when_it_is_read_again_is_not_opened() -> None:
+    stub = ReplayStub(PLAIN_PAGE)
 
     async def scenario(page, dialogs) -> dict:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
         await page.context.route(f"{ELSEWHERE_ORIGIN}/**", stub.handle)
         await page.wait_for_selector(BUTTON)
+        await page.evaluate(SECOND_READING_GAINS_A_REFRESH, f"1;url={ELSEWHERE_ORIGIN}/refreshed")
         async with page.expect_popup() as popup_info:
             await page.click(BUTTON)
         popup = await popup_info.value

@@ -536,15 +536,17 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
 // policy under which it runs no script, loads nothing, submits no form and takes no <base>. The page's own
 // http-equiv tags are left out of it: a refresh is one, and no policy stops it. So are its <noscript> elements:
 // DOMParser reads the page with scripting off and the window reads the copy with it on, so what one holds as text
-// in a <noscript> the other can take for a tag, a refresh among them. So are its <template> elements, whose content
-// no query reaches. The window reads the copy's markup anew, and markup no parser writes (a form in a form) can read
-// otherwise then: the markup is read again first, and a copy that then holds any of these but its policy is not
-// opened. The route's page has no script and escapes what it shows, and for none of these does the copy rest on
-// that. It does for what the page shows: a link in it, for one, goes where it points when it is clicked, as the
-// page's link to the session's URL is meant to.
+// in a <noscript> the other can take for a tag, a refresh among them. So are its <template>, <math> and <svg>
+// elements: querySelectorAll does not look into a template, and MathML written out and read again can turn an HTML
+// <style>'s text into tags; SVG, parsed by the same foreign-content rules, goes with it. The window reads the copy's
+// markup anew, and markup no parser writes (a form in a form) can read otherwise then: the markup is read again
+// first, and a copy that then holds any of these but its policy is not opened. The route's page has none of these
+// and no script, and escapes what it shows, and for none of these does the copy rest on that. It does for what the
+// page shows: a link in it, for one, goes where it points when it is clicked, as the page's link to the session's
+// URL is meant to.
 const REPLAY_COPY_POLICY =
   "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
-const REPLAY_COPY_LEFT_OUT = 'meta[http-equiv], noscript, template';
+const REPLAY_COPY_LEFT_OUT = 'meta[http-equiv], noscript, template, svg, math';
 const asDataUrl = (blob) => new Promise((resolve, reject) => {
   const reader = new FileReader();
   reader.addEventListener('load', () => resolve(reader.result));
