@@ -1731,6 +1731,11 @@ All notable changes to auto-browser are documented here.
   from a gh that prints each page as an array of its own, once the list runs past one page. It now passes `--slurp`
   and reads every advisory on every page; a reply that is not a list of pages fails the check, as does a gh that
   does not know `--slurp`, with gh's error. (HARN-33)
+- **The release audit's advisory check reads gh's output as UTF-8 on Windows.** It decoded it in the ANSI code page
+  (cp1252), so an advisory of any state whose text held a `”`, an `Á` or a Cyrillic letter ended the check with a
+  `TypeError`, and other text read garbled. A triage advisory's summary that the output's encoding cannot hold (that
+  code page, on a pipe) is now printed with those characters escaped, where it ended the check with a
+  `UnicodeEncodeError` before its verdict.
 - **A release tag without its CHANGELOG section stops before anything is published to PyPI.** The release workflow
   read the section as the GitHub release's notes only after the three packages were on PyPI, so a tag with no section
   of its own, or an empty one, published them and then failed. Its build job now checks for the section before it

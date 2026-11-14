@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -72,6 +74,21 @@ class OpenAdvisoryGateTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(report([], now=NOW), 0)
 
+    def test_a_summary_the_output_cannot_hold_is_escaped_and_the_release_still_blocked(self) -> None:
+        # A reporter's text, written where stdout's encoding has no such character (Windows' ANSI code page on a pipe,
+        # as when the release audit's output is captured), ended the check with a UnicodeEncodeError at that summary.
+        entry = advisory("triage") | {"summary": "a → b, 日本語"}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            listed = Path(temp_dir) / "advisories.json"
+            listed.write_text(json.dumps([entry], ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(_SCRIPTS / "check_open_advisories.py"), "--from-json", str(listed)],
+                capture_output=True,
+                env={**os.environ, "PYTHONIOENCODING": "ascii"},
+            )
+        blocked = "Release blocked" in result.stderr.decode("ascii", "replace")
+        self.assertEqual((result.returncode, blocked, b"a \\u2192 b, \\u65e5" in result.stdout), (1, True, True))
+
     def test_age_days_tolerates_a_missing_timestamp(self) -> None:
         self.assertIsNone(age_days(None, NOW))
         # The real GHSA-xmh3-cw7j-9gp5 submission timestamp: 51 whole days by
@@ -115,6 +132,32 @@ class FetchAdvisoriesTests(unittest.TestCase):
     def test_a_failed_call_still_fails(self) -> None:
         with self.assertRaisesRegex(SystemExit, "Could not list security advisories for o/r"):
             self._fetch("", returncode=1)
+
+    def test_an_advisory_s_text_is_read_as_the_utf_8_gh_prints(self) -> None:
+        # Decoded in Windows' ANSI code page (cp1252), the 0x9D that ends ” and the 0x81 of Á or of a Cyrillic letter
+        # stopped the read, and the check died with a TypeError; other text read garbled.
+        run = subprocess.run
+        summaries = [
+            'a "quoted" word',
+            "a “quoted” word",
+            "Árvore",
+            "сервер",
+            "日本語",
+        ]
+        for summary in summaries:
+            printed = json.dumps([[advisory("triage") | {"summary": summary}]], ensure_ascii=False).encode()
+            # Not gh: a child that prints what gh would, read through subprocess with the check's own arguments.
+            child = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(bytes.fromhex({printed.hex()!r}))"]
+
+            def gh(argv: list[str], child: list[str] = child, **kwargs: object) -> subprocess.CompletedProcess:
+                return run(child, **kwargs)
+
+            with (
+                self.subTest(summary=summary),
+                mock.patch.object(check_open_advisories.shutil, "which", return_value="/usr/bin/gh"),
+                mock.patch.object(check_open_advisories.subprocess, "run", gh),
+            ):
+                self.assertEqual(check_open_advisories.fetch_advisories("o/r")[0]["summary"], summary)
 
 
 SECURITY = _REPO / "SECURITY.md"

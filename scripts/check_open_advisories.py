@@ -23,6 +23,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +41,10 @@ def main() -> int:
         help="Read the advisory list from a file instead of the API (tests).",
     )
     args = parser.parse_args()
+    # A summary is a reporter's text. Where stdout's encoding has no such character (Windows' ANSI code page on a pipe,
+    # as when the release audit's output is captured), it is printed escaped, as Python's stderr does, rather than
+    # ending the check at that summary.
+    sys.stdout.reconfigure(errors="backslashreplace")
 
     if args.from_json is not None:
         advisories = json.loads(args.from_json.read_text(encoding="utf-8"))
@@ -85,6 +90,7 @@ def fetch_advisories(repo: str) -> list[dict]:
         ["gh", "api", f"repos/{repo}/security-advisories", "--paginate", "--slurp"],
         cwd=ROOT,
         text=True,
+        encoding="utf-8",  # gh prints UTF-8, which Windows' ANSI code page (cp1252) cannot always decode: ” ends in 0x9D
         capture_output=True,
     )
     if result.returncode != 0:
