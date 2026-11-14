@@ -277,6 +277,43 @@ def test_aws_documented_example_key_is_the_one_token_the_scan_lets_through() -> 
     assert release_audit._secret_lines("a.py:4:nothing Python finds\n") == ["a.py:4:nothing Python finds"]
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_secret_scan_says_where_a_token_is_and_prints_neither_it_nor_its_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A key pasted into a tracked file and not committed, which the scan reads all the same, beside another secret on
+    # its line. Both are made up, and built here so that this file holds neither.
+    token = SECRET_SHAPES["a GitHub classic token"]
+    password = "hunter2-" + "not-real"
+    repo = tmp_path / "repo"
+    (repo / "controller").mkdir(parents=True)
+    (repo / "controller" / "constraints.txt").write_text("idna==3.10\n", encoding="utf-8")
+    (repo / "settings.py").write_text(f'name = "x"\nconn = "postgres://admin:{password}@db/x?k={token}"\n', "utf-8")
+    git = shutil.which("git")
+    subprocess.run([git, "init", "-q", str(repo)], check=True)
+    subprocess.run([git, "-C", str(repo), "add", "settings.py", "controller/constraints.txt"], check=True)
+    # Every step before the scan stubbed, as in _audit_commands; the scan runs git on the repository above.
+    monkeypatch.setattr(release_audit, "ROOT", repo)
+    monkeypatch.setattr(release_audit, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(release_audit, "_check_launch_files", lambda: None)
+    monkeypatch.setattr(release_audit, "_require", lambda command: None)
+    monkeypatch.setattr(release_audit, "_inspect_controller_wheel", lambda wheelhouse: None)
+    monkeypatch.setattr(release_audit, "_inspect_mcp_wheel", lambda wheelhouse: None)
+    monkeypatch.setattr(release_audit, "_inspect_licenses", lambda wheelhouse: None)
+    monkeypatch.setattr(release_audit.os, "chdir", lambda path: None)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-advisory-check", "--skip-doctor"])
+
+    with pytest.raises(SystemExit, match="potential secret-shaped token found"):
+        release_audit.main()
+
+    out, err = capsys.readouterr()
+    # Compared as booleans, so that a failure prints no secret either.
+    printed = [value in out or value in err for value in (token, password)]
+    named = "settings.py:2: secret-shaped token (value withheld)" in err.splitlines()
+    assert (printed, named) == ([False, False], True)
+
+
 ROOT_LICENSE = _REPO / "LICENSE"
 
 

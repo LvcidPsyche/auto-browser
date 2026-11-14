@@ -194,7 +194,10 @@ def main() -> int:
         raise SystemExit(secret_scan.returncode)
     found = _secret_lines(secret_scan.stdout)
     if found:
-        print("\n".join(found), file=sys.stderr)
+        # Where each one is, and never the line, which holds the token and whatever else is beside it: the output can
+        # land in a log or an agent's transcript.
+        for line in found:
+            print(f"{':'.join(line.split(':', 2)[:2])}: secret-shaped token (value withheld)", file=sys.stderr)
         raise SystemExit("Release audit failed: potential secret-shaped token found.")
 
     print()

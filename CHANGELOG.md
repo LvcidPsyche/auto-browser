@@ -1718,7 +1718,8 @@ All notable changes to auto-browser are documented here.
   access tokens and Slack tokens only; it now also finds Anthropic keys (`sk-ant-`), OpenAI project keys
   (`sk-proj-`), AWS access key IDs (`AKIA`, `ASIA`), GitLab tokens (`glpat-`) and GitHub's other tokens (`gho_`,
   `ghs_`, `ghu_`, `ghr_`). One value is let through, and only as itself: AWS's documented example key ID, which the
-  PII scrubber's tests use. (HARN-32)
+  PII scrubber's tests use. A match is named by its file and line, with its value withheld, where the scan printed
+  the whole line, token and all. (HARN-32)
 - **The release audit's advisory check reads the advisory list in one shape, whatever the gh version.**
   `scripts/check_open_advisories.py` read the output of `gh api --paginate` as one JSON document, which it is not
   from a gh that prints each page as an array of its own, once the list runs past one page. It now passes `--slurp`
