@@ -446,6 +446,8 @@ class RevocationStoreTests(_Stores):
             b'{"all": 0, "sessions": []}',
             b'{"all": 0, "sessions": {"session-1": "soon"}}',
             b'{"all": 0, "sessions": {"session-1": true}}',
+            # A revoke's stamp is later than one before it, so above 0, which "all" and "minted" hold for none.
+            b'{"all": 0, "sessions": {"session-1": 0}, "minted": 0, "era": ""}',
             b'{"all": -1, "sessions": {}}',
             b'{"all": 1.5, "sessions": {}}',
             b'{"all": 0, "sessions": {}, "minted": "soon"}',

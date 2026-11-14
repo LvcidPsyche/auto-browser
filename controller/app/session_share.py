@@ -119,7 +119,9 @@ def _revocations_read(data: object) -> _Revocations:
     if set(data) not in ({"all", "sessions"}, {"all", "sessions", "minted"}, {"all", "sessions", "minted", "era"}):
         raise ValueError("its keys are not the ones a save writes")
     every_session, sessions, minted, era = data["all"], data["sessions"], data.get("minted", 0), data.get("era", "")
-    if not _is_stamp(every_session) or not isinstance(sessions, dict) or not all(map(_is_stamp, sessions.values())):
+    # A revoke's stamp is later than the one before it, so above 0, which "all" and "minted" hold for none.
+    revoked = isinstance(sessions, dict) and all(_is_stamp(stamp) and stamp > 0 for stamp in sessions.values())
+    if not _is_stamp(every_session) or not revoked:
         raise ValueError("it holds something other than the stamps of revocations")
     if not _is_stamp(minted):
         raise ValueError("it holds something other than the stamp of a mint")
