@@ -21,7 +21,9 @@ Each of these is reported:
 - the CLI home only resolves into PROTECTED_ROOT, or to it or what holds it: a link, which a CLI that may write
   where the home is written may have made. The CLI is started under the launcher without it, and cannot write its
   home: closed, not open.
-- the controller's own home is, or lies in, a directory the CLI may write. The CLI is started under the launcher.
+- the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
+  write, but for a CLI home in it clear of the home's .ssh and Python's user base. The CLI is started under the
+  launcher.
 - a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT, or a path that lies
   in a directory the CLI may write, as written or once resolved (the CLI can replace a link written there). The CLI
   is started under the launcher, which does not close that place.
@@ -39,6 +41,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import site
 import subprocess
 import sys
 import threading
@@ -47,6 +50,11 @@ from pathlib import Path
 from .cli_sandbox_launcher import EXIT_NOT_APPLIED, MARKER
 from .config import CLI_SANDBOX_PROTECTED_ROOT, Settings
 from .utils import error_text_for_log, quoted_for_log
+
+try:
+    import pwd
+except ImportError:  # not POSIX: no passwd entry to read
+    pwd = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -220,18 +228,42 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
     return given, home_refused
 
 
-def _controllers_home_open(given: list[tuple[str, str]]) -> str:
-    """Why the CLI may write the controller's own home, for the log; "" where it may not."""
-    home = os.path.expanduser("~")
-    if not os.path.isabs(home):
+def _passwd_home() -> str:
+    """The controller's home as its passwd entry names it; "" where there is none (not POSIX, or a uid with none)."""
+    if pwd is None:
         return ""
-    for entry in given:
-        if _lies_in(_ways(home), entry):
-            return (
-                "provider CLIs may write %s under the Landlock sandbox, and the controller's own home %s lies there: "
-                "what a CLI leaves in it, the controller, which is not under the sandbox, can run at its next start "
-                "(a Python user site, an ssh config). Keep CLI_HOME and CLI_SANDBOX_WRITABLE out of it"
-            ) % (entry[1], home)
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        return ""
+
+
+def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
+    """Why the CLI may write the controller's own home or a place in it, for the log; "" where it may not.
+
+    The home is judged as HOME names it and as the passwd entry does: ssh reads the entry's, and the controller's
+    next start may have another HOME. A directory given that is, holds or lies in either is reported, but for the CLI
+    home lying in it away from the places the controller reads at its start (a home's .ssh, Python's user base): a
+    host run whose CLI_HOME cannot be made falls back to a private directory in the user's home (_private_cli_home),
+    and a CLI_HOME set there is the CLI's own.
+    """
+    homes = [_ways(home) for home in dict.fromkeys((os.path.expanduser("~"), _passwd_home())) if os.path.isabs(home)]
+    read_at_start = [_ways(os.path.join(home[0], ".ssh")) for home in homes] + [_ways(site.getuserbase())]
+    own = _ways(cli_home)
+    for entry, home in ((entry, home) for entry in given for home in homes):
+        if _lies_in(home, entry):
+            where = "and the controller's own home %s lies there: what a CLI leaves in it" % home[0]
+        elif _lies_in(entry, home) and (
+            entry != own or any(_lies_in(entry, place) or _lies_in(place, entry) for place in read_at_start)
+        ):
+            where = "which lies in the controller's own home %s: what a CLI leaves there" % home[0]
+        else:
+            continue
+        return (
+            "provider CLIs may write %s under the Landlock sandbox, %s, the controller, which is not under the "
+            "sandbox, can run at its next start (a Python user site, an ssh config). Keep CLI_HOME and "
+            "CLI_SANDBOX_WRITABLE out of it"
+        ) % (entry[1], where)
     return ""
 
 
@@ -287,7 +319,7 @@ async def launch_command(
         found = "provider CLIs start without the Landlock sandbox and can read the controller's files: %s" % missing
     else:
         given, found = _writable(settings, cli_home, env)
-        found = found or _controllers_home_open(given)
+        found = found or _controllers_home_open(given, cli_home)
         if not found and (names := _open_settings(settings, given)):
             found = "the Landlock sandbox of provider CLIs does not close what these settings name, which lies "
             found += "outside %s or in a directory the CLIs may write: %s" % (PROTECTED_ROOT, ", ".join(names))

@@ -13,6 +13,7 @@ import errno
 import json
 import logging
 import os
+import site
 import subprocess
 import sys
 import threading
@@ -72,11 +73,14 @@ def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     # The temp and device directories every CLI may write are this host's: the tests that are about them stand in
     # for them in tmp_path, and the others go without.
     monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ())
-    # The controller's own home, outside every directory a CLI is given unless a test puts it there.
+    # The controller's own home, outside every directory a CLI is given unless a test puts it there: as HOME names
+    # it, as its passwd entry does, and with Python's user base in it.
     controller_home = root.parent / "homes" / "controller"
     controller_home.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(controller_home))
     monkeypatch.setenv("USERPROFILE", str(controller_home))
+    monkeypatch.setattr(cli_sandbox, "_passwd_home", lambda: str(controller_home))
+    monkeypatch.setattr(site, "getuserbase", lambda: str(controller_home / ".local"))
     return SimpleNamespace(
         root=root,
         home=home,
@@ -680,6 +684,97 @@ async def test_where_a_cli_may_write_the_controllers_home_one_warning_says_so_an
     assert str(data.controller_home) in line and "next start" in line
     (refusal,) = _written(caplog, logging.ERROR)
     assert str(data.controller_home) in refusal
+
+
+@pytest.mark.parametrize("entry", ["its .ssh", "its Python user site", "an ordinary directory"])
+async def test_a_directory_a_cli_may_write_inside_the_controllers_home_is_reported_as_the_home_is(
+    data, monkeypatch, caplog, entry: str
+) -> None:
+    # An ssh config, a usercustomize.py: what the controller reads in its home at its next start lies in some
+    # directory of it, and the CLI writes that directory.
+    _probe_says(monkeypatch, None)
+    place = {
+        "its .ssh": data.controller_home / ".ssh",
+        "its Python user site": data.controller_home / ".local" / "lib" / "python3.12" / "site-packages",
+        "an ordinary directory": data.controller_home / "work",
+    }[entry]
+    changed = {"CLI_SANDBOX_WRITABLE": _directories(place)[0]}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, **changed), data)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data)
+
+    assert _given_to_write(command) == [str(data.home), str(place)]
+    (line,) = _written(caplog)
+    assert str(place) in line and str(data.controller_home) in line and "next start" in line
+
+
+@pytest.mark.parametrize(
+    "where", ["a directory of its own", "the home's .ssh", "in Python's user base", "what holds Python's user base"]
+)
+async def test_a_cli_home_in_the_controllers_home_is_its_own_unless_it_meets_what_the_controller_reads_there(
+    data, monkeypatch, caplog, where: str
+) -> None:
+    # A host run whose CLI_HOME cannot be made in /data falls back to a private directory in the user's home, and a
+    # CLI_HOME set there is the CLI's. One that is, holds or lies in the home's .ssh or Python's user base is not.
+    _probe_says(monkeypatch, None)
+    home = {
+        "a directory of its own": data.controller_home / ".cache" / "auto-browser" / "cli-home",
+        "the home's .ssh": data.controller_home / ".ssh",
+        "in Python's user base": data.controller_home / ".local" / "lib",
+        "what holds Python's user base": data.controller_home / "python",
+    }[where]
+    if where == "what holds Python's user base":  # PYTHONUSERBASE set to a directory of it
+        monkeypatch.setattr(site, "getuserbase", lambda: str(home / "base"))
+    _directories(home)
+    env, changed = {**CLI_ENV, "HOME": str(home)}, {"CLI_HOME": str(home)}  # HOME as cli_environment sets it
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, **changed), data, home=home, env=env)
+
+    assert _given_to_write(command) == [str(home)]
+    if where == "a directory of its own":
+        assert _written(caplog) == []
+        assert await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data, home=home, env=env)
+        return
+    (line,) = _written(caplog)
+    assert str(home) in line and str(data.controller_home) in line
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data, home=home, env=env)
+
+
+@pytest.mark.parametrize("which", ["the one HOME names", "the passwd entry's"])
+async def test_where_home_and_the_passwd_entry_name_two_homes_a_directory_in_either_is_reported(
+    data, monkeypatch, caplog, which: str
+) -> None:
+    # ssh reads the passwd entry's home, and the controller's next start may have another HOME.
+    _probe_says(monkeypatch, None)
+    passwd_home = Path(_directories(data.root.parent / "homes" / "passwd")[0])
+    monkeypatch.setattr(cli_sandbox, "_passwd_home", lambda: str(passwd_home))
+    home = data.controller_home if which == "the one HOME names" else passwd_home
+    changed = {"CLI_SANDBOX_WRITABLE": _directories(home / ".ssh")[0]}
+
+    with caplog.at_level(logging.WARNING):
+        await _launch(_settings(data, **changed), data)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data)
+
+    (line,) = _written(caplog)
+    assert str(home / ".ssh") in line and str(home) in line
+
+
+def test_the_passwd_home_is_the_entrys_and_blank_where_there_is_none(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(os, "getuid", lambda: 4242, raising=False)
+    entries = {4242: SimpleNamespace(pw_dir=str(tmp_path))}
+    monkeypatch.setattr(cli_sandbox, "pwd", SimpleNamespace(getpwuid=entries.__getitem__))
+    assert cli_sandbox._passwd_home() == str(tmp_path)
+
+    monkeypatch.setattr(cli_sandbox, "pwd", SimpleNamespace(getpwuid={}.__getitem__))  # a uid with no entry
+    assert cli_sandbox._passwd_home() == ""
+
+    monkeypatch.setattr(cli_sandbox, "pwd", None)  # not POSIX
+    assert cli_sandbox._passwd_home() == ""
 
 
 async def test_where_the_controllers_home_and_a_secret_are_both_open_the_home_is_named(
