@@ -24,6 +24,10 @@ That means:
 - MCP clients with HTTP transport support can talk to it directly, sending the controller's token
 - stdio-first clients can use the bridge, which reads the file named by `AUTO_BROWSER_TOKEN_FILE` / `--token-file`; the repo wrapper (`make stdio-bridge`, or `scripts/mcp_stdio_bridge.py`) defaults that to its checkout's `data/api-token` for a loopback URL
 
+The controller speaks MCP protocol versions `2025-11-25` and `2025-06-18`
+(`2025-03-26` is no longer negotiated, since 1.18.0): an `initialize` that asks
+for another is offered `2025-11-25`, and a client that cannot use it disconnects.
+
 The controller keeps the `clientInfo` and the `capabilities` of an `initialize`
 with the MCP session it makes. Each may be nested at most 32 levels (the object
 itself is the first, and a list is a level as an object is) and take at most
@@ -435,8 +439,9 @@ browser.get_console is in the devtools tool pack, which this controller does not
 
 `browser.queue_agent_run` (pack `agent_jobs`) accepts `workflow_profile`
 (`fast` or `governed`; any other value is refused and nothing is queued) and
-`browser.resume_agent_job` resumes interrupted,
-failed, or step-limited background runs from persisted checkpoints.
+`browser.resume_agent_job` resumes, from persisted checkpoints, a background run
+that was interrupted or failed, or that stopped at its step limit, for an approval
+or with an error: a job whose record reads `resumable: true`.
 
 Use `workflow_profile=governed` when starting convergence against a live browser session. `harness.graduate` writes only a staged candidate; promotion to the production skill corpus remains a separate governed review step.
 
