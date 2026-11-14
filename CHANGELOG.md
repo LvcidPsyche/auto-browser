@@ -898,18 +898,20 @@ All notable changes to auto-browser are documented here.
   changing `SHARE_TOKEN_SECRET`. `DELETE /sessions/{id}/share`, and `browser.revoke_session_share` over MCP (in the
   `session_admin` pack, governed as `destructive`), now end every link of a session minted so far: each answers `403`
   from then on, and a link minted afterwards works. Whoever may use the session may revoke, as for the mint, and a
-  closed session's links can be revoked by its id while its record is kept. A new link says when it was minted, in
-  milliseconds, and a revoke ends the links minted up to its own time. A link minted before this release does not
-  say: it works until it expires, as before, unless its session's links are revoked, which ends it too. Revocations
-  are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, mode `0600`), so a restart does not
-  bring a revoked link back, and each is dropped once no link it ended can still be unexpired. The file is written
-  at each mint as well as at each revoke: a mint that cannot be saved hands out no link, and a revoke that cannot be
-  saved revokes nothing, each answering `503` as when the file cannot be read. A file that cannot be read at startup
-  is left where it is, and until a mint, a revoke or a restart can read it no link is honoured and a mint or a
-  revoke answers `503`; a file that reads as something the controller did not write is logged, every link minted
-  before then is revoked, and it is written again (one that cannot be written again counts as one that cannot be
-  read). A revoke writes `share_revoked` to the audit log. The `full` tool profile lists one tool more, 77 without
-  a vision model. (AUTH-23)
+  closed session's links can be revoked by its id while its record is kept. A new link carries its mint's stamp,
+  and a revoke ends the links stamped up to its own: a stamp in milliseconds that orders mints and revokes, the
+  clock's time except after a corrupt store or a clock set back, when stamps run ahead of it. A link minted before
+  this release carries none: it works until it expires, as before, unless its session's links are revoked, which
+  ends it too. Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, mode `0600`),
+  so a restart does not bring a revoked link back, and each is dropped once no link it ended can still be unexpired
+  by the controller's clock: a revoke made while that clock runs ahead drops them that much too soon, and their
+  links work again once it is set right. The file is written at each mint as well as at each revoke: a mint that
+  cannot be saved hands out no link, and a revoke that cannot be saved revokes nothing, each answering `503` as when
+  the file cannot be read. A file that cannot be read at startup is left where it is, and until a mint, a revoke or
+  a restart can read it no link is honoured and a mint or a revoke answers `503`; a file that reads as something
+  the controller did not write is logged, every link minted before then is revoked, and it is written again (one
+  that cannot be written again counts as one that cannot be read). A revoke writes `share_revoked` to the audit
+  log. The `full` tool profile lists one tool more, 77 without a vision model. (AUTH-23)
 - **A share link's polls are bounded, and a watched session costs one capture however many pages watch it.**
   `GET /share/{token}/observe` needs no API token, and every poll took a capture of its own under the session lock,
   which the session's agent waits for: only the general rate limit, which counts each client address apart, stood

@@ -1505,12 +1505,15 @@ record is kept: such a link shows nothing live, but still opens the frames that 
 The MCP tool is governed as `destructive`, so a `governed` call of it waits for an operator's approval; the route
 does not.
 
-- A link says when it was minted, and a revoke ends the links minted up to its own time. A link minted before 1.18.0
-  does not say: it works until it expires, as before, unless its session's links are revoked, which ends it too.
+- A link carries its mint's stamp, and a revoke ends the links stamped up to its own: a stamp in milliseconds that
+  orders mints and revokes, the clock's time except after a corrupt store or a clock set back, when stamps run ahead
+  of it. A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links
+  are revoked, which ends it too.
 - Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
   so a restart does not bring a revoked link back. One is kept at least as long as a link can live, 24 hours, and
-  dropped by the first revoke after that. A restart without the file brings back the revoked links that have not
-  expired.
+  dropped by the first revoke after that. The age is read from the controller's clock: a revoke made while the clock
+  runs ahead drops revocations that much too soon, and their links work again once it is set right. A restart
+  without the file brings back the revoked links that have not expired.
 - The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
   revoke that cannot be saved revokes nothing: each answers `503`, as while the file cannot be read.
 - A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
@@ -1538,7 +1541,7 @@ the token as the link carries it, never by the token: the digest ties a view to 
 
 - `share_minted` is written by the mint, as the operator who made the link, before the token is answered. A mint
   whose event cannot be written fails, and answers no token.
-- `share_revoked` is written by a revoke, as the operator who made it, with `revoked_before`: the time, in
+- `share_revoked` is written by a revoke, as the operator who made it, with `revoked_before`: the stamp, in
   milliseconds, that the session's links are ended up to. The revocation is saved first: a revoke whose event
   cannot be written answers `500` with the links ended.
 - `share_viewed` is written the first time a valid token is shown something of its session: the page, a frame or a
