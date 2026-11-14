@@ -1521,16 +1521,15 @@ does not.
   `SHARE_TOKEN_TTL_MINUTES` where that is longer, and dropped by the first revoke after that. The age is read from
   the controller's clock: a revoke made while the clock runs ahead drops revocations that much too soon, and their
   links work again once it is set right. A restart without the file brings back the revoked links that have not
-  expired.
+  expired, and ends every link minted since the file was last found corrupt (below).
 - The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
   revoke that cannot be saved revokes nothing: each answers `503` (over MCP, the tool's error with the same text), as
   while the file cannot be read.
 - A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
   and a mint or a revoke answers `503`, until one of those, or a restart, can read it. A file that reads as
   something the controller did not write can no longer say which links were revoked: the controller logs an error,
-  revokes every link minted before that moment, and writes the file again. One it cannot write again counts as one
-  it cannot read: no link is honoured until a mint, a revoke or a restart can write it. A second such file, read
-  after a restart with the clock set back by more than the time since the first, can bring a revoked link back.
+  revokes every link minted before that moment, whatever its stamp, and writes the file again. One it cannot write
+  again counts as one it cannot read: no link is honoured until a mint, a revoke or a restart can write it.
 
 Anyone who holds a link can poll it, so two bounds apply beside the general rate limit, which counts each client
 apart. A link is answered 150 polls a minute, room for ten open pages (they ask for 120, and more in one minute when

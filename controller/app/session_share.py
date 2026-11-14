@@ -5,7 +5,7 @@ Generates HMAC-SHA256 signed tokens that grant read-only observation access
 to a live session for a configurable TTL.
 
 Token format (URL-safe base64 of JSON):
-  {"session_id": "abc123", "exp": 1234567890, "scope": "observe", "iat": 1234567890123}
+  {"session_id": "abc123", "exp": 1234567890, "scope": "observe", "iat": 1234567890123, "era": ""}
 
 The token is signed with SHARE_TOKEN_SECRET to prevent forgery.
 
@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -90,13 +91,16 @@ def _is_stamp(value: object) -> bool:
 
 @dataclass(frozen=True)
 class _Revocations:
-    """What has been revoked: a link is ended when it was minted at or before the time held for its session, or at or
-    before ``every_session``, the mark a corrupt store leaves (0 where there is none). ``minted`` is the stamp the
-    last mint gave (0 where none is recorded), which a restart starts its stamps after."""
+    """What has been revoked: a link is ended when it was minted at or before the stamp held for its session, or at or
+    before ``every_session``, the mark a corrupt store leaves (0 where there is none), or in another ``era`` than this:
+    each corrupt store draws a new one ("" until one is found), so it ends every link minted before it, whatever its
+    stamp. ``minted`` is the stamp the last mint gave (0 where none is recorded), which a restart starts its stamps
+    after."""
 
     every_session: int = 0
     sessions: dict[str, int] = field(default_factory=dict)
     minted: int = 0
+    era: str = ""
 
     def revoked_before(self, session_id: str) -> int:
         return max(self.every_session, self.sessions.get(session_id, 0))
@@ -105,17 +109,20 @@ class _Revocations:
 def _revocations_read(data: object) -> _Revocations:
     """The store's JSON as revocations; ValueError for anything a save does not write. A store with no "minted"
     records no mint: one written before 1.18.0's final form (only unreleased builds of 1.18.0 wrote one) does not
-    carry the last mint, so a revoke after a restart with the clock set back can miss a link such a build minted."""
+    carry the last mint, so a revoke after a restart with the clock set back can miss a link such a build minted. One
+    with no "era" is of the first, "", as are the links such a build minted."""
     if not isinstance(data, dict):
         raise ValueError(f"it holds a JSON {type(data).__name__}, not an object")
-    if set(data) - {"minted"} != {"all", "sessions"}:
+    if set(data) - {"minted", "era"} != {"all", "sessions"}:
         raise ValueError("its keys are not the ones a save writes")
-    every_session, sessions, minted = data["all"], data["sessions"], data.get("minted", 0)
+    every_session, sessions, minted, era = data["all"], data["sessions"], data.get("minted", 0), data.get("era", "")
     if not _is_stamp(every_session) or not isinstance(sessions, dict) or not all(map(_is_stamp, sessions.values())):
         raise ValueError("it holds something other than the times of revocations")
     if not _is_stamp(minted):
         raise ValueError("it holds something other than the time of a mint")
-    return _Revocations(every_session, sessions, minted)
+    if not isinstance(era, str):
+        raise ValueError("it holds something other than an era")
+    return _Revocations(every_session, sessions, minted, era)
 
 
 class SessionShareManager:
@@ -202,7 +209,7 @@ class SessionShareManager:
             self._write_revocations(revocations)
             self._revocations = revocations
         exp = int(now) + effective_ttl
-        payload = {"session_id": normalized_session_id, "exp": exp, "scope": scope, "iat": iat}
+        payload = {"session_id": normalized_session_id, "exp": exp, "scope": scope, "iat": iat, "era": held.era}
         payload_json = json.dumps(payload, separators=(",", ":"))
         payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
         sig = self._sign(payload_b64)
@@ -273,6 +280,10 @@ class SessionShareManager:
         iat = payload.get("iat")
         if revoked_before and (not _is_stamp(iat) or iat <= revoked_before):
             raise ValueError("share token has been revoked")
+        # Minted before a corrupt store was found (every token that carries no era is of the first, ""), or after one
+        # that a restart without the store has forgotten.
+        if payload.get("era", "") != revocations.era:
+            raise ValueError("share token has been revoked")
 
         return {"session_id": session_id, "exp": exp, "scope": scope}
 
@@ -316,6 +327,7 @@ class SessionShareManager:
                     normalized_session_id: stamp,
                 },
                 held.minted,
+                held.era,
             )
             self._write_revocations(revocations)
             self._revocations = revocations
@@ -323,11 +335,11 @@ class SessionShareManager:
 
     def _next_stamp(self, now: float, *, ahead_ms: int = 0) -> int:
         """The time, in milliseconds, of a mint or a revoke made at ``now`` (the clock's), at least ``ahead_ms`` past
-        it: later than every stamp this controller has given before, in this process or an earlier one, so that a link
-        minted after a revoke is never one it ends and a revoke ends every link minted before it. The store keeps the
-        last stamp of a mint and of a revoke, each written before its link is handed out or its revocation counts, and
-        _read_revocations starts after them; a corrupt store, which no longer says, leaves a mark in their place (see
-        there). Called under ``_store_lock``, or by __init__."""
+        it: later than every stamp this controller has given before in the same era, in this process or an earlier one,
+        so that a link minted after a revoke is never one it ends and a revoke ends every link minted before it. The
+        store keeps the last stamp of a mint and of a revoke, each written before its link is handed out or its
+        revocation counts, and _read_revocations starts after them; a corrupt store, which no longer says, starts a new
+        era and leaves a mark in their place (see there). Called under ``_store_lock``, or by __init__."""
         self._last_stamp = max(int(now * 1000) + ahead_ms, self._last_stamp + 1)
         return self._last_stamp
 
@@ -355,14 +367,14 @@ class SessionShareManager:
             )
             raise ShareRevocationStoreError from exc
         except (ValueError, RecursionError) as exc:  # json.JSONDecodeError, UnicodeDecodeError: the file is corrupt
-            # It no longer says what was minted either, and after a step back the clock cannot say which links are
-            # still alive. A mark one link's longest life past the clock is later than every link minted before it
-            # that this clock has not seen expire, unless the clock was stepped back by more than that life (every link
-            # then lives as much longer). Every stamp after it is later still (the seed below), so stamps run ahead of
-            # the clock until it catches up: nothing but the revocation check (validate_token) reads a link's stamp,
-            # and its expiry is its own exp.
+            # It no longer says what was minted either: a new era ends every link minted before now, whatever its
+            # stamp and however the clock has moved (validate_token). The mark, one link's longest life past the clock,
+            # starts the new era's stamps: every stamp after it is later still (the seed below), so stamps run ahead of
+            # the clock until it catches up. Nothing but the revocation check reads a link's stamp, and its expiry is
+            # its own exp.
             revocations = _Revocations(
-                every_session=self._next_stamp(time.time(), ahead_ms=(self.max_ttl_seconds + 1) * 1000)
+                every_session=self._next_stamp(time.time(), ahead_ms=(self.max_ttl_seconds + 1) * 1000),
+                era=os.urandom(8).hex(),
             )
             logger.error(
                 "the store of revoked share links %s is corrupt (%s) and no longer says which links were revoked: "
@@ -381,7 +393,12 @@ class SessionShareManager:
         path = self._revocations_path
         if path is None:
             return
-        stored = {"all": revocations.every_session, "sessions": revocations.sessions, "minted": revocations.minted}
+        stored = {
+            "all": revocations.every_session,
+            "sessions": revocations.sessions,
+            "minted": revocations.minted,
+            "era": revocations.era,
+        }
         text = json.dumps(stored, indent=2)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

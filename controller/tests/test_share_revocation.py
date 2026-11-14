@@ -204,7 +204,8 @@ class RevocationStoreTests(_Stores):
 
         # The last mint's stamp is kept too, written before its link was handed out.
         self.assertEqual(
-            self.stored(), {"all": 0, "sessions": {SESSION_ID: revoked_before}, "minted": _payload(kept)["iat"]}
+            self.stored(),
+            {"all": 0, "sessions": {SESSION_ID: revoked_before}, "minted": _payload(kept)["iat"], "era": ""},
         )
         restarted = self.manager(self.path)
         self.assertFalse(restarted.token_info(old)["valid"])
@@ -262,7 +263,8 @@ class RevocationStoreTests(_Stores):
         token = manager.create_token(SESSION_ID)["token"]
         self.assertTrue(manager.token_info(token)["valid"])
         self.assertEqual(
-            self.stored(), {"all": 0, "sessions": {SESSION_ID: revoked_before}, "minted": _payload(token)["iat"]}
+            self.stored(),
+            {"all": 0, "sessions": {SESSION_ID: revoked_before}, "minted": _payload(token)["iat"], "era": ""},
         )
 
     def test_the_store_is_written_whole_and_private(self) -> None:
@@ -416,6 +418,8 @@ class RevocationStoreTests(_Stores):
             b'{"all": 0, "sessions": {}, "minted": true}',
             b'{"all": 0, "sessions": {}, "minted": -1}',
             b'{"all": 0, "sessions": {}, "minted": 1.5}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": 5}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": null}',
             # Times, without a key every save writes or with one no save writes.
             b"{}",
             b'{"all": 0, "minted": 0}',
@@ -495,6 +499,66 @@ class RevocationStoreTests(_Stores):
         clock.now += 1
         manager.revoke("session-new")
         self.assertEqual(self.stored()["all"], 0)
+
+    def corrupt(self) -> SessionShareManager:
+        """A controller that starts on a store that reads as something no save writes."""
+        self.path.parent.mkdir(exist_ok=True)
+        self.path.write_text("not json", encoding="utf-8")
+        with self.assertLogs(LOGGER, level="ERROR"):
+            return self.manager(self.path)
+
+    def test_a_store_found_corrupt_again_ends_the_links_minted_since_the_first_however_many_there_were(self) -> None:
+        # Stamps after the first mark run a millisecond apart: more links than milliseconds passed since it took
+        # stamps past the second mark, which the clock alone would put a millisecond after the first.
+        clock = self.clock()
+        first = self.corrupt()
+        tokens = [first.create_token(SESSION_ID)["token"] for _ in range(3)]
+        first.revoke(SESSION_ID)
+        clock.now += 0.001
+
+        found_again = self.corrupt()
+
+        self.assertEqual([found_again.token_info(token)["valid"] for token in tokens], [False, False, False])
+        self.assertTrue(found_again.token_info(found_again.create_token(SESSION_ID)["token"])["valid"])
+
+    def test_a_corrupt_store_ends_a_link_minted_before_it_however_far_the_clock_was_set_back(self) -> None:
+        clock = self.clock()
+        token = self.manager(self.path).create_token(SESSION_ID)["token"]
+        # Past the mark's head start: a day, and a second more, is a link's longest life.
+        clock.now -= SHARE_TOKEN_MAX_TTL_SECONDS + 3600
+
+        found = self.corrupt()
+
+        self.assertFalse(found.token_info(token)["valid"])
+        self.assertTrue(found.token_info(found.create_token(SESSION_ID)["token"])["valid"])
+
+    def test_a_link_minted_after_a_corrupt_store_outlives_a_revoke_of_another_session_and_a_restart(self) -> None:
+        self.clock()
+        before = self.manager(self.path).create_token(SESSION_ID)["token"]
+        found = self.corrupt()
+        after = found.create_token(SESSION_ID)["token"]
+
+        found.revoke("session-2")
+        restarted = self.manager(self.path)
+
+        for manager in (found, restarted):
+            self.assertEqual([manager.token_info(token)["valid"] for token in (before, after)], [False, True])
+
+    def test_a_store_written_before_links_carried_its_era_is_read_whole(self) -> None:
+        # What the 1.18.0 builds before it wrote: its links, and the links that carry no era, are of the first.
+        clock = self.clock()
+        minted = int(clock.now * 1000) - 60_000
+        self.path.parent.mkdir()
+        self.path.write_text(json.dumps({"all": 0, "sessions": {}, "minted": minted}), encoding="utf-8")
+        earlier = _signed(self.manager(), now=clock.now, iat=minted)
+
+        with self.assertNoLogs(LOGGER, level="ERROR"):
+            manager = self.manager(self.path)
+
+        token = manager.create_token(SESSION_ID)["token"]
+        self.assertEqual([manager.token_info(each)["valid"] for each in (earlier, token)], [True, True])
+        self.assertEqual(_payload(token)["era"], "")
+        self.assertEqual(self.stored(), {"all": 0, "sessions": {}, "minted": _payload(token)["iat"], "era": ""})
 
 
 class RevokeRouteTests(_Links):

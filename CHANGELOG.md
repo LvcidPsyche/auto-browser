@@ -914,10 +914,9 @@ All notable changes to auto-browser are documented here.
   MCP, the tool's error with the same text) as when the file cannot be read. A file that cannot be read at startup
   is left where it is, and until a mint, a revoke or a restart can read it no link is honoured and a mint or a
   revoke answers `503`; a file that reads as something the controller did not write is logged, every link minted
-  before then is revoked, and it is written again (one that cannot be written again counts as one that cannot be
-  read; a second such file, read after a restart with the clock set back by more than the time since the first,
-  can bring a revoked link back). A revoke writes `share_revoked` to the audit log. The `full` tool profile lists
-  one tool more, 77 without a vision model. (AUTH-23)
+  before then is revoked, whatever its stamp, and it is written again (one that cannot be written again counts as
+  one that cannot be read). A revoke writes `share_revoked` to the audit log. The `full` tool profile lists one tool
+  more, 77 without a vision model. (AUTH-23)
 - **A share link's polls are bounded, and a watched session costs one capture however many pages watch it.**
   `GET /share/{token}/observe` needs no API token, and every poll took a capture of its own under the session lock,
   which the session's agent waits for: only the general rate limit, which counts each client address apart, stood
