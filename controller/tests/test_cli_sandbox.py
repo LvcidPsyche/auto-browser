@@ -861,6 +861,39 @@ async def test_a_cli_home_with_no_dots_in_the_root_is_given(linux_links, caplog)
     assert _written(caplog) == []
 
 
+@pytest.mark.parametrize(
+    "layout", ["PYTHONUSERBASE in /tmp", "the passwd home's .local as CLI_HOME", "the image's own layout"]
+)
+async def test_what_the_controller_reads_at_its_start_is_reported_where_a_cli_may_write_it_whatever_home_it_is_in(
+    linux_links, caplog, layout: str
+) -> None:
+    # Python's user base is where PYTHONUSERBASE puts it, /tmp among the places, and each home has its .local: a
+    # usercustomize.py or a .pth a CLI leaves in one runs at the controller's next start, outside the sandbox.
+    home = "/data/cli-home"
+    if layout == "PYTHONUSERBASE in /tmp":
+        linux_links.user_base = "/tmp/controller-python"
+        linux_links.dirs.add(linux_links.user_base)
+        place = linux_links.user_base
+    elif layout == "the passwd home's .local as CLI_HOME":  # HOME, and the user base, are another home's
+        linux_links.passwd_home = "/home/botuser"
+        home = place = "/home/botuser/.local/lib"
+        linux_links.dirs |= {home, "/home/botuser/.ssh"}
+    env = {"HOME": home}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(), home, env)
+
+    if layout == "the image's own layout":
+        assert _given_to_write(command) == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
+        assert _written(caplog) == []
+        assert await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), home, env)
+        return
+    (line,) = _written(caplog)
+    assert place in line and "next start" in line
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), home, env)
+
+
 @pytest.mark.parametrize("swap", ["a directory in the root", "what holds the root"])
 async def test_a_home_a_cli_swapped_for_a_link_is_not_given_and_the_cli_still_starts_under_the_launcher(
     data, monkeypatch, caplog, swap: str

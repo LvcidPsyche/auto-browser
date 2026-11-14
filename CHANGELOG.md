@@ -866,16 +866,18 @@ All notable changes to auto-browser are documented here.
   `CLI_HOME` is `/data` or holds it as written, the CLI runs without the sandbox; where `CLI_HOME` only resolves
   into `/data` or to what holds it, or has a `..` part, it runs under the sandbox without its home; where a CLI may
   write the controller's own home or a directory in it, as `HOME` or the passwd entry names that home (as with a
-  blank `CLI_HOME`; a `CLI_HOME` in it clear of its `.ssh` and Python's user base is the CLI's own), or a secret's
-  setting names a place outside `/data`, in a directory a CLI may write or holding one, it runs under the sandbox
-  with that left open. With `CLI_SANDBOX_REQUIRED=true` it runs under none of them (see the upgrade note). A
-  launcher that fails at a real start after that fails the call, and the CLI is never started without it. The
-  controller takes Codex's `decision.json` only as a regular file of at most 1 MiB and not through a link at its own
-  name, and makes the call's schema file rather than write through what is at its name, so a CLI cannot have the
-  controller read a closed file for it, or write one. The sandbox does not stop `stat` and other metadata calls on a
-  file under `/data`, an inotify watch there, one CLI call reaching another's files in `CLI_HOME`, signals and TCP
-  connections to the controller, or a connection to a Unix socket under `/data`, the Codex host bridge's among them:
-  docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs outside it. (N1)
+  blank `CLI_HOME`; a `CLI_HOME` in it clear of what the controller reads at its start is the CLI's own), or what
+  the controller reads at its start (each home's `.ssh` and `.local`, and Python's user base wherever
+  `PYTHONUSERBASE` puts it), or a secret's setting names a place outside `/data`, in a directory a CLI may write or
+  holding one, it runs under the sandbox with that left open. With `CLI_SANDBOX_REQUIRED=true` it runs under none of
+  them (see the upgrade note). A launcher that fails at a real start after that fails the call, and the CLI is never
+  started without it. The controller takes Codex's `decision.json` only as a regular file of at most 1 MiB and not
+  through a link at its own name, and makes the call's schema file rather than write through what is at its name, so
+  a CLI cannot have the controller read a closed file for it, or write one. The sandbox does not stop `stat` and
+  other metadata calls on a file under `/data`, an inotify watch there, one CLI call reaching another's files in
+  `CLI_HOME`, signals and TCP connections to the controller, or a connection to a Unix socket under `/data`, the
+  Codex host bridge's among them: docs/deployment.md lists these and the rest. The Codex host bridge's Codex runs
+  outside it. (N1)
 - **The Codex host bridge's unit carries an option that closes the checkout's secrets to the bridge and its Codex.**
   The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and can read what that user
   can: the checkout's `.env`, `data/api-token`, `data/takeover-token`, the keys under `data/` and the sign-ins of the

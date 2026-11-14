@@ -571,13 +571,16 @@ setting until Landlock is there):
   its home. The warning names `CLI_HOME`, its path and where it resolves (or that it is not a directory, or has a
   `..` part); a `CLI_HOME` linked into `/data` on purpose is to be set to its real path, and one with a `..` part
   written without it.
-- **A CLI may write the controller's own home, or a directory in it.** The home is judged as `HOME` names it and as
-  the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank (the CLI's `HOME` is then the controller's),
-  or a directory a CLI may write (`CLI_HOME`, an entry of `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's
-  home, holds it or lies in it: its `.ssh` or its Python user site, say. A `CLI_HOME` in the controller's home is the
-  CLI's own, as is the private directory there that a host run falls back to when its `CLI_HOME` cannot be made, and
-  is not reported unless it is, holds or lies in the home's `.ssh` or Python's user base. The CLI starts under the
-  launcher, and what it leaves there the controller can run at its next start.
+- **A CLI may write the controller's own home, or a directory in it, or a place the controller reads at its start.**
+  The home is judged as `HOME` names it and as the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank
+  (the CLI's `HOME` is then the controller's), or a directory a CLI may write (`CLI_HOME`, an entry of
+  `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's home, holds it or lies in it: its `.ssh` or its Python user
+  site, say. The places read at the start are each home's `.ssh` and `.local` and Python's user base, wherever
+  `PYTHONUSERBASE` puts it: a directory a CLI may write that is, holds or lies in one of them is reported wherever it
+  is (a `PYTHONUSERBASE` in `/tmp`, say). A `CLI_HOME` in the controller's home is the CLI's own, as is the private
+  directory there that a host run falls back to when its `CLI_HOME` cannot be made, and is not reported unless it is,
+  holds or lies in one of those places. The CLI starts under the launcher, and what it leaves there the controller
+  can run at its next start.
 - **A secret is kept outside `/data`, in a directory a CLI may write, or is a directory that holds one.**
   `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`, `WITNESS_ROOT`, `MESH_IDENTITY_DIR`,
   `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so

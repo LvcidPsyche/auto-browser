@@ -24,8 +24,9 @@ Each of these is reported:
   link before it, which the text cannot say). The CLI is started under the launcher without it, and cannot write
   its home: closed, not open.
 - the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
-  write, but for a CLI home in it clear of the home's .ssh and Python's user base. The CLI is started under the
-  launcher.
+  write, but for a CLI home in it clear of what the controller reads at its start; or what it reads there (each
+  home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere) is, holds or lies in such a
+  directory, wherever it is. The CLI is started under the launcher.
 - a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT, or a path that lies
   in a directory the CLI may write, as written or once resolved (the CLI can replace a link written there), or a
   directory that holds one. The CLI is started under the launcher, which does not close that place.
@@ -260,31 +261,32 @@ def _passwd_home() -> str:
 
 
 def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
-    """Why the CLI may write the controller's own home or a place in it, for the log; "" where it may not.
+    """Why the CLI may write the controller's own home or a place in it, or a place the controller reads at its start,
+    for the log; "" where it may not.
 
     The home is judged as HOME names it and as the passwd entry does: ssh reads the entry's, and the controller's
     next start may have another HOME. A directory given that is, holds or lies in either is reported, but for the CLI
-    home lying in it away from the places the controller reads at its start (a home's .ssh, Python's user base): a
-    host run whose CLI_HOME cannot be made falls back to a private directory in the user's home (_private_cli_home),
-    and a CLI_HOME set there is the CLI's own.
+    home lying in it away from the places the controller reads at its start: a host run whose CLI_HOME cannot be made
+    falls back to a private directory in the user's home (_private_cli_home), and a CLI_HOME set there is the CLI's
+    own. Those places are each home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere:
+    a directory given that is, holds or lies in one of them is reported wherever it is.
     """
     homes = [_ways(home) for home in dict.fromkeys((os.path.expanduser("~"), _passwd_home())) if os.path.isabs(home)]
-    read_at_start = [_ways(os.path.join(home[0], ".ssh")) for home in homes] + [_ways(site.getuserbase())]
+    read_at_start = [_ways(os.path.join(home[0], name)) for home in homes for name in (".ssh", ".local")]
+    read_at_start.append(_ways(site.getuserbase()))
     own = _ways(cli_home)
+    found = (
+        "provider CLIs may write %s under the Landlock sandbox, %s, the controller, which is not under the sandbox, "
+        "can run at its next start (a Python user site, an ssh config). Keep CLI_HOME and CLI_SANDBOX_WRITABLE out of it"
+    )
     for entry, home in ((entry, home) for entry in given for home in homes):
         if _lies_in(home, entry):
-            where = "and the controller's own home %s lies there: what a CLI leaves in it" % home[0]
-        elif _lies_in(entry, home) and (
-            entry != own or any(_lies_in(entry, place) or _lies_in(place, entry) for place in read_at_start)
-        ):
-            where = "which lies in the controller's own home %s: what a CLI leaves there" % home[0]
-        else:
-            continue
-        return (
-            "provider CLIs may write %s under the Landlock sandbox, %s, the controller, which is not under the "
-            "sandbox, can run at its next start (a Python user site, an ssh config). Keep CLI_HOME and "
-            "CLI_SANDBOX_WRITABLE out of it"
-        ) % (entry[1], where)
+            return found % (entry[1], "and the controller's own home %s lies there: what a CLI leaves in it" % home[0])
+        if _lies_in(entry, home) and entry != own:
+            return found % (entry[1], "which lies in the controller's own home %s: what a CLI leaves there" % home[0])
+    for entry, place in ((entry, place) for entry in given for place in read_at_start):
+        if _lies_in(entry, place) or _lies_in(place, entry):
+            return found % (entry[1], "and the controller reads %s at its start: what a CLI leaves there" % place[0])
     return ""
 
 
