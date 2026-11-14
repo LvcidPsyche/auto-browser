@@ -13,7 +13,8 @@ the host tests install under, and browser-node/package-lock.json, which
 `npm ci` installs from (playwright and the playwright-core it runs). And
 package.json must name an exact version: a range lets npm take another one.
 
-Exit 0 when the pins match, 1 (listing every pin) when they don't.
+Exit 0 when the pins match. Exit 1 when package.json names a range, which the
+error names, reading no other pin; and 1 when the pins differ, listing every pin.
 """
 
 from __future__ import annotations
