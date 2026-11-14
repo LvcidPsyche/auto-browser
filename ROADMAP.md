@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.10.1)
+## Now
 
 - Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
@@ -21,7 +21,7 @@ This is the near-term direction for Auto Browser.
 - Stage 0 convergence harness for governed skill induction
 - CDP connect mode — attach to an existing Chrome
 - Network inspector — request/response capture with PII scrubbing
-- PII scrubbing layer — pixel redaction, console, network (16 pattern classes)
+- PII scrubbing layer — pixel redaction, console, network (20 pattern classes)
 - Proxy partitioning — named proxy personas for per-agent IPs
 - Shadow browsing — flip headless → headed for live debugging
 - Session forking — clone auth state into a new branch session
