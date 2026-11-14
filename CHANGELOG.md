@@ -1852,7 +1852,10 @@ All notable changes to auto-browser are documented here.
   `ghs_`, `ghu_`, `ghr_`). One value is let through, and only as itself: AWS's documented example key ID, which the
   PII scrubber's tests use; a match in a binary file fails the audit whatever the file's name holds. A match is named
   by its file and line alone, a file whose name holds a token without that name, a match in a binary file by neither,
-  and a scan git cannot run by its exit status, where the scan printed the whole line, token and all. (HARN-32)
+  and a scan git cannot run by its exit status, where the scan printed the whole line, token and all. The scan now
+  runs before the advisory check and the steps after it, where it ran last, so that a token is found before ruff's
+  diagnostics, pytest's tracebacks or compileall's syntax errors can print its line; and it reads untracked files
+  too, except those git ignores, where it read tracked files only. (HARN-32)
 - **The release audit's advisory check reads the advisory list in one shape, whatever the gh version.**
   `scripts/check_open_advisories.py` read the output of `gh api --paginate` as one JSON document, which it is not
   from a gh that prints each page as an array of its own, once the list runs past one page. It now passes `--slurp`

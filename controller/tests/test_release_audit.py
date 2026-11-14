@@ -124,7 +124,7 @@ Call = tuple[list[str], Path | None, str | None, bool]
 
 
 def _stub_steps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, calls: list[Call]) -> None:
-    """Every step main() takes before the secret scan stubbed, each kept in ``calls`` instead of run, in order.
+    """Every step main() takes but the secret scan stubbed, each kept in ``calls`` instead of run, in order.
 
     A command `_run` is given is kept with its directory, the PYTHONPATH it runs with (None: none) and whether any
     AUTO_BROWSER_* name reaches it, never its whole environment, so a failing assertion cannot print the environment's
@@ -151,7 +151,7 @@ def _stub_steps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, calls: list[Cal
 
 
 def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Call]:
-    """The steps main() takes, in order, every one stubbed (_stub_steps), the secret scan last, which finds nothing.
+    """The steps main() takes, in order, every one stubbed (_stub_steps), the secret scan first, which finds nothing.
 
     This process's environment holds a made-up PYTHONPATH and AUTO_BROWSER_BASE_URL meanwhile, as a developer's can.
     """
@@ -185,12 +185,13 @@ def test_main_runs_every_step_once_in_order(monkeypatch: pytest.MonkeyPatch, tmp
     """The audit's steps, in order: a step main() dropped, doubled or moved passes every stubbed test but this one."""
     assert [_step(command, cwd) for command, cwd, *_ in _audit_commands(monkeypatch, tmp_path)] == [
         "launch files", "require git", "require npm", "require uv",
+        "git grep",
         "check_open_advisories.py",
         "ruff", "check_version_parity.py", "check_playwright_pins.py", "check_bridge_parity.py",
         "agent_eval.py", "fixture_eval.py", "pip_audit", "npm browser-node",
         "build", "build", "build", "build", "_inspect_controller_wheel", "_inspect_mcp_wheel", "_inspect_licenses",
         "pytest controller", "venv", "uv", "pytest client", "venv", "uv", "pytest integrations/langchain",
-        "compileall", "git grep",
+        "compileall",
     ]  # fmt: skip
 
 
@@ -339,9 +340,11 @@ def _scan(
     capsys: pytest.CaptureFixture[str],
     files: dict[str, bytes],
     run: Callable[..., subprocess.CompletedProcess] | None = None,
+    untracked: dict[str, bytes] | None = None,
 ) -> tuple[object, str, str]:
-    """main()'s exit (what it returns, or the code it exits with) and what it printed, with every step before the
-    secret scan stubbed (_stub_steps), on a repository that tracks ``files``; ``run`` stands in for git."""
+    """main()'s exit (what it returns, or the code it exits with) and what it printed, with every step but the
+    secret scan stubbed (_stub_steps), on a repository that tracks ``files`` and holds ``untracked`` beside them;
+    ``run`` stands in for git."""
     repo = tmp_path / "repo"
     (repo / "controller").mkdir(parents=True)
     (repo / "controller" / "constraints.txt").write_text("idna==3.10\n", encoding="utf-8")
@@ -350,6 +353,8 @@ def _scan(
     git = shutil.which("git")
     subprocess.run([git, "init", "-q", str(repo)], check=True)
     subprocess.run([git, "-c", "core.autocrlf=false", "-C", str(repo), "add", "--", *files, "controller"], check=True)
+    for name, data in (untracked or {}).items():
+        (repo / name).write_bytes(data)
     monkeypatch.setattr(release_audit, "ROOT", repo)
     _stub_steps(monkeypatch, tmp_path, [])
     if run is not None:
@@ -449,6 +454,23 @@ def test_the_secret_scan_reads_what_git_prints_as_utf_8_whatever_the_code_page(
     code, out, err = _scan(monkeypatch, tmp_path, capsys, {"CHANGELOG.md": changelog})
 
     assert (code, "Release audit passed." in out, example in out or example in err) == (0, True, False)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_secret_scan_reads_the_untracked_files_ruff_and_pytest_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ruff lints, and pytest collects, a file git does not track and does not ignore; a token on a line ruff flags
+    # (S105) or in a failing test's source would be printed by them. An ignored file ruff does not read.
+    token = SECRET_SHAPES["a GitHub classic token"]
+    files = {".gitignore": b"ignored.py\n"}
+    untracked = {"scratch.py": f'api_token = "{token}"\n'.encode(), "ignored.py": f'k = "{token}"\n'.encode()}
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, files, untracked=untracked)
+
+    failed = "potential secret-shaped token found" in str(code)
+    named = err.splitlines() == ["scratch.py:1: secret-shaped token (value withheld)"]
+    assert (failed, token in out or token in err, named) == (True, False, True)
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")

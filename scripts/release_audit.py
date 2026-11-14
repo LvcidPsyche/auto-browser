@@ -97,6 +97,28 @@ def main() -> int:
     _require("npm")
     _require("uv")
 
+    print("Scanning tracked and untracked files for obvious secret-shaped tokens...")
+    # First: the steps below print source lines and paths (ruff's diagnostics, pytest's tracebacks, compileall's
+    # syntax errors), a token's among them. Untracked files too, which ruff and pytest read; like ruff, git leaves out
+    # the files .gitignore names.
+    # As bytes, decoded below: text mode reads a lone \r in a line as the line's end, and on Windows decodes in the ANSI
+    # code page, which stops at a byte such as the 0x9D that ends a UTF-8 ”. The tokens are ASCII, so a byte the
+    # decoding replaces never hides one.
+    secret_scan = subprocess.run(
+        ["git", "grep", "--untracked", "-nE", SECRET_PATTERN, "--", "."], cwd=ROOT, capture_output=True
+    )
+    if secret_scan.returncode not in {0, 1}:
+        # Not git's own words: they can name a path, or a setting's value, that holds a token.
+        print(f"git grep exited with status {secret_scan.returncode}; run it by hand to see why.", file=sys.stderr)
+        raise SystemExit(secret_scan.returncode)
+    found = _secret_lines(secret_scan.stdout.decode("utf-8", "replace"))
+    if found:
+        # Where each one is, and never the line, which holds the token and whatever else is beside it: the output can
+        # land in a log or an agent's transcript.
+        for line in found:
+            print(f"{_secret_place(line)}: secret-shaped token (value withheld)", file=sys.stderr)
+        raise SystemExit("Release audit failed: potential secret-shaped token found.")
+
     # Early, because it is the cheapest possible failure and the one most likely
     # to mean "do not ship yet".
     if args.skip_advisory_check:
@@ -181,23 +203,6 @@ def main() -> int:
         env["SMOKE_PROVIDER"] = "disabled"
         env["DOCTOR_BUILD"] = "1"
         _run([bash, "scripts/doctor.sh"], env=env)
-
-    print("Scanning tracked files for obvious secret-shaped tokens...")
-    # As bytes, decoded below: text mode reads a lone \r in a line as the line's end, and on Windows decodes in the ANSI
-    # code page, which stops at a byte such as the 0x9D that ends a UTF-8 ”. The tokens are ASCII, so a byte the
-    # decoding replaces never hides one.
-    secret_scan = subprocess.run(["git", "grep", "-nE", SECRET_PATTERN, "--", "."], cwd=ROOT, capture_output=True)
-    if secret_scan.returncode not in {0, 1}:
-        # Not git's own words: they can name a path, or a setting's value, that holds a token.
-        print(f"git grep exited with status {secret_scan.returncode}; run it by hand to see why.", file=sys.stderr)
-        raise SystemExit(secret_scan.returncode)
-    found = _secret_lines(secret_scan.stdout.decode("utf-8", "replace"))
-    if found:
-        # Where each one is, and never the line, which holds the token and whatever else is beside it: the output can
-        # land in a log or an agent's transcript.
-        for line in found:
-            print(f"{_secret_place(line)}: secret-shaped token (value withheld)", file=sys.stderr)
-        raise SystemExit("Release audit failed: potential secret-shaped token found.")
 
     print()
     print("Release audit passed.")
