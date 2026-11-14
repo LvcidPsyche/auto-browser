@@ -214,14 +214,15 @@ def test_the_audit_runs_each_package_suite_as_ci_does(
     assert len(venvs) == 1 and venvs[0] < installs[0], calls
 
 
-def test_a_failing_step_says_which_command_failed_and_where(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", [1, 3])  # 1: what pytest, ruff, pip-audit, npm audit and the parity checks exit with
+def test_a_failing_step_says_which_command_failed_and_where(tmp_path: Path, status: int) -> None:
     with pytest.raises(SystemExit) as caught:
-        release_audit._run([sys.executable, "-c", "raise SystemExit(3)"], cwd=tmp_path)
+        release_audit._run([sys.executable, "-c", f"raise SystemExit({status})"], cwd=tmp_path)
     message = str(caught.value.code)
     assert message.startswith("Release audit failed:")
-    assert "-c raise SystemExit(3)" in message
+    assert f"-c raise SystemExit({status})" in message
     assert str(tmp_path) in message
-    assert "exited with status 3" in message
+    assert f"exited with status {status}" in message
 
 
 # Built at run time, so this file holds no secret-shaped token for the scan itself to find.
