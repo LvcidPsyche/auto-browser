@@ -120,9 +120,9 @@ def _revocations_read(data: object) -> _Revocations:
         raise ValueError("its keys are not the ones a save writes")
     every_session, sessions, minted, era = data["all"], data["sessions"], data.get("minted", 0), data.get("era", "")
     if not _is_stamp(every_session) or not isinstance(sessions, dict) or not all(map(_is_stamp, sessions.values())):
-        raise ValueError("it holds something other than the times of revocations")
+        raise ValueError("it holds something other than the stamps of revocations")
     if not _is_stamp(minted):
-        raise ValueError("it holds something other than the time of a mint")
+        raise ValueError("it holds something other than the stamp of a mint")
     # A save writes "" or a new era drawn as os.urandom(8).hex().
     if not isinstance(era, str) or (era and re.fullmatch("[0-9a-f]{16}", era) is None):
         raise ValueError("it holds something other than an era")
