@@ -454,6 +454,13 @@ class RevocationStoreTests(_Stores):
             b'{"all": 0, "sessions": {}, "minted": 1.5}',
             b'{"all": 0, "sessions": {}, "minted": 0, "era": 5}',
             b'{"all": 0, "sessions": {}, "minted": 0, "era": null}',
+            # An era no save writes: a save writes "" or sixteen lowercase hex digits, and "minted" with it.
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": "broken"}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": "0"}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": "\\ud800"}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": "0123456789ABCDEF"}',
+            b'{"all": 0, "sessions": {}, "minted": 0, "era": "0123456789abcdef0"}',
+            b'{"all": 0, "sessions": {}, "era": ""}',
             # Times, without a key every save writes or with one no save writes.
             b"{}",
             b'{"all": 0, "minted": 0}',

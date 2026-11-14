@@ -25,6 +25,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -113,14 +114,16 @@ def _revocations_read(data: object) -> _Revocations:
     with no "era" is of the first, "", as are the links such a build minted."""
     if not isinstance(data, dict):
         raise ValueError(f"it holds a JSON {type(data).__name__}, not an object")
-    if set(data) - {"minted", "era"} != {"all", "sessions"}:
+    # A save writes all four; an unreleased build of 1.18.0 wrote the first two, or the first three.
+    if set(data) not in ({"all", "sessions"}, {"all", "sessions", "minted"}, {"all", "sessions", "minted", "era"}):
         raise ValueError("its keys are not the ones a save writes")
     every_session, sessions, minted, era = data["all"], data["sessions"], data.get("minted", 0), data.get("era", "")
     if not _is_stamp(every_session) or not isinstance(sessions, dict) or not all(map(_is_stamp, sessions.values())):
         raise ValueError("it holds something other than the times of revocations")
     if not _is_stamp(minted):
         raise ValueError("it holds something other than the time of a mint")
-    if not isinstance(era, str):
+    # A save writes "" or a new era drawn as os.urandom(8).hex().
+    if not isinstance(era, str) or (era and re.fullmatch("[0-9a-f]{16}", era) is None):
         raise ValueError("it holds something other than an era")
     return _Revocations(every_session, sessions, minted, era)
 
