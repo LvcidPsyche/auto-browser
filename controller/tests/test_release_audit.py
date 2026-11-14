@@ -8,6 +8,7 @@ metapackage first failed at tag time.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -192,6 +193,70 @@ def test_a_failing_step_says_which_command_failed_and_where(tmp_path: Path) -> N
     assert "-c raise SystemExit(3)" in message
     assert str(tmp_path) in message
     assert "exited with status 3" in message
+
+
+# Built at run time, so this file holds no secret-shaped token for the scan itself to find.
+SECRET_SHAPES = {
+    "an Anthropic key": "sk-ant-api03-" + "Ab1_-" * 8,
+    "an OpenAI project key": "sk-proj-" + "Ab1_-" * 8,
+    "an AWS access key ID": "AKIA" + "Q7" * 8,
+    "an AWS temporary access key ID": "ASIA" + "7Q" * 8,
+    "a GitLab token": "glpat-" + "x_-" * 7,
+    "a GitHub OAuth token": "gho_" + "a1" * 18,
+    "a GitHub server token": "ghs_" + "a1" * 18,
+    "a GitHub user-to-server token": "ghu_" + "a1" * 18,
+    "a GitHub refresh token": "ghr_" + "a1" * 18,
+    "an OpenAI key": "sk-" + "a1" * 12,
+    "a GitHub classic token": "ghp_" + "a1" * 18,
+}
+PROSE = [
+    "ask-anthropic-about-it is a branch name",
+    "a task-oriented guide to sk-ant- prefixes",
+    "AKIA is how an AWS access key ID begins",
+    "glpat- and gho_ are token prefixes",
+    "AKIAlowercase0123456789",
+]
+
+
+@pytest.mark.parametrize("name", sorted(SECRET_SHAPES))
+def test_the_secret_pattern_finds_each_token_shape(name: str) -> None:
+    assert re.search(release_audit.SECRET_PATTERN, f"key = {SECRET_SHAPES[name]}\n"), name
+
+
+@pytest.mark.parametrize("text", PROSE)
+def test_the_secret_pattern_passes_prose(text: str) -> None:
+    assert re.search(release_audit.SECRET_PATTERN, text) is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_git_grep_reads_the_secret_pattern_as_an_extended_expression(tmp_path: Path) -> None:
+    """The scan runs the pattern through `git grep -E`, a POSIX extended expression, not Python's `re`."""
+    lines = [*SECRET_SHAPES.values(), *PROSE]
+    (tmp_path / "samples.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [shutil.which("git"), "grep", "--no-index", "-nE", release_audit.SECRET_PATTERN, "--", "samples.txt"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    found = sorted(int(line.split(":", 2)[1]) for line in result.stdout.splitlines())
+    assert found == list(range(1, len(SECRET_SHAPES) + 1))
+
+
+def test_aws_documented_example_key_is_the_one_token_the_scan_lets_through() -> None:
+    # The fixture as the PII scrubber's tests hold it, so a change to it shows here. Not written out in this file,
+    # which would then hold a token for the scan to find.
+    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
+    examples = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    assert len(examples) == 1, "the PII scrubber's tests hold one secret-shaped token, AWS's example key ID"
+    example = examples.pop()
+    real = "AKIA" + "Q7" * 8
+    assert release_audit._secret_lines(f"CHANGELOG.md:1:  `{example}` passed\n") == []
+    assert release_audit._secret_lines(f"a.py:2:key={real}\n") == [f"a.py:2:key={real}"]
+    assert release_audit._secret_lines(f"a.py:3:{example} {real}\n") == [f"a.py:3:{example} {real}"]
+    # A line git found and Python's reading of the pattern does not is kept: the two engines must not disagree quietly.
+    assert release_audit._secret_lines("a.py:4:nothing Python finds\n") == ["a.py:4:nothing Python finds"]
 
 
 if __name__ == "__main__":

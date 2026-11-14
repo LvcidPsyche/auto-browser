@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,10 +47,17 @@ PACKAGE_SUITES = (
     ("integrations/langchain", "langchain,dev", "auto_browser_langchain", 90, None),
 )
 PACKAGE_HOLD_HOURS = 72
+# A POSIX extended expression, which `git grep -E` reads (no \b, no lookaround).
 SECRET_PATTERN = (
     r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|"
-    r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|(AKIA|ASIA)[0-9A-Z]{16}|"
+    r"glpat-[A-Za-z0-9_-]{20}|gh[osur]_[A-Za-z0-9]{20,}"
 )
+# Published examples, not credentials, each let through only as itself and named by its SHA-256, so this file holds no
+# token for this scan or another to find: AWS's documented example access key ID, which the PII scrubber's tests scrub
+# and the CHANGELOG quotes.
+SECRET_EXAMPLE_SHA256 = frozenset({"1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3"})
 
 
 def main() -> int:
@@ -153,16 +162,31 @@ def main() -> int:
         text=True,
         capture_output=True,
     )
-    if secret_scan.returncode == 0:
-        print(secret_scan.stdout, file=sys.stderr)
-        raise SystemExit("Release audit failed: potential secret-shaped token found.")
     if secret_scan.returncode not in {0, 1}:
         print(secret_scan.stderr, file=sys.stderr)
         raise SystemExit(secret_scan.returncode)
+    found = _secret_lines(secret_scan.stdout)
+    if found:
+        print("\n".join(found), file=sys.stderr)
+        raise SystemExit("Release audit failed: potential secret-shaped token found.")
 
     print()
     print("Release audit passed.")
     return 0
+
+
+def _secret_lines(grep_output: str) -> list[str]:
+    """The lines `git grep` found that hold a secret-shaped token other than a published example.
+
+    A line is let through only when Python's reading of the pattern finds a token in it and every token is an example,
+    so a line the two engines read differently stays found.
+    """
+    found = []
+    for line in grep_output.splitlines():
+        digests = [hashlib.sha256(match.group(0).encode()).hexdigest() for match in re.finditer(SECRET_PATTERN, line)]
+        if not digests or any(digest not in SECRET_EXAMPLE_SHA256 for digest in digests):
+            found.append(line)
+    return found
 
 
 def _check_launch_files() -> None:

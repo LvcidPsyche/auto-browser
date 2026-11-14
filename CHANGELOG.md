@@ -1706,6 +1706,11 @@ All notable changes to auto-browser are documented here.
   integration), in a fresh environment the audit makes for it, where `uv` installs the package editable with CI's
   extras, taking no release from the last 72 hours; so the audit now needs `uv`. A step that fails now ends the audit
   with its command, its directory and its exit status, where it ended in a traceback. (HARN-31)
+- **The release audit's secret scan knows more token shapes.** It found OpenAI and Google API keys, GitHub personal
+  access tokens and Slack tokens only; it now also finds Anthropic keys (`sk-ant-`), OpenAI project keys
+  (`sk-proj-`), AWS access key IDs (`AKIA`, `ASIA`), GitLab tokens (`glpat-`) and GitHub's other tokens (`gho_`,
+  `ghs_`, `ghu_`, `ghr_`). One value is let through, and only as itself: AWS's documented example key ID, which the PII
+  scrubber's tests use. (HARN-32)
 
 ### Changed
 
