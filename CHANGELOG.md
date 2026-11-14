@@ -181,7 +181,9 @@ All notable changes to auto-browser are documented here.
   first had not used, and of one step when it had used them all. They now queue a run of the first run's whole
   `max_steps`, so a resumed run can take more steps than were left: pass `max_steps` to set the number. A resumed run
   also no longer presents the `approval_id` its first run was queued with, so a step of it that needs an approval asks
-  for a new one.
+  for a new one. After a downgrade to 1.17.0, every run job this version left queued fails when it runs, and no run
+  job it wrote can be resumed (`400`): its stored request holds `resume_checkpoints` (null for a new run), which
+  1.17.0 refuses as a field it does not know.
 - **Decided approvals are now deleted 30 days after their decision, and this deletes history.** The first start after
   the upgrade, and each maintenance sweep after it, delete from `APPROVAL_ROOT` and `STATE_DB_PATH` the approvals
   decided, approved or rejected, more than `APPROVAL_RETENTION_DAYS` (default `30`) ago, with a tool call's stored
@@ -274,8 +276,9 @@ All notable changes to auto-browser are documented here.
   started by compose needs it in `CONTROLLER_ALLOWED_HOSTS`.
 - **An approval asked for a `type` shows its text only where its field read as plain.** An approval now says how
   the field of its `type` read when it was asked for, as `field_read`: `plain`, `secret`, or `unread` (the read
-  did not answer within a second, what the type names has no field that takes text or has a frame in it, or an
-  earlier release stored the approval). Unless it is `plain`,
+  did not answer within a second, what the type names has no field that takes text, or has a frame in it and no
+  field that reads as secret, the caller marked the text `sensitive`, or an earlier release stored the approval).
+  Unless it is `plain`,
   `GET /approvals`, `GET /approvals/{id}`, the approval tools, a decision's and an execution's answer and the
   `approval_required` error give its `action.text` as "text hidden: its field reads as secret" or "text hidden:
   its field has not been read", as its webhook's and SSE event's summary do (see Security). A pending approval
@@ -289,10 +292,12 @@ All notable changes to auto-browser are documented here.
   in its own open shadow root and takes it back), and of one typed by a selector that names a frame.
 - **A `type` by selector that clears its field can now end as `focus_lost` during the clear.** It checks after
   select-all and after Delete that focus is still in the element its selector named, as a type by `element_id`
-  does (see Fixed). A page that moves focus during the clear, or puts another node in the field's place as it
-  empties, now gets the retryable `focus_lost` with no text typed, where the text went into whatever had focus;
-  so does a type whose element is not found again, or does not answer, within a second. Where the page replaced
-  the field, a second type finds the new node. `clear_first: false` skips the clear and its checks.
+  does, but for focus in a frame inside that element, which counts as in it by selector and not by `element_id`
+  (such a type keeps no preview: see Fixed). A page that moves focus during the clear, or puts another node in the
+  field's place as it empties, now gets the retryable `focus_lost` with no text typed, where the text went into
+  whatever had focus; so does a type whose element is not found again, or does not answer, within a second. Where
+  the page replaced the field, a second type finds the new node. `clear_first: false` skips the clear and its
+  checks.
 - **Behind a path prefix, `REQUEST_RATE_LIMIT_EXEMPT_PATHS` names paths as the router matches them.** Only a
   controller served behind an ASGI `root_path` (`uvicorn --root-path /api`, `UVICORN_ROOT_PATH`) is affected. The
   list is now compared with the path that follows the prefix, as every other path rule is (see Security), so the
@@ -300,14 +305,22 @@ All notable changes to auto-browser are documented here.
   `/api/healthz`) loses that exemption: write each entry without the prefix (`/healthz`). Behind a prefix the
   paths that answer without a token (`/healthz`, `/readyz`, `/version`, `/dashboard` and the rest of that list)
   now do, as they do without one, where each answered `401`.
-- **A failed agent step's `error_code` is now `502` or `503`, never the provider's own status, and its error text is
-  fixed.** A step the provider failed carried the provider's HTTP status as its `error_code`: it was also the
+- **A failed agent step's `error_code` is now `502` or `503` where the provider failed, never the provider's own
+  status, and its error text is fixed.** A step the provider failed carried the provider's HTTP status as its
+  `error_code`: it was also the
   response status of `POST /sessions/{id}/agent/step`, and it is in the steps of a run and of a queued job's result.
   A `401`, a `404` or a `429` from the provider came back as that. A client that read it must now read `502` (the
-  provider refused, and a retry will not help) or `503` (a rate limit, a server error, a timeout or a network
-  failure: try again later), with the error `Provider request failed`. Any other failure of a step now says only
-  `Agent step failed`, where it named the error's class and text, and a job that failed with an error nothing
-  handled now records `Agent job failed`. The detail is in the controller log.
+  provider refused, and a retry will not help) or `503` (a rate limit, a server error, a timeout, or a connection
+  that could not be made or broke while it was read or written: try again later), with the error
+  `Provider request failed`. Any other failure of a step now says only `Agent step failed`, where it named the
+  error's class and text, and its `error_code` stays null, as before (`/agent/step` answers it `502`): a connection
+  the provider closed with no answer and a proxy's refusal are among these, unretried, as in 1.17.0. One step
+  error keeps its text: a page that could not be observed says `Could not observe the page:` and the browser's
+  error, cut at 300 characters, in the step, the job's checkpoint and a failed job's `error`. A job that failed with
+  an error nothing handled now records `Agent job failed`. The detail is in the controller log.
+- **`POST /sessions/{id}/agent/step` and `/agent/run` answer an `approval_id` that no record holds with `404`, before
+  any step.** A step whose action needed no approval used to run with such an id. Send an `approval_id` with the step
+  it was asked for, and not one the approval retention may have removed (see Fixed).
 - **In API mode, a Claude or Gemini provider reports its API model, whatever `CLAUDE_CLI_MODEL` or
   `GEMINI_CLI_MODEL` says.** With `CLAUDE_AUTH_MODE` or `GEMINI_AUTH_MODE` at `api` (the default) and a CLI model set,
   `GET /agent/providers` and `browser.list_providers` gave the CLI model as the provider's `model`, and so did a step
@@ -453,9 +466,13 @@ All notable changes to auto-browser are documented here.
   error instead), a CDP connect that failed, an upload's check, a post-action observation, a tool's refusal, a
   route's answer that repeats an error's text. Where such a text is a pydantic `ValidationError`'s, it repeated
   each value the model refused (the first and last characters of a long one), in an answer as in a log line: it is
-  now the fields and kinds of refusal alone there too, neither quoted nor cut. `POST /agent/jobs/{id}/resume` of a
-  job whose stored request no longer validates answers `400` with
-  `2 refused by AgentRunRequest: goal: string_type; max_steps: less_than_equal`, and a mesh request that does not
+  now the fields and kinds of refusal alone there too, neither quoted nor cut, though a field's path can hold the
+  caller's own text, whole (the key of a dict field, or a key an `extra="forbid"` model does not know). FastAPI's own
+  `422` is not such a text, nor is MCP `tools/call`'s `-32602`: each still repeats the refused input.
+  `POST /agent/jobs/{id}/resume` of a
+  job whose stored request no longer validates answers `400` with what it refused (one with a `goal` that is no
+  string and a `max_steps` past the bound:
+  `2 refused by AgentRunRequest: goal: string_type; max_steps: less_than_equal`), and a mesh request that does not
   decode is refused as `Malformed DelegationRequest: 1 refused by DelegationRequest: capability: string_type` (the
   delegation manager's own text: the route answers a fixed `403`). The private CLI home's lines and `mesh.peers`'
   line of a peers file it cannot use, which wrote such a text as it came, now quote and cut it.
@@ -464,8 +481,8 @@ All notable changes to auto-browser are documented here.
   of a generated token file whose mode could not be checked. Each writes the error's text quoted and cut now, the OS
   error whole (`"[Errno 13] Permission denied: '/data/uploads/a.bin'"`) where it wrote the reason alone. The
   sweep's line wrote the entry's path as it came as well, and an entry is named as whoever wrote it chose (a member
-  of an imported auth profile archive keeps its name, a line break or an ESC in it): the path is quoted and cut as
-  the error is, and the line reads
+  of an imported auth profile archive keeps its name, a line break or an ESC in it): the path is quoted and cut at
+  200 characters too (with no count of what was cut, which the error's text carries), and the line reads
   `cleanup sweep could not handle '/data/uploads/a.bin': "[Errno 13] Permission denied: '/data/uploads/a.bin'"`.
   The line
   of an isolated session's directory that could not be removed named the first entry left, a file of the browser's
@@ -494,12 +511,14 @@ All notable changes to auto-browser are documented here.
   configured.
   An answer or an error's message that named a caller's or a peer's value by its repr escaped it and wrote it
   whole. A mesh peer's capability of a kind this node does not route came back whole in the reply that refused it,
-  in its `error` and again in its `result` (`Unknown capability kind`), and an approval id presented as
-  `governed_approval_id`, which no input model bounds, came back in `Unknown approval`. Each such text now quotes
-  the value the same way and cuts it at 200 characters as an unknown MCP method is cut, the mark after the closing
-  quote; a value of 200 characters or fewer reads as it did. They are those two, `No saved auth profile`,
-  `No file ... in the auth directory` (and `in this session's auth directory`, `in the upload directory`), the CDP
-  element read's `Selector not found`, `Invalid cron schedule`, `invalid harness run id`, a memory profile's and a
+  in its `error` and again in its `result` (`Unknown capability kind`). Each such text now quotes the value the same
+  way and cuts it at 200 characters as an unknown MCP method is cut, the mark after the closing quote; a string of
+  200 characters or fewer reads as it did, and any other value is its repr, quoted. An approval id no record holds
+  (as `governed_approval_id`, which no input model bounds, or `approval_id`) came back as the error's whole text, as
+  sent; the new `Unknown approval` answer (see Fixed) quotes and cuts it the same way. They are those two,
+  `No saved auth profile`, `No file ... in the auth directory` (and `in this session's auth directory`,
+  `in the upload directory`), the CDP element read's `Selector not found`, `Invalid cron schedule`,
+  `invalid harness run id`, a memory profile's and a
   proxy persona's refusals (`not found`, `belongs to another operator`, `collides with the existing profile`,
   `cannot be read`), the mesh's `Unknown sender node_id`, `nonce replay from sender`, `Unknown peer node_id`,
   `No grant for capability` and its envelope whose sender or recipient is not the one expected, and the refusals of
@@ -534,14 +553,16 @@ All notable changes to auto-browser are documented here.
   `.format()`, whether of the error, of what it was raised with or of a task's `.exception()`; a log call whose
   arguments are not as many as the conversions of a format written in one piece; and a value written by its repr
   (`%r`, `{value!r}`, `repr()`), in a log format or anywhere else, that its lists do not name with the reason it is
-  no caller's. It reads the source, and takes for an error what an `except` clause names, or a parameter named or
+  no caller's, or bounded. It reads the source, and takes for an error what an `except` clause names, or a parameter
+  named or
   annotated as one: an error kept under another name (assigned, held in a list, returned by a helper) is not seen,
   nor is a text made earlier and logged under a name of its own, as the entrypoint's hand-over pass writes the OS's
   reason for an entry it could not hand over (escaped, a line each, and not cut). Still written whole: an error's
   text in a traceback, which prints it as it is (an MCP tool's or an agent job's unexpected error and a readiness
   check that failed among them, and otherwise mostly the failures of the controller's own work: a store's, an audit
-  event's or a witness receipt's write, a maintenance sweep); the last 800 characters of autossh's own log, as that
-  file holds them, in `session tunnel for ... degraded`; and, where only the standard library is at hand, the stdio
+  event's or a witness receipt's write, a maintenance sweep); the last 800 characters of autossh's own log (read as
+  UTF-8 with a bad byte replaced, and stripped), in `session tunnel for ... degraded`; and, where only the standard
+  library is at hand, the stdio
   bridge's error texts (on stderr and in its answers, its known secrets taken out) and the entrypoint's line of the
   capabilities it could not drop.
 - **A refused start quotes a `*_AUTH_MODE` value only where it could be a mistyped mode.** With
@@ -755,7 +776,8 @@ All notable changes to auto-browser are documented here.
   fields inside either, through open shadow roots, in one read, within a second. It says how they read as
   `field_read`: `secret` if one of them does (a `label` or a form around a password field, a component with one
   in its open shadow root), `plain` only where there is one and all of them do, and `unread` where there is none
-  (a component that takes its keys itself), where a frame is among what is named (its document is not read), or
+  (a component that takes its keys itself), where a frame is among what is named and none of them reads as secret
+  (its document is not read), or
   where the read did not answer in that time (a field not on the page yet, a busy page). Only `plain`
   shows the text: else it reads "text hidden: its field reads as secret" or "text hidden: its field has not been
   read" in the approval's summary, the queue and the dialog, and in every answer that hands the approval out
@@ -767,11 +789,12 @@ All notable changes to auto-browser are documented here.
   its text hidden until such a request reads the field as plain. The approval's stored record keeps the text, as
   before: the action retried with the approval's id is matched against it. A text the caller marked `sensitive`
   is withheld everywhere, as before (its approval stores only a digest of it), and its field is not read for its
-  approval. A typed text still shows: as the preview of a field read as not secret, and in the approval of one (a
+  approval (`field_read` is `unread`). A typed text still shows: as the preview of a field read as not secret, and in
+  the approval of one (a
   post's or a message's text is what its approver must see; the approval reads the fields as they are when it
   is asked for, whatever they are by the time the type runs),
   which includes a field whose attributes do not say it is secret (a PIN field with no such type, name or
-  label), one that turns secret and back again while the text goes in, one in a component's closed shadow root
+  `aria-label`), one that turns secret and back again while the text goes in, one in a component's closed shadow root
   (the page shows no node past the component: a preview reads the component, and an approval the fields it shows
   outside that root, `unread` where it shows none), and a text whose focus goes to another field and back
   on a page that stops focus events before its nodes hear them; in an approval's reason, the agent's own
@@ -821,7 +844,12 @@ All notable changes to auto-browser are documented here.
   its audit event and the session's directories stay as the close left them. A create that fails by itself now
   takes its session out of the controller's list before its rollback starts, so a close that arrives then finds no
   session to close: a pre-request gate lost while the first page loaded had the controller's close and the create's
-  rollback each close the context.
+  rollback each close the context. One close goes the other way: one that has waited its 10 seconds
+  (`CLOSE_LOCK_WAIT_SECONDS`) for a first page still loading closes the browser context to end the load, so the
+  create fails with the load's error and rolls its session back, and that close is answered `404` with
+  `code: session_closed`. Nothing of the session is left then: no `session_closed` event (a failed create writes
+  none) and no directories. Before, that close answered closed while the create's rollback ran beside its teardown,
+  the runtime was released twice, and `create_failed` was written over the close's reason.
 - **A resumed agent run no longer shows its first run's page text to the planner as the operator's hints.**
   `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` merged a summary of the first run's checkpoints into
   the new run's `context_hints`, which every planner's prompt prints as operator text, so a URL or a title a page had
@@ -832,14 +860,20 @@ All notable changes to auto-browser are documented here.
   that says the run resumes an earlier one; `context_hints` of a resumed run is the operator's alone. A client can set
   the field on `POST /sessions/{id}/agent/run` and in the `request` of the queue tools, and it is shown as page data
   whoever set it. A job record an older version wrote can hold the merged block in its `context_hints`: a resume cuts
-  it off, and so does the run of a resumed job queued before the upgrade, which reads its checkpoints from its
-  parent's record (none where that record is gone or cannot be read); that job's record keeps what was written.
-  (STORE-24)
+  it off (but for a record written before 1.8.1, whose merged hints could pass 4,000 characters: its resume fails the
+  request's own length check first, `400` with `string_too_long`, as it always did), and so does the run of a
+  resumed job queued before the upgrade, which reads its checkpoints from its parent's record (none where that
+  record is gone or cannot be read); that job's record keeps what was written. Such a job still fails at its
+  session, which a restart does not keep, before any planner is asked: the cut and the checkpoints are what the
+  worker would hand a planner. (STORE-24)
 - **A failed agent step no longer hands the provider's status, or an error's text, to the caller.** The step's
   `error_code` was the status the provider had answered with, and any failure that was no provider's put its class and
   text, up to 300 characters, into the step's `error`: a `PermissionError` from the CLI home named its path. A
-  provider's failure is now `503` where trying again may help (a `429`, a `5xx`, a timeout, a network failure) and
-  `502` where it will not, with the error `Provider request failed`; any other failure says `Agent step failed`.
+  provider's failure is now `503` where trying again may help (a `429`, a `5xx`, a timeout, a connection that could
+  not be made or broke while it was read or written) and `502` where it will not, with the error
+  `Provider request failed`; any other failure says `Agent step failed` (a connection the provider closed with no
+  answer and a proxy's refusal among them), but for a page that could not be observed, whose step still says
+  `Could not observe the page:` and the browser's error, cut at 300 characters.
   The detail was already in the controller log and stays there. A job that failed with an error nothing handled
   (one raised outside the provider call, such as a log file that could not be written) recorded the error's class
   and text, a path among them, in the record that anyone who lists the jobs reads: it records `Agent job failed`
@@ -1056,15 +1090,17 @@ All notable changes to auto-browser are documented here.
   selector it checked neither, since 0.1.0 (by its code; the probe ran on this release's). A page whose select-all
   handler moved focus to a second field had that field emptied by the Delete, and the text typed into it; so had
   one whose handler moved focus as the Delete went in. Both now end as `focus_lost` (retryable) with nothing
-  typed, as by `element_id`: "Keyboard focus would not stay in the target field after select-all (nothing was
-  cleared), so nothing was typed", or "... through the clear, so nothing was typed", where the field the Delete's
-  handler moved to has been emptied by that key (the limit `docs/llm-adapters.md` gives). The checks are asked of
-  the element the selector named once the type had focused it, found once and then held for the text's preview
-  too: a selector looked up again at each check names whatever the page has made it match by then. So a page that
-  puts another node in the field's place as it is cleared is refused too, where the text went into the new node
-  before; a second type finds that node. A type by selector that clears its field is refused the same way where
-  the element is not found again, or does not answer, within a second: before, the text was typed and its preview
-  withheld. With `clear_first` false nothing changes.
+  typed, as by `element_id`, where the second field is in the same document: focus in a frame inside the named
+  element still counts as focus in it by selector (not by `element_id`), so a field in that frame can still be
+  emptied and typed into, and the type keeps no preview (its hold refuses a frame). The answer is "Keyboard focus
+  would not stay in the target field after select-all (nothing was cleared), so nothing was typed", or "...
+  through the clear, so nothing was typed", where the field the Delete's handler moved to has been emptied by that
+  key (the limit `docs/llm-adapters.md` gives). The checks are asked of the element the selector named once the
+  type had focused it, found once and then held for the text's preview too: a selector looked up again at each
+  check names whatever the page has made it match by then. So a page that puts another node in the field's place
+  as it is cleared is refused too, where the text went into whatever had focus before; a second type finds that
+  node. A type by selector that clears its field is refused the same way where the element is not found again, or
+  does not answer, within a second: before, the text was typed. With `clear_first` false nothing changes.
 - **A call into a page's isolated world no longer fails with an `AttributeError` when another call drops the page's
   session under it.** A call that read the page's frame tree again (after a "No frame for given id found") kept the
   frame it read where another call on the same page had run out of time meanwhile and dropped the session: the world
@@ -1609,20 +1645,23 @@ All notable changes to auto-browser are documented here.
   says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before (a `null` is
   none: it reads as an argument left out).
 - **A window-birth watcher that is lost is attached again when its first re-attach fails.** When the watcher's
-  browser session dies while the browser lives and has a watched session, a replacement is attached at once, and
-  until it is up every popup of that browser's sessions is refused as unjudged. That attach was tried once. If it
+  browser session dies while the browser lives and has a watched session, a replacement's attach is started at once
+  (behind another browser's attach in progress), and until it is up every popup of that browser's sessions is refused
+  as unjudged. That attach was tried once. If it
   failed, the watcher stayed lost: `/readiness` went on reporting `lost`, and the popups stayed refused, until a
   new session was created on the browser, even where the browser could be attached to again a moment later. The
   attach is now tried three more times, each about 2 seconds after the one before (a little longer than the attach
   backoff, so that it reaches the browser), while the browser still has that lost watcher and a watched session.
-  Releasing the browser ends the retries at once, as the controller's shutdown does, and they stop where a new
+  Releasing the browser starts no more of them, as the controller's shutdown does (an attach already in flight can
+  finish, and the release removes what it attached), and they stop where a new
   session's own attach has replaced the watcher or the browser's last watched session is gone. After the last of
   them the watcher stays lost until the next session is created there, as before. The first attach is now made on
   the same terms. A watcher lost on a browser with no watched session is not replaced until a session is created
-  there, and `/readiness` reports `lost` meanwhile: before, a watcher that watched nothing was attached. And a
-  watcher lost while its browser is being released is not replaced: before, that attach could be made once the
-  release had ended, and `/readiness` then reported a watcher, or a failed attach, on a browser the controller no
-  longer used.
+  there, and `/readiness` reports `lost` meanwhile: before, a watcher that watched nothing was attached. And the
+  loss of a watcher its browser's release is removing starts no attach (a re-attach already in flight may finish,
+  and the release removes what it attached, unless the release is itself cancelled first): before, that attach
+  could be made once the release had ended, and `/readiness` then reported a watcher, or a failed attach, on a browser
+  the controller no longer used.
 - **An MCP call that names an agent job or an auth profile the controller does not hold is told what is missing.**
   `browser.get_agent_job`, `browser.resume_agent_job`, `browser.discard_agent_job`, `browser.cancel_agent_job` and
   `browser.get_auth_profile` answered an id no record answers to with the id alone (`nope123`), the text of the
@@ -1632,37 +1671,50 @@ All notable changes to auto-browser are documented here.
   another operator's auth profile, read as one that never was, as before. The REST routes' `404`s are unchanged.
 - **A provider CLI is stopped whole, and its output is read with a cap.** `claude`, `codex` and `gemini` were started
   in the controller's own process group, and a timeout or a cancelled job killed only that process, then waited for
-  its pipes with no limit: a helper it had started that kept them open held the call, the worker and the job for as
+  its pipes with no limit (a cancel did so on Python 3.11, the image's; on 3.14 it returned at once and left the
+  helper running): a helper it had started that kept them open held the call, the worker and the job for as
   long as it lived, and whatever the CLI printed was buffered whole. The CLI now leads a process group of its own
   (where there are none, as on Windows, only the CLI itself is killed), and a timeout, a cancel or too much output
   kills the group. The call then waits for the pipes at most 5 seconds before it gives up on them, with a warning.
-  Stdout past 1 MiB fails the step (`CLI output exceeded 1048576 bytes`, not retryable), and of stderr only the first
-  16 KiB is kept, which holds the failure's text (its first 1,200 characters). A prompt that cannot be encoded (a
+  Stdout past 1 MiB fails the step as a provider's failure a retry will not mend (`502`, `Provider request failed`;
+  the step's line in the log says `CLI output exceeded 1048576 bytes`). Of stderr only the first 16 KiB is read and
+  kept: a CLI that exits with an error fails the step the same way, and its line in the log carries the start of
+  that stderr (the error's text is cut at 200 characters there). A prompt that cannot be encoded (a
   page's lone surrogate) now fails before the CLI is started: it was started first, and then given up on without
-  being stopped or reaped. (STORE-34)
+  being stopped or reaped. One cancel is still the old one: a cancel that lands in the few milliseconds while the
+  CLI is being started is handled by asyncio, which kills the CLI alone, so a helper it had already started goes
+  on, and on Python 3.11 that cancel returns only when the helper closes the CLI's stderr. (STORE-34)
 - **Under `OPENAI_AUTH_MODE=cli`, a working directory that cannot be made raises one error with no path.** Each Codex
   call works in a directory made under the CLI home. When that failed (a full disk, a home the controller may not
   write) the OS error, with the path in its text, was what the call raised. It now raises the error the CLI home's own
-  failures raise (`set CLI_HOME to a writable directory`), and the path and the cause are in the log, on a line of
-  their own. (D1-7)
+  failures raise, and the path and the cause are in the log, on a line of their own. The step says `Agent step failed`
+  either way (STORE-27), and the step's line in the log now says to set `CLI_HOME` to a writable directory. (D1-7)
 - **A private CLI home that cannot be used is logged once per process, not on every provider call.** With
   `CLI_HOME` unset, or a `CLI_HOME` that cannot be made, a CLI provider checks its private home on each call, and a
   home that stayed unusable wrote its warning and its error each time. Each warning and the final error are now
-  written once, and the check goes on without a word, so the call still fails with the same error each time. A home
-  that fails for another reason is logged when it does. (D1-8)
+  written once, and the check goes on without a word, so the call still fails with the same error each time. A private
+  home that fails for another reason is logged when it does; a configured `CLI_HOME` that cannot be made is warned
+  about once per path, whatever the reason, as before. (D1-8)
 - **`POST /sessions/{id}/agent/step` and `/agent/run` log the error behind a `503`.** Both answered every
   `RuntimeError` that left the orchestrator as `503 Service unavailable` and wrote nothing, so a fault read as "try
   again later" with no trace of what it was. The answer is the same fixed text. The route now also logs one warning
   that names the session and the error's class and text, quoted and cut, as the other routes log a cause they hide.
   A step that failed inside (the provider's failure, or any other) is not among these: it ends as an error result,
-  and the answer is its `error_code`.
-- **`POST /sessions/{id}/agent/step` and `/agent/run` answer an `approval_id` that no record holds with `404`, and
-  write nothing.** An id the approval store did not hold (a typo, or another operator's, which the store answers
-  the same way) made a failed step: `502` with `Agent step failed`, and an ERROR with a traceback in the log. The
-  route now looks the id up first and answers `404` `Not found: <id>`, as `POST /sessions/{id}/actions/execute` and
-  `/actions/upload` answer one, so another operator's id and an unknown one read alike. A session the controller
-  does not know is still `404` `Unknown session`. A job queued with such an id is not looked up and fails when it
-  runs, as before.
+  which `/agent/step` answers with its `error_code` (`502` where it has none) and `/agent/run` with `200` and the
+  run.
+- **`POST /sessions/{id}/agent/step` and `/agent/run` refuse an `approval_id` that no record holds with `404`,
+  before the first step, and write nothing.** An id the approval store did not hold (a typo, one the retention has
+  removed, or another operator's, which the store answers the same way) was refused only by a step whose action
+  needed an approval. There, `/agent/step` answered `502` (`Agent step failed: KeyError: '<id>'`) and `/agent/run`
+  answered `200` with a run that ended in that step, each with an ERROR and its traceback in the log. A step whose
+  action needed none ran: a `fast` click, type or navigation whose label and target ask for none, any read, or
+  `done`. The route now looks the id up before any step and answers `404` `Not found: <id>`, the answer
+  `POST /sessions/{id}/actions/execute` and `/actions/upload` give such an id, so another operator's id and an
+  unknown one read alike. Those two routes refuse it only for an action that needs an approval; these refuse it
+  whatever their steps would do. A session the controller does not know is still `404` `Unknown session`, with an
+  id the store holds or with none: with an unknown id too, the id's `404` comes first. A job queued with such an id
+  is not looked up: a step of it that needs the approval fails when it runs, as before, and one that needs none
+  runs. See the upgrade note.
 - **A resume whose own audit event cannot be written answers `queued`, where it failed while its job ran.**
   `POST /agent/jobs/{id}/resume` and `browser.resume_agent_job` queue the resumed job and then write
   `agent_job_resumed`. When that write failed (a full disk) the call failed, `500` over REST, with the job queued and
@@ -1675,7 +1727,13 @@ All notable changes to auto-browser are documented here.
   left the job queued, and it ran, so a caller who tried again ran it twice. The job is now recorded `interrupted`,
   as a shutdown records one, and stopped if a worker had begun it, and the caller is told as before. A job a worker
   had already run to its end (`completed` or `failed`) is answered as queued, with a line in the log, since only the
-  audit failed; one an operator cancelled or discarded meanwhile stays so, and the caller is told.
+  audit failed. One an operator cancelled or discarded meanwhile stays so for every caller: a REST, MCP or resume
+  caller is told of the failed audit, and a cron run is answered as queued once a worker has taken the job off the
+  queue or stopped it, its job's record saying what became of it. Two limits stay. Where the withdrawal itself cannot
+  be written (the job store failing with the audit), the job
+  is logged by id as not withdrawn and can still run. And where a job ran while its admission audit was pending and
+  the write of its own end failed too (the same full disk), its record stays `running`, and a caller with no finish
+  callback (all but a cron run) is told of the failure although the job ran.
 - **`GET /healthz/deep` no longer warns of a missing fixture at every probe.** The probe read its page from
   `evals/fixtures/deep_health.html`, which the controller image does not hold, so every probe there logged a warning
   that named the path and then rendered the page the controller carries. It now always renders that page: no file is
@@ -1828,8 +1886,10 @@ All notable changes to auto-browser are documented here.
   queue: pass its `approval_id`. (STORE-26)
 - **A provider's reply that holds several different decisions is refused as soon as a second one is found.** The
   parser collected every decision in the reply before it refused it, and its error (the controller log keeps it) gave
-  the full count. It now stops at the second different decision and says `at least 2 different decisions`. A reply
-  with one decision, or with the same decision more than once, is read as before. (D1-12)
+  the full count. It now stops at the second different decision and says `at least 2 different decisions`, where the
+  decisions are separate JSON values in the reply; those inside one JSON value (an array, a wrapper object) are still
+  all read before the second is refused. A reply with one decision, or with the same decision more than once, is
+  read as before. (D1-12)
 
 ## [1.17.0] — 2026-11-08
 
