@@ -72,7 +72,7 @@ every API and MCP request must send it as `Authorization: Bearer <token>`. The d
 for it once, the examples below read it with `$(cat data/api-token)`, and the MCP clients take
 it as shown under [MCP Clients](#mcp-clients). `API_ALLOW_TOKENLESS_LOOPBACK=true` runs the
 controller without a token, as it ran before, but then any container on the compose network
-can drive the browser.
+can drive the browser (a write a browser sends from another web origin is refused).
 
 Optional:
 
@@ -199,7 +199,7 @@ Cursor, VS Code, Claude Desktop through the stdio bridge (which reads the file n
 URL), and pairing Auto Browser with a web-search MCP server are covered in
 [`docs/mcp-clients.md`](./docs/mcp-clients.md).
 
-The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:
+The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, `wait_for_selector`, `eval_js`, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:
 
 ```bash
 MCP_TOOL_PROFILE=full
@@ -236,7 +236,7 @@ see [`docs/mcp-clients.md#resources-and-subscriptions`](./docs/mcp-clients.md#re
 
 Auto Browser ships a Stage 0 convergence harness for Agent Skill Induction. It runs a structured task contract, records tamper-checked traces, verifies completion, and writes a staged skill candidate carrying provenance. With a mesh identity configured that provenance is signed, and the registry verifies the signature before serving a candidate — a candidate that fails the check, or that was dropped into the staging directory unsigned, is refused. Candidates induced from a mock run are marked `simulated` so they cannot pass as converged. Generated skills are staged only — promotion stays explicit and reviewed.
 
-The harness tools — convergence runs, run status and traces, drift checks, candidate management, and graduation — are in the `full` MCP tool profile (`MCP_TOOL_PROFILE=full`), or can be invoked directly over REST.
+The harness tools — convergence runs, run status and traces, drift checks, candidate management, and graduation — are in the `full` MCP tool profile (`MCP_TOOL_PROFILE=full`); over REST, `POST /mcp/tools/call` calls them once the controller serves them.
 
 Start with [`docs/convergence-harness.md`](./docs/convergence-harness.md). A deterministic local smoke is:
 
