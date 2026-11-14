@@ -26,8 +26,9 @@ All notable changes to auto-browser are documented here.
   silent, as it always was, and `resources/unsubscribe` still removes it.
 - **A failed `resources/read` now answers `-32603`, and a page's DOM is capped.** A read that failed for any reason
   but an unknown resource or session (a timeout, a closed page, a policy refusal, a screenshot file that has gone, a
-  result that cannot be encoded) answered `-32002` "Resource not found", and a failed `browser://sessions` or
-  `browser://audit/events` read was an unhandled `500`. A client that took `-32002` to mean a resource is gone now
+  result that cannot be encoded) answered `-32002` "Resource not found", and a `browser://sessions` or
+  `browser://audit/events` read whose listing raised was an unhandled `500` (one whose listing could not be
+  encoded answered `-32002`). A client that took `-32002` to mean a resource is gone now
   gets `-32603` for those, and should retry or report them. `browser://<id>/dom` now returns at most 1,000,000
   characters, the most a tool result may return; a longer page ends in an HTML comment that says so and names
   `browser.get_html`, which pages through the rest.
@@ -36,8 +37,9 @@ All notable changes to auto-browser are documented here.
   stream per session, reconnect only when it has ended, and after reconnecting read again what you watch:
   notifications are not replayed.
 - **`DELETE /mcp` with a wrong `MCP-Protocol-Version` no longer deletes the session.** 1.17.0 ignored the header on
-  `DELETE`. A version the controller does not speak, or one other than the session's, now answers `400` and the
-  session stays. Send the session's version on `DELETE`, or no header, as the stdio bridge does.
+  `DELETE`. A version other than the session's now answers `400` and the session stays: `-32602` where the
+  controller does not speak it, `-32600` where it does. The session's own version deletes it, `2025-03-26` too for
+  a session restored at it. Send the session's version on `DELETE`, or no header, as the stdio bridge does.
 - **On a confidential session, `browser.set_cookies` and `browser.set_local_storage` now follow an action's rules, and
   a required hosted Witness must answer.** Both are `account_change`, so a session with `protection_mode=confidential`
   refuses them for an anonymous operator, on a shared takeover surface and in a shared browser process, as it refuses
@@ -53,18 +55,24 @@ All notable changes to auto-browser are documented here.
   changed. A client that sets the viewport while a long action or an agent step holds the session now gets an error
   it never got: set the viewport before the action starts, or try again when it has ended.
 - **A governed tool now refuses a `workflow_profile` other than `fast` or `governed`.** Any other value (a typo, the
-  wrong case, a non-string) used to read as `fast`, so the call ran without the approval it asked for. It now answers
-  an error that names the two values, and nothing runs: send one of them, or leave the argument out (`null` counts as
-  left out). `browser.queue_agent_run` and `browser.queue_agent_step` refuse such a value too: neither is governed,
-  but a `governed` call queues its run or step governed, and a mistyped one queued it as `fast`. Any other tool that
-  is not governed does not check the value, as before.
-- **A garbled reply from `browser.find_by_vision`'s model is now a tool error, where it read as `found: false`.** That
-  is a reply that is not a JSON object, one with no `found` or a `found` that is neither true nor false, or a
-  `found: true` reply whose point is not usable (see Changed). A client that took `found: false` to cover those must
-  handle the error, by retrying the call or finding the element another way. Two of those replies were answered as
-  found at 1.17.0, with the point, and are errors too: one whose numbers are quoted (`"x": "640"`) and one whose
-  `found` is a non-empty string (`"found": "true"`). A reply of `found: false` stays a normal answer, and its
-  `confidence` is now always 0.0, where the reply's own was passed through.
+  wrong case, a non-string) used to read as `fast`, so without `FORCE_GOVERNED_APPROVALS` the call ran without the
+  approval it asked for (`browser.eval_js` was governed whatever it said, and `harness.start_convergence` on a live
+  session was refused). It now answers an error that names the two values, and nothing runs, with
+  `FORCE_GOVERNED_APPROVALS` on too, where such a call used to ask for an approval: send one of them, or leave the
+  argument out (`null` counts as left out). `browser.queue_agent_run` and `browser.queue_agent_step` refuse such a
+  value too: neither is governed, but a `governed` call queues its run or step governed, and a mistyped one left it
+  at its request's own `workflow_profile` (`fast` by default). Any other tool that is not governed does not check
+  the value, as before.
+- **A garbled reply from `browser.find_by_vision`'s model is now a tool error, where most read as `found: false`.**
+  That is a reply that is not a JSON object, one with no `found` or a `found` that is neither true nor false, or a
+  `found: true` reply whose point is not usable (see Changed). At 1.17.0 a reply that was no JSON, or whose `found`
+  was missing or false, read as `found: false`; one that was JSON but no object, or a `found: true` reply with a
+  `null` `x`, answered `Tool execution failed`; and one whose `found` was truthy (`"true"`, `1`) and whose `x` and
+  `y` passed `int()` (`"640"`, a point outside the screenshot or below zero) was answered as found, with the point.
+  A client that took `found: false` to cover those must handle the error, by retrying the call or finding the
+  element another way. A reply of `found: false` stays a normal answer: its coordinates are no longer read (a
+  `null` or no number there failed at 1.17.0), and its `confidence` is now always 0.0, where the reply's own was
+  passed through.
 - **A `browser.find_elements` pattern that ran can now be refused.** With `regex=true`, a pattern whose group repeats
   without bound and holds an unbounded repeat of its own or overlapping alternatives, at any depth (`(a+)+$`,
   `(a|aa)+`, `((a|aa))+`), fails validation with a message naming the group and why, where it used to reach the
@@ -118,14 +126,17 @@ All notable changes to auto-browser are documented here.
 - **Refused takeover-link calls write fewer `takeover_link_refused` events.** One source writes one for its first
   refusal in a minute, and the rest of that minute's are only counted until an event reports them in its
   `details.count`: the refusals it reports beside its own. An alert that counts these events must add that field:
-  events and counts add up to the refusals, or to more where a shutdown cut a write short: what that event reports
-  can be reported twice, never lost. How many events a minute sees is not fixed: a read with the right
+  events and counts add up to the refusals, or to more where a shutdown cut a write short (what that event reports
+  can be reported twice), or to fewer where more than 1,024 sources are held: the oldest is forgotten, with what it
+  had only counted. How many events a minute sees is not fixed: a read with the right
   token writes what is held and the minute goes on, so refusals between such reads write an event after each. An
   event that reports others can come late (with the source's next call, at a maintenance sweep or at a clean
   shutdown: see Fixed), so an alert on a rate should read `details.count` when it arrives, and a controller that is
   killed loses what it had only counted.
 - **Cron webhook keys are now stored hashed, and `webhook_key_preview` is gone.** The first start after the upgrade
-  replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds. A store that
+  replaces every key in the cron store with its SHA-256 hash, so a client goes on using the key it holds; a key or a
+  hash it cannot read (a store edited by hand) is left as it is, with a WARNING, or a readable key beside such a hash
+  removed, and that job's webhook refuses every key until the key is rotated. A store that
   cannot be re-saved keeps working and the failure is logged; going back to an earlier version leaves those jobs with
   no usable key. A 1.17.0 controller started over a 1.18.0 cron store hands out each stored record whole, so its
   cron answers show `webhook_key_hash` (a hash of the key, not the key) and, for a job that was refused (below),
@@ -137,7 +148,8 @@ All notable changes to auto-browser are documented here.
   `webhook_key_id`, a short id derived from the hash that tells keys apart and is no part of the key. A lost key
   cannot be read from the store any more: `POST /crons/{id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`
   makes a new one and answers it once, ending the old one, and `DELETE /crons/{id}/webhook-key` or
-  `browser.revoke_cron_webhook_key` removes it.
+  `browser.revoke_cron_webhook_key` removes it (a stored key it cannot read stays, and the answer is
+  `revoked: false`).
 - **Cron schedules now run in `CRON_TIMEZONE`, `UTC` by default, not in the controller process's zone.** 1.17.0 gave
   the scheduler no zone, so it used the one its own process saw. In the shipped image that is UTC whatever the
   Docker host's clock says (neither the image nor the compose files set `TZ` or mount `/etc/localtime`), so a
@@ -147,8 +159,9 @@ All notable changes to auto-browser are documented here.
   meant nine in that zone and now means nine UTC. To keep the old hours there, set `CRON_TIMEZONE` to that zone's
   name (`America/Chicago`, `Europe/Berlin`). A name the zone database does not know stops the controller at startup.
 - **`POST /crons/{id}/trigger` no longer answers `404` for an unknown job.** A caller without the key could tell
-  which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`):
-  treat `403` as covering all three. A job that is disabled still answers `409` once the key is proved. So does a
+  which job ids exist. An unknown id, a job with no key and a wrong key now answer the same `403` (`Not permitted`),
+  and so does a job whose stored key cannot be read (a store edited by hand): treat `403` as covering all of them. A
+  job that is disabled still answers `409` once the key is proved. So does a
   run the controller refuses to start with the key proved where 1.17.0 answered `403` (an auth state too old or not
   encrypted, a `start_url` that `ALLOWED_HOSTS` refuses or whose load the pre-request gate stops), `404` (a stored
   job with no `goal`) or `400` (a stored job the run's request model refuses). A `start_url` that does not load
@@ -199,15 +212,18 @@ All notable changes to auto-browser are documented here.
   `approval_required` of that kind, as the same click labelled honestly did. So does a `type` aimed at such a
   button, and a click that names a container when the press lands on such a button inside it. An agent loop that
   ran such clicks unattended in the fast profile now stops there until an operator approves (or the agent itself,
-  under `AUTONOMOUS_APPROVALS`). A form submit with no such label still runs unattended, recorded as `write`, and
-  so do `Send code`, `Remove filter`, `Purchase history` and the other harmless continuations (`Send link` by
-  itself asks: it is also the button of a share dialog; so does `Send code to all users`, since after `to` a label
-  may go on only with words for where a sign-in code goes or what it is for, an address, or a masked number). A
-  menu's command (`role=menuitem`) is read as a button is, and a link inside a button or a menu item as that item.
-  A click or a type, so labelled, on a wrapper with no box of its own (`display: contents`) answers
-  `target_has_no_box`: name an element inside it. The direct routes (`POST /sessions/{id}/actions/click` and
-  `/actions/type`) carry no label and are not read. The whole table, how a label is read, and what the read does
-  not catch, are in `docs/production-hardening.md`.
+  under `AUTONOMOUS_APPROVALS`). A form submit with no such label still runs unattended (one labelled `read` is
+  recorded as `write`, but not where only the press found it), and so do `Send code`, `Remove filter`,
+  `Purchase history` and the other harmless continuations (`Send link` by itself asks: it is also the button of a
+  share dialog; so does `Send code to all users`, since after `to` a label may go on only with words for where a
+  sign-in code goes or what it is for, an address, a masked number, a count of seconds (`30s`) or another of
+  `Send`'s tail words: `Send code to me again` runs). A menu's command (`role=menuitem`) is read as a button is, and a
+  link inside a button or a menu item as that item. A click or a type, so labelled, by selector on a wrapper with no
+  box of its own (`display: contents`) answers `target_has_no_box`, and by `element_id` a click answers
+  `element_not_visible` once `ACTION_TIMEOUT_MS` has passed and a type `focus_lost`, with nothing pressed: name an
+  element inside it. The direct routes (`POST /sessions/{id}/actions/click` and `/actions/type`) carry no label and
+  are not read. The whole table, how a label is read, and what the read does not catch, are in
+  `docs/production-hardening.md`.
 - **Approvals for tool calls are now matched under a key file, `.tool-call-digest.key` in `APPROVAL_ROOT`: back it up
   with the records.** The first start after the upgrade writes the key there (also when `STATE_DB_PATH` holds the
   records) and rewrites each stored tool call's stand-in, a `request_human_takeover` action whose `action.text` reads
@@ -240,8 +256,9 @@ All notable changes to auto-browser are documented here.
   downgrade.
 - **The image now starts uvicorn with `--timeout-graceful-shutdown 5`: start it your own way, and you must pass it
   too.** A stop waits at most 5 seconds for the requests in flight and then runs the controller's cleanup; without
-  the option, a stop with an event stream open (`GET /mcp`, `GET /sessions/{id}/events`) never reaches the cleanup
-  (see Fixed). If your own image, command or process manager starts `uvicorn app.main:app`, add the option, in
+  the option, a stop with an event stream open (`GET /mcp`, `GET /sessions/{id}/events`) reaches the cleanup only
+  once each stream's client has gone, and never where the supervisor kills the process first (see Fixed). If your own
+  image, command or process manager starts `uvicorn app.main:app`, add the option, in
   seconds and well under what your supervisor waits before it kills the process (compose waits 60). A call still
   running 5 seconds after a stop is now cancelled, where it ran on until it ended or Docker killed the controller.
   At such a stop uvicorn logs `Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR: that line is
@@ -256,12 +273,14 @@ All notable changes to auto-browser are documented here.
   logging integration, a structured formatter) gets the message alone. So are, in the same form,
   `POST /mesh/receive`'s (`mesh.receive failed: answered 500 for`, where it was `mesh.receive error`), the ERROR of
   an agent job worker that crashed on a job (`agent job worker ... crashed on`), of an agent step that failed
-  (`agent step failed for session`) and of a background task that failed (`background task ... failed`), and the
-  WARNING behind a `409 Conflict` of `POST /sessions` and `POST /sessions/{id}/fork` (`answered 409 for`). This is
-  the record of the `500 Internal error` a route answers where it catches the error (nearly every route under
-  `/sessions`, and those of `/agent/jobs`, `/approvals` and `/audit/events` among them): an error a route does not
-  catch (a cron route's, a proxy persona's read) still reaches Starlette, which answers a plain-text
-  `Internal Server Error`, and the server logs its traceback, as before.
+  (`agent step failed for session`) and of a background task that failed (`background task ... failed`). This
+  is the record of the `500 Internal error` a route answers where it catches the error (41 of the 54 routes under
+  `/sessions`, and every route of `/agent/jobs`, `/approvals` and `/audit/events`): an error a route does not catch
+  (a cron route's, a proxy persona's read, and under `/sessions` those of the network requests and hooks, the CDP
+  element and raw command, the events, the replay, the export script, the trace, the takeover link and the share)
+  still reaches Starlette, which answers a plain-text `Internal Server Error`, and the server logs its traceback, as
+  before. The WARNING now written behind a `409 Conflict` of `POST /sessions` and `POST /sessions/{id}/fork`
+  (`answered 409 for`), which 1.17.0 did not log, has that form with the three frames nearest the raise alone.
 - **A controller with no token whose `CONTROLLER_ALLOWED_HOSTS` holds a wildcard no longer starts.** With
   `API_ALLOW_TOKENLESS_LOOPBACK=true` and no token, on a loopback controller not in production (the only one that
   starts without a token), an entry `*`, `*.example.com` or any other wildcard stops startup with a message that
@@ -281,12 +300,15 @@ All notable changes to auto-browser are documented here.
   Unless it is `plain`,
   `GET /approvals`, `GET /approvals/{id}`, the approval tools, a decision's and an execution's answer and the
   `approval_required` error give its `action.text` as "text hidden: its field reads as secret" or "text hidden:
-  its field has not been read", as its webhook's and SSE event's summary do (see Security). A pending approval
+  its field has not been read", as its webhook's and SSE event's summary do (see Security); a text the caller
+  marked `sensitive` shows its stored digest there (`[sensitive text] hmac-sha256:...`), as before, and its summary
+  reads "text hidden at the agent's request (sensitive)". A pending approval
   for a `type` that 1.17.0 stored shows no text after the upgrade: decide it from the page, or ask for the same
   action again, which reuses the approval and reads its field. A client that retries
   the action from the `action` an approval answers, not from its own, now sends that text, which the approval does
   not match: retry with the action you asked with. The `text_preview` of a type whose text submits its form and
-  leaves the page (a search that ends in a newline) is now withheld, and that type's receipt is `restricted`; so
+  leaves the page as its Enter goes in (a search that ends in a newline) is now withheld, and that type's receipt is
+  `restricted` (a page whose script submits a moment after the Enter keeps the preview, as the field had focus); so
   is that of any type whose field does not have focus once the text is in, or lost it on the way (a text whose
   Enter moves on to the next field, a field that blurs itself on Enter, a component that hands focus to a field
   in its own open shadow root and takes it back), and of one typed by a selector that names a frame.
@@ -330,8 +352,9 @@ All notable changes to auto-browser are documented here.
 - **The Skills Curator's default model is now the provider's model setting.** With `CURATOR_ENABLED=true` and no
   `CURATOR_MODEL`, the curator used its own fixed defaults (`claude-opus-4-7`, `gpt-4o`, `gemini-1.5-pro`), which no
   longer matched the models the controller is set up for. It now uses `CLAUDE_MODEL`, `OPENAI_MODEL` or `GEMINI_MODEL`
-  for `CURATOR_PROVIDER`, so a deployment that relied on the old defaults changes model, and its cost with it. Set
-  `CURATOR_MODEL` to keep a specific model. (STORE-31)
+  for `CURATOR_PROVIDER`, and the startup line names that model (`model=`). No code calls the curator's model, in
+  this release or in 1.17.0 (the post-session review is not wired to a transcript), so no call and no cost changes.
+  Set `CURATOR_MODEL` to keep a specific model. (STORE-31)
 - **On Linux, a provider CLI (`*_AUTH_MODE=cli`) can no longer open the controller's data directory, except
   `CLI_HOME`, what `CLI_SANDBOX_WRITABLE` names there and the screenshot of its call, and outside it writes only its
   own directories.** Where the kernel has Landlock (5.13 or later), `codex`, `claude` and `gemini` now start under a
@@ -389,14 +412,18 @@ All notable changes to auto-browser are documented here.
   A tool with a governed kind now refuses it, and `policy_profile` likewise, before anything runs, with a message that
   names the two allowed values and does not repeat what was sent (see the upgrade note). So do
   `browser.queue_agent_run` and `browser.queue_agent_step`, which have no governed kind and act on the argument all
-  the same: a mistyped profile queued the run as `fast`, and every write of that run went without an approval. The
-  argument's description in `tools/list` now says what the profile does in every configuration, and
-  `browser.create_cron_job`'s description says that the job's runs start under the creating call's profile. (MCP-20)
+  the same: a mistyped profile left the run at its request's own profile, so where that was `fast` (the default) and
+  approvals were not forced, every write of the run went without the approval asked for. The argument's
+  description in `tools/list` of a governed tool now says what the profile does in every configuration (the queue
+  tools' does not name `FORCE_GOVERNED_APPROVALS`, under which their runs and steps run governed whatever either
+  profile says), and `browser.create_cron_job`'s description says that the job's runs start under the creating
+  call's profile. (MCP-20)
 - **A controller with no token refuses a write a web page sends from another origin.** A page on any site could POST
   to a tokenless loopback controller: CORS stops a page reading the answer, not sending the request, and the API has
   no cookies to check, so a form or a no-cors `fetch` reached `POST /maintenance/cleanup` and every action route. The
   controller now refuses, with a `403` and one fixed text, a write a browser marks as `cross-site` or `same-site`, or
-  whose `Origin` is not the host and port the request's `Host` names, and it does so after the Host check, so a
+  whose `Origin` is not the host and port the request's `Host` names (but for `/mesh/receive`, which is signed, and
+  `/mcp`, which keeps its own Origin check), and it does so after the Host check, so a
   DNS-rebinding hostname is refused as a Host error first. `GET /auth-profiles/{name}/export` counts as a write: it
   leaves an archive behind, for a name a page can guess. Host names compare case-insensitively, a port equal to the
   `Origin` scheme's default equals no port, and an `Origin` that cannot be parsed, `null` included, counts as foreign.
@@ -427,7 +454,8 @@ All notable changes to auto-browser are documented here.
   having it, so that refusal wrote the password and the query to the log. The line now names the URL's host alone,
   quoted and cut at 200 characters, and says when the URL carried userinfo or a port that cannot be read, for which
   it is refused whatever its host, and, of a host a pattern allows, which of the URL's scheme, port (as written) and
-  path no pattern allows with that host, or that the URL writes no port where each pattern of that host names one;
+  path no pattern allows with that host, or that the URL writes no port where each pattern of that host names one
+  (where its patterns each refuse a different part, it names none: no one pattern allows them together);
   what the peer is answered is the fixed text it was. Under
   `LOG_LEVEL=DEBUG`, a session id that names no record a tool can read was logged as sent too (`no readable record
   for session`), the id of a peer's request or of an MCP call; and with `REDIS_URL` set, while Redis failed, so was
@@ -545,11 +573,12 @@ All notable changes to auto-browser are documented here.
   credential, did not expect, where it wrote a traceback (the error can quote what the peer sent); and so are an
   agent job worker's crash, an agent step that failed and a background task that failed, each a traceback, which
   prints a Playwright error's text as it is. The `RuntimeError` behind a `409 Conflict` of `POST /sessions` and of
-  a fork, written by its traceback too (a persona's name or a URL the caller sent among it), is written as a
+  a fork (a persona's name or a URL the caller sent can be in its text), which 1.17.0 did not log, is written as a
   route's hidden cause. Every other log line that takes a caught error's text now quotes and cuts it, made inside
   the guard, wherever a source test can see the error. That test refuses a log call that is passed a caught error
-  itself, alone or behind a fallback or a conditional (`exc.strerror or exc`), or its text as it is, neither quoted
-  nor cut; an error's text taken outside the guard by `str()`, `repr()`, `format()`, an f-string, `%` or
+  itself after its message, alone or behind a fallback or a conditional (`exc.strerror or exc`), or its text as it
+  is, neither quoted nor cut (an error passed as the message itself is not seen; no line of the controller does
+  that); an error's text taken outside the guard by `str()`, `repr()`, `format()`, an f-string, `%` or
   `.format()`, whether of the error, of what it was raised with or of a task's `.exception()`; a log call whose
   arguments are not as many as the conversions of a format written in one piece; and a value written by its repr
   (`%r`, `{value!r}`, `repr()`), in a log format or anywhere else, that its lists do not name with the reason it is
@@ -586,7 +615,8 @@ All notable changes to auto-browser are documented here.
   `browser.get_auth_profile` tool no longer promises them. The audit log stays operator-wide, as
   `docs/production-hardening.md` says: an export's or a save's event there still names the profile. (AUTH-31)
 - **A page `ALLOWED_HOSTS` refuses no longer shows in the network log, on any surface.** The log holds the URL of
-  every request, and a page that had moved onto a refused host had its own requests read back through
+  every request (one a refused page makes is kept withheld, as its origin alone with no headers or body, as in
+  1.17.0), and a page that had moved onto a refused host had the origins of its own requests read back through
   `GET /sessions/{id}/network/requests`, `GET /sessions/{id}/network-log`, `browser.get_network_log` and the
   `browser://<id>/network` resource, none of which checked the page. Each now refuses it, as the raw CDP route does,
   under a bounded wait for the session lock and with fixed text that names no host, checking the page before the read
@@ -597,7 +627,8 @@ All notable changes to auto-browser are documented here.
   or hash reaches any API, MCP or log surface, nor an audit or witness record: a key is answered once, by the call
   that makes it. `POST /crons/{id}/webhook-key/rotate` and `DELETE /crons/{id}/webhook-key`, and the `cron` pack's
   `browser.rotate_cron_webhook_key` and `browser.revoke_cron_webhook_key` (governed as `write` and `destructive`),
-  replace or remove a key, on a job the caller may use, and each change writes an audit event. Both tools are
+  replace or remove a key, on a job the caller may use, and each change writes an audit event (one the audit store
+  cannot take is logged, and the change stands). Both tools are
   annotated `destructiveHint: true`: a rotation ends the working key at once, as a revoke does. See the upgrade
   note. (STORE-16)
 - **The cron webhook trigger no longer tells an unknown job from a wrong key.** `POST /crons/{id}/trigger` answered
@@ -683,7 +714,9 @@ All notable changes to auto-browser are documented here.
   neighbour, which the read above had never seen. The moved point is now kept only while the same element is under
   it (compared in the isolated world once the pointer has arrived); otherwise, or when that cannot be told (half a
   second to set the comparison up, half a second to make it), the press is on the point itself. Two points inside
-  a frame of another origin are never taken for one element.
+  a frame of another origin are never taken for one element. Points are compared through open shadow roots only: in
+  a closed one both find its host, so two of its controls, or two points in a frame inside it, are taken for one
+  element and the moved point is kept.
 - **A tool call's approval no longer stores a digest that its arguments alone reproduce.** An approval for a governed
   tool call binds the call through a stand-in action whose text was `<tool> sha256:<digest>`, a plain SHA-256 of the
   call's whole arguments, the credentials its preview leaves out included. `GET /approvals`, `browser.list_approvals`
@@ -695,7 +728,9 @@ All notable changes to auto-browser are documented here.
   witness receipts do not carry it. A record an earlier version stored still matches its call, and the first start
   that finds it rewrites it keyed, in both stores. One that cannot be rewritten is logged and taken at the next
   start: until then, or until a decision or a call writes it, the stores hold its plain digest, and it is listed and
-  answered keyed all the same. An approval kept under a key the controller no longer holds cannot be matched to a
+  answered keyed all the same. A start that cannot use the key file (it keys with a key of its own) rewrites none,
+  and a decision or a call there writes the plain digest back: it stays until a start that can use the file. An
+  approval kept under a key the controller no longer holds cannot be matched to a
   call: an approve of it, and a call that presents one approved earlier, are refused with a message that says so,
   and the agent asks again. The key lies beside the records, so a reader of `APPROVAL_ROOT` itself can still guess:
   the change protects what the API, the MCP tools and a copy of the database alone show. See the upgrade note.
@@ -756,7 +791,8 @@ All notable changes to auto-browser are documented here.
   has it back:
   a text whose Enter moves focus to another field keeps no preview, nor does one whose field the page replaced
   or took away, one typed by a selector that names a frame (its text goes to a node of the frame's
-  document, which is not held), or one whose Enter submits its form and leaves the page. Focus is taken to have
+  document, which is not held), or one whose Enter submits its form and leaves the page (at the Enter: a page whose
+  script submits a moment later keeps the preview). Focus is taken to have
   left the held node at a blur or a focus on it, at a focus that arrives anywhere in its own open shadow tree (a
   component that has focus itself and hands it to a field inside it and back hears neither on itself), and where
   it has a shadow root it did not have when it was held; and the focused element is read through the
@@ -801,8 +837,8 @@ All notable changes to auto-browser are documented here.
   words, which can quote it; and in an agent step's own `decision` (in its answer, `agent_steps.jsonl` and
   `agent_runs.jsonl`), which is what the model wrote. The case of attributes that could not be read by selector is
   in every release from 0.1.0 (the function was `BrowserManager._locator_is_sensitive_input` before 1.1.0); the
-  `standard` receipt in 1.16.0 and 1.17.0; the other paths in 1.17.0 (by their code; the probes ran on this
-  release's).
+  `standard` receipt in 1.17.0, where a run of that release showed it; the other paths in 1.17.0 (by their code;
+  the probes ran on this release's).
 - **Behind a `root_path`, a file under `/artifacts` keeps its sandbox.** The controller serves every file under
   `/artifacts` with `Content-Security-Policy: sandbox; ...`, so that an HTML file a visited page made the browser
   download is shown as an inert document and never runs as the controller's origin. The header was chosen by the
@@ -812,18 +848,18 @@ All notable changes to auto-browser are documented here.
   router runs. A controller served without a prefix always sent the header, and one that requires a token answered
   a request for such a file that carries none with `401` either way.
 - **Behind a `root_path`, the paths that need no token, no operator id and no rate-limit budget are the router's.**
-  Five more rules compared the request's whole path, prefix included, with paths written without one: the token
+  Four more rules compared the request's whole path, prefix included, with paths written without one: the token
   gate's list of paths that answer without a token, the operator-id exemptions, `REQUEST_RATE_LIMIT_EXEMPT_PATHS`,
-  `/healthz` in the loopback `Host` check of a controller with no token and no `CONTROLLER_ALLOWED_HOSTS`, and the
-  rule that a path which answers without a token asks about no session. So behind a prefix `/api/healthz`,
-  `/api/version` and `/api/dashboard` answered `401` with no token; with one, `/api/healthz` answered `400` for a
-  missing `X-Operator-Id` where `REQUIRE_OPERATOR_ID` is on; such a tokenless controller refused `/api/healthz`
-  under a `Host` that is no loopback name; and no entry of the rate limiter's list matched, so a healthcheck and
-  each artifact a token holder loaded counted against the limit. All five now read the path the router matches.
-  The rules failed closed, and this opens nothing that is closed without a prefix: `/api/sessions`, `/api/metrics`,
-  a file under `/api/artifacts`, `/api/healthz/` and a path that only starts with the prefix still answer `401`
-  without a token, a request for `/api/metrics` or a file under `/api/artifacts` with no token or a wrong one
-  still counts against the limit, and a `session_id` on a path that needs the token is still checked. See the
+  and `/healthz` in the loopback `Host` check of a controller with no token and no `CONTROLLER_ALLOWED_HOSTS`. So
+  behind a prefix `/api/healthz`, `/api/version` and `/api/dashboard` answered `401` with no token; with one,
+  `/api/healthz` answered `400` for a missing `X-Operator-Id` where `REQUIRE_OPERATOR_ID` is on; such a tokenless
+  controller refused `/api/healthz` under a `Host` that is no loopback name; and no entry of the rate limiter's list
+  matched, so a healthcheck and each artifact a token holder loaded counted against the limit. All four now read the
+  path the router matches, as does this release's rule that a path which answers without a token asks about no
+  session. The rules failed closed, and this opens nothing that is closed without a prefix: `/api/sessions`,
+  `/api/metrics`, a file under `/api/artifacts`, `/api/healthz/` and a path that only starts with the prefix still
+  answer `401` without a token, a request for `/api/metrics` or a file under `/api/artifacts` with no token or a wrong
+  one still counts against the limit, and a `session_id` on a path that needs the token is still checked. See the
   upgrade note for `REQUEST_RATE_LIMIT_EXEMPT_PATHS`.
 - **A session closed while it is being created stays as the close left it, and keeps no tunnel.** A create
   registers its session before it has finished starting it: the first page loads, and with
@@ -858,14 +894,14 @@ All notable changes to auto-browser are documented here.
   an action at 120). Every planner's prompt (the Claude, Gemini, OpenAI and OpenAI-compatible APIs, the three CLIs and
   the Codex host bridge) shows them inside the observation's JSON, quoted, beside one sentence of the controller's own
   that says the run resumes an earlier one; `context_hints` of a resumed run is the operator's alone. A client can set
-  the field on `POST /sessions/{id}/agent/run` and in the `request` of the queue tools, and it is shown as page data
-  whoever set it. A job record an older version wrote can hold the merged block in its `context_hints`: a resume cuts
-  it off (but for a record written before 1.8.1, whose merged hints could pass 4,000 characters: its resume fails the
-  request's own length check first, `400` with `string_too_long`, as it always did), and so does the run of a
-  resumed job queued before the upgrade, which reads its checkpoints from its parent's record (none where that
-  record is gone or cannot be read); that job's record keeps what was written. Such a job still fails at its
-  session, which a restart does not keep, before any planner is asked: the cut and the checkpoints are what the
-  worker would hand a planner. (STORE-24)
+  the field on `POST /sessions/{id}/agent/run` and in the `request` of `browser.queue_agent_run` (a step's request
+  has no such field), and it is shown as page data whoever set it. A job record an older version wrote can hold the
+  merged block in its `context_hints`: a resume cuts it off (but for a record written before 1.8.1, whose merged hints
+  could pass 4,000 characters: its resume fails the request's own length check first, `400` with `string_too_long`, as
+  it always did), and so does the run of a resumed job queued before the upgrade, which reads its checkpoints from its
+  parent's record (none where that record is gone or cannot be read); that job's record keeps what was written. Such a
+  job still fails at its session, which a restart does not keep, before any planner is asked: the cut and the
+  checkpoints are what the worker would hand a planner. (STORE-24)
 - **A failed agent step no longer hands the provider's status, or an error's text, to the caller.** The step's
   `error_code` was the status the provider had answered with, and any failure that was no provider's put its class and
   text, up to 300 characters, into the step's `error`: a `PermissionError` from the CLI home named its path. A
@@ -1021,11 +1057,13 @@ All notable changes to auto-browser are documented here.
   document, which cannot tell where it lies on the screen, and answered yes. Where the element is wider or taller
   than its frame shows (a wide card link, a long form), the middle of its box is outside the frame, and the click,
   or the click that puts the caret for a `type`, pressed whatever the page had there, or nothing past the edge of
-  the viewport, and ended as done under the name of the element it never touched. A fast-profile action whose
-  target is read still asked at such a press for a button of the table's kinds;
-  `POST /sessions/{id}/actions/click` read nothing. The pointer is now looked for in the element's document and
+  the viewport, and ended as done under the name of the element it never touched. 1.17.0 read nothing at a click's
+  press, so such a press went down unread for every caller (the read at the press is new in this release: see
+  Security). The pointer is now looked for in the element's document and
   in each document on the way up, where the frame must be what the pointer finds; when it is not, the click is one
-  Playwright places, on what the viewport shows of the element. An element in a frame is asked as well whether
+  Playwright places, on what the viewport shows of the element. At most eight documents are asked, the target's
+  own first: for a target eight or more frames down the ones above are not, which counts as a no, so Playwright
+  places the click. An element in a frame is asked as well whether
   the browser has the pointer over it: in a frame that runs in a process of its own (another site's, or a
   sandboxed one) and has a border or padding, Playwright gives every element a box up and left of it by that
   much, the pointer was looked for by that box, and a press near the edge of a small element went down on what
@@ -1034,7 +1072,9 @@ All notable changes to auto-browser are documented here.
   at another size), and the element and its frames are asked again where the press goes down: the element where
   its own document saw the pointer arrive, which the browser gives through every border, padding and turn of the
   frames around it (a frame of another process that is turned, bordered or padded is handled exactly while it
-  stays so), and a frame inside another at a point carried by its boxes. Where the element's box has moved or
+  stays so), and a frame inside another at a point carried by its boxes (there too at most eight documents are
+  asked, and a target eight or more frames down counts as found, the frames above left to Playwright's hover).
+  Where the element's box has moved or
   changed its size since the click was placed (a page that moves the frame once the pointer has arrived, or
   scales one that runs in the page's process), that point is no longer the pointer's, and the click ends as
   `target_moved` with nothing pressed; so does a scroll of the element's own document then, even where the element
@@ -1042,7 +1082,9 @@ All notable changes to auto-browser are documented here.
   reshapes the frame as the pointer arrives and leaves the element's box as Playwright counts it, which in a
   frame of another process is as if the frame were not turned or scaled and had no border or padding (a half
   turn, a scale about the frame's top-left corner, its padding grown inside the same border box): the click then
-  presses what the change put under the pointer. Three limits stay. Playwright does
+  presses what the change put under the pointer. Three limits stay, with more of their kind that
+  `docs/production-hardening.md` lists (a frame nested in a bordered or padded frame of another process among them,
+  where a button half off the inner frame's edge is pressed by no way of clicking). Playwright does
   not look through a frame that CSS transforms, or that stands inside anything CSS transforms (a dialog centred
   with a transform is one), so its own click, which a click that is not read still is, presses what is at the
   point it picks and ends as done: what the page has put over such a frame, or has beside it where the element
@@ -1054,7 +1096,8 @@ All notable changes to auto-browser are documented here.
   document that runs no script (a frame sandboxed without `allow-scripts`), and of a frame inside the element (a
   video in a card) where the element's document saw no move: a read click that has to be placed there can end as
   `target_moved`, or when its time runs out, with nothing over its target, and a frame the page puts under the
-  pointer once Playwright's hover has passed, within that much of a frame inside the element, can be pressed. In a
+  pointer once Playwright's hover has passed, within that much of a frame inside the element, can be pressed, as
+  can what a document that runs no script shows under the pointer on hover (CSS can), short of that point. In a
   frame CSS turns such a click can end so as well. Before, that press went down unchecked at the middle of the box.
 - **A selector click has one time limit for all its waits.** The scroll into view, the read of the element's box,
   the checks, the question what the pointer finds and the click Playwright places each waited up to
@@ -1138,8 +1181,10 @@ All notable changes to auto-browser are documented here.
   REST route returning page text answered `500`, whatever the tool had done by then. What a route returns, the MCP
   responses and the REST error answers (a `404`, a `BrowserActionError`, an `HTTPException`'s detail, a `422` quoting
   what was sent) now carry U+FFFD in its place, as the controller's records already do: a strict JSON parser refuses a
-  lone surrogate's own escape, and a page should not break a client's parser. A URI holding one answers `-32002`, not
-  `500`. `GET /sessions/{id}/events` sent a page title holding one as that escape, and now sends U+FFFD too.
+  lone surrogate's own escape, and a page should not break a client's parser. The replay page,
+  `GET /sessions/{id}/replay`, is HTML and not JSON, and still answers `500` for a page title holding one, as in
+  1.17.0. A URI holding one answers `-32002`, not `500`. `GET /sessions/{id}/events` sent a page title holding one as
+  that escape, and now sends U+FFFD too.
 - **A REST answer holding a NaN or an infinity now carries `null` in its place.** Neither is JSON, and the answer
   raised after its handler had run: a route with no declared return type (`GET /sessions/{id}/network/requests` is
   one) and a `BrowserActionError` whose details held one answered `500`. A tool result already sent `null` for one,
@@ -1170,25 +1215,25 @@ All notable changes to auto-browser are documented here.
   each. A stream whose body had already ended is sent nothing more, and its line says so. One whose client had gone
   by then is no error either: the controller's own streams end by themselves when their client goes and leave no
   line, and uvicorn's `send` writes nothing to a connection that is lost and raises nothing, so a stream still open
-  there is logged as ended. A client that is connected and no longer reads is waited for up to one second more: its
-  stream is left unfinished, and uvicorn logs `ASGI callable returned without completing response.` at ERROR, with
-  no traceback, and asks the transport to close. See the upgrade note.
+  there is logged as ended. A client that is connected and no longer reads is sent the end of its body while its
+  buffers have room; once they are full it is waited for up to one second more, its stream is left unfinished,
+  and uvicorn asks the transport to close (and logs `ASGI callable returned without completing response.` at
+  ERROR, with no traceback, where it writes that line). See the upgrade note.
 - **A lone surrogate no longer costs a change its record.** The audit store raised on one in any string of an event,
-  after the change the event records had been made: `browser.set_cookies` with one in a cookie's name set the
-  cookies, then failed with no audit event, no receipt and no log line. The audit store now writes U+FFFD in its
-  place, in both backends, as the witness chain and `actions.jsonl` already did. The session store and the agent job
-  store had the same fault and write U+FFFD too: a session whose page title held one could not have its record
-  saved, at its close included, and an agent run that finished with one in its result was recorded `failed` with no
-  result, though its steps had run. A tool write that was made and whose record still cannot be written (a full
-  disk) is now logged at ERROR with the tool and the session, whatever error the store raised (a cancellation
-  during that write is not logged so); the record of a write that failed, when it cannot be written either, is
-  logged at WARNING with the tool and not the session. `browser.set_cookies` also refuses a cookie
-  with a lone surrogate in any of its strings before anything reaches the browser, as `browser.set_local_storage`
-  refuses one in its key or value: Chromium stored such a cookie with U+FFFD in the surrogate's place, and a good
-  cookie sent in the same call with it. Two keys of one object that differ only in a lone surrogate take one name
-  once it is replaced, and one of their values was dropped from the audit event, the witness receipt or the answer
-  that held them. Both are now kept: the key whose name is taken gets ` (2)` appended (` (3)` and so on), and a key
-  that needed no replacement keeps its name.
+  after the change the event records had been made, so the change went unrecorded. The audit store now writes U+FFFD
+  in its place, in both backends, as the witness chain and `actions.jsonl` already did. The session store and the
+  agent job store had the same fault and write U+FFFD too: a session whose page title held one could not have its
+  record saved, at its close included, and an agent run that finished with one in its result was recorded `failed`
+  with no result, though its steps had run. A tool write that was made and whose record still cannot be written (a
+  full disk) is now logged at ERROR with the tool and the session, whatever error the store raised (a cancellation
+  during that write is not logged so); the record of a write that failed, when it cannot be written either, is logged
+  at WARNING with the tool and not the session. `browser.set_cookies` also refuses a cookie with a lone surrogate in
+  any of its strings before anything reaches the browser, as `browser.set_local_storage` refuses one in its key or
+  value: Chromium stored such a cookie with U+FFFD in the surrogate's place, and a good cookie sent in the same call
+  with it. Two keys of one object that differ only in a lone surrogate take one name once it is replaced, and one of
+  their values was dropped from the audit event, the witness receipt or the answer that held them. Both are now kept:
+  the key whose name is taken gets ` (2)` appended (` (3)` and so on), and a key that needed no replacement keeps its
+  name.
 - **A harness run no longer fails on a lone surrogate.** `harness.start_convergence` takes two values its input does
   not type, the contract's `metadata` and `mock_final_observation`. A lone surrogate in a metadata value failed the
   call with the serializer's error and left the run's empty directory behind. One in the mock observation, or in an
@@ -1199,8 +1244,9 @@ All notable changes to auto-browser are documented here.
   call to its approval takes a lone surrogate as it is, so the approval is asked and covers that call alone. One in
   a key is refused, whichever the profile: a key of either value was already (the input types it), and a key of a
   dict inside one now is too, with `contract.metadata must not hold a lone surrogate (half of a UTF-16 pair) in a
-  key`. The call with such a key ran under `fast`, and under `governed` was still answered `utf-8`. A reply of the
-  Universal Verifier (`HARNESS_UV_COMMAND`) can hold one too, written as its JSON escape. In a value the result
+  key` (or `mock_final_observation must not hold ...`, naming the value that holds the key). The call with such a
+  key ran under `fast`, and under `governed` was still answered `utf-8`. A reply of the Universal Verifier
+  (`HARNESS_UV_COMMAND`) can hold one too, written as its JSON escape. In a value the result
   keeps as it came, the run's record could not be written: the call raised, and `run.json` read `running` until the
   next start. In the notes or a postcondition's name the verdict was dropped as an invalid reply, and in a key the
   run failed. The reply now gets U+FFFD in its place, keys included, so the verdict stands, and `run.json` is
@@ -1225,17 +1271,19 @@ All notable changes to auto-browser are documented here.
   recently it was used (the bridge initializes again at its next call). An open stream still counts as use, as a
   request does, in the last-used time a restart goes by. (MCP-11)
 - **`DELETE /mcp` checks `MCP-Protocol-Version`, as every other request after `initialize` does.** It ignored the
-  header and deleted the session whatever the header said. An unsupported version is now `400` and `-32602`, a
-  version other than the session's `400` and `-32600`, and the session stays; a matching or absent header still
-  deletes it.
+  header and deleted the session whatever the header said. A version other than the session's is now `400`, and
+  the session stays: `-32602` for one the controller does not speak, `-32600` for one it does. A matching or
+  absent header still deletes it, the session's own version whatever it is (`2025-03-26` for a session restored
+  at it).
 - **A screenshot that a tool result could not carry now says why.** `browser.screenshot` and observe's `fast` preset
   dropped the inline image without a word when the screenshot was too large, outside the artifact root, of an
   unsupported type or could not be read. The result now carries `image_omitted`, in its text and in
   `structuredContent` alike, with one of `too_large`, `outside_artifact_root`, `unsupported_type`, `unreadable` or
   `no_artifact_root`; a result that carries its image, or was never meant to, has no such key. (MCP-26)
 - **`tools/list` now shows the governed approval arguments.** Every tool with a governed kind accepts
-  `workflow_profile` and `approval_id`, but its advertised schema named neither (`browser.execute_action`'s named only
-  `approval_id`), so a client could not find the approval retry flow from it. Both are now optional properties on
+  `workflow_profile` and `approval_id`, but the advertised schema of all but two named neither, so a client could not
+  find the approval retry flow from it (`browser.execute_action`'s and `browser.eval_js`'s named only `approval_id`,
+  and `browser.eval_js` described the flow). Both are now optional properties on
   exactly those tools. `browser.queue_agent_run` and `browser.queue_agent_step` have no governed kind and act on
   `workflow_profile` all the same (`governed` overrides the request's own), and their schema, which allows no
   property it does not name, left it out: it now shows `workflow_profile`, described as what it does there, and no
@@ -1285,9 +1333,12 @@ All notable changes to auto-browser are documented here.
   oldest entries) now answer an empty list for a limit at or below zero, and the SQLite store itself returns none
   for one. (AUTH-28)
 - **A `RuntimeError` behind a `409 Conflict` from `POST /sessions` or a fork is logged.** The answer stays `409`
-  `Conflict`; its cause, which nothing recorded, now goes in the log with its traceback. (AUTH-21)
+  `Conflict`; its cause, which nothing recorded, now goes in the log as a route's hidden cause: a WARNING with the
+  error's class and text, its three frames nearest the raise and the errors it was raised from, and no Python
+  traceback. (AUTH-21)
 - **More routes that call the browser manager answer its errors as the others do.** `GET /sessions`, `GET` of a
-  session, the screenshot and tab routes, the session auth-state route, `GET /auth-profiles/{name}` and
+  session, the screenshot routes, the tab routes but the list (`GET /sessions/{id}/tabs` already answered them as
+  the rest do), the session auth-state route, `GET /auth-profiles/{name}` and
   `POST /sessions/{id}/auth-profiles` (the profile list, `GET /auth-profiles`, is not one of them), `/remote-access`,
   `/audit/events`, the approval reads, `/pii-scrubber` and the agent and job routes let a `PermissionError`, a
   `ValueError` or a `FileNotFoundError` reach the client as a bare `500`. They now answer as the rest do: a typed
@@ -1296,66 +1347,67 @@ All notable changes to auto-browser are documented here.
   run's `503`) is unchanged. (AUTH-10)
 - **A route's fixed `400`, `403` or `404` now leaves its cause in the log.** A route answers the manager's
   `ValueError`, `PermissionError` or `FileNotFoundError` with a fixed text and logged nothing, and a server-side
-  fault raises the same errors: an audit file whose last line a kill cut short no longer decodes, which is a
-  `ValueError`, so `GET /audit/events` (one of the routes the entry above adds to those) would have answered
-  `Invalid request` with nothing in the log. Each is now logged at WARNING before it is answered: the route's
-  message, the error's class and text, and the last three frames it was raised through, a line each (the file, the
-  line and the function). So is a route's own fixed
-  answer for one of the three: the `409` `Conflict` of an approval's approve, reject or execute and of
-  `POST /proxy-personas`, the `403` of a page or a tab `ALLOWED_HOSTS` refuses (observe, screenshot, screenshot
-  compare, the network log, tab activation), the `400` and `403` of the cron routes and of
-  `POST /sessions/{id}/share`, and the `409` of a cron trigger whose run is refused. Not logged: a refusal a route
-  answers in that refusal's own words (a tab another tab refused, a busy session), and a refused page at
-  `GET /share/{token}/observe`, which the shared page asks for every five seconds. A caller's own mistake is logged
-  the same way: an ordinary bad request, a refused navigation or a webhook trigger with a wrong key writes one
-  WARNING of at most four lines, as often as the request rate limit lets it be sent, which is worth knowing before
-  alerting on WARNING. The error's text and the route's
-  arguments can be the caller's, so each is written escaped and cut at 200 characters (the line says when the text
-  was cut); a request model's refusal is written as its fields and the kind of each refusal, never the values
-  (the trigger's body holds the webhook key); and the frames are part of the message, written by the controller and
-  not as a Python prints a traceback, which is longer on a newer one. The `400` of a refused shadow browse (off by
-  default, and refused before its session is looked up) had a line of its own that wrote the session id as the
-  caller sent it, a line break included: it is written as the others are. One refusal's text held the
-  caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
+  fault raises the same errors: an audit file whose last line a kill cut short inside a character of more than one
+  byte no longer decodes, which is a `ValueError`, so `GET /audit/events` (one of the routes the entry above adds to
+  those) would have answered `Invalid request` with nothing in the log (a line cut anywhere else is skipped, with a
+  WARNING of its own, and the other events are answered). Each is now logged at WARNING before it is answered: the
+  route's message, the error's class and text, and the last three frames it was raised through, a line each (the file,
+  the line and the function). So is a route's own fixed answer for one of the three: the `409` `Conflict` of an
+  approval's approve, reject or execute and of `POST /proxy-personas`, the `403` of a page or a tab `ALLOWED_HOSTS`
+  refuses (observe, screenshot, screenshot compare, the network log, tab activation), the `400` and `403` of the cron
+  routes and of `POST /sessions/{id}/share`, and the `409` of a cron trigger whose run is refused. Not logged: a
+  refusal a route answers in that refusal's own words (a tab another tab refused, a busy session), and a refused page
+  at `GET /share/{token}/observe`, which the shared page asks for every five seconds. A caller's own mistake is logged
+  the same way: an ordinary bad request, a refused navigation or a webhook trigger with a wrong key writes one WARNING
+  of at most four lines, as often as the request rate limit lets it be sent, which is worth knowing before alerting on
+  WARNING. The error's text and the route's arguments can be the caller's, so each is written escaped and cut at 200
+  characters (the line says when the text was cut); a request model's refusal is written as its fields and the kind of
+  each refusal, never the values (the trigger's body holds the webhook key); and the frames are part of the message,
+  written by the controller and not as a Python prints a traceback, which is longer on a newer one. The `400` of a
+  refused shadow browse (off by default, and refused before the route opens the session; under `API_BEARER_TOKENS` the
+  app-wide session check answers `404` first for an id the caller may not use) had a line of its own that wrote the
+  session id as the caller sent it, a line break included: it is written as the others are. One refusal's text held
+  the caller's whole URL, with its userinfo and query: that of a navigation, a session or a fork whose URL has no host
   name. It now says `The https URL has no host name`, to a tool's caller too. And the refusal of a host that
   `ALLOWED_HOSTS` does not allow (`Host '...' is not allowlisted`) named the host whole, as long as the URL was: it
-  names its first 200 characters now, to a tool's caller too, and so does the refusal of a scheme that is not
-  http(s) (`URL scheme '...' is not allowed`), though a request refuses such a scheme before that check: only a
-  cron job's stored `start_url` (a store edited by hand) hands it a long one today.
+  names its first 200 characters now, to a tool's caller too, and so does the refusal of a scheme that is not http(s)
+  (`URL scheme '...' is not allowed`), though a request refuses such a scheme before that check: only a cron job's
+  stored `start_url` (a store edited by hand) hands it a long one today.
 - **An unknown approval id no longer writes a traceback to the log, and no `404` repeats a long id whole.** A REST
   route that maps no answer of its own for a `KeyError` gets the app's `404` `Not found: <key>` and its
   `unmapped KeyError` warning, which is there to tell a bug from an unknown id. The five approval routes by id
   (`GET /approvals/{id}` and its `/arguments`, `POST` `/approve`, `/reject` and `/execute`) mapped none for an id no
   approval answers to, so a caller's typo wrote that warning with a traceback of some forty lines. They answer the
-  same `404` now and write nothing. The warning carried the error by its traceback, which quotes the key whole under
-  a path cut at 200 characters, and the `404` repeated the key: an id of 60,000 characters wrote a record of 63,000
-  and came back in a body of 60,000. The warning now holds the method, the path, the error's class and text and the
-  last three frames it was raised through, the caller's texts escaped and cut at 200 characters as in the entry
-  above, and the `404` cuts the key at 200 characters, on the approval routes as well. `GET /auth-profiles/{name}`,
-  `GET /crons/{id}` and `GET /sessions/{id}/auth-state` reached that handler the same way for an id they do not know,
-  and `POST /sessions/{id}/actions/execute` and `/actions/upload` for an `approval_id` no record answers to (or
-  another operator's): each answers the `404` it answered and writes nothing now. `GET /agent/jobs/{id}` still writes
-  the warning for an id it does not know. Eight routes answer an id they do not know with a `404` in words of their
-  own, and those words repeated it whole: `DELETE /proxy-personas/{name}`, `DELETE /crons/{id}`, the four
-  `/sessions/{id}/network` routes and the two `/sessions/{id}/cdp` routes, for a session with no inspector or no CDP
-  session. Each says what it said, with the id cut at 200 characters. So do the MCP transport's `404`
-  `Unknown MCP session` (`-32001`), which repeated the `Mcp-Session-Id` header whole, and its `403`
-  `Forbidden Origin header` (`-32000`), the `Origin` header, and its answers that repeated a caller's text whole:
-  `Unknown MCP method` (`-32601`), the method; `Resource not found` (`-32002`) of a read or a subscribe, and
-  `Could not read resource` (`-32603`), the URI; and the `data.requested` of `Unsupported MCP protocol version`
-  (`400`, `-32602`), the `MCP-Protocol-Version` header. So does the `Unknown tool:` error of a tool call (MCP
-  `tools/call`, `POST /mcp/tools/call`), the tool's name. The message of a session id that names no live session,
-  which is the `detail` of every route's `404` for it (`unknown_session`, `session_closed`, `session_interrupted`,
-  `session_not_live`, the app-wide session check's included) and the text of an MCP tool's error, named the id
-  whole: an id of 60,000 characters came back in a `detail` of 60,079. It names the id cut at 200 characters, with
-  the same `code`, `reason` and words.
+  same `404` now and write nothing. The warning carried the path whole and the error by its traceback, which quotes
+  the key whole, and the `404` repeated the key: at 1.17.0 an id of 60,000 characters wrote a record of 123,242
+  characters and came back in a body of 60,024. The warning now holds the method, the path, the error's class and text
+  and the last three frames it was raised through, the caller's texts escaped and cut at 200 characters as in the
+  entry above, and the `404` cuts the key at 200 characters, on the approval routes as well.
+  `GET /auth-profiles/{name}`, `GET /crons/{id}` and `GET /sessions/{id}/auth-state` reached that handler the same way
+  for an id they do not know, and `POST /sessions/{id}/actions/execute` and `/actions/upload` for an `approval_id` no
+  record answers to (or another operator's): each answers the `404` it answered and writes nothing now.
+  `GET /agent/jobs/{id}` still writes the warning for an id it does not know. Eight routes answer an id they do not
+  know with a `404` in words of their own, and those words repeated it whole: `DELETE /proxy-personas/{name}`,
+  `DELETE /crons/{id}`, the four `/sessions/{id}/network` routes and the two `/sessions/{id}/cdp` routes, for a
+  session with no inspector or no CDP session. Each says what it said, with the id cut at 200 characters. So do the
+  MCP transport's `404` `Unknown MCP session` (`-32001`), which repeated the `Mcp-Session-Id` header whole, and its
+  `403` `Forbidden Origin header` (`-32000`), the `Origin` header, and its answers that repeated a caller's text
+  whole: `Unknown MCP method` (`-32601`), the method; `Resource not found` (`-32002`) of a read or a subscribe, the
+  URI, which the new `Could not read resource` (`-32603`) cuts too; and the `data.requested` of
+  `Unsupported MCP protocol version` (`400`, `-32602`), the `MCP-Protocol-Version` header. So does the `Unknown tool:`
+  error of a tool call (MCP `tools/call`, `POST /mcp/tools/call`), the tool's name. The message of a session id that
+  names no live session, which is the `detail` of every route's `404` for it (`unknown_session`, `session_closed`,
+  `session_interrupted`, `session_not_live`, the app-wide session check's included) and the text of an MCP tool's
+  error, named the id whole: an id of 60,000 characters came back in a `detail` of 60,079. It names the id cut at 200
+  characters, with the same `code`, `reason` and words.
 - **A file the operating system refuses is no longer answered as a conflict or as a refused page.** The approve,
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
-  screenshot, screenshot compare, the network log and tab activation answered that the page or tab is on a host
-  `ALLOWED_HOSTS` does not allow, for every `PermissionError`: one the operating system raised too (an approval or
-  artifact directory the process may not write), with nothing logged. Such an error now answers the generic `403`
-  `Not permitted` there, as on every other route, and is logged; at `GET /share/{token}/observe` it answers a
-  logged `500`. The controller's own refusals are answered as before. `POST /approvals/{id}/approve` and
+  screenshot, screenshot compare and tab activation answered that the page or tab is on a host `ALLOWED_HOSTS` does
+  not allow, for every `PermissionError`: one the operating system raised too (an approval or artifact directory the
+  process may not write), with nothing logged. Such an error now answers the generic `403` `Not permitted` there, as
+  on every other route, and is logged; at `GET /share/{token}/observe` it answers a logged `500`. The network log
+  now answers it with that generic `403` too, where it was a bare `500` (its refused-page `403` is new in this
+  release). The controller's own refusals are answered as before. `POST /approvals/{id}/approve` and
   `.../reject` and `POST /proxy-personas` now answer every other error as the rest of the routes do, where they
   let it reach the client as a bare `500`: a bad value `400`, a missing file `404`, anything else a logged `500`
   `Internal error`.
@@ -1366,16 +1418,18 @@ All notable changes to auto-browser are documented here.
   the others as its `details.count`, written when the source next reads the link with the right token (before that
   read's own event), at the first maintenance sweep after the 60 seconds (`CLEANUP_INTERVAL_SECONDS`, an hour by
   default; with `0` no sweep runs) and at a clean shutdown. Either way each refusal is one event or one of an
-  event's count, so the two add up to the refusals. They can add up to more: a write that a shutdown cuts short,
-  or that the audit store reports as failed, can have landed all the same, and what it reported (its own refusal
-  and its whole count) is then written again by the next event, so a refusal can be reported twice and is never
-  lost. An event written late names the operator who was refused, and
+  event's count, so the two add up to the refusals while the source is remembered. They can add up to more: a
+  write that a shutdown cuts short, or that the audit store reports as failed, can have landed all the same, and
+  what it reported (its own refusal and its whole count) is then written again by the next event, so a refusal
+  can be reported twice. An event written late names the operator who was refused, and
   its time is when it was written. `details.counted_other_sessions` is `true` when some of the refusals an event
   counts named another session than the event does. An event that cannot be written opens no window: the next
-  refusal, read, sweep or shutdown writes one, carrying what it lost. A refusal still answers `403` (`500`, as
-  before, when its audit write fails, and so does a read whose source's held refusals cannot be written),
-  `takeover_link_viewed` is written every time, and at most 1024 sources are remembered: the oldest is forgotten
-  first, with its count. A controller that is killed loses what it had only counted. See the upgrade note. (R5C-6)
+  refusal, read, sweep or shutdown writes one, carrying what it lost, while its source is remembered. A refusal
+  still answers `403` (`500`, as before, when its audit write fails, and so does a read whose source's held refusals
+  cannot be written), `takeover_link_viewed` is written every time, and at most 1024 sources are remembered: the
+  oldest is forgotten first, with its count, which no event then reports, and a failed write whose source has been
+  forgotten by then is lost, the source's next refusal auditing as new. A controller that is killed loses what it had
+  only counted. See the upgrade note. (R5C-6)
 - **A start that races another for the mesh or Witness key no longer trips over the other's files.** The loser of
   the race raised `FileExistsError`, which failed that start; it now loads the key the other start made, retrying
   for up to 2 seconds while the file is still being written, and the public key and `node_meta.json` are published
@@ -1418,21 +1472,23 @@ All notable changes to auto-browser are documented here.
   is refused. A stored job with no `goal` answered `404` `Not found`, and one the run's request model refuses `400`
   `Invalid request`. Each now answers `409` in one fixed text that names nothing of the cause, since the caller
   holds a webhook key and not the operator's token: the cause is in the server log, one WARNING for each such
-  trigger. Only an unknown job, a job with no key and a wrong key answer `403`, and only a request the route refuses
-  `400`: its body, or a job id in the path that is blank or longer than 50 characters. A body nested past what the
-  JSON reader goes down is refused so too, with its WARNING, where it was an unhandled `500`. A job whose stored
-  key cannot be read (a lone surrogate in the key or its hash, a record that is no JSON object: a store edited by
-  hand) proves no key, and answers that `403` to every key with a WARNING that names the class of what was raised
-  and that the stored key cannot be read, and nothing of the key, where it answered `400` or `500`. Every other
-  reader of such a job takes it as one with no key, where each answered `500`: `GET /crons` (for every job),
-  `GET /crons/{id}`, `DELETE /crons/{id}/webhook-key` (`revoked: false`) and the rotate, which replaces it. A record
-  that is no JSON object is answered as no job, and `GET /crons` leaves it out: `DELETE /crons/{id}` answers it
-  `404`, as an unknown job, where it answered `500`, and `browser.delete_cron_job` `deleted: false`; a fire refused
-  for its owner's credential, and the record of that refusal, no longer raise on one edited meanwhile; and a
-  scheduled fire of one edited since it was registered runs nothing and logs nothing, where it logged an ERROR at
-  each fire. A start leaves such a job as it is, with one WARNING that names the job, where a key held as it was
-  sent, by a store of an earlier version, stopped the controller's start; a readable key held so beside a hash that
-  cannot be read is removed from the store, as the start removes every other such key, and the WARNING says so.
+  trigger. Only an unknown job, a job with no key, a wrong key and a job whose stored key cannot be read (below)
+  answer `403`, and only a request the route refuses `400`: its body, or a job id in the path that is blank or longer
+  than 50 characters. A body nested past what the JSON reader goes down is refused so too, with its WARNING, where it
+  was an unhandled `500`. A job whose stored key cannot be read (a lone surrogate in the key or its hash, a record
+  that is no JSON object: a store edited by hand) proves no key, and answers that `403` to every key with a WARNING
+  that names the class of what was raised and that the stored key cannot be read, and nothing of the key, where it
+  answered `400` or `500`. Every other reader of such a job takes it as one with no key: `GET /crons` (for every job)
+  and `GET /crons/{id}`, which answered `500` where the lone surrogate reached the answer (in the key's first 8
+  characters, its `webhook_key_preview`, or in a field handed out whole), and this release's
+  `DELETE /crons/{id}/webhook-key` (`revoked: false`) and rotate, which replaces it. A record that is no JSON object
+  is answered as no job, and `GET /crons` leaves it out: `DELETE /crons/{id}` answers it `404`, as an unknown job,
+  where it answered `500`, and `browser.delete_cron_job` `deleted: false`; a fire refused for its owner's credential
+  (a refusal new in this release), and the record of that refusal, raise nothing on one edited meanwhile; and a
+  scheduled fire of one edited since it was registered runs nothing and logs nothing, where it logged an ERROR at each
+  fire. A start leaves such a job as it is, with one WARNING that names the job (1.17.0's start read no key, and
+  stopped at a record that is no JSON object, whatever key it held); a readable key held so beside a hash that cannot
+  be read is removed from the store, as the start removes every other such key, and the WARNING says so.
   `browser.trigger_cron_job`, which takes no key, is unchanged but for a record that is no JSON object, which it
   answers as an unknown job (`Cron job not found: <id>`) where it answered `Tool execution failed`.
 - **With its key proved, a cron trigger no longer passes on what the run's session answers its own caller, nor
@@ -1446,7 +1502,8 @@ All notable changes to auto-browser are documented here.
   `5xx` again and not a `4xx`, and the page may answer next time. A stored job that holds, where a run reads text
   or a number, a value that is neither (`max_steps` a string or a list, `start_url` or `auth_profile` a number or
   a list, `proxy_persona` a list: a store edited by hand), or whose `id` is a list or an object, was an unhandled
-  `500` and now answers that `409`. Each writes its WARNING with the cause. For such a job `browser.trigger_cron_job`
+  `500` and now answers that `409` (a `max_steps` of `true` is no such value: it runs as 1, as it did). Each writes
+  its WARNING with the cause. For such a job `browser.trigger_cron_job`
   now answers an error that names the field, where it answered `Tool execution failed`, and a scheduled fire logs
   the same. An empty value in one of the first four (`null`, `false`, `0`, `0.0`, `""`, an empty list or object) is
   no value, as it was, and the run's session is now created with none there: a `proxy_persona` of `false`, `0`,
@@ -1455,7 +1512,9 @@ All notable changes to auto-browser are documented here.
 - **A cron trigger whose run is queued now answers `triggered: true` even when the store fails afterwards.** The job
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
-  write that fails when the run has already ended is logged too, and the answer stays `triggered: true`. A stored
+  write that fails when the run has already ended is logged too, and the answer stays `triggered: true`, where the
+  job's record says the run is over; where that record cannot be read either (the job store failing with the
+  audit), the trigger answers `500` for a run that ran, and a webhook's sender tries it again. A stored
   `run_count` that is `null`, a string, a list or an object (a store edited by hand) answered an unhandled `500`
   there with the run queued, so that a webhook's sender, which tries a `5xx` again, ran the job again: a try while
   the run still held the job's slot was answered `previous_run_active`, and each one after it ended queued another
@@ -1466,10 +1525,11 @@ All notable changes to auto-browser are documented here.
 - **Every save of a cron store its JSON writer cannot write back now fails with an error its caller handles.** The
   JSON reader takes what the writer cannot write: a value nested deeper than the writer goes (the reader of Python
   3.12 and later goes deeper than the writer), or a `run_count` of 4,300 nines, which a run makes one digit longer
-  than Python prints. The save raised `RecursionError` or `ValueError`: a store holding a legacy webhook key stopped
-  the controller's start, `POST /crons`, `DELETE /crons/{id}` and the webhook key's rotate and revoke answered an
-  unhandled `500`, a fire refused for its owner's credential raised, and a trigger whose run was queued answered
-  `500` for the long `run_count`. Now the start goes on, and logs that the keys are still in plaintext; a route
+  than Python prints. The save raised `RecursionError` or `ValueError`: in 1.17.0 `POST /crons` and
+  `DELETE /crons/{id}` answered an unhandled `500` for a value nested too deep, and a trigger whose run was queued
+  answered `400` `Invalid request` for the long `run_count`, its run queued all the same; this release's key
+  migration at the start, the key's rotate and revoke, and the refusal of a fire for its owner's credential met the
+  same raise. Now the start goes on, and logs that the keys are still in plaintext; a route
   answers `503` with a fixed text, which says the store holds a value the controller cannot write back, and an MCP
   tool answers the same text; the refused fire is answered as refused; and the trigger answers `triggered: true`.
   Each such save writes one ERROR line that names the store's path and what the writer raised, and leaves the store
@@ -1500,21 +1560,23 @@ All notable changes to auto-browser are documented here.
   The cancel now leaves the callback to finish and settles the record as `interrupted`, as it does for a running
   record no worker holds. (NODE-cancel-job-finish-callback)
 - **A cron run cancelled or discarded while it waits in the queue gives back its session and its slot at once.**
-  The record ended at the call, but the session the fire opened was closed, the cron job's slot freed and
-  `last_status` written only when a worker took the run off the queue: behind a long run, with one worker
-  (`AGENT_JOB_WORKER_COUNT`), the session stayed open and counted toward `MAX_SESSIONS`, the job's next fires answered
-  `previous_run_active`, and `last_status` read `queued`, for as long as the run ahead took. The cancel or the
-  discard now does that itself, once, when no worker holds the run; it waits up to 5 seconds for the close, which
-  goes on if the caller gives up, and `last_status` then reads `cancelled` or `discarded`.
+  The record ended at the call, but the session the fire opened was closed and the cron job's slot freed only when
+  a worker took the run off the queue: behind a long run, with one worker (`AGENT_JOB_WORKER_COUNT`), the session
+  stayed open and counted toward `MAX_SESSIONS`, and the job's next fires answered `previous_run_active`, for as
+  long as the run ahead took. The cancel or the discard now does that itself, once, when no worker holds the run; it
+  waits up to 5 seconds for the close, which goes on if the caller gives up, and `last_status` then reads
+  `cancelled` or `discarded` (1.17.0 left it `queued` for good: the final status is new, see the entry above).
 - **Queuing an agent job at a full queue answers `503`, where it answered `500`.** With 100 jobs already waiting,
   `POST /sessions/{id}/agent/jobs/run` and `POST /sessions/{id}/agent/jobs/step` refused the new job and the request
   answered `500`. Both now answer `503` `Service unavailable`, as
   `POST /agent/jobs/{id}/resume` does at a full queue: try again later. The refused job is recorded `failed`, as
   before, and `browser.queue_agent_run` and `browser.queue_agent_step` already answered with the queue's own message.
   Only the full queue is answered so. The resume route answered every `RuntimeError` as `503` with nothing logged, so
-  a fault after the job was queued read as "try again later" with the job left queued: on all three routes any other
-  fault now answers `500` `Internal error` and is logged (the resume route still answers `404` for a job that is not
-  there and `400` for one that cannot be resumed). A full queue's `503` is logged as well, on all three: one
+  a fault after the job was queued read as "try again later" with the job left queued: on all three routes an OS
+  `PermissionError` now answers `403` `Not permitted`, a `FileNotFoundError` `404` `Not found` and, on the two
+  queuing routes, a `ValueError` `400`, where 1.17.0 answered each `500`, and any other fault `500` `Internal error`,
+  logged at ERROR (the resume route still answers `404` for a job that is not there and `400` for one that cannot be
+  resumed). A full queue's `503` is logged as well, on all three: one
   warning that names the session, or the job for a resume, with no traceback. `POST /crons/{id}/trigger` answered
   `500` when the queue refused its run, and now answers the same `503` with the same warning, naming the cron job;
   the session the run was given is closed, as it was.
@@ -1550,20 +1612,21 @@ All notable changes to auto-browser are documented here.
   number or a boolean as the pattern. Matching then raised for every request of the session that finished or
   failed (one DEBUG line each), so no hook registered after it was called again, and
   `DELETE /sessions/{id}/network/hooks/{pattern}`, whose pattern is text, could not remove it. A list or an object
-  answered `500`. Each now answers `422` and nothing is stored, and is refused before the session is looked for:
-  with a session the controller does not know it answers `422` where it answered `404`. A missing, an empty or a
-  `null` pattern answers `422` `url_pattern required` as before. A `false` or a `0` was answered so too, and
-  stored nothing: it is now refused as a `true` or a `5` is, so the `detail` of its `422` is a list that names
-  `body.url_pattern` where it was that text.
+  that is not empty answered `500`. Each now answers `422` and nothing is stored, and is refused before the session
+  is looked for: with a session the controller does not know it answers `422` where it answered `404` (with no
+  token or the shared one; under `API_BEARER_TOKENS` the app-wide session check comes first, and it answers `404`,
+  as it did). A missing, an empty or a `null` pattern answers `422` `url_pattern required` as before. A `false`, a
+  `0`, an empty list or an empty object was answered so too, and stored nothing: it is now refused as a `true` or a
+  `5` is, so the `detail` of its `422` is a list that names `body.url_pattern` where it was that text.
 - **One MCP `initialize` can no longer stop every later one.** The transport keeps the `clientInfo` and the
   `capabilities` of each MCP session, and writes all its sessions to one file at every `initialize`. A lone
   surrogate in either (JSON's `"\ud800"` reads as one) could not be written as UTF-8: the caller was answered
   `500`, the session stayed in memory, and every later write of the file failed the same way. Each `initialize` by
   any client then answered `500`, as did `notifications/initialized` and `DELETE /mcp` for a session made before,
-  until a restart. Any client that may call `POST /mcp` could send one, and a client that decodes its own name
-  with `surrogateescape` sends one by accident. Capabilities nested some hundreds of objects deep did the same, and
-  a session nested a few levels less was written by its `initialize` and then failed the write of every client's
-  `DELETE /mcp`, which answered `500` for as long as that session lasted, restarts included. Nothing bounded the
+  until a restart, or until the table's cap (500 sessions, or 100 of one token-verified operator's own) pushed
+  that session out as the least recently used, some 500 failed writes later at most. Any client that may call
+  `POST /mcp` could send one, and a client that decodes its own name with `surrogateescape` sends one by accident.
+  Capabilities nested some hundreds of objects deep did the same. Nothing bounded the
   size of either, and the file is written whole at every write of it by anybody. A lone surrogate is now stored as
   U+FFFD, and that `initialize` is answered as any other. An `initialize` whose `clientInfo` or `capabilities` is
   nested deeper than 32 levels (the object itself is the first, and a list is a level as an object is) or takes
@@ -1572,14 +1635,15 @@ All notable changes to auto-browser are documented here.
   written. What is kept can be longer than what was sent, and it is what the next start measures: keys that differ
   only in a lone surrogate meet once it is replaced, and all but one of them are numbered (`" (2)"`, `" (3)"`, ...).
   The file is now written compactly, as the bound measures each field: written indented, a session at the bounds
-  took up to some 35 times what is bounded (fields of lists 32 levels deep, 4.44 MiB a session, 2.17 GiB at the
-  cap). It is still written whole at every write of it, on the event loop: at the table's cap of 500 sessions,
+  took some 35 times what is bounded with fields of numbers in lists 32 levels deep (4.44 MiB a session, 2.17 GiB
+  at the cap), and 52 times with lists of one element down to the 32nd level (6.47 MiB, 3.16 GiB). It is still written
+  whole at every write of it, on the event loop: at the table's cap of 500 sessions,
   with both fields of each at 64 KiB, it is 62.6 MiB whatever the fields hold. Each session's two fields are now
   written out once, when the session is made or read back at a start, and a write joins that text with the
   session's other fields, written out at the write, where each write copied every session and wrote it out whole.
   On the host it was measured on (Windows, Python 3.12, a host other work shared), with fields of small numbers in
   a list, the worst shape measured, one write of the table at the cap now holds the event loop for about 0.3 s,
-  where it held it for about 13 s (about 0.8 s for fields that each hold one long text); a small `initialize` and
+  where 1.17.0's, written indented, held it for 40 to 47 s and wrote 375 MiB; a small `initialize` and
   a `DELETE /mcp` at the cap take as long, as each writes the table. A `notifications/initialized` for a session
   already initialized no longer writes it, where each one did: the last use it marks, which eviction goes by, is
   saved with the next write of the table, as any other request's is, so a restart before that write reads back the
@@ -1616,34 +1680,37 @@ All notable changes to auto-browser are documented here.
   answers a field it refuses with `422` and each error's `input`, the value as it was sent, and MCP `tools/call`
   answers params it refuses with `-32602` `Invalid tools/call params` and the same errors in its `data`. Each walk
   of such an answer goes down the value by recursion: the encoder a call a level, and the walks that write a lone
-  surrogate as U+FFFD and a `NaN`, an infinity or `1e999` as `null` two frames a level on Python 3.11. A value
-  nested deep enough that one of them gave up was an unhandled `500`: on 3.11, the image's Python, from about 490
-  levels around a lone surrogate, `NaN` or `1e999` (a `POST /sessions` whose `name` was such a list) and from about
-  500 for `tools/call`; on 3.12 at about 980 around `NaN` or `1e999` for `POST /sessions`, and on 3.12 and 3.14
-  from about 990 for `tools/call`. An error whose `input` is nested more than 100 levels deep (the value itself the
-  first) now leaves its `input` out and keeps its `type`, `loc`, `msg` and the rest; a shallower `input` is
-  repeated as it was. A body nested past what the JSON reader goes down is still the reader's `400`.
+  surrogate as U+FFFD and a `NaN`, an infinity or `1e999` as `null` two frames a level on Python 3.11. The last two
+  are this release's (1.17.0 had neither: a refused value that held a lone surrogate, `NaN` or `1e999` was an
+  unhandled `500` at any depth, see the entries above), and a value nested deep enough would make them give up, from
+  about 490 levels on 3.11, the image's Python. In 1.17.0 a plain value was a `500` too from about 990 levels for
+  `POST /sessions` on 3.12, while `tools/call` repeated one of 1,500. An error whose `input` is nested more than 100
+  levels deep (the value itself the first) now leaves its `input` out and keeps its `type`, `loc`, `msg` and the
+  rest; a shallower `input` is repeated as it was. A body nested past what the JSON reader goes down is still the
+  reader's `400`.
 - **An MCP request whose JSON-RPC `id` is no string, number or `null` is refused, where one nested deep answered
   `500`.** An answer of `POST /mcp` repeats the request's `id` whole (all but the refusals of an `Origin`, of a
-  body that is no JSON, of a batch and of a body that is no object, which answer `"id": null`), and the walks of an
-  answer go down it by recursion: an `id` of lists nested around `NaN` or a lone surrogate was an unhandled `500`
-  from about 600 levels on Python 3.11, the image's Python, and at 1,200 on 3.12, whatever the request was (a
-  `tools/call`, a `ping`, and the refusals of a body that is not JSON-RPC 2.0 or names no method). JSON-RPC 2.0
+  body that is no JSON, of a batch and of a body that is no object, which answer `"id": null`). In 1.17.0 an `id`
+  that held `NaN`, an infinity, `1e999` or a lone surrogate, bare or nested in lists, was an unhandled `500`
+  whatever the request was (a `tools/call`, a `ping`, and the refusals of a body that is not JSON-RPC 2.0 or names
+  no method), and the walks this release adds to an answer go down an `id` by recursion. JSON-RPC 2.0
   allows a string, a number or `null` (MCP a string or an integer); any other `id` (a list, an object, `true` or
   `false`) is now answered `400` with `-32600` and `"id": null`, before its `jsonrpc`, its method or its session
   is looked at, with the message `JSON-RPC id must be a string (with no lone surrogate), a finite number or null`.
-  So is an `id` an answer could not repeat as it was sent, which ran its request: `NaN`, `Infinity`, `-Infinity`
-  and a number too large for a float such as `1e999`, which the JSON reader takes and which are no JSON numbers
-  (the answer said `"id": null`), and a string that holds a lone surrogate (`"\ud800"`, which the answer wrote as
-  U+FFFD). An `initialize` with one made a session whose answer did not name its request. Any other string, number
-  or `null` is answered as before.
+  So is an `id` an answer could not repeat as it was sent, which ran its request and was then answered an unhandled
+  `500` in 1.17.0: `NaN`, `Infinity`, `-Infinity` and a number too large for a float such as `1e999`, which the JSON
+  reader takes and which are no JSON numbers, and a string that holds a lone surrogate (`"\ud800"`). An `initialize`
+  with one made a session, and its `500` carried no session header. Any other string, number or `null` is answered
+  as before.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
   `browser.create_cron_job` created its job at once and stored it `fast`, and a run queued by
-  `browser.queue_agent_run` kept the profile its request named. A call is now `governed` when either argument
-  says `governed`; a value that is neither `fast` nor `governed` is refused in either, as before (a `null` is
-  none: it reads as an argument left out).
+  `browser.queue_agent_run` kept the profile its request named (with `FORCE_GOVERNED_APPROVALS` off, the default;
+  with it on, a governed tool's call waited for an approval all the same, and the cron job was still stored `fast`). A
+  call is now `governed` when either argument says `governed`; a value that is neither `fast` nor `governed` is
+  refused in either, by a governed tool and by the two queue tools (a refusal new in this release, above; any other
+  tool reads neither), and a `null` is none: it reads as an argument left out.
 - **A window-birth watcher that is lost is attached again when its first re-attach fails.** When the watcher's
   browser session dies while the browser lives and has a watched session, a replacement's attach is started at once
   (behind another browser's attach in progress), and until it is up every popup of that browser's sessions is refused
@@ -1667,8 +1734,9 @@ All notable changes to auto-browser are documented here.
   `browser.get_auth_profile` answered an id no record answers to with the id alone (`nope123`), the text of the
   lookup's `KeyError`. They now answer in the wording of an unknown session id:
   `No agent job with id nope123. List agent jobs to find one.` and
-  `No auth profile named nope123. List auth profiles to find one.` A job in a session the caller may not use, and
-  another operator's auth profile, read as one that never was, as before. The REST routes' `404`s are unchanged.
+  `No auth profile named nope123. List auth profiles to find one.` A job in a session the caller may not use reads as
+  one that never was, as before, and so now does another operator's auth profile (see Security; 1.17.0 answered it
+  `not_permitted`, naming its owner). The REST routes' `404`s are unchanged.
 - **A provider CLI is stopped whole, and its output is read with a cap.** `claude`, `codex` and `gemini` were started
   in the controller's own process group, and a timeout or a cancelled job killed only that process, then waited for
   its pipes with no limit (a cancel did so on Python 3.11, the image's; on 3.14 it returned at once and left the
@@ -1838,8 +1906,10 @@ All notable changes to auto-browser are documented here.
 - **A garbled reply from `browser.find_by_vision`'s model is now an error, where it was `found: false`.** A reply that
   was not a JSON object, a `found` that was missing or neither true nor false, or a `found: true` reply whose `x`, `y`
   or `confidence` was not a finite number (a boolean is not one) or whose point fell outside the screenshot read as a
-  normal not-found or failed with a raw Python error, but for two that were answered as found, with the point: a
-  reply whose numbers were quoted (`"x": "640"`) and one whose `found` was a non-empty string (`"found": "true"`).
+  normal not-found, failed with a raw Python error (`Tool execution failed`, or a `ValueError`'s own text for an
+  `"x": NaN`), or was answered as found, with the point: one whose numbers were quoted (`"x": "640"`) or
+  booleans (`"x": true` read as 1), one whose `found` was truthy but not `true` (`"found": "true"`,
+  `"found": 1`), and one whose point fell outside the screenshot.
   Each is now a tool error with a fixed message that does not quote the reply; `found: false` stays a normal answer,
   its coordinates are not read, and its `confidence` is always 0.0, where the reply's own was passed through. The
   reply is no longer logged whole or returned as `raw_response`: only its length and the failure's class are logged,
@@ -1849,8 +1919,10 @@ All notable changes to auto-browser are documented here.
   overlapping alternatives, its own or those of a group inside it at any depth (`(a|aa)+`, `((a|aa))+`), now fails
   validation, with a message naming the group and why. It used to reach the page, where it could hang the page's
   JavaScript thread after the controller's 10-second bound had stopped waiting for it. The check reads the pattern's
-  own syntax, folds case as the page's case-insensitive RegExp does (for an escape or a class it compares the text as
-  written), and stops only these shapes; that bound stays for the rest. It does not tell a pattern that hangs from
+  own syntax, folds case as the page's case-insensitive RegExp does (for an escape, a class or a nested group used
+  as an alternative it compares the text as written, so `(a|(a))+` passes; and it does not read a group's inline
+  modifiers, `(?-i:...)`, folding its letters as the whole pattern's), and stops only these shapes; that bound stays
+  for the rest. It does not tell a pattern that hangs from
   an everyday one of the same shape: `\d+(\.\d+)*` and `\w+(\s+\w+)*` are refused, and
   `\$\d+(,\d{3})*(\.\d{2})?`, whose inner repeat is bounded, passes. A repeat with an upper bound is not counted,
   around the group or inside it: `(a{1,50})+$`, `(a+){1,50}$` and `(a|aa){1,50}$` pass and backtrack as the patterns
