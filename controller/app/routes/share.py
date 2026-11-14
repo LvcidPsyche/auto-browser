@@ -57,15 +57,17 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         The token is checked again on each side of the event. A route waits after its own check (a poll for its
         frame, as long as the session's agent holds the lock; the page for the session's lookup), and a first view
         waits for its event, and for any other token's before it: a link revoked or expired during either wait is
-        refused as it is now, and one refused before its event is no view. One revoked while its event is written is
-        refused with the event written.
+        refused as it is now, and one refused before its event is no view. One revoked or expired while its event is
+        written is refused with the event written.
         """
         _shared_session_id(token)
         try:
             await share_manager.record_view(manager.audit, token, session_id)
         except Exception:
             raise internal_error(
-                logger, "the first view of a share link of session %s was not audited", session_id
+                logger,
+                "the audit of the first view of a share link of session %s failed (its event may be in the log)",
+                session_id,
             ) from None
         _shared_session_id(token)
 

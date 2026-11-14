@@ -322,10 +322,12 @@ class FirstViewAuditTests(_Links):
         token = self.mint()
         self.audit.fail_with = OSError(28, "No space left on device")
 
-        with self.assertLogs("app.routes.share", level="ERROR"):
+        with self.assertLogs("app.routes.share", level="ERROR") as logs:
             statuses = self.view_every_way(token)
         self.assertEqual(statuses, [500, 500, 500])
         self.assertEqual(self.audit.of(SHARE_VIEWED_EVENT), [])
+        # The file store appends the event before it trims the log, which can fail after it.
+        self.assertIn("failed (its event may be in the log)", logs.output[0])
 
         self.audit.fail_with = None
         self.assertEqual(self.view_every_way(token), [200, 200, 200])

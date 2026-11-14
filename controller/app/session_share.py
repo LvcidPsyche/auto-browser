@@ -85,7 +85,7 @@ def token_digest(token: str) -> str:
 
 
 def _is_stamp(value: object) -> bool:
-    """Whether ``value`` is a time as a mint or a revoke writes it: a whole number of milliseconds, no bool."""
+    """Whether ``value`` is a stamp as a mint or a revoke writes it: a whole number of milliseconds, no bool."""
     return type(value) is int and value >= 0
 
 
@@ -202,7 +202,7 @@ class SessionShareManager:
             # only once a link's longest life has passed since its stamp. Were exp read after the lock, a revoke in
             # between could be dropped while the link it ended was still good.
             now = time.time()
-            # iat: when it was minted, in milliseconds, for a revoke to end it by (validate_token). Kept as the last
+            # iat: its mint's stamp, in milliseconds, for a revoke to end it by (validate_token). Kept as the last
             # mint's, so that a revoke after a restart takes a later stamp (_read_revocations).
             iat = self._next_stamp(now)
             revocations = replace(held, minted=iat)
@@ -304,8 +304,8 @@ class SessionShareManager:
     # ── Revocation ─────────────────────────────────────────────────────────
 
     def revoke(self, session_id: str) -> int:
-        """End every link of ``session_id`` minted so far, and return the time they are ended by: one minted afterwards
-        works. Blocking (it writes the store): call it in a worker thread.
+        """End every link of ``session_id`` minted so far, and return the stamp they are ended by: one minted
+        afterwards works. Blocking (it writes the store): call it in a worker thread.
 
         The store is written before the revocation counts, so one that cannot be saved revokes nothing and raises
         ShareRevocationStoreError, as does a store that cannot be read. Revocations no link can still need are dropped
@@ -334,7 +334,7 @@ class SessionShareManager:
         return stamp
 
     def _next_stamp(self, now: float, *, ahead_ms: int = 0) -> int:
-        """The time, in milliseconds, of a mint or a revoke made at ``now`` (the clock's), at least ``ahead_ms`` past
+        """The stamp, in milliseconds, of a mint or a revoke made at ``now`` (the clock's), at least ``ahead_ms`` past
         it: later than every stamp this controller has given before in the same era, in this process or an earlier one,
         so that a link minted after a revoke is never one it ends and a revoke ends every link minted before it. The
         store keeps the last stamp of a mint and of a revoke, each written before its link is handed out or its

@@ -1514,8 +1514,9 @@ does not.
 
 - A link carries its mint's stamp, and a revoke ends the links stamped up to its own: a stamp in milliseconds that
   orders mints and revokes, the clock's time except after a corrupt store or a clock set back, when stamps run ahead
-  of it. A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links
-  are revoked, which ends it too.
+  of it (not after a restart without the file, when a revoke can miss a link minted before the clock was set back).
+  A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links are
+  revoked, which ends it too.
 - Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
   so a restart does not bring a revoked link back. One is kept at least as long as a link can live, 24 hours, or
   `SHARE_TOKEN_TTL_MINUTES` where that is longer, and dropped by the first revoke after that. The age is read from
@@ -1549,16 +1550,17 @@ The audit log records a link's mint, its first view and a revoke. It names a lin
 the token as the link carries it, never by the token: the digest ties a view to its mint and opens nothing.
 
 - `share_minted` is written by the mint, as the operator who made the link, before the token is answered. A mint
-  whose event cannot be written fails, and answers no token.
+  whose event cannot be written fails, and answers no token; so does one whose audit fails after its event is
+  written (the trim of the log that follows it, say).
 - `share_revoked` is written by a revoke, as the operator who made it, with `revoked_before`: the stamp, in
   milliseconds, that the session's links are ended up to. The revocation is saved first: a revoke whose event
   cannot be written answers `500` with the links ended.
 - `share_viewed` is written the first time a valid token is shown something of its session: the page, a frame or a
   frame's image. Once per token while the controller runs: it remembers the 4,096 tokens viewed last, so after a
   restart, or once a token is forgotten, its next view is recorded again. A view whose event cannot be written is
-  answered `500`. A link revoked while its first view's event is being written is refused, with that event written.
-  The event's operator is `anonymous` unless the viewer also proved a named credential (`API_BEARER_TOKENS`),
-  whatever an `X-Operator-Id` header on the request says.
+  answered `500`. A link revoked or expired while its first view's event is being written is refused, with that
+  event written. The event's operator is `anonymous` unless the viewer also proved a named credential
+  (`API_BEARER_TOKENS`), whatever an `X-Operator-Id` header on the request says.
 
 ## Backups
 

@@ -891,9 +891,10 @@ All notable changes to auto-browser are documented here.
 - **A share link's mint and its first view are in the audit log.** `POST /sessions/{id}/share` and
   `browser.share_session` hand out a link that lets anyone who holds it watch the session, and nothing recorded that
   one was made or that it was used. A mint now writes `share_minted`, as the operator who made the link, before the
-  token is answered: one whose event cannot be written fails, and answers no token. The first time a valid token is
-  shown something of its session (the share page, a frame or a frame's image) `share_viewed` is written, once per
-  token while the controller runs: it remembers the 4,096 tokens viewed last, so after a restart, or once a token is
+  token is answered: one whose event cannot be written fails, and answers no token, as does one whose audit fails
+  after its event is written (the trim of the log that follows it, say). The first time a valid token is shown
+  something of its session (the share page, a frame or a frame's image) `share_viewed` is written, once per token
+  while the controller runs: it remembers the 4,096 tokens viewed last, so after a restart, or once a token is
   forgotten, its next view is recorded again. A view whose event cannot be written answers `500`. Both events name
   the token by `token_sha256`, its SHA-256, and never hold it. A `share_viewed` event is the `anonymous` operator's
   unless the viewer also proved a named credential, whatever its `X-Operator-Id` header says. "Share links" in
@@ -904,9 +905,10 @@ All notable changes to auto-browser are documented here.
   from then on, and a link minted afterwards works. Whoever may use the session may revoke, as for the mint, and a
   closed session's links can be revoked by its id while its record is kept. A new link carries its mint's stamp,
   and a revoke ends the links stamped up to its own: a stamp in milliseconds that orders mints and revokes, the
-  clock's time except after a corrupt store or a clock set back, when stamps run ahead of it. A link minted before
-  this release carries none: it works until it expires, as before, unless its session's links are revoked, which
-  ends it too. Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, mode `0600`),
+  clock's time except after a corrupt store or a clock set back, when stamps run ahead of it (not after a restart
+  without the file, when a revoke can miss a link minted before the clock was set back). A link minted before this
+  release carries none: it works until it expires, as before, unless its session's links are revoked, which ends it
+  too. Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, mode `0600`),
   so a restart does not bring a revoked link back, and each is dropped once no link it ended can still be unexpired
   by the controller's clock: a revoke made while that clock runs ahead drops them that much too soon, and their
   links work again once it is set right. The file is written at each mint as well as at each revoke: a mint that
