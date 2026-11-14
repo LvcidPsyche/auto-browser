@@ -76,11 +76,12 @@ All notable changes to auto-browser are documented here.
 - **A `browser.find_elements` pattern that ran can now be refused.** With `regex=true`, a pattern whose group repeats
   without bound and holds an unbounded repeat of its own or overlapping alternatives, at any depth (`(a+)+$`,
   `(a|aa)+`, `((a|aa))+`), fails validation with a message naming the group and why, where it used to reach the
-  page. Everyday patterns of that shape, with a separator between the two repeats, are refused too (`\d+(\.\d+)*`,
-  `\w+(\s+\w+)*`). Those were never slow, and an upper bound on the group's repeat, or on each repeat inside it,
-  gets them past the check (`\d+(\.\d{1,50})*`, with `{1,50}` in place of `+`); or pass `regex=false` to match the
-  text literally. A bound does not make a slow pattern fast: the check does not count a repeat with an upper bound,
-  so `(a{1,50})+$` passes it and can hang a page as `(a+)+$` did.
+  page (an alternative that is itself a group is compared as written: `(a|(a))+` passes). Everyday patterns of that
+  shape, with a separator between the two repeats, are refused too (`\d+(\.\d+)*`, `\w+(\s+\w+)*`). Those were never
+  slow, and an upper bound on the group's repeat, or on each repeat inside it, gets them past the check
+  (`\d+(\.\d{1,50})*`, with `{1,50}` in place of `+`); or pass `regex=false` to match the text literally. A bound does
+  not make a slow pattern fast: the check does not count a repeat with an upper bound, so `(a{1,50})+$` passes it and
+  can hang a page as `(a+)+$` did.
 - **A controller with no token now refuses a write from another web origin.** On a tokenless loopback controller
   (`API_ALLOW_TOKENLESS_LOOPBACK=true`), a POST, PUT, PATCH or DELETE that a browser marks `Sec-Fetch-Site:
   cross-site` or `same-site`, or whose `Origin` names another host or port than its `Host` (`Origin: null` and one
@@ -688,8 +689,9 @@ All notable changes to auto-browser are documented here.
     first read never saw. A button of a kind the action has no approval for is not pressed, and the action asks. A
     click that Playwright has to place (on a wrapper wider than the viewport, one broken over two lines, or one
     covered at its middle) is pressed by the controller at the point Playwright would have picked, so it is read
-    where it lands too; on a wrapper with no box of its own (`display: contents`) such an action now answers
-    `target_has_no_box` and presses nothing, where it used to click a child, and a target the page has taken out
+    where it lands too; on a wrapper with no box of its own (`display: contents`) such an action by selector now
+    answers `target_has_no_box` and presses nothing (by `element_id`, see the upgrade note), where it used to click
+    a child, and a target the page has taken out
     of its layout when it is to be pressed (`hidden`, `display: none`), or that the pointer does not find where
     the click was placed (made invisible since, or under something), answers `target_moved`, which is retryable
     (one that has left the page, or was made invisible before the pointer was placed, is waited for, as a click
@@ -714,9 +716,9 @@ All notable changes to auto-browser are documented here.
   neighbour, which the read above had never seen. The moved point is now kept only while the same element is under
   it (compared in the isolated world once the pointer has arrived); otherwise, or when that cannot be told (half a
   second to set the comparison up, half a second to make it), the press is on the point itself. Two points inside
-  a frame of another origin are never taken for one element. Points are compared through open shadow roots only: in
-  a closed one both find its host, so two of its controls, or two points in a frame inside it, are taken for one
-  element and the moved point is kept.
+  a frame of another origin are never taken for one element, unless the frame is in a closed shadow root: points
+  are compared through open shadow roots only, and in a closed one both find its host, so two of its controls, or
+  two points in a frame inside it, are taken for one element and the moved point is kept.
 - **A tool call's approval no longer stores a digest that its arguments alone reproduce.** An approval for a governed
   tool call binds the call through a stand-in action whose text was `<tool> sha256:<digest>`, a plain SHA-256 of the
   call's whole arguments, the credentials its preview leaves out included. `GET /approvals`, `browser.list_approvals`
@@ -1513,8 +1515,8 @@ All notable changes to auto-browser are documented here.
   store could fail (an unreadable file, a full disk) just after the run was queued, and the trigger then answered an
   error for a run that had started. The failure is now logged and the run's metadata is left as it was. An audit
   write that fails when the run has already ended is logged too, and the answer stays `triggered: true`, where the
-  job's record says the run is over; where that record cannot be read either (the job store failing with the
-  audit), the trigger answers `500` for a run that ran, and a webhook's sender tries it again. A stored
+  agent job's record says the run is over; where that record cannot be read either (the agent job store failing
+  with the audit), the trigger answers `500` for a run that ran, and a webhook's sender tries it again. A stored
   `run_count` that is `null`, a string, a list or an object (a store edited by hand) answered an unhandled `500`
   there with the run queued, so that a webhook's sender, which tries a `5xx` again, ran the job again: a try while
   the run still held the job's slot was answered `previous_run_active`, and each one after it ended queued another
@@ -1688,20 +1690,19 @@ All notable changes to auto-browser are documented here.
   levels deep (the value itself the first) now leaves its `input` out and keeps its `type`, `loc`, `msg` and the
   rest; a shallower `input` is repeated as it was. A body nested past what the JSON reader goes down is still the
   reader's `400`.
-- **An MCP request whose JSON-RPC `id` is no string, number or `null` is refused, where one nested deep answered
-  `500`.** An answer of `POST /mcp` repeats the request's `id` whole (all but the refusals of an `Origin`, of a
-  body that is no JSON, of a batch and of a body that is no object, which answer `"id": null`). In 1.17.0 an `id`
-  that held `NaN`, an infinity, `1e999` or a lone surrogate, bare or nested in lists, was an unhandled `500`
-  whatever the request was (a `tools/call`, a `ping`, and the refusals of a body that is not JSON-RPC 2.0 or names
-  no method), and the walks this release adds to an answer go down an `id` by recursion. JSON-RPC 2.0
+- **An MCP request whose JSON-RPC `id` is no string, finite number or `null` is refused, where one that held `NaN` or
+  a lone surrogate answered `500`.** An answer of `POST /mcp` repeats the request's `id` whole (all but the refusals
+  of an `Origin`, of a body that is no JSON, of a batch and of a body that is no object, which answer `"id": null`).
+  In 1.17.0 an `id` that held `NaN`, an infinity, `1e999` or a lone surrogate, bare or nested in lists, was an
+  unhandled `500` whatever the request was (a `tools/call`, a `ping`, and the refusals of a body that is not JSON-RPC
+  2.0 or names no method), and the walks this release adds to an answer go down an `id` by recursion. JSON-RPC 2.0
   allows a string, a number or `null` (MCP a string or an integer); any other `id` (a list, an object, `true` or
-  `false`) is now answered `400` with `-32600` and `"id": null`, before its `jsonrpc`, its method or its session
-  is looked at, with the message `JSON-RPC id must be a string (with no lone surrogate), a finite number or null`.
-  So is an `id` an answer could not repeat as it was sent, which ran its request and was then answered an unhandled
-  `500` in 1.17.0: `NaN`, `Infinity`, `-Infinity` and a number too large for a float such as `1e999`, which the JSON
-  reader takes and which are no JSON numbers, and a string that holds a lone surrogate (`"\ud800"`). An `initialize`
-  with one made a session, and its `500` carried no session header. Any other string, number or `null` is answered
-  as before.
+  `false`) is now answered `400` with `-32600` and `"id": null`, before its `jsonrpc`, its method or its session is
+  looked at, with the message `JSON-RPC id must be a string (with no lone surrogate), a finite number or null`. So is
+  an `id` an answer could not repeat as it was sent, which ran its request and was then answered an unhandled `500` in
+  1.17.0: `NaN`, `Infinity`, `-Infinity` and a number too large for a float such as `1e999`, which the JSON reader
+  takes and which are no JSON numbers, and a string that holds a lone surrogate (`"\ud800"`). An `initialize` with one
+  made a session, and its `500` carried no session header. Any other string, number or `null` is answered as before.
 - **A tool call whose two profile arguments disagree is governed.** `policy_profile` is a second name for
   `workflow_profile`, and it was read first: `{"workflow_profile": "governed", "policy_profile": "fast"}` ran as
   `fast`. A governed tool then ran without the approval one of the two arguments asked for,
@@ -1903,17 +1904,17 @@ All notable changes to auto-browser are documented here.
 - **MCP protocol `2025-03-26` is no longer negotiated.** That version allows JSON-RPC batches, and the controller
   refuses them, so a client on it was promised what the server would not do. `2025-11-25` and `2025-06-18` remain.
   (MCP-15)
-- **A garbled reply from `browser.find_by_vision`'s model is now an error, where it was `found: false`.** A reply that
-  was not a JSON object, a `found` that was missing or neither true nor false, or a `found: true` reply whose `x`, `y`
-  or `confidence` was not a finite number (a boolean is not one) or whose point fell outside the screenshot read as a
-  normal not-found, failed with a raw Python error (`Tool execution failed`, or a `ValueError`'s own text for an
-  `"x": NaN`), or was answered as found, with the point: one whose numbers were quoted (`"x": "640"`) or
-  booleans (`"x": true` read as 1), one whose `found` was truthy but not `true` (`"found": "true"`,
-  `"found": 1`), and one whose point fell outside the screenshot.
-  Each is now a tool error with a fixed message that does not quote the reply; `found: false` stays a normal answer,
-  its coordinates are not read, and its `confidence` is always 0.0, where the reply's own was passed through. The
-  reply is no longer logged whole or returned as `raw_response`: only its length and the failure's class are logged,
-  as a reply is model output about a page. A `confidence` left out still reads as 0.0. (STORE-32)
+- **A garbled reply from `browser.find_by_vision`'s model is now an error, where most were `found: false`.** A
+  reply that was not a JSON object, a `found` that was missing or neither true nor false, or a `found: true` reply
+  whose `x`, `y` or `confidence` was not a finite number (a boolean is not one) or whose point fell outside the
+  screenshot read as a normal not-found, failed with a raw Python error (`Tool execution failed`, or a `ValueError`'s
+  own text for an `"x": NaN`), or was answered as found, with the point: one whose numbers were quoted (`"x": "640"`)
+  or booleans (`"x": true` read as 1), one whose `found` was truthy but not `true` (`"found": "true"`, `"found": 1`),
+  and one whose point fell outside the screenshot. Each is now a tool error with a fixed message that does not quote
+  the reply; `found: false` stays a normal answer, its coordinates are not read, and its `confidence` is always 0.0,
+  where the reply's own was passed through. The reply is no longer logged whole or returned as `raw_response`: only
+  its length and the failure's class are logged, as a reply is model output about a page. A `confidence` left out
+  still reads as 0.0. (STORE-32)
 - **`browser.find_elements` refuses the classic catastrophic regular expressions.** With `regex=true`, a pattern with
   a group that repeats without bound and either holds an unbounded repeat of its own (`(a+)+$`, `(.*)*`) or has
   overlapping alternatives, its own or those of a group inside it at any depth (`(a|aa)+`, `((a|aa))+`), now fails
