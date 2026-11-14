@@ -903,6 +903,27 @@ def test_a_cli_home_that_a_directory_given_holds_once_resolved_is_not_refused(
     assert any(PurePosixPath(home).is_relative_to(real) for _, real in given)
 
 
+async def test_a_directory_written_in_the_controllers_home_that_resolves_elsewhere_is_named_as_written(
+    linux_links, caplog
+) -> None:
+    # An operator's link in the home: what the CLI writes in its target is what the controller finds at the link, in
+    # its home. The line names the path that lies there, and where it resolves.
+    linux_links.dirs.add("/opt/out")
+    linux_links.links["/home/controller/out-link"] = "/opt/out"
+    settings = {"CLI_SANDBOX_WRITABLE": "/home/controller/out-link"}
+
+    with caplog.at_level(logging.WARNING):
+        await _launch_on_linux(_linux_settings(**settings), "/data/cli-home", {"HOME": "/data/cli-home"})
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(
+            _linux_settings(CLI_SANDBOX_REQUIRED="true", **settings), "/data/cli-home", {"HOME": "/data/cli-home"}
+        )
+
+    (line,) = _written(caplog)
+    assert "write /home/controller/out-link (/opt/out once resolved) under" in line
+    assert "which lies in the controller's own home /home/controller" in line
+
+
 @pytest.mark.parametrize(
     "layout", ["PYTHONUSERBASE in /tmp", "the passwd home's .local as CLI_HOME", "the image's own layout"]
 )

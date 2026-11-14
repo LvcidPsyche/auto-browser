@@ -256,6 +256,12 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
     return given, home_refused
 
 
+def _named(entry: tuple[str, str]) -> str:
+    """A directory for the log: as written, and once resolved where that is another path."""
+    written, real = entry
+    return written if written == real else "%s (%s once resolved)" % (written, real)
+
+
 def _passwd_home() -> str:
     """The controller's home as its passwd entry names it; "" where there is none (not POSIX, or a uid with none)."""
     if pwd is None:
@@ -287,12 +293,21 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
     )
     for entry, home in ((entry, home) for entry in given for home in homes):
         if _lies_in(home, entry):
-            return found % (entry[1], "and the controller's own home %s lies there: what a CLI leaves in it" % home[0])
+            return found % (
+                _named(entry),
+                "and the controller's own home %s lies there: what a CLI leaves in it" % home[0],
+            )
         if _lies_in(entry, home) and entry != own:
-            return found % (entry[1], "which lies in the controller's own home %s: what a CLI leaves there" % home[0])
+            return found % (
+                _named(entry),
+                "which lies in the controller's own home %s: what a CLI leaves there" % home[0],
+            )
     for entry, place in ((entry, place) for entry in given for place in read_at_start):
         if _lies_in(entry, place) or _lies_in(place, entry):
-            return found % (entry[1], "and the controller reads %s at its start: what a CLI leaves there" % place[0])
+            return found % (
+                _named(entry),
+                "and the controller reads %s at its start: what a CLI leaves there" % place[0],
+            )
     return ""
 
 
