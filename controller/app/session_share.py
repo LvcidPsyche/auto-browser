@@ -66,9 +66,10 @@ class ShareRevocationStoreError(RuntimeError):
 
 
 class ShareAuditError(Exception):
-    """A mint's event could not be written to the audit log, raised from the audit's own error: the server's fault
-    whatever that error's class (the file store's trim raises UnicodeDecodeError, a ValueError, for a log that is not
-    UTF-8), and never a refusal of the caller's request. No token is handed out."""
+    """A mint's audit failed, raised from the audit's own error: the server's fault whatever that error's class, and
+    never a refusal of the caller's request. Its event may be in the log all the same: the file store appends it and
+    then trims the log, and the trim raises UnicodeDecodeError, a ValueError, for a log that is not UTF-8. No token
+    is handed out."""
 
 
 # A link's first view is audited once per token per process: the digests of this many tokens are remembered, and the
@@ -91,7 +92,7 @@ def _is_stamp(value: object) -> bool:
 class _Revocations:
     """What has been revoked: a link is ended when it was minted at or before the time held for its session, or at or
     before ``every_session``, the mark a corrupt store leaves (0 where there is none). ``minted`` is the stamp the
-    last mint gave (0 before any), which a restart starts its stamps after."""
+    last mint gave (0 where none is recorded), which a restart starts its stamps after."""
 
     every_session: int = 0
     sessions: dict[str, int] = field(default_factory=dict)
@@ -102,8 +103,9 @@ class _Revocations:
 
 
 def _revocations_read(data: object) -> _Revocations:
-    """The store's JSON as revocations; ValueError for anything a save does not write. A store with no "minted" (the
-    first 1.18.0 builds wrote none) has seen no mint."""
+    """The store's JSON as revocations; ValueError for anything a save does not write. A store with no "minted"
+    records no mint: one written before 1.18.0's final form (only unreleased builds of 1.18.0 wrote one) does not
+    carry the last mint, so a revoke after a restart with the clock set back can miss a link such a build minted."""
     if not isinstance(data, dict):
         raise ValueError(f"it holds a JSON {type(data).__name__}, not an object")
     if set(data) - {"minted"} != {"all", "sessions"}:
@@ -336,7 +338,8 @@ class SessionShareManager:
         A store that is not there holds no revocations. One that cannot be read is left where it is, as the cron
         store is. One that reads as something no save writes can no longer say which links were revoked, and an empty
         one in its place would bring them back: every link minted before now is revoked instead, and the store is
-        written again saying so. It is not set aside as a corrupt cron store is: it held nothing to restore.
+        written again saying so (one that cannot be written again stays unreadable: ShareRevocationStoreError). It is
+        not set aside as a corrupt cron store is: it held nothing to restore.
         """
         path = self._revocations_path
         try:
@@ -435,8 +438,8 @@ async def mint_share_token(share_manager: Any, audit: Any, session_id: str, *, t
     each of which has first checked that its caller may use the session.
 
     The token is returned only once its stamp is in the store (create_token, in a worker thread: it reads and writes
-    the store) and its event is written: a mint that cannot be audited raises ShareAuditError, and the token made
-    for it is dropped unseen. The event names the token by its digest (token_digest).
+    the store) and its event is written: a mint whose audit fails raises ShareAuditError, and the token made for it
+    is dropped unseen. The event names the token by its digest (token_digest).
     """
     token = await asyncio.to_thread(share_manager.create_token, session_id, ttl_seconds=ttl_seconds)
     try:
@@ -452,7 +455,9 @@ async def mint_share_token(share_manager: Any, audit: Any, session_id: str, *, t
             },
         )
     except Exception as cause:
-        raise ShareAuditError("the mint of a share link was not audited, and no link was handed out") from cause
+        raise ShareAuditError(
+            "the audit of a share link's mint failed (its event may be in the log), and no link was handed out"
+        ) from cause
     return token
 
 

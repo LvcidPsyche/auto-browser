@@ -562,10 +562,11 @@ setting until Landlock is there):
   take its answer. The probe runs outside the call's own timeout, so on a host where it keeps timing out every CLI
   call waits 30 seconds before it starts, and then runs without the launcher.
 - **`CLI_HOME` is `/data` or a directory that holds it,** as written. The CLI starts without the launcher.
-- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it:** a link, which a CLI that may
-  write where the home is written can have made (a home in `/tmp`, swapped for a link to `/data/approvals` or to
-  `/`). The CLI starts under the launcher without it, and cannot write its home. The warning names `CLI_HOME`, its
-  path and where it resolves; a `CLI_HOME` linked into `/data` on purpose is to be set to its real path.
+- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or is not a directory:** a
+  link, which a CLI that may write where the home is written can have made (a home in `/tmp`, swapped for a link to
+  `/data/approvals` or to `/`). The CLI starts under the launcher without it, and cannot write its home. The warning
+  names `CLI_HOME`, its path and where it resolves (or that it is not a directory); a `CLI_HOME` linked into `/data`
+  on purpose is to be set to its real path.
 - **A CLI may write the controller's own home, or a directory in it.** The home is judged as `HOME` names it and as
   the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank (the CLI's `HOME` is then the controller's),
   or a directory a CLI may write (`CLI_HOME`, an entry of `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's
@@ -1516,17 +1517,20 @@ does not.
   of it. A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links
   are revoked, which ends it too.
 - Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
-  so a restart does not bring a revoked link back. One is kept at least as long as a link can live, 24 hours, and
-  dropped by the first revoke after that. The age is read from the controller's clock: a revoke made while the clock
-  runs ahead drops revocations that much too soon, and their links work again once it is set right. A restart
-  without the file brings back the revoked links that have not expired.
+  so a restart does not bring a revoked link back. One is kept at least as long as a link can live, 24 hours, or
+  `SHARE_TOKEN_TTL_MINUTES` where that is longer, and dropped by the first revoke after that. The age is read from
+  the controller's clock: a revoke made while the clock runs ahead drops revocations that much too soon, and their
+  links work again once it is set right. A restart without the file brings back the revoked links that have not
+  expired.
 - The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
-  revoke that cannot be saved revokes nothing: each answers `503`, as while the file cannot be read.
+  revoke that cannot be saved revokes nothing: each answers `503` (over MCP, the tool's error with the same text), as
+  while the file cannot be read.
 - A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
   and a mint or a revoke answers `503`, until one of those, or a restart, can read it. A file that reads as
   something the controller did not write can no longer say which links were revoked: the controller logs an error,
   revokes every link minted before that moment, and writes the file again. One it cannot write again counts as one
-  it cannot read: no link is honoured until a mint, a revoke or a restart can write it.
+  it cannot read: no link is honoured until a mint, a revoke or a restart can write it. A second such file, read
+  after a restart with the clock set back by more than the time since the first, can bring a revoked link back.
 
 Anyone who holds a link can poll it, so two bounds apply beside the general rate limit, which counts each client
 apart. A link is answered 150 polls a minute, room for ten open pages (they ask for 120, and more in one minute when

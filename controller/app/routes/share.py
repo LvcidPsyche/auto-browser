@@ -81,7 +81,12 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         except ShareRevocationStoreError as cause:
             raise HTTPException(status_code=503, detail=error_text(cause)) from None
         except ShareAuditError:
-            raise internal_error(logger, "the mint of a share link of session %s was not audited", session_id) from None
+            raise internal_error(
+                logger,
+                "the audit of the mint of a share link of session %s failed (its event may be in the log), and no "
+                "link was handed out",
+                session_id,
+            ) from None
         except ValueError as cause:
             # create_token's refusal of the request; an audit that failed with a ValueError is a ShareAuditError.
             log_hidden_cause(logger, 400, cause, "share failed for session %s", session_id)
