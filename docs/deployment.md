@@ -67,7 +67,8 @@ search domain). A controller with a token admits by its wildcards as before.
 
 ## API token
 
-Every API and MCP request carries `Authorization: Bearer <token>`. `API_BEARER_TOKEN`
+Every API and MCP request carries `Authorization: Bearer <token>`, apart from the health
+checks, `/version`, the dashboard page, share links and `/mesh/receive`. `API_BEARER_TOKEN`
 (or named `API_BEARER_TOKENS`) sets it. Without either, the controller uses the token in
 `API_TOKEN_FILE` (`/data/api-token`, which the shipped compose maps to `./data/api-token`
 on the host), and a loopback controller outside production generates one there on first
