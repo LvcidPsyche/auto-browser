@@ -6,11 +6,11 @@ The harness intentionally stops at staging. Promotion into the production skill 
 
 ## Operator Runbook
 
-1. Start the controller with the full MCP profile when an external MCP client should drive the harness:
+1. Start the controller with the full MCP profile when an external MCP client should drive the harness. Its runs
+   and candidates are kept under `HARNESS_ROOT`, by default `/data/harness` (`./data/harness` on the host):
 
 ```powershell
 $env:MCP_TOOL_PROFILE="full"
-$env:HARNESS_ROOT=".autonomous/harness"
 docker compose up --build
 ```
 
