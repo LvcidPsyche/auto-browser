@@ -186,13 +186,18 @@ class SessionShareManager:
         with self._store_lock:
             # No link is honoured while the store cannot be read: it is read again before one more is handed out.
             held = self._revocations if self._revocations is not None else self._read_revocations()
+            # One reading of the clock for iat and exp, taken under the lock: a revoke that ends this link takes the
+            # lock after it, so its stamp is no earlier than the time exp counts from, and revoke drops a revocation
+            # only once a link's longest life has passed since its stamp. Were exp read after the lock, a revoke in
+            # between could be dropped while the link it ended was still good.
+            now = time.time()
             # iat: when it was minted, in milliseconds, for a revoke to end it by (validate_token). Kept as the last
             # mint's, so that a revoke after a restart takes a later stamp (_read_revocations).
-            iat = self._next_stamp()
+            iat = self._next_stamp(now)
             revocations = replace(held, minted=iat)
             self._write_revocations(revocations)
             self._revocations = revocations
-        exp = int(time.time()) + effective_ttl
+        exp = int(now) + effective_ttl
         payload = {"session_id": normalized_session_id, "exp": exp, "scope": scope, "iat": iat}
         payload_json = json.dumps(payload, separators=(",", ":"))
         payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
@@ -296,7 +301,7 @@ class SessionShareManager:
             raise ValueError("session_id must not be empty")
         with self._store_lock:
             held = self._revocations if self._revocations is not None else self._read_revocations()
-            stamp = self._next_stamp()
+            stamp = self._next_stamp(time.time())
             # The oldest link a revocation can still matter to was minted just before it, with the longest life, and
             # is good through the whole of its last second (exp is in whole seconds).
             oldest_needed = int(time.time() * 1000) - (self.max_ttl_seconds + 1) * 1000
@@ -312,14 +317,14 @@ class SessionShareManager:
             self._revocations = revocations
         return stamp
 
-    def _next_stamp(self, *, ahead_ms: int = 0) -> int:
-        """The time, in milliseconds, of a mint or a revoke, at least ``ahead_ms`` past the clock's: later than every
-        stamp this controller has given before, in this process or an earlier one, so that a link minted after a
-        revoke is never one it ends and a revoke ends every link minted before it. The store keeps the last stamp of a
-        mint and of a revoke, each written before its link is handed out or its revocation counts, and
+    def _next_stamp(self, now: float, *, ahead_ms: int = 0) -> int:
+        """The time, in milliseconds, of a mint or a revoke made at ``now`` (the clock's), at least ``ahead_ms`` past
+        it: later than every stamp this controller has given before, in this process or an earlier one, so that a link
+        minted after a revoke is never one it ends and a revoke ends every link minted before it. The store keeps the
+        last stamp of a mint and of a revoke, each written before its link is handed out or its revocation counts, and
         _read_revocations starts after them; a corrupt store, which no longer says, leaves a mark in their place (see
         there). Called under ``_store_lock``, or by __init__."""
-        self._last_stamp = max(int(time.time() * 1000) + ahead_ms, self._last_stamp + 1)
+        self._last_stamp = max(int(now * 1000) + ahead_ms, self._last_stamp + 1)
         return self._last_stamp
 
     def _read_revocations(self) -> _Revocations:
@@ -351,7 +356,9 @@ class SessionShareManager:
             # then lives as much longer). Every stamp after it is later still (the seed below), so stamps run ahead of
             # the clock until it catches up: nothing but the revocation check (validate_token) reads a link's stamp,
             # and its expiry is its own exp.
-            revocations = _Revocations(every_session=self._next_stamp(ahead_ms=(self.max_ttl_seconds + 1) * 1000))
+            revocations = _Revocations(
+                every_session=self._next_stamp(time.time(), ahead_ms=(self.max_ttl_seconds + 1) * 1000)
+            )
             logger.error(
                 "the store of revoked share links %s is corrupt (%s) and no longer says which links were revoked: "
                 "every link minted before now is revoked, and the store is being written again",

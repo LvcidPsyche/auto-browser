@@ -71,6 +71,25 @@ def _signed(manager: SessionShareManager, *, now: float | None = None, **fields:
     return f"{body}.{manager._sign(body)}"
 
 
+class _HeldAtRelease:
+    """A manager's ``_store_lock`` whose first release by the ``minting`` thread waits until ``revoked`` is set: a
+    revoke takes the lock after a mint has let it go, and before the mint goes on."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.minting: threading.Thread | None = None
+        self.released, self.revoked = threading.Event(), threading.Event()
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+        if threading.current_thread() is self.minting and not self.released.is_set():
+            self.released.set()
+            self.revoked.wait(5)
+
+
 class _Stores(unittest.TestCase):
     def setUp(self) -> None:
         self.stack = ExitStack()
@@ -268,6 +287,40 @@ class RevocationStoreTests(_Stores):
         clock.now += 1
         manager.revoke("session-new")
         self.assertEqual(sorted(self.stored()["sessions"]), ["session-kept", "session-new"])
+
+    def test_a_link_revoked_as_it_is_minted_is_still_refused_once_its_revocation_is_dropped(self) -> None:
+        clock = self.clock()
+        clock.now += 0.980
+        manager = self.manager(self.path)
+        lock = manager._store_lock = _HeldAtRelease()
+        seen: dict[str, Any] = {}
+
+        def mint() -> None:
+            seen.update(manager.create_token(SESSION_ID, ttl_seconds=SHARE_TOKEN_MAX_TTL_SECONDS))
+
+        def revoke() -> None:
+            # Between the mint's stamp and the rest of the mint, which goes on in the next second.
+            if lock.released.wait(5):
+                clock.now += 0.015
+                seen["revoked_before"] = manager.revoke(SESSION_ID)
+                clock.now += 0.010
+            lock.revoked.set()
+
+        lock.minting = threading.Thread(target=mint)
+        revoking = threading.Thread(target=revoke)
+        for thread in (lock.minting, revoking):
+            thread.start()
+        for thread in (lock.minting, revoking):
+            thread.join(10)
+        token = seen["token"]
+        self.assertFalse(manager.token_info(token)["valid"])
+
+        # Past the last millisecond the revocation is kept for, a revoke of any session drops it.
+        clock.now = seen["revoked_before"] / 1000 + SHARE_TOKEN_MAX_TTL_SECONDS + 1.002
+        manager.revoke("session-2")
+
+        self.assertNotIn(SESSION_ID, self.stored()["sessions"])
+        self.assertFalse(manager.token_info(token)["valid"])
 
     def test_a_deployment_with_longer_links_keeps_its_revocations_as_long(self) -> None:
         clock = self.clock()
