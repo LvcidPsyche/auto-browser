@@ -1740,6 +1740,12 @@ All notable changes to auto-browser are documented here.
   release while a privately reported advisory waits in triage runs in the release audit, which is run by hand; no
   workflow runs it, as listing private advisories needs a token secret the workflows do not have. `SECURITY.md` and
   the script's own text now say so. (INFRA-40)
+- **The release audit's Python dependency audit checks what the image installs, from any host.** It handed
+  `controller/constraints.txt` to pip-audit, which reads each line's markers for the machine it runs on: on Windows
+  it skipped `uvloop` and audited `pywin32`, `colorama` and `tzdata`, and on Python 3.12 or later it audited pyee
+  14.0.0 where the image runs 13.0.1. The audit now reads the markers for the image's platform (Linux, CPython 3.11)
+  and hands pip-audit the pins that hold there, without their markers, so it audits what CI's dependency audit, on
+  Linux and Python 3.11, audits. (N3)
 
 ### Changed
 

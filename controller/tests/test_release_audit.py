@@ -334,6 +334,53 @@ def test_the_audit_rejects_a_wheel_whose_license_is_another(monkeypatch: pytest.
         _inspect_licenses(monkeypatch, tmp_path, licenses)
 
 
+LOCK = """\
+pyee==13.0.1 ; python_full_version < '3.12'
+    # via playwright
+pyee==14.0.0 ; python_full_version >= '3.12'
+    # via playwright
+pywin32==312 ; sys_platform == 'win32'
+colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
+uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
+async-timeout==5.0.1 ; python_full_version < '3.11.3'
+uvicorn[standard]==0.40.0
+"""
+
+
+def test_the_lock_is_read_for_the_image_whatever_the_host() -> None:
+    # The image is Linux and CPython 3.11: pyee 13, uvloop, and nothing Windows-only, on this host or any other.
+    assert release_audit._image_pins(LOCK) == ["pyee==13.0.1", "uvloop==0.23.0", "uvicorn[standard]==0.40.0"]
+
+
+def test_the_audit_hands_pip_audit_the_image_pins_without_markers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """pip-audit reads a marker for the host it runs on, so the file it is given must hold none."""
+    audited: list[str] = []
+    calls = []
+
+    def record(command: list[object], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+        command = [str(part) for part in command]
+        calls.append(command)
+        if command[1:3] == ["-m", "pip_audit"]:
+            # main() runs from the repository's root, which the stub of os.chdir leaves this process outside.
+            audited.append((release_audit.ROOT / command[command.index("-r") + 1]).read_text(encoding="utf-8"))
+
+    _audit_commands(monkeypatch, tmp_path)  # every other step stubbed as there
+    monkeypatch.setattr(release_audit, "_run", record)
+    assert release_audit.main() == 0
+
+    assert len(audited) == 1, calls
+    markers = [line for line in audited[0].splitlines() if ";" in line]
+    assert markers == [], "the audited file still holds markers"
+    lock = (release_audit.ROOT / "controller" / "constraints.txt").read_text(encoding="utf-8")
+    assert audited[0].splitlines() == release_audit._image_pins(lock)
+    assert [command for command in calls if command[1:3] == ["-m", "pip_audit"]][0][-2:] == [
+        "--disable-pip",
+        "--no-deps",
+    ]
+
+
 def test_the_audit_rejects_a_missing_wheel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     licenses = {name: LICENSE_TEXT for name in LICENSED_WHEELS if name != "auto_browser_client"}
     with pytest.raises(SystemExit, match="auto_browser_client wheel was not built"):

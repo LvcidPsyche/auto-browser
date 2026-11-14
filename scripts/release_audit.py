@@ -14,6 +14,8 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
 LAUNCH_FILES = [
@@ -62,6 +64,21 @@ SECRET_PATTERN = (
 # token for this scan or another to find: AWS's documented example access key ID, which the PII scrubber's tests scrub
 # and the CHANGELOG quotes.
 SECRET_EXAMPLE_SHA256 = frozenset({"1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3"})
+# The platform the controller image runs, for which the lock's markers are read: python:3.11-slim, CPython 3.11 on
+# Linux x86_64. The image takes the newest 3.11 release, 3.11.15 when this was written.
+IMAGE_MARKER_ENVIRONMENT = {
+    "implementation_name": "cpython",
+    "implementation_version": "3.11.15",
+    "os_name": "posix",
+    "platform_machine": "x86_64",
+    "platform_python_implementation": "CPython",
+    "platform_release": "",
+    "platform_system": "Linux",
+    "platform_version": "",
+    "python_full_version": "3.11.15",
+    "python_version": "3.11",
+    "sys_platform": "linux",
+}
 
 
 def main() -> int:
@@ -105,9 +122,14 @@ def main() -> int:
 
     print("Running Python dependency audit...")
     # The tree controller/constraints.txt pins, read as it is (R5C-14): a resolve would audit other versions, and first
-    # installs pip, wheel and setuptools unpinned. pip-audit takes the lines whose markers match this host's platform
-    # and Python; CI's dependency-audit job reads the file on Linux and Python 3.11, as the image is.
-    _run([PYTHON, "-m", "pip_audit", "-r", "controller/constraints.txt", "--disable-pip", "--no-deps"])
+    # installs pip, wheel and setuptools unpinned. pip-audit reads each line's markers for the host it runs on, so it
+    # is given the lines the image installs (IMAGE_MARKER_ENVIRONMENT), without their markers: from any host it audits
+    # what CI's dependency-audit job, on Linux and Python 3.11, audits.
+    lock = (ROOT / "controller" / "constraints.txt").read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="auto-browser-pins-") as temp_dir:
+        pins = Path(temp_dir) / "image-pins.txt"
+        pins.write_text("\n".join(_image_pins(lock)) + "\n", encoding="utf-8")
+        _run([PYTHON, "-m", "pip_audit", "-r", pins, "--disable-pip", "--no-deps"])
 
     print("Running browser-node production dependency audit...")
     _run(["npm", "audit", "--omit=dev", "--audit-level=high"], cwd=ROOT / "browser-node")
@@ -178,6 +200,20 @@ def main() -> int:
     print()
     print("Release audit passed.")
     return 0
+
+
+def _image_pins(lock: str) -> list[str]:
+    """The lock's requirements whose markers hold for the image, each written without its marker."""
+    pins = []
+    for raw in lock.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        requirement = Requirement(line)
+        if requirement.marker is None or requirement.marker.evaluate(IMAGE_MARKER_ENVIRONMENT):
+            requirement.marker = None
+            pins.append(str(requirement))
+    return pins
 
 
 def _secret_lines(grep_output: str) -> list[str]:
