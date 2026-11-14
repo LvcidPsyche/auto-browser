@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -137,7 +138,7 @@ def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tup
     monkeypatch.setattr(release_audit, "_inspect_licenses", lambda wheelhouse: None)
     monkeypatch.setattr(release_audit.os, "chdir", lambda path: None)
     # The secret scan is the one subprocess main() starts itself: it finds nothing.
-    monkeypatch.setattr(release_audit.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", ""))
+    monkeypatch.setattr(release_audit.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, b"", b""))
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-advisory-check", "--skip-doctor"])
     assert release_audit.main() == 0
@@ -277,22 +278,23 @@ def test_aws_documented_example_key_is_the_one_token_the_scan_lets_through() -> 
     assert release_audit._secret_lines("a.py:4:nothing Python finds\n") == ["a.py:4:nothing Python finds"]
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
-def test_the_secret_scan_says_where_a_token_is_and_prints_neither_it_nor_its_line(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # A key pasted into a tracked file and not committed, which the scan reads all the same, beside another secret on
-    # its line. Both are made up, and built here so that this file holds neither.
-    token = SECRET_SHAPES["a GitHub classic token"]
-    password = "hunter2-" + "not-real"
+def _scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    files: dict[str, bytes],
+    run: Callable[..., subprocess.CompletedProcess] | None = None,
+) -> tuple[object, str, str]:
+    """main()'s exit (what it returns, or the code it exits with) and what it printed, with every step before the
+    secret scan stubbed, as in _audit_commands, on a repository that tracks ``files``; ``run`` stands in for git."""
     repo = tmp_path / "repo"
     (repo / "controller").mkdir(parents=True)
     (repo / "controller" / "constraints.txt").write_text("idna==3.10\n", encoding="utf-8")
-    (repo / "settings.py").write_text(f'name = "x"\nconn = "postgres://admin:{password}@db/x?k={token}"\n', "utf-8")
+    for name, data in files.items():
+        (repo / name).write_bytes(data)
     git = shutil.which("git")
     subprocess.run([git, "init", "-q", str(repo)], check=True)
-    subprocess.run([git, "-C", str(repo), "add", "settings.py", "controller/constraints.txt"], check=True)
-    # Every step before the scan stubbed, as in _audit_commands; the scan runs git on the repository above.
+    subprocess.run([git, "-c", "core.autocrlf=false", "-C", str(repo), "add", "--", *files, "controller"], check=True)
     monkeypatch.setattr(release_audit, "ROOT", repo)
     monkeypatch.setattr(release_audit, "_run", lambda *a, **k: None)
     monkeypatch.setattr(release_audit, "_check_launch_files", lambda: None)
@@ -303,15 +305,110 @@ def test_the_secret_scan_says_where_a_token_is_and_prints_neither_it_nor_its_lin
     monkeypatch.setattr(release_audit.os, "chdir", lambda path: None)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["release_audit.py", "--skip-advisory-check", "--skip-doctor"])
-
-    with pytest.raises(SystemExit, match="potential secret-shaped token found"):
-        release_audit.main()
-
+    if run is not None:
+        monkeypatch.setattr(release_audit.subprocess, "run", run)
+    try:
+        code = release_audit.main()
+    except SystemExit as exited:
+        code = exited.code
     out, err = capsys.readouterr()
+    return code, out, err
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_secret_scan_says_where_a_token_is_and_prints_neither_it_nor_its_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A key pasted into a tracked file and not committed, which the scan reads all the same, beside another secret on
+    # its line. Both are made up, and built here so that this file holds neither.
+    token = SECRET_SHAPES["a GitHub classic token"]
+    password = "hunter2-" + "not-real"
+    settings = f'name = "x"\nconn = "postgres://admin:{password}@db/x?k={token}"\n'
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {"settings.py": settings.encode()})
+
     # Compared as booleans, so that a failure prints no secret either.
+    failed = "potential secret-shaped token found" in str(code)
     printed = [value in out or value in err for value in (token, password)]
     named = "settings.py:2: secret-shaped token (value withheld)" in err.splitlines()
-    assert (printed, named) == ([False, False], True)
+    assert (failed, printed, named) == (True, [False, False], True)
+
+
+# What a line git prints can hold, and str.splitlines() reads as a line's end; text mode reads \r so too.
+LINE_ENDS_INSIDE_A_LINE = ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " "]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("end", LINE_ENDS_INSIDE_A_LINE, ids=ascii)
+def test_the_secret_scan_prints_no_piece_of_a_line_that_holds_what_python_reads_as_a_line_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], end: str
+) -> None:
+    token = SECRET_SHAPES["a GitHub classic token"]
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {"settings.py": f"x{end}password: {token}\n".encode()})
+
+    failed = "potential secret-shaped token found" in str(code)
+    named = err.splitlines() == ["settings.py:1: secret-shaped token (value withheld)"]
+    assert (failed, token in out or token in err, named) == (True, False, True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_a_path_that_holds_a_token_is_withheld_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # git names a text file's match by its path and line, and a binary file's in a line of its own that holds the path.
+    token, other = SECRET_SHAPES["a GitHub classic token"], SECRET_SHAPES["a GitHub OAuth token"]
+    files = {f"notes-{token}.txt": f"key = {other}\n".encode(), f"keys-{token}.bin": b"\0key = " + other.encode()}
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, files)
+
+    failed = "potential secret-shaped token found" in str(code)
+    printed = any(value in out or value in err for value in (token, other))
+    named = sorted(err.splitlines()) == [
+        "(a path that holds one):1: secret-shaped token (value withheld)",
+        "a match git names no line of: secret-shaped token (value withheld)",
+    ]
+    assert (failed, printed, named) == (True, False, True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_a_failed_scan_prints_not_what_git_said_but_its_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = SECRET_SHAPES["a GitHub classic token"]
+
+    def failed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        # What git says of a GIT_DIR that is no repository: it names the directory, which a setting gave.
+        return subprocess.CompletedProcess(command, 128, b"", f"fatal: not a git repository: '/src/{token}'\n".encode())
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {}, run=failed)
+
+    assert (code, token in out or token in err, "git grep exited with status 128" in err) == (128, False, True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("encoding", ["utf-8", "latin-1"])
+def test_the_secret_scan_reads_what_git_prints_as_utf_8_whatever_the_code_page(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], encoding: str
+) -> None:
+    # Read in Windows' ANSI code page (cp1252), the 0x9D that ends a UTF-8 ” stopped the read, and in UTF-8 mode a
+    # byte that is not UTF-8 did: a tree that held the one token let through, beside such a byte, failed the audit
+    # with a traceback.
+    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
+    (example,) = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    text = {"utf-8": "AWS’s “example” key ID", "latin-1": "la clé d'exemple d'AWS"}[encoding]
+    changelog = f"  `{example}` is {text}\n".encode(encoding)
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, {"CHANGELOG.md": changelog})
+
+    assert (code, "Release audit passed." in out, example in out or example in err) == (0, True, False)
+
+
+def test_a_match_is_placed_by_its_path_and_line_alone() -> None:
+    token = SECRET_SHAPES["a GitHub classic token"]
+    lines = ["a:b.py:4:x = 1", f"notes-{token}.txt:2:x", "Binary file a.bin matches"]
+    places = ["a:b.py:4", "(a path that holds one):2", "a match git names no line of"]
+    assert [release_audit._secret_place(line) for line in lines] == places
 
 
 ROOT_LICENSE = _REPO / "LICENSE"

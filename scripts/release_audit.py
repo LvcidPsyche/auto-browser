@@ -183,21 +183,20 @@ def main() -> int:
         _run([bash, "scripts/doctor.sh"], env=env)
 
     print("Scanning tracked files for obvious secret-shaped tokens...")
-    secret_scan = subprocess.run(
-        ["git", "grep", "-nE", SECRET_PATTERN, "--", "."],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
+    # As bytes, decoded below: text mode reads a lone \r in a line as the line's end, and on Windows decodes in the ANSI
+    # code page, which stops at a byte such as the 0x9D that ends a UTF-8 ”. The tokens are ASCII, so a byte the
+    # decoding replaces never hides one.
+    secret_scan = subprocess.run(["git", "grep", "-nE", SECRET_PATTERN, "--", "."], cwd=ROOT, capture_output=True)
     if secret_scan.returncode not in {0, 1}:
-        print(secret_scan.stderr, file=sys.stderr)
+        # Not git's own words: they can name a path, or a setting's value, that holds a token.
+        print(f"git grep exited with status {secret_scan.returncode}; run it by hand to see why.", file=sys.stderr)
         raise SystemExit(secret_scan.returncode)
-    found = _secret_lines(secret_scan.stdout)
+    found = _secret_lines(secret_scan.stdout.decode("utf-8", "replace"))
     if found:
         # Where each one is, and never the line, which holds the token and whatever else is beside it: the output can
         # land in a log or an agent's transcript.
         for line in found:
-            print(f"{':'.join(line.split(':', 2)[:2])}: secret-shaped token (value withheld)", file=sys.stderr)
+            print(f"{_secret_place(line)}: secret-shaped token (value withheld)", file=sys.stderr)
         raise SystemExit("Release audit failed: potential secret-shaped token found.")
 
     print()
@@ -226,11 +225,21 @@ def _secret_lines(grep_output: str) -> list[str]:
     so a line the two engines read differently stays found.
     """
     found = []
-    for line in grep_output.splitlines():
+    # At git's own line ends alone: str.splitlines() also ends a line at \v, \f, U+2028 and others a line can hold.
+    for line in filter(None, grep_output.split("\n")):
         digests = [hashlib.sha256(match.group(0).encode()).hexdigest() for match in re.finditer(SECRET_PATTERN, line)]
         if not digests or any(digest not in SECRET_EXAMPLE_SHA256 for digest in digests):
             found.append(line)
     return found
+
+
+def _secret_place(line: str) -> str:
+    """Where `git grep -n` found ``line``, as path:line, and never its text; a path that holds a token is withheld."""
+    place = re.match(r"(.+?):([0-9]+):", line)
+    if place is None:  # "Binary file ... matches", which names no line
+        return "a match git names no line of"
+    path, number = place.groups()
+    return f"{'(a path that holds one)' if re.search(SECRET_PATTERN, path) else path}:{number}"
 
 
 def _check_launch_files() -> None:
