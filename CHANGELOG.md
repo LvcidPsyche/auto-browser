@@ -1687,10 +1687,12 @@ All notable changes to auto-browser are documented here.
   token and opens a copy that holds them, in a window that has no copy of the dashboard's tokens, under a policy
   that lets the copy run no script, load nothing, submit no form and take no `<base>`; the page's `http-equiv`
   tags, a refresh among them, are left out of it, and so are its `<noscript>` elements, whose content the window
-  can read as tags where the copy read text. A screenshot that cannot be read says so in its place, and a page
-  that cannot be read closes the window and says why on the dashboard. The dashboard keeps the last copy it
-  opened: an earlier one's window keeps what it shows and cannot be reloaded. The route and its page are as they
-  were. (AUTH-27)
+  can read as tags where the copy read text, and its `<template>` elements. The copy's markup is read again before
+  it is opened, and one that then holds any of these, its own policy aside, is not: markup no parser writes can
+  read otherwise the second time. A screenshot that cannot be read says so in its place, and a page that cannot be
+  read, or that changes when it is read again, closes the window and says why on the dashboard. The dashboard keeps
+  the last copy it opened: an earlier one's window keeps what it shows and cannot be reloaded. The route and its
+  page are as they were. (AUTH-27)
 - **The network inspector gives up on a response body that does not end.** Playwright's `response.body()` waits
   for the end of a response, and the inspector left out only `text/event-stream` and `multipart/x-mixed-replace`,
   so any other response a page kept open, a chunked `application/x-ndjson` or a long poll, held the read and its

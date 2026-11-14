@@ -536,11 +536,15 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
 // policy under which it runs no script, loads nothing, submits no form and takes no <base>. The page's own
 // http-equiv tags are left out of it: a refresh is one, and no policy stops it. So are its <noscript> elements:
 // DOMParser reads the page with scripting off and the window reads the copy with it on, so what one holds as text
-// in a <noscript> the other can take for a tag, a refresh among them. The route's page has no script and escapes
-// what it shows, and for none of these does the copy rest on that. It does for what the page shows: a link in it,
-// for one, goes where it points when it is clicked, as the page's link to the session's URL is meant to.
+// in a <noscript> the other can take for a tag, a refresh among them. So are its <template> elements, whose content
+// no query reaches. The window reads the copy's markup anew, and markup no parser writes (a form in a form) can read
+// otherwise then: the markup is read again first, and a copy that then holds any of these but its policy is not
+// opened. The route's page has no script and escapes what it shows, and for none of these does the copy rest on
+// that. It does for what the page shows: a link in it, for one, goes where it points when it is clicked, as the
+// page's link to the session's URL is meant to.
 const REPLAY_COPY_POLICY =
   "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
+const REPLAY_COPY_LEFT_OUT = 'meta[http-equiv], noscript, template';
 const asDataUrl = (blob) => new Promise((resolve, reject) => {
   const reader = new FileReader();
   reader.addEventListener('load', () => resolve(reader.result));
@@ -564,12 +568,17 @@ async function sessionReplayCopy(sessionId) {
       img.alt = `screenshot unavailable: ${err.message}`;
     }
   }));
-  copy.querySelectorAll('meta[http-equiv], noscript').forEach((tag) => tag.remove());
+  copy.querySelectorAll(REPLAY_COPY_LEFT_OUT).forEach((tag) => tag.remove());
   const policy = copy.createElement('meta');
   policy.httpEquiv = 'Content-Security-Policy';
   policy.content = REPLAY_COPY_POLICY;
   copy.head.prepend(policy);
-  return new Blob(['<!DOCTYPE html>', copy.documentElement.outerHTML], {type: 'text/html;charset=utf-8'});
+  const markup = `<!DOCTYPE html>${copy.documentElement.outerHTML}`;
+  const again = new DOMParser().parseFromString(markup, 'text/html');
+  if (again.querySelectorAll(REPLAY_COPY_LEFT_OUT).length !== 1) {
+    throw new Error('the page changes when it is read again');
+  }
+  return new Blob([markup], {type: 'text/html;charset=utf-8'});
 }
 // The last copy opened. A copy holds every screenshot of its session, so the one before is let go when another is
 // opened: its window keeps what it shows, and cannot be reloaded.

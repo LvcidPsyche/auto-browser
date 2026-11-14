@@ -222,12 +222,28 @@ NOSCRIPT_REFRESH_PAGE = f"""<!DOCTYPE html>
 <noscript><style></noscript><meta http-equiv="refresh" content="1;url={ELSEWHERE_ORIGIN}/refreshed"></style></noscript>
 </head>
 <body><h1>Session Replay</h1></body></html>"""
+# The same in a <template>, whose content no query of the copy's reaches: in the window the noscript ends at its first
+# </noscript>, the </template> after it closes the template, and the refresh is a tag of the document.
+REFRESH_TAG = f'<meta http-equiv="refresh" content="1;url={ELSEWHERE_ORIGIN}/refreshed">'
+TEMPLATE_NOSCRIPT = f"<template><noscript><style></noscript></template>{REFRESH_TAG}</style></noscript></template>"
+TEMPLATE_IN_HEAD_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title>
+{TEMPLATE_NOSCRIPT}
+</head>
+<body><h1>Session Replay</h1></body></html>"""
+TEMPLATE_IN_BODY_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title></head>
+<body><h1>Session Replay</h1>
+{TEMPLATE_NOSCRIPT}
+</body></html>"""
 # Each way a page could move the copy's window elsewhere with no script: its markup, and what is clicked.
 NAVIGATIONS = {
     "a form": (NAVIGATING_PAGE, "#submit"),
     "a base": (NAVIGATING_PAGE, "#relative"),
     "a refresh": (REFRESH_PAGE, None),
     "a refresh behind a noscript": (NOSCRIPT_REFRESH_PAGE, None),
+    "a refresh behind a noscript in a template in the head": (TEMPLATE_IN_HEAD_PAGE, None),
+    "a refresh behind a noscript in a template in the body": (TEMPLATE_IN_BODY_PAGE, None),
 }
 # Longer than the refresh's second: a window that is moving has moved by then.
 NAVIGATION_WAIT_MS = 2500
@@ -261,6 +277,47 @@ def test_the_copy_is_not_moved_elsewhere_by_a_form_a_base_or_a_refresh(case: str
 
     assert seen["base"] == "blob"
     assert seen["at"] in ("blob", "about"), seen
+    assert [path for path in stub.asked if path.startswith(ELSEWHERE_ORIGIN)] == []
+
+
+# Not the scripting flag: the copy's markup nests one form in another, which a parser does not, so the window reads
+# the mglyph as MathML and the <style> in it as markup, where the copy held the refresh as the style's text.
+MGLYPH_REFRESH_PAGE = f"""<!DOCTYPE html>
+<html><head><title>Replay</title></head>
+<body><h1>Session Replay</h1>
+<form><math><mtext></form><form><mglyph><style></math>{REFRESH_TAG}</style></mglyph></form></mtext></math></form>
+</body></html>"""
+
+
+@requires_chromium
+def test_a_page_that_reads_otherwise_when_it_is_read_again_is_not_opened() -> None:
+    stub = ReplayStub(MGLYPH_REFRESH_PAGE)
+
+    async def scenario(page, dialogs) -> dict:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        await page.context.route(f"{ELSEWHERE_ORIGIN}/**", stub.handle)
+        await page.wait_for_selector(BUTTON)
+        async with page.expect_popup() as popup_info:
+            await page.click(BUTTON)
+        popup = await popup_info.value
+        try:
+            await popup.wait_for_event("close", timeout=NAVIGATION_WAIT_MS)
+        except PlaywrightTimeoutError:
+            pass
+        return {
+            "closed": popup.is_closed(),
+            "note": await page.evaluate(NOTE),
+            "dialogs": [dialog for dialog in dialogs if dialog[0] != "prompt"],
+        }
+
+    seen = drive(stub, scenario)
+
+    assert seen == {
+        "closed": True,
+        "note": f"Could not open the replay of session {SESSION}: the page changes when it is read again",
+        "dialogs": [],
+    }
     assert [path for path in stub.asked if path.startswith(ELSEWHERE_ORIGIN)] == []
 
 
