@@ -654,9 +654,9 @@ All notable changes to auto-browser are documented here.
     dialog now labels a reason "what an agent wrote in it is unverified" rather than "as the agent wrote it".
     Retried with that approval, the action runs as the kind approved and spends it, whether or not its target can
     be read again.
-  - A link, bare `Close` or `Cancel`, and a target that cannot be read (the action then goes on as labelled, and
-    an info-level log line says so) are not classified, and an action inside a governed run's approval is not
-    read. See the upgrade note. (STORE-42)
+  - A link in no button or menu item, bare `Close` or `Cancel`, and a target that cannot be read (the action then
+    goes on as labelled, and an info-level log line says so) are not classified, and an action inside a governed
+    run's approval is not read. See the upgrade note. (STORE-42)
 - **A click by coordinates is pressed on the element at its point.** The press landed up to 2.5 pixels from the
   point each way, as a hand's does, on whatever was there: a click aimed at a small control could press its
   neighbour, which the read above had never seen. The moved point is now kept only while the same element is under
