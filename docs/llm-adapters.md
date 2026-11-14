@@ -282,7 +282,3 @@ If a provider still proposes a side effect, the controller does not trust it bli
 - Provider HTTP calls retry timeouts, network errors, `429` and `5xx` responses with exponential backoff (`MODEL_MAX_RETRIES`, `MODEL_RETRY_BACKOFF_SECONDS`); a `Retry-After` header on a `429`/`5xx` lengthens the wait (capped).
 - Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME` (OpenAI can also use `host_bridge`).
 - Session observations now also include `tabs` and `recent_downloads`, so providers can follow popup flows and stop after a file lands or an export completes.
-
-## Next production upgrades
-
-- add streaming/SSE on top of the current REST + MCP surfaces when clients need server-pushed events
