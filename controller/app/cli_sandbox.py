@@ -308,12 +308,12 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
         if _lies_in(home, entry):
             return found % (
                 _named(entry),
-                "and the controller's own home %s lies there: what a CLI leaves in it" % home[0],
+                "and the controller's own home %s lies there: what a CLI leaves in it" % _named(home),
             )
         if _lies_in(entry, home) and entry != own:
             return found % (
                 _named(entry),
-                "which lies in the controller's own home %s: what a CLI leaves there" % home[0],
+                "which lies in the controller's own home %s: what a CLI leaves there" % _named(home),
             )
     for entry, place in ((entry, place) for entry in given for place in read_at_start):
         if _lies_in(entry, place) or _lies_in(place, entry):

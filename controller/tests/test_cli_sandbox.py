@@ -1056,6 +1056,33 @@ async def test_a_directory_written_in_the_controllers_home_that_resolves_elsewhe
 
 
 @pytest.mark.parametrize(
+    "entry, said",
+    [
+        ("/mnt/home", "and the controller's own home %s lies there"),
+        ("/mnt/home/controller/work", "which lies in the controller's own home %s:"),
+    ],
+    ids=["a directory given holds the home", "a directory given lies in the home"],
+)
+async def test_the_controllers_home_that_a_directory_given_meets_once_resolved_is_named_with_where_it_resolves(
+    linux_links, caplog, entry: str, said: str
+) -> None:
+    # HOME and the passwd entry name a link, and the directory given meets the home where the link leads: the line
+    # names both, as it names the directory.
+    linux_links.home = linux_links.passwd_home = "/home/c-link"
+    linux_links.links["/home/c-link"] = "/mnt/home/controller"
+    linux_links.dirs.add("/mnt/home/controller/work")
+    linux_links.user_base = "/opt/ub"
+
+    with caplog.at_level(logging.WARNING):
+        await _launch_on_linux(
+            _linux_settings(CLI_SANDBOX_WRITABLE=entry), "/data/cli-home", {"HOME": "/data/cli-home"}
+        )
+
+    (line,) = _written(caplog)
+    assert said % "/home/c-link (/mnt/home/controller once resolved)" in line
+
+
+@pytest.mark.parametrize(
     "layout", ["PYTHONUSERBASE in /tmp", "the passwd home's .local as CLI_HOME", "the image's own layout"]
 )
 async def test_what_the_controller_reads_at_its_start_is_reported_where_a_cli_may_write_it_whatever_home_it_is_in(
