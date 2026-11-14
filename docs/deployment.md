@@ -582,18 +582,21 @@ setting until Landlock is there):
   directory there that a host run falls back to when its `CLI_HOME` cannot be made, and is not reported unless it is,
   holds or lies in one of those places. The CLI starts under the launcher, and what it leaves there the controller
   may run at its next start, where it is a Python user site or an ssh config.
-- **A secret is kept outside `/data`, in a directory a CLI may write, or is a directory that holds one.**
-  `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`, `WITNESS_ROOT`, `MESH_IDENTITY_DIR`,
+- **A secret is kept outside `/data`, in a directory a CLI may write, or is a directory that holds one, or its path
+  has a `..` part.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`, `WITNESS_ROOT`, `MESH_IDENTITY_DIR`,
   `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so
   a `/data` that is a symbolic link to another place holds none of them. "In a directory a CLI may write" (`CLI_HOME`,
   or an entry of `CLI_SANDBOX_WRITABLE` under `/data`) is as written or once resolved: a path written there counts
   wherever it resolves, since the CLI can replace a link there with a file of its own. A secret's directory that
-  holds one counts too (`AUTH_ROOT=/data/auth` with `CLI_SANDBOX_WRITABLE=/data/auth/sub`). The CLI starts under the
-  launcher, which closes `/data` and not that place. A Linux host run that keeps its data elsewhere gets this
-  warning, with the name of each of them it sets. Only these eight are checked: any other store kept outside `/data`
-  (`APPROVAL_ROOT`, which holds the approvals' digest key, `STATE_DB_PATH`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`,
-  `AUDIT_ROOT`, `MEMORY_ROOT`, `HARNESS_ROOT`, `MESH_PEERS_PATH`, the tunnel's `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`,
-  `ISOLATED_TUNNEL_INFO_ROOT` and `REMOTE_ACCESS_INFO_PATH`) is readable by a CLI, with no warning.
+  holds one counts too (`AUTH_ROOT=/data/auth` with `CLI_SANDBOX_WRITABLE=/data/auth/sub`), and so does a path with
+  a `..` part, wherever it resolves: Linux reads the `..` after any link before it, which a CLI may have made
+  (`AUTH_ROOT=/data/cli-home/slot/../../auth` is the `auth` in the directory two levels above wherever `slot` points,
+  and a CLI can make `slot` a link). The CLI starts under the launcher, which closes `/data` and not that place. A
+  Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it sets. Only these
+  eight are checked: any other store kept outside `/data` (`APPROVAL_ROOT`, which holds the approvals' digest key,
+  `STATE_DB_PATH`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `AUDIT_ROOT`, `MEMORY_ROOT`, `HARNESS_ROOT`,
+  `MESH_PEERS_PATH`, the tunnel's `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`, `ISOLATED_TUNNEL_INFO_ROOT` and
+  `REMOTE_ACCESS_INFO_PATH`) is readable by a CLI, with no warning.
 
 `CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
 with `Provider request failed` (`502`), and the log names the condition in one error line. So

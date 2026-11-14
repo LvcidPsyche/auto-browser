@@ -935,6 +935,34 @@ async def test_a_cli_home_with_no_dots_in_the_root_is_given(linux_links, caplog)
     assert _written(caplog) == []
 
 
+@pytest.mark.parametrize("dots", [True, False], ids=["with a '..' after a link", "the same place, written without"])
+async def test_a_secret_whose_path_has_dots_after_a_link_is_named_open_and_required_refuses(
+    linux_links, caplog, dots: bool
+) -> None:
+    # The CLI writes its home and can make /data/cli-home/slot a link to any directory, and Linux reads the '..' after
+    # it: AUTH_ROOT leads to /data/auth while the link is this one, and wherever the CLI points it after.
+    linux_links.dirs |= {"/data/x/y", "/data/auth"}
+    linux_links.links["/data/cli-home/slot"] = "/data/x/y"
+    auth_root = "/data/cli-home/slot/../../auth" if dots else "/data/auth"
+    env = {"HOME": "/data/cli-home"}
+    required = _linux_settings(AUTH_ROOT=auth_root, CLI_SANDBOX_REQUIRED="true")
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(AUTH_ROOT=auth_root), "/data/cli-home", env)
+    if dots:
+        with pytest.raises(cli_sandbox.SandboxRequired):
+            await _launch_on_linux(required, "/data/cli-home", env)
+    else:
+        assert await _launch_on_linux(required, "/data/cli-home", env) == command
+
+    assert _given_to_write(command) == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
+    # The setting by its name, never its value.
+    lines = _written(caplog)
+    assert [("AUTH_ROOT" in line, "'..'" in line, auth_root in line) for line in lines] == (
+        [(True, True, False)] if dots else []
+    )
+
+
 async def test_a_cli_home_in_tmp_that_is_a_link_elsewhere_is_said_to_be_refused_and_required_refuses(
     linux_links, caplog
 ) -> None:
