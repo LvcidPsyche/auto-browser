@@ -462,8 +462,11 @@ ROOT_LICENSE = _REPO / "LICENSE"
     not (ROOT_LICENSE.is_file() and RELEASE_WORKFLOW.is_file()), reason="the repository root is not in this tree"
 )
 def test_each_published_package_holds_the_repository_license() -> None:
-    published = re.findall(r"python -m build --outdir dist (\S+)", RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    published = re.findall(r"python -m build --outdir dist (\S+)", workflow)
     assert len(published) == 3, published
+    # The wheels the audit checks for LICENSE are the ones publish-pypi uploads.
+    assert re.findall(r"dist_glob: (\S+)-\*", workflow) == list(release_audit.LICENSED_WHEELS)
     expected = ROOT_LICENSE.read_text(encoding="utf-8")
     for directory in published:
         package_license = _REPO / directory / "LICENSE"
