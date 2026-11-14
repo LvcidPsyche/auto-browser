@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.responses import StreamingResponse
 
 from app.mcp_transport import (
     MAX_MCP_SESSIONS,
@@ -19,6 +21,33 @@ from app.mcp_transport import (
     McpSession,
 )
 from app.models import McpToolCallContent, McpToolCallResponse
+from tests.test_mcp_resource_ownership import mcp_request
+
+# The answer to a request whose id cannot be read, or cannot be repeated as it was sent.
+ID_REFUSED = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32600,
+        "message": "JSON-RPC id must be a string (with no lone surrogate), a finite number or null",
+    },
+}
+
+
+def _stream_request(session_id: str, protocol_version: str) -> Request:
+    """A GET /mcp: the TestClient would buffer the endless stream."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/mcp",
+            "query_string": b"",
+            "headers": [
+                (MCP_SESSION_HEADER.lower().encode(), session_id.encode()),
+                (MCP_PROTOCOL_HEADER.lower().encode(), protocol_version.encode()),
+            ],
+        }
+    )
 
 
 class McpTransportTests(unittest.TestCase):
@@ -120,6 +149,75 @@ class McpTransportTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"]["protocolVersion"], "2025-06-18")
+
+    def test_2025_03_26_is_answered_with_a_counter_offer(self) -> None:
+        """That version allowed JSON-RPC batches, which this transport refuses."""
+        response = self._initialize_with_version("2025-03-26")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["protocolVersion"], "2025-11-25")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-11-25")
+
+    def _restart_with_a_session_negotiated_at(self, version: str) -> str:
+        """A session from before this version was dropped, restored from the store. Its id is returned."""
+        store = Path(f"{self.tempdir.name}/mcp-sessions.json")
+        session = McpSession(
+            id="restored", protocol_version=version, client_info="{}", client_capabilities="{}", initialized=True
+        )
+        store.write_text(f"[{session.table_record()}]", encoding="utf-8")
+        self.transport = McpHttpTransport(
+            tool_gateway=self.gateway,
+            server_name="auto-browser",
+            server_title="Auto Browser MCP",
+            server_version="0.2.0",
+            allowed_origins=["https://allowed.example"],
+            session_store_path=str(store),
+            manager=self.manager,
+        )
+        return session.id
+
+    def test_a_restored_2025_03_26_session_keeps_working_without_the_version_header(self) -> None:
+        """A client on 2025-03-26 sends no MCP-Protocol-Version header, so nothing changes until it initializes."""
+        session_id = self._restart_with_a_session_negotiated_at("2025-03-26")
+
+        response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id},
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["tools"][0]["name"], "browser.observe")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-03-26")
+
+    def test_a_restored_2025_03_26_session_goes_on_at_its_own_version_with_the_header(self) -> None:
+        """A stdio bridge sends its negotiated version on every POST and re-initializes only on a 404: refused with a
+        400, a bridge that outlived the upgrade would never get past it."""
+        session_id = self._restart_with_a_session_negotiated_at("2025-03-26")
+        headers = {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: "2025-03-26"}
+
+        post = self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        stream = asyncio.run(self.transport.handle_get_request(_stream_request(session_id, "2025-03-26")))
+
+        self.assertEqual(post.status_code, 200)
+        self.assertEqual(post.json()["result"]["tools"][0]["name"], "browser.observe")
+        self.assertEqual(post.headers[MCP_PROTOCOL_HEADER], "2025-03-26")
+        self.assertIsInstance(stream, StreamingResponse)
+
+    def test_a_2025_03_26_header_on_a_session_at_another_version_is_refused_as_unsupported(self) -> None:
+        headers = {**self._ready_headers(), MCP_PROTOCOL_HEADER: "2025-03-26"}
+
+        response = self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertEqual(error["data"]["requested"], "2025-03-26")
+        self.assertNotIn("2025-03-26", error["data"]["supported"])
 
     def _initialize(self) -> tuple[str, str]:
         response = self.client.post(
@@ -254,6 +352,37 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(missing_response.status_code, 404)
         self.assertEqual(missing_response.json()["error"]["code"], -32001)
 
+    def test_delete_refuses_an_unsupported_protocol_version_and_keeps_the_session(self) -> None:
+        headers = self._ready_headers()
+
+        response = self.client.delete("/mcp", headers={**headers, MCP_PROTOCOL_HEADER: "2099-01-01"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], -32602)
+        self.assertIn(headers[MCP_SESSION_HEADER], self.transport._sessions)
+
+    def test_delete_refuses_a_protocol_version_that_differs_from_the_sessions_and_keeps_it(self) -> None:
+        headers = self._ready_headers()
+
+        response = self.client.delete("/mcp", headers={**headers, MCP_PROTOCOL_HEADER: "2025-06-18"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], -32600)
+        self.assertIn(headers[MCP_SESSION_HEADER], self.transport._sessions)
+
+    def test_delete_with_a_matching_or_absent_protocol_version_deletes_the_session(self) -> None:
+        for label, drop in (("matching", False), ("absent", True)):
+            with self.subTest(label):
+                headers = self._ready_headers()
+                session_id = headers[MCP_SESSION_HEADER]
+                if drop:
+                    del headers[MCP_PROTOCOL_HEADER]
+
+                response = self.client.delete("/mcp", headers=headers)
+
+                self.assertEqual(response.status_code, 204)
+                self.assertNotIn(session_id, self.transport._sessions)
+
     def test_origin_allowlist_blocks_untrusted_browser_origins(self) -> None:
         response = self.client.post(
             "/mcp",
@@ -268,6 +397,93 @@ class McpTransportTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], -32000)
+
+    def test_an_unknown_session_and_a_forbidden_origin_repeat_no_long_header_whole(self) -> None:
+        # Each answer repeated the caller's header as it was sent, as long as the server lets a header be; the
+        # routes' 404s cut the id they repeat at 200 characters, and so do these now, in the same words.
+        long_id, long_origin = "s" * 8000, "https://" + "o" * 8000 + ".example"
+        tools_list = {"jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}}
+        unknown = {MCP_SESSION_HEADER: long_id, MCP_PROTOCOL_HEADER: "2025-11-25"}
+        for method, response in (
+            ("POST", self.client.post("/mcp", headers=unknown, json=tools_list)),
+            ("DELETE", self.client.delete("/mcp", headers=unknown)),
+        ):
+            with self.subTest(method):
+                self.assertEqual(response.status_code, 404, response.text[:200])
+                error = response.json()["error"]
+                self.assertEqual((error["code"], error["message"]), (-32001, f"Unknown MCP session: {'s' * 200}..."))
+
+        refused = self.client.post("/mcp", headers={"Origin": long_origin}, json={**tools_list, "method": "initialize"})
+
+        self.assertEqual(refused.status_code, 403, refused.text[:200])
+        error = refused.json()["error"]
+        self.assertEqual(
+            (error["code"], error["message"]), (-32000, f"Forbidden Origin header: {long_origin[:200]}...")
+        )
+
+    def test_an_unsupported_protocol_version_is_logged_quoted_and_cut(self) -> None:
+        # The INFO line repeated the client's protocolVersion with %r, as long as the body: "v\n" * 30,000 wrote one
+        # record of 90,073 characters. It is quoted and cut at 200 characters, and the counter-offer is as before.
+        with self.assertLogs("app.mcp_transport", level="INFO") as logged:
+            response = self._initialize_with_version("v\n" * 30_000)
+
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertEqual(response.json()["result"]["protocolVersion"], "2025-11-25")
+        (written,) = [record.getMessage() for record in logged.records if "protocol version" in record.getMessage()]
+        self.assertTrue(written.startswith("MCP client requested unsupported protocol version 'v\\nv\\n"), written[:80])
+        self.assertTrue(written.endswith("; offering 2025-11-25"), written[-80:])
+        self.assertEqual(written.splitlines(), [written])
+        self.assertLess(len(written), 400, written[:80])
+
+    def test_an_answer_that_repeats_a_callers_text_cuts_it(self) -> None:
+        # Each repeated the method, the URI or the MCP-Protocol-Version header whole: 60,000 characters came back
+        # as 60,000. Each is cut at 200 characters, as Unknown MCP session cuts its header, in the same code and words.
+        headers = self._ready_headers()
+        long_method, long_uri, long_version = "m" * 60_000, "browser://" + "u" * 59_990, "v" * 60_000
+        answers = [
+            (
+                "method",
+                self.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 9, "method": long_method}),
+                200,
+                (-32601, f"Unknown MCP method: {'m' * 200}..."),
+            ),
+            (
+                "subscribe",
+                self._resource_call(headers, "resources/subscribe", long_uri),
+                200,
+                (-32002, f"Resource not found: {long_uri[:200]}..."),
+            ),
+            (
+                "read",
+                self._resource_call(headers, "resources/read", long_uri),
+                200,
+                (-32002, f"Resource not found: {long_uri[:200]}..."),
+            ),
+            (
+                "version header",
+                self.client.post(
+                    "/mcp",
+                    headers={**headers, MCP_PROTOCOL_HEADER: long_version},
+                    json={"jsonrpc": "2.0", "id": 10, "method": "ping"},
+                ),
+                400,
+                (-32602, "Unsupported MCP protocol version"),
+            ),
+        ]
+        for name, response, status, (code, message) in answers:
+            with self.subTest(name):
+                self.assertEqual(response.status_code, status, response.text[:200])
+                error = response.json()["error"]
+                self.assertEqual((error["code"], error["message"]), (code, message))
+                self.assertLess(len(response.content), 1024)
+        self.assertEqual(answers[-1][1].json()["error"]["data"]["requested"], "v" * 200 + "...")
+        # The mismatch's "got ..." is reached only by a version this server supports, which is short.
+        mismatch = self.client.post(
+            "/mcp",
+            headers={**headers, MCP_PROTOCOL_HEADER: "2025-06-18"},
+            json={"jsonrpc": "2.0", "id": 11, "method": "ping"},
+        )
+        self.assertTrue(mismatch.json()["error"]["message"].endswith("expected 2025-11-25, got 2025-06-18"))
 
     def test_sessions_survive_transport_restart_when_store_path_is_configured(self) -> None:
         session_id, protocol_version = self._initialize()
@@ -320,8 +536,8 @@ class McpTransportTests(unittest.TestCase):
             f"session-{index}": McpSession(
                 id=f"session-{index}",
                 protocol_version="2025-11-25",
-                client_info={},
-                client_capabilities={},
+                client_info="{}",
+                client_capabilities="{}",
                 initialized=bool(index % 2),
                 created_at=f"2026-04-17T00:00:{index:02d}Z",
             )
@@ -352,17 +568,17 @@ class McpTransportTests(unittest.TestCase):
             f"session-{index}": McpSession(
                 id=f"session-{index}",
                 protocol_version="2025-11-25",
-                client_info={},
-                client_capabilities={},
+                client_info="{}",
+                client_capabilities="{}",
                 created_at=f"2026-04-17T00:{index // 60:02d}:{index % 60:02d}Z",
             )
             for index in range(500)
         }
         transport._sessions["session-0"].last_used_at = "2026-04-18T00:00:00Z"
         transport._sessions["new"] = McpSession(
-            id="new", protocol_version="2025-11-25", client_info={}, client_capabilities={}
+            id="new", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}"
         )
-        transport._evict_stale_sessions()
+        transport._persist_sessions()
 
         self.assertEqual(len(transport._sessions), 500)
         self.assertIn("session-0", transport._sessions)
@@ -382,6 +598,110 @@ class McpTransportTests(unittest.TestCase):
         store_payload = json.loads(Path(f"{self.tempdir.name}/mcp-sessions.json").read_text(encoding="utf-8"))
         self.assertEqual(store_payload[0]["last_used_at"], self.transport._sessions[session_id].last_used_at)
 
+    def test_an_unsupported_protocol_version_header_is_refused_400(self) -> None:
+        headers = {**self._ready_headers(), MCP_PROTOCOL_HEADER: "2099-01-01"}
+
+        response = self.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 30, "method": "ping"})
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertEqual(error["data"]["requested"], "2099-01-01")
+        self.assertIn("2025-11-25", error["data"]["supported"])
+
+    def test_a_protocol_version_header_that_differs_from_the_sessions_is_refused_400(self) -> None:
+        headers = {**self._ready_headers(), MCP_PROTOCOL_HEADER: "2025-06-18"}
+
+        response = self.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 31, "method": "ping"})
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32600)
+        self.assertIn("Protocol version mismatch", error["message"])
+
+    def test_a_failing_tool_is_isError_true_on_the_wire(self) -> None:
+        self.gateway.call_tool.return_value = McpToolCallResponse(
+            content=[McpToolCallContent(text="the tool failed")], isError=True
+        )
+        headers = self._ready_headers()
+
+        response = self.client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 32,
+                "method": "tools/call",
+                "params": {"name": "browser.observe", "arguments": {}},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertNotIn("error", body)
+        self.assertIs(body["result"]["isError"], True)
+        self.assertEqual(body["result"]["content"][0]["text"], "the tool failed")
+
+    def test_ping_answers_an_empty_result(self) -> None:
+        """Before notifications/initialized too: ping is the one method allowed that early."""
+        session_id, protocol_version = self._initialize()
+
+        response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "id": 33, "method": "ping"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"jsonrpc": "2.0", "id": 33, "result": {}})
+
+    def test_params_that_are_invalid_are_refused(self) -> None:
+        headers = self._ready_headers()
+        calls = (
+            ({"jsonrpc": "2.0", "id": 34, "method": "ping", "params": ["not", "an", "object"]}, "object"),
+            ({"jsonrpc": "2.0", "id": 35, "method": "tools/call", "params": {"arguments": {}}}, "Invalid tools/call"),
+        )
+        for payload, message in calls:
+            with self.subTest(message=message):
+                response = self.client.post("/mcp", headers=headers, json=payload)
+
+                self.assertEqual(response.status_code, 200)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], -32602)
+                self.assertIn(message, error["message"])
+
+    def test_a_batch_is_refused_400(self) -> None:
+        response = self.client.post("/mcp", json=[{"jsonrpc": "2.0", "id": 36, "method": "ping"}])
+
+        self.assertEqual(response.status_code, 400)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32600)
+        self.assertIn("batches", error["message"])
+
+    def test_get_without_a_session_header_is_refused_400(self) -> None:
+        response = self.client.get("/mcp")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], -32000)
+
+    def test_get_for_an_unknown_session_is_refused_404(self) -> None:
+        response = self.client.get("/mcp", headers={MCP_SESSION_HEADER: "no-such-session"})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], -32001)
+
+    def test_get_before_notifications_initialized_is_refused(self) -> None:
+        session_id, protocol_version = self._initialize()
+
+        response = self.client.get(
+            "/mcp", headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32005)
+        self.assertIn("notifications/initialized", error["message"])
+
     def test_missing_method_returns_invalid_request_error(self) -> None:
         response = self.client.post(
             "/mcp",
@@ -392,6 +712,71 @@ class McpTransportTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["error"]["code"], -32600)
         self.assertEqual(body["error"]["message"], "JSON-RPC method is required")
+
+    def test_an_id_that_is_no_string_number_or_null_is_refused_before_anything_repeats_it(self) -> None:
+        # Every answer repeats the id whole, and its walks go down it by recursion: an id of lists nested some hundreds
+        # deep around NaN or a lone surrogate answered an unhandled 500 (Python 3.11 from about 600 levels, 3.12 at
+        # 1,200), on each path below, the refusals of the envelope included.
+        headers = {**self._ready_headers(), "content-type": "application/json"}
+        ids = {"a list": "[1]", "an object": '{"a":1}', "true": "true", "200 lists deep": "[" * 200 + "NaN" + "]" * 200}
+        bodies = {
+            "tools/call": '{"jsonrpc":"2.0","id":ID,"method":"tools/call","params":{"name":1}}',
+            "ping": '{"jsonrpc":"2.0","id":ID,"method":"ping"}',
+            "not JSON-RPC 2.0": '{"jsonrpc":"1.0","id":ID,"method":"ping"}',
+            "no method": '{"jsonrpc":"2.0","id":ID}',
+        }
+        for label, value in ids.items():
+            for path, body in bodies.items():
+                with self.subTest(id=label, body=path):
+                    response = self.client.post("/mcp", content=body.replace("ID", value).encode(), headers=headers)
+
+                    self.assertEqual((response.status_code, response.json()), (400, ID_REFUSED))
+
+    def test_an_id_an_answer_cannot_repeat_as_sent_is_refused_before_the_request_runs(self) -> None:
+        # NaN, the infinities and 1e999, which reads as one, are no JSON numbers: an answer wrote each as null. A lone
+        # surrogate, which UTF-8 does not carry, it wrote as U+FFFD. Each initialize made a session (200) whose answer
+        # named no request, or another one.
+        ids = {
+            "NaN": "NaN",
+            "Infinity": "Infinity",
+            "-Infinity": "-Infinity",
+            "1e999": "1e999",
+            "-1e999": "-1e999",
+            "a lone surrogate": '"\\ud800"',
+            "a lone surrogate in text": '"a\\udfffb"',
+        }
+        initialize = (
+            '{"jsonrpc":"2.0","id":ID,"method":"initialize","params":{"protocolVersion":"2025-11-25",'
+            '"clientInfo":{"name":"pytest","version":"1.0.0"},"capabilities":{}}}'
+        )
+        ping = '{"jsonrpc":"2.0","id":ID,"method":"ping"}'
+        ready = self._ready_headers()
+        sessions = sorted(self.transport._sessions)
+        for label, value in ids.items():
+            for path, body, headers in (("initialize", initialize, {}), ("ping", ping, ready)):
+                with self.subTest(id=label, body=path):
+                    response = self.client.post(
+                        "/mcp",
+                        content=body.replace("ID", value).encode("ascii"),
+                        headers={**headers, "content-type": "application/json"},
+                    )
+
+                    self.assertEqual((response.status_code, response.json()), (400, ID_REFUSED))
+                    self.assertNotIn(MCP_SESSION_HEADER, response.headers)
+                    self.assertEqual(sorted(self.transport._sessions), sessions)
+
+    def test_an_id_that_is_a_string_a_number_or_null_is_answered_as_before(self) -> None:
+        headers = self._ready_headers()
+        for value in ("abc", "caf" + chr(0xE9) + chr(0x1F600), 7, 10**30, 1.5, -2.5e-300, None):
+            with self.subTest(id=value):
+                response = self.client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": value, "method": "tools/call", "params": {"name": 1}},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual((response.json()["id"], response.json()["error"]["code"]), (value, -32602))
 
     def test_resources_list_and_read_sessions_work_after_initialization(self) -> None:
         session_id, protocol_version = self._initialize()
@@ -429,6 +814,26 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(contents[0]["mimeType"], "application/json")
         self.assertEqual(contents[0]["text"], '[{"id": "session-1", "status": "active"}]')
         self.manager.list_sessions.assert_awaited_once_with()
+
+    def test_resources_read_refuses_a_uri_that_is_not_a_non_empty_string(self) -> None:
+        session_id, protocol_version = self._initialize()
+        headers = {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version}
+        self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        )
+
+        for params in ({"uri": 5}, {"uri": []}, {"uri": {}}, {"uri": None}, {"uri": ""}, {}):
+            with self.subTest(params=params):
+                response = self.client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": 16, "method": "resources/read", "params": params},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], -32602)
+                self.assertEqual(error["message"], "resources/read requires a non-empty uri")
 
     def test_resources_read_returns_not_found_error_for_unknown_uri(self) -> None:
         session_id, protocol_version = self._initialize()
@@ -549,6 +954,55 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(subscribe_response.status_code, 200)
         self.assertEqual(subscribe_response.json()["error"]["code"], -32002)
 
+    def _ready_headers(self) -> dict[str, str]:
+        """The headers of a session that has sent notifications/initialized."""
+        session_id, protocol_version = self._initialize()
+        headers = {MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version}
+        self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        )
+        return headers
+
+    def _resource_call(self, headers: dict[str, str], method: str, uri: str):
+        return self.client.post(
+            "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 17, "method": method, "params": {"uri": uri}}
+        )
+
+    def test_subscribing_to_the_audit_events_is_refused_because_nothing_notifies_them(self) -> None:
+        headers = self._ready_headers()
+
+        response = self._resource_call(headers, "resources/subscribe", "browser://audit/events")
+
+        self.assertEqual(response.status_code, 200)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertIn("poll resources/read", error["message"])
+        self.assertEqual(self.transport._sessions[headers[MCP_SESSION_HEADER]].resource_subscriptions, [])
+
+    def test_a_manager_without_audit_events_answers_the_subscribe_as_an_unknown_resource(self) -> None:
+        headers = self._ready_headers()
+        self.manager.list_audit_events = None
+
+        response = self._resource_call(headers, "resources/subscribe", "browser://audit/events")
+
+        self.assertEqual(response.json()["error"]["code"], -32002)
+
+    def test_a_persisted_subscription_to_the_audit_events_stays_silent_and_can_be_removed(self) -> None:
+        """A version that accepted the subscribe left this in the store."""
+        headers = self._ready_headers()
+        session = self.transport._sessions[headers[MCP_SESSION_HEADER]]
+        session.resource_subscriptions.append("browser://audit/events")
+
+        for event in ("observe", "action", "session", "approval"):
+            uris = McpHttpTransport._updated_resource_uris(
+                {"event": event, "session_id": "session-1"}, subscribed=session.resource_subscriptions
+            )
+            self.assertEqual(uris, [], event)
+        response = self._resource_call(headers, "resources/unsubscribe", "browser://audit/events")
+
+        self.assertEqual(response.json()["result"], {})
+        self.assertEqual(session.resource_subscriptions, [])
+
     def test_resource_update_mapping_only_emits_subscribed_resources(self) -> None:
         uris = McpHttpTransport._updated_resource_uris(
             {"event": "observe", "session_id": "session-1"},
@@ -568,8 +1022,8 @@ def _owned_sessions(owner: str | None, count: int, *, minute: int) -> dict[str, 
         f"{owner}-{index}": McpSession(
             id=f"{owner}-{index}",
             protocol_version="2025-11-25",
-            client_info={},
-            client_capabilities={},
+            client_info="{}",
+            client_capabilities="{}",
             created_at=f"2026-04-17T00:{minute:02d}:00.{index:06d}Z",
             owner=owner,
         )
@@ -588,7 +1042,7 @@ class McpSessionCapTests(unittest.TestCase):
     def test_one_operators_flood_does_not_evict_another_operators_session(self) -> None:
         self.transport._sessions = {**_owned_sessions("alice", 1, minute=0), **_owned_sessions("bob", 600, minute=1)}
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertIn("alice-0", self.transport._sessions)
 
@@ -598,7 +1052,7 @@ class McpSessionCapTests(unittest.TestCase):
             **_owned_sessions("bob", MAX_MCP_SESSIONS_PER_OWNER + 2, minute=1),
         }
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         bob = sorted((key for key in self.transport._sessions if key.startswith("bob-")), key=lambda k: int(k[4:]))
         self.assertEqual(len(bob), MAX_MCP_SESSIONS_PER_OWNER)
@@ -611,11 +1065,40 @@ class McpSessionCapTests(unittest.TestCase):
             self.transport._sessions.update(_owned_sessions(owner, MAX_MCP_SESSIONS_PER_OWNER, minute=minute))
         self.transport._sessions.update(_owned_sessions(None, 10, minute=59))
 
-        self.transport._evict_stale_sessions()
+        self.transport._persist_sessions()
 
         self.assertEqual(len(self.transport._sessions), MAX_MCP_SESSIONS)
         self.assertNotIn("operator-0-0", self.transport._sessions)
         self.assertIn("None-9", self.transport._sessions)
+
+
+class McpGetStreamTests(unittest.IsolatedAsyncioTestCase):
+    """The TestClient buffers the whole response, so the success case is driven here and read under a timeout."""
+
+    async def test_get_opens_an_event_stream_only_for_an_initialized_session(self) -> None:
+        transport = McpHttpTransport(
+            tool_gateway=SimpleNamespace(list_tools=lambda: []),
+            server_name="auto-browser",
+            server_version="0.2.0",
+            manager=None,
+        )
+        session = McpSession(id="m1", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}")
+        transport._sessions["m1"] = session
+
+        refused = await transport.handle_get_request(mcp_request("GET", "m1"))
+
+        self.assertNotIsInstance(refused, StreamingResponse)
+        self.assertEqual(json.loads(refused.body)["error"]["code"], -32005)
+
+        session.initialized = True
+        response = await transport.handle_get_request(mcp_request("GET", "m1"))
+
+        self.assertIsInstance(response, StreamingResponse)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-11-25")
+        self.assertEqual(await asyncio.wait_for(response.body_iterator.__anext__(), 5), ": connected\n\n")
+        await response.body_iterator.aclose()
 
 
 class McpResourceEncodingTests(unittest.IsolatedAsyncioTestCase):
@@ -647,11 +1130,11 @@ class McpResourceEncodingTests(unittest.IsolatedAsyncioTestCase):
                     parsed = json.loads(resource["text"], parse_constant=lambda name: self.fail(f"{uri} sent {name}"))
                     self.assertIn(None, [*parsed[0].values()])
 
-    async def test_a_resource_that_cannot_be_encoded_is_not_served_and_is_logged(self) -> None:
+    async def test_a_resource_that_cannot_be_encoded_is_not_served(self) -> None:
         transport = self._transport(object())
         for uri in self.URIS:
-            with self.subTest(uri=uri), self.assertLogs("app.mcp_transport", "WARNING"):
-                self.assertIsNone(await transport._read_resource(uri))
+            with self.subTest(uri=uri), self.assertRaises(TypeError):
+                await transport._read_resource(uri)
 
 
 if __name__ == "__main__":

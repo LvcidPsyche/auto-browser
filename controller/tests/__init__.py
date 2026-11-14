@@ -69,6 +69,7 @@ for _name, _relative in {
     "MESH_IDENTITY_DIR": "mesh/identity",
     "MESH_PEERS_PATH": "mesh/peers.json",
     "CRON_STORE_PATH": "crons/crons.json",
+    "SHARE_REVOCATION_STORE_PATH": "share/revocations.json",
     "MCP_SESSION_STORE_PATH": "mcp/sessions.json",
     "COMPLIANCE_MANIFEST_PATH": "compliance-manifest.json",
     "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
@@ -96,8 +97,9 @@ os.environ.setdefault("API_ALLOW_TOKENLESS_LOOPBACK", "true")
 # A tokenless loopback controller answers only to loopback Host names unless
 # CONTROLLER_ALLOWED_HOSTS says otherwise (app/middleware/http.py) — the guard
 # against DNS rebinding. TestClient addresses every request to `testserver`, so
-# the suite declares it the way docker-compose.yml does. Tests of the guard
-# itself build their own Settings.
+# the suite lists it beside the loopback names; no shipped default does (a
+# single-label name a host on the same network can answer for). Tests of the
+# guard itself build their own Settings.
 os.environ.setdefault("CONTROLLER_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver")
 
 # The lifespan makes the controller process non-dumpable (app/process_hardening.py), and several tests run the real

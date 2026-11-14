@@ -419,6 +419,11 @@ async function loadSessions() {
     appendCell(row, s.owner);
     appendCell(row, s.current_url || s.start_url, {className: 'mono', maxWidth: '200px'});
     const actionCell = document.createElement('td');
+    const actions = document.createElement('div');
+    actions.className = 'btn-row';
+    actions.style.alignItems = 'center';
+    const fullId = asText(s.session_id || s.id, '');
+    const note = document.getElementById('takeover-note');
     const href = safeHttpUrl(s.takeover_url);
     if (href) {
       const link = document.createElement('a');
@@ -428,14 +433,15 @@ async function loadSessions() {
       link.style.color = 'var(--accent)';
       link.style.textDecoration = 'none';
       link.textContent = 'Open noVNC';
-      const fullId = asText(s.session_id || s.id, '');
       const isolated = isIsolated(s);
-      const note = document.getElementById('takeover-note');
       if (fullId) link.addEventListener('click', (event) => openTakeover(event, fullId, href, isolated, note));
-      actionCell.appendChild(link);
-    } else {
-      actionCell.textContent = '—';
+      actions.appendChild(link);
     }
+    if (fullId) {
+      actions.appendChild(jobActionButton('Open replay', 'refresh-btn', () => openSessionReplay(fullId, note)));
+    }
+    if (actions.childNodes.length) actionCell.appendChild(actions);
+    else actionCell.textContent = '—';
     row.appendChild(actionCell);
     tbody.appendChild(row);
   });
@@ -458,6 +464,20 @@ function takeoverToken() {
 // browser-node session's takeover link carries none, so its listed URL is the link.
 const isIsolated = (session) => Boolean(session && session.isolation && session.isolation.mode === 'docker_ephemeral');
 const showTakeoverNote = (note, text) => { if (note) note.textContent = text; };
+// A blank window to point somewhere once an answer arrives, or null when the browser blocked it. A window opened
+// this way starts with a copy of this tab's sessionStorage, both tokens included: the copy is cleared, and the
+// window has no way back to this tab.
+function openClearedWindow() {
+  const win = window.open('about:blank', '_blank');
+  if (!win) return null;
+  try {
+    win.sessionStorage.clear();
+  } catch (err) {
+    console.warn(`new window: could not clear its session storage: ${err.message}`);
+  }
+  win.opener = null;
+  return win;
+}
 
 // No session record carries an isolated session's noVNC password (the model reads
 // those); GET /sessions/{id}/takeover-link, a human-only endpoint, returns the full
@@ -476,17 +496,11 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
   event.preventDefault();
   showTakeoverNote(note, '');
   const token = isolated ? takeoverToken() : '';
-  const win = window.open('about:blank', '_blank');
+  const win = openClearedWindow();
   if (!win) {
     showTakeoverNote(note, 'The browser blocked the noVNC window. Click Open noVNC again.');
     return;
   }
-  try {
-    win.sessionStorage.clear();  // a window opened this way starts with a copy of this tab's
-  } catch (err) {
-    console.warn(`takeover window: could not clear its session storage: ${err.message}`);
-  }
-  win.opener = null;
   let target = fallback;
   if (token) {
     const path = `/sessions/${encodeURIComponent(sessionId)}/takeover-link`;
@@ -513,6 +527,85 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
     }
   }
   win.location.href = target;
+}
+
+// --- Session replay --------------------------------------------------------
+// GET /sessions/{id}/replay and the /artifacts screenshots it names sit behind the bearer token, which neither a
+// navigation nor an <img src> can send. "Open replay" reads the page and each screenshot through apiResponse() and
+// opens a copy that holds them as data: URLs. The copy opens on this origin, so it gets a cleared window and a
+// policy under which it runs no script, loads nothing, submits no form and takes no <base>. The page's own
+// http-equiv tags are left out of it: a refresh is one, and no policy stops it. So are its <noscript> elements:
+// DOMParser reads the page with scripting off and the window reads the copy with it on, so what one holds as text
+// in a <noscript> the other can take for a tag, a refresh among them. So are its <template>, <math> and <svg>
+// elements: querySelectorAll does not look into a template, and MathML written out and read again can turn an HTML
+// <style>'s text into tags; SVG, parsed by the same foreign-content rules, goes with it. The window reads the copy's
+// markup anew, and markup no parser writes (a form in a form) can read otherwise then: the markup is read again
+// first, and a copy that then holds any of these but its policy is not opened. The route's page has none of these
+// and no script, and escapes what it shows, and for none of these does the copy rest on that. It does for what the
+// page shows: a link in it, for one, goes where it points when it is clicked, as the page's link to the session's
+// URL is meant to.
+const REPLAY_COPY_POLICY =
+  "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
+const REPLAY_COPY_LEFT_OUT = 'meta[http-equiv], noscript, template, svg, math';
+const asDataUrl = (blob) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.addEventListener('load', () => resolve(reader.result));
+  reader.addEventListener('error', () => reject(reader.error));
+  reader.readAsDataURL(blob);
+});
+// The token goes only to this controller's /artifacts. Any other image keeps its src, which the copy's policy
+// does not load.
+const isOwnArtifact = (url) => url.origin === window.location.origin && url.pathname.startsWith('/artifacts/');
+async function sessionReplayCopy(sessionId) {
+  const path = `/sessions/${encodeURIComponent(sessionId)}/replay`;
+  const page = await (await apiResponse(path, {}, {alerts: false})).text();
+  const copy = new DOMParser().parseFromString(page, 'text/html');
+  await Promise.all([...copy.querySelectorAll('img[src]')].map(async (img) => {
+    const url = new URL(img.getAttribute('src'), window.location.origin);
+    if (!isOwnArtifact(url)) return;
+    try {
+      img.src = await asDataUrl(await (await apiResponse(url.href, {}, {alerts: false})).blob());
+    } catch (err) {
+      img.removeAttribute('src');
+      img.alt = `screenshot unavailable: ${err.message}`;
+    }
+  }));
+  copy.querySelectorAll(REPLAY_COPY_LEFT_OUT).forEach((tag) => tag.remove());
+  const policy = copy.createElement('meta');
+  policy.httpEquiv = 'Content-Security-Policy';
+  policy.content = REPLAY_COPY_POLICY;
+  copy.head.prepend(policy);
+  const markup = `<!DOCTYPE html>${copy.documentElement.outerHTML}`;
+  const again = new DOMParser().parseFromString(markup, 'text/html');
+  if (again.querySelectorAll(REPLAY_COPY_LEFT_OUT).length !== 1) {
+    throw new Error('the page changes when it is read again');
+  }
+  return new Blob([markup], {type: 'text/html;charset=utf-8'});
+}
+// The last copy opened. A copy holds every screenshot of its session, so the one before is let go when another is
+// opened: its window keeps what it shows, and cannot be reloaded.
+let replayCopyUrl = null;
+// The window opens on the click, before anything is read (a popup blocker refuses one opened after a slow
+// answer), and is pointed at the copy once it is built. A page that cannot be read closes it, with the reason in
+// the note and no alert(): the window may be in front of this tab.
+async function openSessionReplay(sessionId, note) {
+  showTakeoverNote(note, '');
+  const win = openClearedWindow();
+  if (!win) {
+    showTakeoverNote(note, 'The browser blocked the replay window. Click Open replay again.');
+    return;
+  }
+  let copy;
+  try {
+    copy = await sessionReplayCopy(sessionId);
+  } catch (err) {
+    win.close();
+    showTakeoverNote(note, `Could not open the replay of session ${sessionId}: ${err.message}`);
+    return;
+  }
+  if (replayCopyUrl) URL.revokeObjectURL(replayCopyUrl);
+  replayCopyUrl = URL.createObjectURL(copy);
+  win.location.href = replayCopyUrl;
 }
 
 const checkpointTimeline = (job) => {
@@ -633,7 +726,9 @@ async function loadAgentJobs() {
 // --- Pending approvals -----------------------------------------------------
 // Reasons and actions come from pages and agents, so they are written as text
 // only. An approval stores the exact action it authorises, typed text
-// included; a type action marked sensitive never shows that text here.
+// included; a type action marked sensitive never shows that text here, nor
+// one whose field did not read plain when its approval was asked for
+// (field_read: the server answers the text hidden too).
 // The fields and how they read come from the server (app.approval_display), so
 // the queue says what the webhook and SSE summary say, field for field.
 const APPROVAL_DISPLAY = __APPROVAL_DISPLAY__;
@@ -673,15 +768,20 @@ const shownField = (name, value, cut) => {
   const shown = `${name}=${shownValue(sent, cut)}`;
   return written === null ? shown : `${shown} (host as written: ${written})`;
 };
-const describeAction = (action, origin, cut) => {
+// fieldRead: the approval's field_read (how its type's field read: 'plain', 'secret' or 'unread'). Only
+// 'plain' shows a type's text, as the server's _hidden_text: an answer that does not say is unread.
+const describeAction = (action, origin, cut, fieldRead) => {
   if (!action || typeof action !== 'object') return '—';
   // A governed tool call (eval_js, set_cookies, ...) is approved through a
   // stand-in action whose text is "<tool> sha256:<digest of its arguments>"
-  // (McpToolGateway._governed_call_decision); its reason previews the arguments.
+  // (McpToolGateway._governed_call_decision), stored with that digest keyed
+  // ("<tool> hmac-sha256:<key id>:<digest>", ApprovalStore._keyed; plain in a
+  // record from before 1.18.0 that no start has rewritten); its reason previews
+  // the arguments.
   // Only the server's origin says the gateway built it: a caller can write the
   // same action, and then it is shown as the action it is.
   const toolCall = origin === 'tool_call'
-    && /^([a-z_.]+) sha256:[0-9a-f]{64}$/.exec(String(action.text || ''));
+    && /^([a-z_.]+) (?:sha256:|hmac-sha256:[0-9a-f]{8}:)[0-9a-f]{64}$/.exec(String(action.text || ''));
   if (toolCall) return shownText(`tool call ${toolCall[1]} (arguments under Reason)`);
   // Everything the approval covers (it must match exactly) is shown, the target first: a click by
   // coordinates, or an option picked behind an opaque element id, read as a bare "click".
@@ -701,9 +801,11 @@ const describeAction = (action, origin, cut) => {
   APPROVAL_DISPLAY.fields.forEach(([name, actions]) => {
     const value = action[name];
     if ((actions && !actions.includes(action.action)) || !isSet(value)) return;
-    const part = name === 'text' && action.sensitive
-      ? APPROVAL_DISPLAY.sensitiveTextHidden
-      : shownField(name, value, cut);
+    let part = shownField(name, value, cut);
+    if (name === 'text' && action.sensitive) part = APPROVAL_DISPLAY.sensitiveTextHidden;
+    else if (name === 'text' && verb === 'type' && fieldRead !== 'plain') {
+      part = APPROVAL_DISPLAY.fieldTextHidden[fieldRead === 'secret' ? 'secret' : 'unread'];
+    }
     const note = unusedNote(name)
       ?? (verb === 'select_option' && name === 'value' ? APPROVAL_DISPLAY.valueOrLabel : null);
     parts.push(note ? `${part} ${note}` : part);
@@ -735,8 +837,8 @@ const approvalConfirmText = (approval) => {
       : 'Nothing more of the call is kept than this preview.';
   }
   return `Approve this ${asText(approval.kind, 'unknown')} action in session ${asText(approval.session_id)}?\\n\\n`
-    + `${describeAction(approval.action, approval.origin, APPROVAL_DISPLAY.cut)}\\n\\n`
-    + `${toolCall ? 'Arguments (server preview)' : 'Reason, as the agent wrote it'}: `
+    + `${describeAction(approval.action, approval.origin, APPROVAL_DISPLAY.cut, approval.field_read)}\\n\\n`
+    + `${toolCall ? 'Arguments (server preview)' : 'Reason (what an agent wrote in it is unverified)'}: `
     + `${shownText(shown)}\\n\\n${whole}`;
 };
 
@@ -803,7 +905,7 @@ const approvalCells = (a) => {
     [asText(a.id, ''), 'mono'],
     [asText(a.session_id, '').slice(0, 12), 'mono'],
     [a.kind, undefined],
-    [describeAction(a.action, a.origin), 'mono wrap'],
+    [describeAction(a.action, a.origin, undefined, a.field_read), 'mono wrap'],
     [shownText(a.reason), 'wrap'],
   ];
 };
@@ -1003,7 +1105,7 @@ async function loadReplay() {
         // account, which the approval does not bind.
         appendCell(row, a.id);
         appendCell(row, a.kind);
-        appendCell(row, describeAction(a.action, a.origin));
+        appendCell(row, describeAction(a.action, a.origin, undefined, a.field_read));
         // As the queue shows it: what would hide or reorder the agent's words, as its code point.
         appendCell(row, shownText(a.reason));
         appendNodeCell(row, statusBadge(a.status));

@@ -15,6 +15,10 @@ dynamic = ["dependencies", "optional-dependencies"]
 [project.urls]
 Homepage = "https://github.com/LvcidPsyche/auto-browser"
 
+# Not published: release.yml publishes the client, the LangChain integration and the MCP metapackage, and the image
+# copies app/ without installing this. The wheel is built only so the release audit and CI's package-build job can
+# check what it holds. Its one top-level package is `app`, a name other projects use too, so install it only into an
+# environment of its own, as the host tests do, never beside other packages.
 [tool.setuptools.packages.find]
 include = ["app*"]
 

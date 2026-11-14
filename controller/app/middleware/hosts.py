@@ -10,12 +10,15 @@ client was refused. This keeps the same pattern language (exact names,
 
 from __future__ import annotations
 
-from typing import Sequence
+import re
+from typing import Callable, Sequence
 
 from fastapi import FastAPI
 from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+from ..host_patterns import is_wildcard_pattern, normalize_pattern, pattern_error
 
 
 def host_from_header(value: str) -> str:
@@ -33,11 +36,35 @@ def host_from_header(value: str) -> str:
     return candidate.lower()
 
 
-def _normalize_pattern(pattern: str) -> str:
-    normalized = pattern.strip().lower()
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
-    return normalized
+# What a browser serializes an Origin to, and nothing looser: a scheme with a default port, a name or a bracketed IPv6
+# address, and a port. A path, a query, a user or a second origin in the header is no Origin a browser sent.
+_SERIALIZED_ORIGIN = re.compile(r"(https?)://(\[[0-9a-f:.]+\]|[^\[\]/?#@:\s]+)(?::([0-9]{1,5}))?", re.IGNORECASE)
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_HTTP_OPTIONAL_WHITESPACE = " \t"
+
+
+def _origin_key(origin: str) -> tuple[str, int] | None:
+    """The host (lowercased, without IPv6 brackets) and port of ``origin``, its scheme's default when it names none."""
+    match = _SERIALIZED_ORIGIN.fullmatch(origin)
+    if match is None:
+        return None
+    scheme, host, port = match.groups()
+    return host.strip("[]").lower(), int(port) if port else _DEFAULT_PORTS[scheme.lower()]
+
+
+def origin_matches_host(origin: str, host_header: str) -> bool:
+    """Whether an Origin header names the host and port a request's Host header does, as a browser compares them.
+
+    Only host and port: a TLS-terminating proxy leaves the controller on plain HTTP behind an https page. A Host with
+    no port means the default port of the scheme the Origin used, so ``http://localhost`` matches ``localhost:80``. An
+    Origin or a Host that cannot be parsed matches nothing, which the caller must read as foreign.
+    """
+    origin = origin.strip(_HTTP_OPTIONAL_WHITESPACE)
+    own = _origin_key(origin)
+    if own is None:
+        return False
+    scheme = origin.partition("://")[0]
+    return own == _origin_key(f"{scheme}://{host_header.strip(_HTTP_OPTIONAL_WHITESPACE)}")
 
 
 def host_is_allowed(host_header: str, patterns: Sequence[str]) -> bool:
@@ -45,7 +72,7 @@ def host_is_allowed(host_header: str, patterns: Sequence[str]) -> bool:
     if not host:
         return False
     for raw in patterns:
-        pattern = _normalize_pattern(raw)
+        pattern = normalize_pattern(raw)
         if pattern == "*":
             return True
         if pattern.startswith("*."):
@@ -57,31 +84,42 @@ def host_is_allowed(host_header: str, patterns: Sequence[str]) -> bool:
 
 
 class ControllerHostMiddleware:
-    """Reject requests whose Host header is not in ``allowed_hosts``."""
+    """Reject requests whose Host header is not in ``allowed_hosts``.
 
-    def __init__(self, app: ASGIApp, allowed_hosts: Sequence[str]) -> None:
+    A wildcard admits a Host only while the controller requires a credential (``requires_credential``, asked per
+    request, HTTP and WebSocket alike): without one, a page that rebinds a name under the wildcard to 127.0.0.1 is no
+    different from a client, and drives the controller whole. Exact entries admit as they always did.
+    """
+
+    def __init__(self, app: ASGIApp, allowed_hosts: Sequence[str], *, requires_credential: Callable[[], bool]) -> None:
         for pattern in allowed_hosts:
-            normalized = _normalize_pattern(pattern)
-            wildcard_ok = normalized == "*" or (normalized.startswith("*.") and "*" not in normalized[1:])
-            if "*" in normalized and not wildcard_ok:
-                raise ValueError(f"invalid host pattern {pattern!r}; wildcards must look like '*.example.com'")
+            error = pattern_error(pattern)
+            if error is not None:
+                raise ValueError(f"invalid host pattern {pattern!r}; {error}")
         self.app = app
         self.allowed_hosts = list(allowed_hosts)
+        self.exact_hosts = [pattern for pattern in self.allowed_hosts if not is_wildcard_pattern(pattern)]
+        self.requires_credential = requires_credential
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
         host = Headers(scope=scope).get("host", "")
-        if host_is_allowed(host, self.allowed_hosts):
+        patterns = self.allowed_hosts if self.requires_credential() else self.exact_hosts
+        if host_is_allowed(host, patterns):
             await self.app(scope, receive, send)
             return
         response = PlainTextResponse("Invalid host header", status_code=400)
         await response(scope, receive, send)
 
 
-def install_controller_host_middleware(application: FastAPI, allowed_hosts: Sequence[str]) -> None:
+def install_controller_host_middleware(
+    application: FastAPI, allowed_hosts: Sequence[str], *, requires_credential: Callable[[], bool]
+) -> None:
     # An empty list is not "allow everything" for an unauthenticated API: the
     # loopback-only Host rule in app/middleware/http.py covers that case.
     if allowed_hosts:
-        application.add_middleware(ControllerHostMiddleware, allowed_hosts=list(allowed_hosts))
+        application.add_middleware(
+            ControllerHostMiddleware, allowed_hosts=list(allowed_hosts), requires_credential=requires_credential
+        )

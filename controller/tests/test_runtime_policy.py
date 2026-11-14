@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.api_token import ensure_api_credential
 from app.config import Settings
 from app.runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH, validate_runtime_policy
 
@@ -312,6 +313,30 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("OPENAI_AUTH_MODE=bogus is invalid; expected one of: api, cli, host_bridge", report.errors)
 
+    def test_an_auth_mode_too_long_to_be_a_mistyped_mode_is_not_printed(self) -> None:
+        # .env.example has OPENAI_AUTH_MODE three lines under OPENAI_API_KEY: a key pasted on the wrong line would
+        # be in the error a refused start logs. A synthetic stand-in, not a key.
+        pasted = "sk-" + "K" * 40
+        settings = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
+            REQUIRE_OPERATOR_ID="true",
+            AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+            REQUIRE_AUTH_STATE_ENCRYPTION="true",
+            ALLOWED_HOSTS="example.com",
+            CONTROLLER_ALLOWED_HOSTS="controller.example.com",
+            OPENAI_AUTH_MODE=pasted,
+        )
+
+        report = validate_runtime_policy(settings)
+
+        [error] = [error for error in report.errors if "OPENAI_AUTH_MODE" in error]
+        self.assertIn("is invalid; expected one of: api, cli, host_bridge", error)
+        self.assertIn("43 characters", error)
+        self.assertNotIn("k" * 40, error.lower())
+
     def test_production_rejects_cli_mode_without_expected_auth_state(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             settings = Settings(
@@ -392,6 +417,86 @@ class RuntimePolicyTests(unittest.TestCase):
 
         self.assertTrue(report.ok)
         self.assertFalse(any("OPENAI_AUTH_MODE" in error for error in report.errors))
+
+
+class TokenlessWildcardHostPolicyTests(unittest.TestCase):
+    """A controller that requires no credential does not start with a wildcard in CONTROLLER_ALLOWED_HOSTS.
+
+    A page that rebinds a name under the wildcard to 127.0.0.1 is admitted by it, and with no token to ask for, drives
+    the controller whole. Every spelling the Host check reads as a wildcard counts, brackets and case included.
+    """
+
+    def _host_errors(self, **fields) -> list[str]:
+        report = validate_runtime_policy(Settings(_env_file=None, **fields))
+        return [error for error in report.errors if "CONTROLLER_ALLOWED_HOSTS" in error]
+
+    def test_a_tokenless_controller_with_a_wildcard_host_does_not_start(self) -> None:
+        for allowed in (
+            "*",
+            "*.example.com",
+            "*.EXAMPLE.com",
+            "[*]",
+            "[*.example.com]",
+            "*.",
+            "localhost,127.0.0.1,::1,controller.internal,*.example.com",
+        ):
+            with self.subTest(allowed=allowed):
+                errors = self._host_errors(
+                    API_BIND_SCOPE="loopback", API_ALLOW_TOKENLESS_LOOPBACK="true", CONTROLLER_ALLOWED_HOSTS=allowed
+                )
+
+                self.assertEqual(len(errors), 1, errors)
+                # It says what works: a token, or exact host names.
+                self.assertIn("API_BEARER_TOKEN", errors[0])
+                self.assertIn("exact host names", errors[0])
+
+    def test_a_token_or_exact_names_start_as_before(self) -> None:
+        for fields in (
+            # A token, with every Host the wildcard matches.
+            {
+                "API_BIND_SCOPE": "loopback",
+                "API_BEARER_TOKEN": PRODUCTION_BEARER_TOKEN,
+                "CONTROLLER_ALLOWED_HOSTS": "*",
+            },
+            # The Codespaces overlay: a token, published off-box, and the forwarder's suffix.
+            {
+                "API_BIND_SCOPE": "exposed",
+                "API_BEARER_TOKEN": PRODUCTION_BEARER_TOKEN,
+                "CONTROLLER_ALLOWED_HOSTS": "localhost,127.0.0.1,::1,*.app.github.dev",
+            },
+            # Tokenless, with exact loopback names and with an exact name that is no loopback one.
+            {
+                "API_BIND_SCOPE": "loopback",
+                "API_ALLOW_TOKENLESS_LOOPBACK": "true",
+                "CONTROLLER_ALLOWED_HOSTS": "localhost,127.0.0.1,::1,[::1]",
+            },
+            {
+                "API_BIND_SCOPE": "loopback",
+                "API_ALLOW_TOKENLESS_LOOPBACK": "true",
+                "CONTROLLER_ALLOWED_HOSTS": "localhost,controller.internal",
+            },
+        ):
+            with self.subTest(fields=fields):
+                report = validate_runtime_policy(Settings(_env_file=None, **fields))
+
+                self.assertEqual(report.errors, [])
+
+    def test_a_token_the_start_generates_is_not_refused(self) -> None:
+        # The lifespan loads or generates the token first, and checks the policy after it.
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(
+                _env_file=None,
+                API_BIND_SCOPE="loopback",
+                API_ALLOW_TOKENLESS_LOOPBACK="false",
+                CONTROLLER_ALLOWED_HOSTS="*",
+                API_TOKEN_FILE=str(Path(directory) / "api-token"),
+            )
+            ensure_api_credential(settings)
+
+            report = validate_runtime_policy(settings)
+
+        self.assertTrue(settings.api_bearer_token)
+        self.assertEqual(report.errors, [])
 
 
 class CdpConnectUrlPolicyTests(unittest.TestCase):

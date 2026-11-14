@@ -60,11 +60,23 @@ Unix socket (`scripts/codex_host_bridge.py`, which gives Codex an allowlisted en
 `--pass-env NAME`; see docs/deployment.md). `GET /agent/providers` reports the mode each provider is in.
 
 A `cli` provider's CLI gets an allowlisted environment, and on Linux the controller (and the bridge) is
-non-dumpable, so the CLI cannot read the controller's environment through `/proc`. Known limit: the CLI runs as the
-controller's uid (the bridge's Codex as the bridge's), so it can still read the controller's files: `data/api-token`,
-`data/takeover-token`, the mesh and witness keys. Page content shown to the model can prompt-inject the CLI into
-doing so. On macOS and Windows the controller and the bridge do not change this, and whether a process of the same
-user can read their environment depends on the system.
+non-dumpable, so the CLI cannot read the controller's environment through `/proc`. On Linux with Landlock the
+controller also starts the CLI in a sandbox: of `/data` it can open only `CLI_HOME`, what `CLI_SANDBOX_WRITABLE`
+names there and the screenshot of its own call, so it cannot read `data/api-token`, `data/takeover-token` or the
+mesh and witness keys kept in their default places, though it runs as the controller's uid; outside `/data` it reads
+what it did before and writes only its home,
+the temp directories, `/dev` and the directories `CLI_SANDBOX_WRITABLE` names (on a kernel older than 6.2 it can
+still empty any file the controller's user may write). Where the sandbox is not in use, or is
+in use and would leave a secret open (a secret's setting outside `/data`, for one), the controller says so in one
+warning, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI instead ("The CLI sandbox" in docs/deployment.md,
+which also lists what it does not stop). `CLI_SANDBOX_ENABLED=false` turns the sandbox off, for a CLI that cannot run
+under it. With the sandbox on, Codex cannot run a command its model asks for, whatever `CODEX_SANDBOX_MODE` says
+(measured with codex-cli 0.114.0): its own sandbox, which wraps each such command, does not work beneath this one.
+The decision the controller asks Codex for needs no command. Known
+limit: the bridge's Codex runs as the bridge's uid on the host, outside that sandbox, so it can still read that
+user's files. Page content shown to the model can prompt-inject a CLI into trying. On
+macOS and Windows there is no sandbox and the controller and the bridge do not make themselves non-dumpable, and
+whether a process of the same user can read their environment depends on the system.
 
 ### OpenAI
 Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:
@@ -177,7 +189,12 @@ curl -X POST http://localhost:8000/agent/jobs/<job_id>/resume \
 
 The MCP full profile exposes the same behavior as `browser.resume_agent_job`.
 Resume creates a new child job with `parent_job_id` set to the original job and
-injects the checkpoint summary into `context_hints`.
+carries the original's last six checkpoints in the request's `resume_checkpoints` field (step, status, action, URL
+and title). The planner is shown them as page data, inside the observation, since a URL or a title came from a page;
+`context_hints` of the child stays the operator's. The child gets the original
+job's `max_steps`, not what was left of them, unless the request gives
+`max_steps`. It does not carry the original job's `approval_id`: a step that
+needs an approval asks for a new one.
 
 ## Safety behavior
 
@@ -227,11 +244,18 @@ If a provider still proposes a side effect, the controller does not trust it bli
   the action tools.
 - What it does not guarantee is delivery against a page that runs script in the gaps between the checks and the
   input: the few milliseconds between the last hit test and the press, and the 20-80 ms between mouse down and up;
-  focus is checked before the text, between select-all and delete and after the clear, not between keystrokes, and
-  a keydown handler can move focus within the key it handles, the clear's Delete included: the check after the
-  clear then reports `focus_lost` after the field it moved to was emptied; hover is not hit-tested once the
-  pointer arrives; a drag's destination is not hit-tested (drag libraries put the dragged element under the
-  pointer), and its check of a coordinate end compares scroll positions, so a page can still change what is under
+  focus is checked before the text, between select-all and delete and after the clear (a type by selector checks
+  its clear the same way, asking the element its selector named as the type focused it, so a page that puts
+  another node in that element's place during the clear is refused as `focus_lost` too), not between keystrokes: a
+  key of the text that moves focus on (an Enter that takes a login form to its password field) sends the rest of
+  the text to the field focus moved to, and the type then keeps no preview of its text (`text_redacted`, under a
+  `restricted` receipt), which it keeps only where the node that had focus as the text began reads as not secret
+  and kept focus until the text was in (a page that stops focus events before its nodes hear them can still move
+  focus away and back unheard); and a keydown handler can move focus within the key it handles, the clear's Delete
+  included: the check after the clear then reports `focus_lost` after the field it moved to was emptied; hover is
+  not hit-tested once the pointer arrives; a drag's destination is not hit-tested (drag libraries put the dragged
+  element under the pointer),
+  and its check of a coordinate end compares scroll positions, so a page can still change what is under
   that point (by scrolling a box no element end is drawn inside while stopping its scroll events or inside a
   shadow root, by scrolling back to where it was, or by replacing content), and a scroller an element end is
   slotted into through a closed shadow root is not seen; the hit test and the focus check do not see into closed
@@ -248,16 +272,14 @@ If a provider still proposes a side effect, the controller does not trust it bli
   same.
 - Each message to the isolated world has a deadline, `ACTION_TIMEOUT_MS` plus its own wait for a script that waits
   on the element: a bound per message, not a deadline for the whole action. A page that does not answer in time
-  fails with `page_not_responding` (not retryable; HTTP 504 over REST, an MCP tool error with that code). Other
-  calls still wait on the page (its title, mouse and keyboard input, the checks after an action), so a page that
-  hangs in its click handler holds that action until it answers. A change sent to the world (a focus, a selection,
-  the upload's marker) whose answer is lost after it was sent fails as `change_unconfirmed` (not retryable):
-  observe the page before acting again.
+  fails with `page_not_responding` (not retryable; HTTP 504 over REST, an MCP tool error with that code). A call
+  that gave up waiting while another call was still opening the page's session fails with the same code and is
+  retryable: it sent the page nothing more (a read whose answer was lost is asked a second time, and that second
+  asking is what gave up). Other calls still wait on the page (its title, mouse and keyboard input, the checks
+  after an action), so a page that hangs in its click handler holds that action until it answers. A change sent to
+  the world (a focus, a selection, the upload's marker) whose answer is lost after it was sent fails as
+  `change_unconfirmed` (not retryable): observe the page before acting again.
 - Provider calls are awaited HTTP requests made from the API process; there is no separate model worker.
 - Provider HTTP calls retry timeouts, network errors, `429` and `5xx` responses with exponential backoff (`MODEL_MAX_RETRIES`, `MODEL_RETRY_BACKOFF_SECONDS`); a `Retry-After` header on a `429`/`5xx` lengthens the wait (capped).
 - Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME` (OpenAI can also use `host_bridge`).
 - Session observations now also include `tabs` and `recent_downloads`, so providers can follow popup flows and stop after a file lands or an export completes.
-
-## Next production upgrades
-
-- add streaming/SSE on top of the current REST + MCP surfaces when clients need server-pushed events

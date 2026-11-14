@@ -12,11 +12,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
 from app.config import Settings
+from app.provider_registry import ProviderRegistry
 from app.providers.base import BaseProviderAdapter
+from app.providers.claude_adapter import ClaudeAdapter
+from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
 
 
@@ -72,10 +76,54 @@ class ProviderReadinessHelperTests(unittest.TestCase):
         self.assertEqual(BaseProviderAdapter.normalize_auth_mode(None), "")
         self.assertIn("api", self.adapter.supported_auth_modes)
         self.assertTrue(self.adapter.auth_mode_supported("api"))
-        self.assertFalse(self.adapter.auth_mode_supported("carrier-pigeon"))
-        detail = self.adapter.invalid_auth_mode_detail("carrier-pigeon")
-        self.assertIn("carrier-pigeon", detail)
+        self.assertFalse(self.adapter.auth_mode_supported("carrier_pigeon"))
+        # Letters and an underscore, as a mode is: with a hyphen it is described and not quoted (auth_mode_shown).
+        detail = self.adapter.invalid_auth_mode_detail("carrier_pigeon")
+        self.assertIn("carrier_pigeon", detail)
         self.assertIn("expected one of", detail)
+
+
+class ProviderDefaultModelTests(unittest.TestCase):
+    """STORE-30: a CLI model set for the CLI mode was reported as the model of the API mode too."""
+
+    def _settings(self, **extra: str) -> Settings:
+        return Settings(
+            _env_file=None,
+            CLAUDE_MODEL="claude-api-model",
+            CLAUDE_CLI_MODEL="claude-cli-alias",
+            GEMINI_MODEL="gemini-api-model",
+            GEMINI_CLI_MODEL="gemini-cli-alias",
+            **extra,
+        )
+
+    def test_in_api_mode_the_default_model_is_the_api_model_whatever_the_cli_model_is(self) -> None:
+        settings = self._settings(CLAUDE_AUTH_MODE="api", GEMINI_AUTH_MODE="api")
+
+        self.assertEqual(ClaudeAdapter(settings).default_model, "claude-api-model")
+        self.assertEqual(GeminiAdapter(settings).default_model, "gemini-api-model")
+
+    def test_in_cli_mode_the_default_model_is_the_cli_model(self) -> None:
+        settings = self._settings(CLAUDE_AUTH_MODE="cli", GEMINI_AUTH_MODE="cli")
+
+        self.assertEqual(ClaudeAdapter(settings).default_model, "claude-cli-alias")
+        self.assertEqual(GeminiAdapter(settings).default_model, "gemini-cli-alias")
+
+    def test_in_cli_mode_with_no_cli_model_the_default_model_is_the_api_model(self) -> None:
+        settings = Settings(
+            _env_file=None, CLAUDE_AUTH_MODE="cli", GEMINI_AUTH_MODE="cli", CLAUDE_MODEL="c-api", GEMINI_MODEL="g-api"
+        )
+
+        self.assertEqual(ClaudeAdapter(settings).default_model, "c-api")
+        self.assertEqual(GeminiAdapter(settings).default_model, "g-api")
+
+    def test_the_provider_list_reports_the_model_the_mode_uses(self) -> None:
+        listed = {
+            info.provider: info.model
+            for info in ProviderRegistry(self._settings(CLAUDE_AUTH_MODE="api", GEMINI_AUTH_MODE="cli")).list()
+        }
+
+        self.assertEqual(listed["claude"], "claude-api-model")
+        self.assertEqual(listed["gemini"], "gemini-cli-alias")
 
 
 class ProviderObservationPromptTests(unittest.TestCase):
@@ -142,6 +190,43 @@ class ProviderDecisionParsingTests(unittest.TestCase):
     def test_parse_garbage_raises(self) -> None:
         with self.assertRaises(RuntimeError):
             self.adapter.parse_decision_text("no json here, just words {incomplete")
+
+    def test_a_reply_with_several_different_decisions_is_refused_at_the_second(self) -> None:
+        # D1-12: every candidate was collected first, and the message gave the full count.
+        text = " ".join(_decision_json(f"e{number}") for number in (1, 2, 3))
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.adapter.parse_decision_text(text)
+
+        self.assertIn("its reply holds at least 2 different decisions", str(caught.exception))
+        self.assertNotIn("3 different", str(caught.exception))
+
+    def test_the_scan_stops_at_the_second_different_decision(self) -> None:
+        raw_decode = json.JSONDecoder.raw_decode
+
+        def decodes_for(objects: int) -> int:
+            """How many times the reply was decoded as JSON before it was refused."""
+            text = " ".join(_decision_json(f"e{number}") for number in range(objects))
+            decoded: list[int] = []
+
+            def counting(decoder, string, idx=0):
+                decoded.append(idx)
+                return raw_decode(decoder, string, idx)
+
+            with patch.object(json.JSONDecoder, "raw_decode", counting), self.assertRaises(RuntimeError):
+                self.adapter.parse_decision_text(text)
+            return len(decoded)
+
+        # The third object and the rest of a long reply are never decoded: the work does not grow with the reply.
+        self.assertEqual(decodes_for(39), decodes_for(3))
+
+    def test_the_same_decision_given_again_is_one_decision_and_does_not_stop_the_scan(self) -> None:
+        same = _decision_json("again")
+
+        self.assertEqual(self.adapter.parse_decision_text(f"{same} then {same} then {same}").element_id, "again")
+        with self.assertRaises(RuntimeError) as caught:
+            self.adapter.parse_decision_text(f"{same} {same} {_decision_json('other')} {_decision_json('more')}")
+        self.assertIn("at least 2 different decisions", str(caught.exception))
 
     def test_parse_decision_file_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

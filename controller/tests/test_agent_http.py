@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import os
 import shutil
@@ -29,8 +30,9 @@ for env_name, relative_path in {
     os.environ.setdefault(env_name, str(_TEST_ROOT / relative_path))
 
 import app.main as main_module
-import app.routes.system as system_routes
-from app.models import AgentStepResult, ProviderInfo
+from app.agent_jobs import AgentJobStore
+from app.cron_service import WebhookKeyRefusedError
+from app.models import AgentJobRecord, AgentStepResult, ProviderInfo
 from app.witness import ReceiptList
 
 
@@ -173,13 +175,10 @@ class AgentHttpTests(unittest.TestCase):
         self.assertIn('data-ab-deep-health="ready"', browser.context.page.content)
         self.assertTrue(browser.context.closed)
 
-    def test_deep_health_uses_embedded_fixture_fallback(self) -> None:
+    def test_deep_health_names_its_embedded_page(self) -> None:
         browser = _DeepHealthBrowser()
 
-        with (
-            patch.object(system_routes, "_DEEP_HEALTH_FIXTURE", _TEST_ROOT / "missing-deep-health.html"),
-            patch.object(main_module.manager, "ensure_browser", new=AsyncMock(return_value=browser)),
-        ):
+        with patch.object(main_module.manager, "ensure_browser", new=AsyncMock(return_value=browser)):
             response = self.client.get("/healthz/deep")
 
         self.assertEqual(response.status_code, 200)
@@ -242,6 +241,105 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["parent_job_id"], "job-1")
         resume_job.assert_awaited_once_with("job-1", max_steps=4)
+
+    def test_queuing_a_job_at_a_full_queue_answers_503(self) -> None:
+        # The queue's own refusal, through both routes that queue: a queue that holds one job, already holding it.
+        # It reached the client as a 500 "Internal error", where a resume at the same queue answers 503.
+        full: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        full.put_nowait("a-job-waiting")
+        store = AgentJobStore(tempfile.mkdtemp(dir=_TEST_ROOT))
+        with (
+            patch.object(main_module.manager, "get_session", new=AsyncMock()),
+            patch.object(main_module.job_queue, "queue", full),
+            patch.object(main_module.job_queue, "store", store),
+        ):
+            for path in ("/sessions/session-1/agent/jobs/run", "/sessions/session-1/agent/jobs/step"):
+                with self.subTest(path=path):
+                    with self.assertLogs("app.routes.agent", level="WARNING") as logged:
+                        response = self.client.post(path, json={"provider": "openai", "goal": "g"})
+
+                    self.assertEqual((response.status_code, response.json()), (503, {"detail": "Service unavailable"}))
+                    # One line that says why, and for which session: the 500 this replaced was logged, and a 503
+                    # that passes through the route's error handling is not. No traceback: nothing is broken.
+                    (record,) = logged.records
+                    self.assertEqual(record.levelname, "WARNING")
+                    self.assertIn("queue is full", record.getMessage())
+                    self.assertIn("session-1", record.getMessage())
+                    self.assertIsNone(record.exc_info)
+        # Neither refused job is left queued for a restart to run.
+        self.assertEqual([record.status for record in store._list_sync(None, None)], ["failed", "failed"])
+
+    def test_resuming_a_job_at_a_full_queue_answers_503(self) -> None:
+        # The third route that queues, at the same queue: the run a full queue refused is one that can be resumed.
+        full: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        full.put_nowait("a-job-waiting")
+        store = AgentJobStore(tempfile.mkdtemp(dir=_TEST_ROOT))
+        with (
+            patch.object(main_module.manager, "get_session", new=AsyncMock()),
+            patch.object(main_module.job_queue, "queue", full),
+            patch.object(main_module.job_queue, "store", store),
+        ):
+            self.client.post("/sessions/session-1/agent/jobs/run", json={"provider": "openai", "goal": "g"})
+            (refused,) = store._list_sync(None, None)
+
+            with self.assertLogs("app.routes.agent", level="WARNING") as logged:
+                response = self.client.post(f"/agent/jobs/{refused.id}/resume")
+
+        self.assertEqual((response.status_code, response.json()), (503, {"detail": "Service unavailable"}))
+        # The route names a job and no session, so the line names the job.
+        (record,) = logged.records
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertIn("queue is full", record.getMessage())
+        self.assertIn(refused.id, record.getMessage())
+        self.assertIsNone(record.exc_info)
+
+    def test_resuming_a_job_whose_stored_request_no_longer_validates_answers_without_its_values(self) -> None:
+        # The 400 carried pydantic's text of the refusal, which repeats each value it refused: here the job's goal,
+        # as a record written before the request's model took its present shape holds it.
+        store = AgentJobStore(tempfile.mkdtemp(dir=_TEST_ROOT))
+        stored = AgentJobRecord(
+            id="job-1",
+            session_id="session-1",
+            kind="agent_run",
+            status="failed",
+            created_at="2026-11-12T00:00:00Z",
+            updated_at="2026-11-12T00:00:00Z",
+            request={"provider": "openai", "goal": ["a value that must not come back"], "max_steps": 99},
+        )
+        store._write_sync(stored)
+        with (
+            patch.object(main_module.manager, "session_accessible", new=AsyncMock(return_value=True)),
+            patch.object(main_module.job_queue, "store", store),
+        ):
+            response = self.client.post("/agent/jobs/job-1/resume")
+
+        self.assertEqual(
+            (response.status_code, response.json()),
+            (400, {"detail": "2 refused by AgentRunRequest: goal: string_type; max_steps: less_than_equal"}),
+        )
+
+    def test_an_error_that_is_not_the_full_queue_answers_500_and_is_logged(self) -> None:
+        # Each route that queues answered every RuntimeError as a full queue, 503 and unlogged: an audit write that
+        # raised one after the job was queued read as "try again later", with the job left queued.
+        routes = (
+            ("/sessions/session-1/agent/jobs/run", "enqueue_run", {"provider": "openai", "goal": "g"}),
+            ("/sessions/session-1/agent/jobs/step", "enqueue_step", {"provider": "openai", "goal": "g"}),
+            ("/agent/jobs/job-1/resume", "resume_job", None),
+        )
+        for path, method, body in routes:
+            failing = AsyncMock(side_effect=RuntimeError("the audit store is closed"))
+            with (
+                self.subTest(path=path),
+                patch.object(main_module.manager, "get_session", new=AsyncMock()),
+                patch.object(main_module.job_queue, method, failing),
+                self.assertLogs("app.routes.agent", level="ERROR") as logged,
+            ):
+                response = self.client.post(path, json=body)
+
+                self.assertEqual((response.status_code, response.json()), (500, {"detail": "Internal error"}))
+                self.assertIn(
+                    "answered 500 for RuntimeError: 'the audit store is closed'", logged.records[0].getMessage()
+                )
 
     def test_discard_agent_job_endpoint_marks_job_discarded(self) -> None:
         discard_job = AsyncMock(return_value={"id": "job-1", "status": "discarded", "resumable": False})
@@ -345,7 +443,11 @@ class AgentHttpTests(unittest.TestCase):
                 patch.object(main_module.manager, "get_pii_scrubber_status", return_value={"enabled": True})
             )
             stack.enter_context(
-                patch.object(main_module.share_manager, "create_token", return_value={"token": "share"})
+                patch.object(
+                    main_module.share_manager,
+                    "create_token",
+                    return_value={"token": "share", "session_id": "session-1", "scope": "observe", "expires_at": 0},
+                )
             )
             stack.enter_context(
                 patch.object(
@@ -465,7 +567,9 @@ class AgentHttpTests(unittest.TestCase):
             patch.object(main_module.share_manager, "token_info", return_value={"valid": False}),
             patch.object(main_module.proxy_store, "delete_persona", return_value=False),
             patch.object(main_module.cron_service, "delete_job", new=AsyncMock(return_value=False)),
-            patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=PermissionError())),
+            patch.object(
+                main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=WebhookKeyRefusedError())
+            ),
         ):
             replay = self.client.get("/sessions/session-1/replay")
             exported = self.client.get("/auth-profiles/ops/export")

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import hashlib
 import tempfile
 import unittest
+from collections.abc import Mapping
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from apscheduler.triggers.cron import CronTrigger
+from pydantic import ValidationError
+
+from app.app_factory import build_controller_services
 from app.audit import get_current_operator
-from app.cron_service import CronJobDisabledError, CronService
+from app.config import Settings
+from app.cron_service import CronJobDisabledError, CronService, CronStoreUnreadableError
 from app.models import OperatorIdentity
 from app.session_ownership import acting_as
 
@@ -32,16 +42,20 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(created["name"], "daily check")
         self.assertTrue(created["webhook_enabled"])
-        self.assertIn("webhook_key_preview", created)
         # Disclosed once, on creation — otherwise no caller could ever trigger it.
         self.assertEqual(len(created["webhook_key"]), 64)
-        self.assertTrue(created["webhook_key"].startswith(created["webhook_key_preview"].removesuffix("...")))
+        self.assertNotIn("webhook_key_preview", created)
+        self.assertNotIn("webhook_key_hash", created)
+        self.assertFalse(created["webhook_key"].startswith(created["webhook_key_id"]))
         fetched = await service.get_job(created["id"])
         self.assertEqual(fetched["id"], created["id"])
         self.assertNotIn("webhook_key", fetched)
+        self.assertNotIn("webhook_key_hash", fetched)
+        self.assertEqual(fetched["webhook_key_id"], created["webhook_key_id"])
         listed = await service.list_jobs()
         self.assertEqual(len(listed), 1)
         self.assertNotIn("webhook_key", listed[0])
+        self.assertNotIn("webhook_key_hash", listed[0])
 
         with self.assertRaises(ValueError):
             await service.create_job(name="overflow", goal="nope")
@@ -71,7 +85,8 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         raw = service._load()[created["id"]]
 
-        self.assertEqual(created["webhook_key"], raw["webhook_key"])
+        self.assertNotIn("webhook_key", raw)
+        self.assertEqual(raw["webhook_key_hash"], hashlib.sha256(created["webhook_key"].encode("utf-8")).hexdigest())
 
         with self.assertRaises(PermissionError):
             await service.trigger_via_webhook(created["id"], "wrong")
@@ -180,6 +195,38 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_warning.call_args_list[0][0][0], "failed to remove cron job %s during update: %s")
         self.assertEqual(mock_warning.call_args_list[1][0][0], "failed to remove cron job %s during delete: %s")
 
+    async def test_a_job_the_scheduler_never_held_is_deleted_and_updated_without_a_warning(self) -> None:
+        # A webhook-only job has no schedule and a disabled one is not registered: asking the scheduler to remove
+        # either one failed, and the miss was logged as a warning at every delete and update.
+        service = CronService(self.store_path)
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+        webhook_only = await service.create_job(name="hook", goal="run", webhook_enabled=True)
+        disabled = await service.create_job(name="off", goal="run", schedule="0 9 * * *", enabled=False)
+        self.assertIsNone(service._scheduler.get_job(webhook_only["id"]))
+        self.assertIsNone(service._scheduler.get_job(disabled["id"]))
+
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await service.update_job(webhook_only["id"], {"name": "renamed"})
+            self.assertTrue(await service.delete_job(webhook_only["id"]))
+            self.assertTrue(await service.delete_job(disabled["id"]))
+
+    async def test_a_registered_job_is_still_taken_off_the_scheduler(self) -> None:
+        service = CronService(self.store_path)
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+        updated = await service.create_job(name="a", goal="run", schedule="0 9 * * *")
+        deleted = await service.create_job(name="b", goal="run", schedule="0 9 * * *")
+        self.assertIsNotNone(service._scheduler.get_job(updated["id"]))
+        self.assertIsNotNone(service._scheduler.get_job(deleted["id"]))
+
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await service.update_job(updated["id"], {"enabled": False})
+            await service.delete_job(deleted["id"])
+
+        self.assertIsNone(service._scheduler.get_job(updated["id"]))
+        self.assertIsNone(service._scheduler.get_job(deleted["id"]))
+
     async def test_invalid_schedule_is_rejected_not_silently_saved(self) -> None:
         service = CronService(self.store_path)
         with self.assertRaises(ValueError):
@@ -256,6 +303,28 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.trigger_job(created["id"])
 
         self.assertEqual(service._active_runs, {})
+
+    async def test_a_store_that_fails_after_the_run_is_queued_still_answers_triggered(self) -> None:
+        for name, patch_store in (
+            ("unreadable", lambda service: patch.object(service, "_load", side_effect=CronStoreUnreadableError())),
+            ("unsaveable", lambda service: patch.object(service, "_save", side_effect=OSError("disk full"))),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                manager = MagicMock()
+                manager.create_session = AsyncMock(return_value={"id": "session-1"})
+                queue = MagicMock()
+                queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+                service = CronService(Path(tmp) / "crons.json", job_queue=queue, manager=manager)
+                created = await service.create_job(name="n", goal="g", webhook_enabled=True)
+                job = service._load()[created["id"]]
+
+                with patch_store(service), self.assertLogs("app.cron_service", level="ERROR") as logged:
+                    result = await service._run_job_now(job)
+
+                self.assertTrue(result["triggered"])
+                self.assertEqual(result["session_id"], "session-1")
+                self.assertEqual(result["queued_job"], {"id": "agent-job-1"})
+                self.assertTrue(any(created["id"] in line for line in logged.output), logged.output)
 
     async def test_cancel_during_enqueue_frees_the_slot_and_closes_the_session(self) -> None:
         started = asyncio.Event()
@@ -353,6 +422,791 @@ class CronQuarantineWarningTests(unittest.IsolatedAsyncioTestCase):
             await self._start_and_stop()
 
 
+class CronTimezoneTests(unittest.IsolatedAsyncioTestCase):
+    """Schedules read in CRON_TIMEZONE (UTC by default), whatever the host's own time zone is."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store_path = Path(self.tmp.name) / "crons.json"
+
+    async def _started(self, **kwargs) -> CronService:
+        service = CronService(self.store_path, **kwargs)
+        await service.startup()
+        self.addAsyncCleanup(service.shutdown)
+        return service
+
+    async def test_the_scheduler_defaults_to_utc_and_holds_the_three_job_defaults(self) -> None:
+        service = await self._started()
+
+        self.assertEqual(str(service._scheduler.timezone), "UTC")
+        self.assertEqual(
+            service._scheduler._job_defaults, {"misfire_grace_time": 300, "coalesce": True, "max_instances": 1}
+        )
+
+    async def test_the_configured_zone_reaches_the_scheduler_and_the_trigger_a_job_gets(self) -> None:
+        await CronService(self.store_path).create_job(name="n", goal="g", schedule="0 9 * * *")
+
+        service = await self._started(timezone="Asia/Tokyo")
+
+        self.assertEqual(str(service._scheduler.timezone), "Asia/Tokyo")
+        [job] = service._scheduler.get_jobs()
+        self.assertEqual(str(job.trigger.timezone), "Asia/Tokyo")
+        # Nine in the morning there: the zone changes the instant it fires.
+        self.assertEqual(job.next_run_time.hour, 9)
+        self.assertNotEqual(job.next_run_time.utcoffset(), timedelta(0))
+
+    async def test_a_new_job_and_the_schedule_check_use_the_same_zone(self) -> None:
+        service = await self._started(timezone="Asia/Tokyo")
+        real_from_crontab = CronTrigger.from_crontab
+
+        with patch("app.cron_service.CronTrigger.from_crontab", wraps=real_from_crontab) as from_crontab:
+            created = await service.create_job(name="n", goal="g", schedule="30 6 * * *")
+
+        self.assertGreaterEqual(from_crontab.call_count, 2, "both the check and the registration read the schedule")
+        for call in from_crontab.call_args_list:
+            self.assertEqual(call.kwargs.get("timezone"), "Asia/Tokyo", call)
+        self.assertEqual(str(service._scheduler.get_job(created["id"]).trigger.timezone), "Asia/Tokyo")
+
+    async def test_a_bad_zone_name_stops_startup_with_a_clear_message(self) -> None:
+        for bad in ("Mars/Olympus", "not a zone", "../etc/passwd", "Europe"):
+            with self.subTest(bad):
+                with self.assertRaises(ValidationError) as caught:
+                    Settings(CRON_TIMEZONE=bad)
+                self.assertIn("CRON_TIMEZONE", str(caught.exception))
+                self.assertIn("IANA", str(caught.exception))
+
+    async def test_a_good_or_empty_zone_name_is_kept_or_defaulted_and_the_controller_is_wired_to_it(self) -> None:
+        self.assertEqual(Settings().cron_timezone, "UTC")
+        self.assertEqual(Settings(CRON_TIMEZONE="").cron_timezone, "UTC")
+        self.assertEqual(Settings(CRON_TIMEZONE="  ").cron_timezone, "UTC")
+        self.assertEqual(Settings(CRON_TIMEZONE=" America/Chicago ").cron_timezone, "America/Chicago")
+
+        services = build_controller_services(Settings(CRON_TIMEZONE="Europe/Berlin"), version="test")
+
+        self.assertEqual(services.cron_service._timezone, "Europe/Berlin")
+
+
+class _OutcomeQueue:
+    """Keeps a run's finish callback, and answers its agent job's record with the status a test sets."""
+
+    def __init__(self) -> None:
+        self.callback = None
+        self.status = "completed"
+        self.store = SimpleNamespace(get=AsyncMock(side_effect=self._record))
+
+    async def _record(self, _job_id: str):
+        return SimpleNamespace(status=self.status)
+
+    async def enqueue_run(self, _session_id, _request, *, on_finish=None):
+        self.callback = on_finish
+        return {"id": "agent-job-1"}
+
+
+class CronRunOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    """last_status says how the job's latest run ended, not that it was once queued."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.manager = MagicMock()
+        self.manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        self.manager.close_session = AsyncMock()
+        self.queue = _OutcomeQueue()
+        self.service = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+        self.job_id = (await self.service.create_job(name="n", goal="g", webhook_enabled=True))["id"]
+
+    def _stored(self) -> dict:
+        return self.service._load()[self.job_id]
+
+    async def test_a_finished_run_replaces_queued_with_how_it_ended(self) -> None:
+        for status in ("completed", "failed", "cancelled", "interrupted", "discarded"):
+            with self.subTest(status):
+                await self.service.trigger_job(self.job_id)
+                self.assertEqual(self._stored()["last_status"], "queued")
+
+                self.queue.status = status
+                await self.queue.callback("agent-job-1")
+
+                self.assertEqual(self._stored()["last_status"], status)
+                self.manager.close_session.assert_awaited_with("session-1")
+                self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_record_that_shows_no_end_reads_unknown_and_never_running(self) -> None:
+        # The worker could not write the job's end (a full disk), so its record still says it runs: it has ended.
+        await self.service.trigger_job(self.job_id)
+        self.queue.status = "running"
+
+        await self.queue.callback("agent-job-1")
+
+        self.assertEqual(self._stored()["last_status"], "unknown")
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_a_finish_callback_that_runs_before_the_queued_write_keeps_its_outcome(self) -> None:
+        async def finished_before_enqueue_returns(_session_id, _request, *, on_finish=None):
+            self.queue.status = "failed"
+            await on_finish("agent-job-1")
+            return {"id": "agent-job-1"}
+
+        self.queue.enqueue_run = finished_before_enqueue_returns
+
+        result = await self.service.trigger_job(self.job_id)
+
+        self.assertTrue(result["triggered"])
+        stored = self._stored()
+        self.assertEqual(stored["last_status"], "failed", "the later 'queued' write ran over the outcome")
+        self.assertEqual(stored["run_count"], 1)
+        self.assertIsNotNone(stored["last_run_at"])
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_finish_callback_blocked_behind_the_queued_write_lands_after_it(self) -> None:
+        # The callback waits for the store lock the trigger's update holds: its outcome is the one that stays.
+        await self.service.trigger_job(self.job_id)
+        await self.service._lock.acquire()
+        finish = asyncio.create_task(self.queue.callback("agent-job-1"))
+        await asyncio.sleep(0)
+        self.service._active_runs[self.job_id] = "session-1"  # still this run's while the callback waits
+        jobs = self.service._load()
+        jobs[self.job_id]["last_status"] = "queued"
+        self.service._save(jobs)
+        self.service._lock.release()
+
+        await finish
+
+        self.assertEqual(self._stored()["last_status"], "completed")
+
+    async def test_a_finish_callback_for_an_old_run_leaves_a_newer_runs_status_alone(self) -> None:
+        await self.service.trigger_job(self.job_id)
+        old_run = self.queue.callback
+        # A newer trigger took the slot: its run, not this old one, says what the job's status is.
+        self.service._active_runs[self.job_id] = "session-2"
+        jobs = self.service._load()
+        jobs[self.job_id]["last_status"] = "queued"
+        self.service._save(jobs)
+        self.queue.status = "failed"
+
+        await old_run("agent-job-1")
+
+        self.assertEqual(self._stored()["last_status"], "queued", "an old run wrote over a newer run's status")
+        self.assertEqual(self.service._active_runs, {self.job_id: "session-2"}, "the newer run's slot was freed")
+        self.manager.close_session.assert_not_awaited()
+
+    async def test_a_cron_store_that_cannot_be_read_in_the_callback_still_releases_the_run(self) -> None:
+        await self.service.trigger_job(self.job_id)
+
+        with (
+            patch.object(self.service, "_load", side_effect=CronStoreUnreadableError()),
+            self.assertLogs("app.cron_service", level="ERROR") as logged,
+        ):
+            await self.queue.callback("agent-job-1")
+
+        self.assertTrue(any(self.job_id in line for line in logged.output), logged.output)
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_cron_store_that_cannot_be_saved_in_the_callback_still_releases_the_run(self) -> None:
+        await self.service.trigger_job(self.job_id)
+
+        with (
+            patch.object(self.service, "_save", side_effect=OSError("disk full")),
+            self.assertLogs("app.cron_service", level="ERROR") as logged,
+        ):
+            await self.queue.callback("agent-job-1")
+
+        self.assertTrue(any(self.job_id in line for line in logged.output), logged.output)
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(self.service._active_runs, {})
+
+    async def test_an_agent_job_that_cannot_be_read_reads_unknown_and_still_releases_the_run(self) -> None:
+        for error in (OSError("disk error"), KeyError("agent-job-1"), ValueError("the record does not parse")):
+            with self.subTest(type(error).__name__):
+                self.manager.close_session.reset_mock()
+                await self.service.trigger_job(self.job_id)
+                self.queue.store.get = AsyncMock(side_effect=error)
+
+                with self.assertLogs("app.cron_service", level="ERROR") as logged:
+                    await self.queue.callback("agent-job-1")
+
+                self.assertTrue(any("agent-job-1" in line for line in logged.output), logged.output)
+                self.assertEqual(self._stored()["last_status"], "unknown")
+                self.manager.close_session.assert_awaited_once_with("session-1")
+                self.assertEqual(self.service._active_runs, {})
+
+    async def test_a_run_whose_callback_never_comes_stays_queued(self) -> None:
+        await self.service.trigger_job(self.job_id)
+
+        self.assertEqual(self._stored()["last_status"], "queued")
+        self.assertEqual(self.service._active_runs, {self.job_id: "session-1"})
+
+
+ALICE = OperatorIdentity(id="alice", source="token")
+BOB = OperatorIdentity(id="bob", source="token")
+OWNER_CREDENTIAL_GONE = "refused: owner credential removed"
+# The stored name of the mark that a refusal's audit event is written: a rename would orphan the stores that hold it.
+REFUSAL_AUDITED = "refusal_audited"
+
+
+class CronOwnerCredentialTests(unittest.IsolatedAsyncioTestCase):
+    """A job fires as its owner only while a named credential still proves who that owner is."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.manager = MagicMock()
+        self.manager.settings = SimpleNamespace(api_bearer_tokens="alice:token-a,bob:token-b", api_bearer_token=None)
+        self.manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        self.manager.close_session = AsyncMock()
+        self.manager.audit.append = AsyncMock()
+        self.queue = MagicMock()
+        self.queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+        self.service = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+        with acting_as(ALICE):
+            self.job = await self.service.create_job(name="mine", goal="g", webhook_enabled=True)
+
+    def _stored(self) -> dict:
+        return self.service._load()[self.job["id"]]
+
+    def _forget_the_refusal(self) -> None:
+        """The job as it is before its first refusal: no status, and no mark that a refusal's event is written."""
+        jobs = self.service._load()
+        jobs[self.job["id"]]["last_status"] = None
+        jobs[self.job["id"]].pop(REFUSAL_AUDITED, None)
+        self.service._save(jobs)
+
+    def _assert_refused(self, result: dict | None) -> None:
+        if result is not None:
+            self.assertEqual(
+                result, {"triggered": False, "job_id": self.job["id"], "reason": "owner_credential_removed"}
+            )
+        self.manager.create_session.assert_not_awaited()
+        self.queue.enqueue_run.assert_not_awaited()
+        self.assertEqual(self.service._active_runs, {})
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        self.manager.audit.append.assert_awaited_once()
+        audited = self.manager.audit.append.await_args.kwargs
+        self.assertEqual(audited["event_type"], "cron_job_refused")
+        self.assertEqual(audited["status"], "refused")
+        self.assertEqual(
+            audited["details"],
+            {"cron_job": self.job["id"], "owner": "alice", "reason": "owner_credential_removed"},
+        )
+        self.assertNotIn(self.job["webhook_key"], str(audited))
+
+    async def test_a_configured_owner_still_fires_as_itself(self) -> None:
+        result = await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertTrue(result["triggered"])
+        self.manager.create_session.assert_awaited_once()
+        self.manager.audit.append.assert_not_awaited()
+
+    async def test_a_removed_owner_is_refused_on_every_path(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        async def scheduled() -> None:
+            await self.service._scheduled_run(self.job["id"])
+
+        async def webhook() -> dict:
+            return await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        async def trigger_tool() -> dict:
+            with acting_as(ALICE):
+                return await self.service.trigger_job(self.job["id"])
+
+        for name, fire in (("scheduled", scheduled), ("webhook", webhook), ("trigger", trigger_tool)):
+            with self.subTest(name):
+                self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
+                self._assert_refused(await fire())
+
+    def _audit_as_whoever_is_current(self) -> list[tuple[str, str]]:
+        audited_as: list[tuple[str, str]] = []
+
+        async def append(**_kwargs) -> None:
+            audited_as.append(_who())
+
+        self.manager.audit.append = append
+        return audited_as
+
+    async def test_a_scheduled_fires_refusal_is_audited_as_the_system_not_as_who_last_woke_the_scheduler(self) -> None:
+        # APScheduler's timer keeps the context of the request that last re-armed it (bob creating a job of his own),
+        # and the refusal was audited as that operator.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        audited_as = self._audit_as_whoever_is_current()
+
+        with acting_as(BOB):
+            await self.service._scheduled_run(self.job["id"])
+            self.assertEqual(_who(), ("bob", "token"), "the scheduled run left its identity behind")
+
+        self.assertEqual(audited_as, [("system", "system")])
+
+    async def test_a_scheduled_fire_with_no_request_behind_it_is_the_systems_too(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        audited_as = self._audit_as_whoever_is_current()
+
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(audited_as, [("system", "system")])
+
+    async def test_a_callers_own_trigger_is_still_refused_in_the_callers_name(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        audited_as = self._audit_as_whoever_is_current()
+
+        with acting_as(BOB):
+            await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertEqual(audited_as, [("bob", "token")])
+
+    async def test_a_scheduled_fire_that_is_not_refused_still_runs_as_its_owner(self) -> None:
+        seen: dict[str, tuple[str, str]] = {}
+
+        async def create_session(**_kwargs) -> dict[str, str]:
+            seen["session"] = _who()
+            return {"id": "session-1"}
+
+        async def enqueue_run(_session_id, _request, **_kwargs) -> dict[str, str]:
+            seen["agent_job"] = _who()
+            return {"id": "agent-job-1"}
+
+        self.manager.create_session = create_session
+        self.queue.enqueue_run = enqueue_run
+        unowned = await self.service.create_job(name="shared", goal="g")
+
+        with acting_as(BOB):
+            await self.service._scheduled_run(self.job["id"])
+            self.assertEqual(seen, {"session": ("alice", "token"), "agent_job": ("alice", "token")})
+            seen.clear()
+            await self.service._scheduled_run(unowned["id"])
+
+        self.assertEqual(seen, {"session": ("anonymous", "anonymous"), "agent_job": ("anonymous", "anonymous")})
+
+    async def test_three_fires_of_an_orphaned_job_leave_one_audit_event(self) -> None:
+        # One event a fire filled the audit log: a job on * * * * * wrote 10,000 of them in a week.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        with self.assertLogs("app.cron_service", level="DEBUG") as logged:
+            for _ in range(3):
+                await self.service._scheduled_run(self.job["id"])
+
+        self._assert_refused(None)  # awaited once
+        refusals = [record for record in logged.records if "refused" in record.getMessage()]
+        self.assertEqual([record.levelname for record in refusals], ["WARNING", "DEBUG", "DEBUG"])
+
+    async def test_a_job_refused_then_allowed_then_refused_again_leaves_two(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        self.manager.create_session.assert_awaited_once()
+        self.service._active_runs.clear()  # that run is over
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_an_allowed_fire_that_starts_nothing_still_ends_the_refusal_it_follows(self) -> None:
+        # Neither of these writes last_status, which still reads refused when the credential goes again.
+        for name, starts_nothing in (
+            ("the session cannot be created", {"create_session": AsyncMock(side_effect=RuntimeError("no browser"))}),
+            ("a previous run is active", {}),
+        ):
+            with self.subTest(name):
+                self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+                await self.service._scheduled_run(self.job["id"])
+                self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+                if starts_nothing:
+                    with patch.object(self.manager, "create_session", starts_nothing["create_session"]):
+                        await self.service._scheduled_run(self.job["id"])
+                else:
+                    self.service._active_runs[self.job["id"]] = "session-0"
+                    await self.service._scheduled_run(self.job["id"])
+                    self.service._active_runs.clear()
+                self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+                await self.service._scheduled_run(self.job["id"])
+
+                self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_restart_does_not_audit_a_job_that_was_already_refused(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        restarted = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+
+        result = await restarted.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertEqual(result["reason"], "owner_credential_removed")
+        self.manager.audit.append.assert_awaited_once()
+
+    async def test_a_refusal_whose_status_could_not_be_saved_is_audited_again(self) -> None:
+        # The store is what remembers a refusal: one it could not take is recorded again rather than not at all.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        with patch.object(self.service, "_save", side_effect=OSError("disk full")):
+            with self.assertLogs("app.cron_service", level="ERROR"):
+                await self.service._scheduled_run(self.job["id"])
+                await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_refusal_whose_audit_event_could_not_be_written_is_audited_at_the_next_fire(self) -> None:
+        # The status was saved before the append failed, and every later fire took the saved status for an audited
+        # refusal: the job stayed refused with no event at all.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        self.manager.audit.append.side_effect = [OSError("audit store full"), None, None]
+
+        with self.assertLogs("app.cron_service", level="ERROR"):
+            await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)  # the one that failed, and the one that wrote
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+    async def test_a_restart_after_an_allowed_fire_that_wrote_no_status_audits_the_next_refusal(self) -> None:
+        # That fire was remembered in memory alone, so a restart took the next refusal for the old one.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        self.service._active_runs[self.job["id"]] = "session-0"  # a previous run is active: nothing is started
+        await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        restarted = CronService(Path(self.tmp.name) / "crons.json", job_queue=self.queue, manager=self.manager)
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await restarted._scheduled_run(self.job["id"])
+        await restarted._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_deleted_job_leaves_nothing_in_memory_and_one_made_again_with_its_id_starts_clean(self) -> None:
+        job_id = self.job["id"]
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(job_id)
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        self.service._active_runs[job_id] = "session-0"
+        await self.service._scheduled_run(job_id)  # allowed, and starts nothing
+        self.service._active_runs.clear()
+
+        with acting_as(ALICE):
+            self.assertTrue(await self.service.delete_job(job_id))
+
+        # The ids of deleted jobs stayed in a set for the life of the process. A Mapping, not a dict alone: the
+        # refusal locks are in a WeakValueDictionary, which holds a job's lock only while a fire of the job uses it.
+        gc.collect()
+        kept = {
+            name: held
+            for name, held in vars(self.service).items()
+            if isinstance(held, set | Mapping | list) and job_id in held
+        }
+        self.assertEqual(kept, {})
+        with acting_as(ALICE), patch("app.cron_service.uuid4", return_value=SimpleNamespace(hex=job_id)):
+            again = await self.service.create_job(name="mine again", goal="g")
+        self.assertEqual(again["id"], job_id)
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(job_id)
+        await self.service._scheduled_run(job_id)
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)  # the first job's refusal, and this one's
+
+    async def test_an_old_run_that_finishes_between_two_refusals_leaves_one_event(self) -> None:
+        # The run was started while the credential stood. Its finish wrote "completed" over the refusal's status,
+        # and the next fire audited the same refusal again.
+        self.queue.store.get = AsyncMock(return_value=SimpleNamespace(status="completed"))
+        await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self.service._active_runs, {self.job["id"]: "session-1"})
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+
+        await self.service._finish_run(self.job["id"], "session-1", "agent-job-1")
+        self.assertEqual(self._stored()["last_status"], "completed")
+        await self.service._scheduled_run(self.job["id"])
+
+        self.manager.audit.append.assert_awaited_once()
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)  # the latest fire was refused
+
+    def _store_the_mark_beside_queued(self) -> None:
+        """The record as a controller that does not know the mark leaves it (1.17.0, which keeps the keys it does not
+        know through its writes): the fire it allowed wrote "queued", and the mark of the refusal before is still there.
+        """
+        jobs = self.service._load()
+        jobs[self.job["id"]].update({"last_status": "queued", REFUSAL_AUDITED: True})
+        self.service._save(jobs)
+
+    async def test_a_mark_left_beside_queued_is_not_the_next_refusals(self) -> None:
+        # The next refusal read as one whose event was written, and wrote none: a job refused with no event at all.
+        self._store_the_mark_beside_queued()
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self._assert_refused(None)  # one event
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+    async def test_a_mark_left_beside_queued_does_not_stand_for_a_refusal_whose_event_failed(self) -> None:
+        # The stale mark goes in the save that writes the refusal's status. Left in the record, it would stand beside
+        # that status at the next fire, as the mark of an event that was never written.
+        self._store_the_mark_beside_queued()
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        self.manager.audit.append.side_effect = [OSError("audit store full"), None, None]
+
+        with self.assertLogs("app.cron_service", level="ERROR"):
+            await self.service._scheduled_run(self.job["id"])
+        self.assertEqual(self._stored()["last_status"], OWNER_CREDENTIAL_GONE)
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)  # the one that failed, and the one that wrote
+
+    def _saving_after_one_failure(self):
+        """The store's save, failing once: the first save an allowed fire makes after a refusal is the mark's clear."""
+        save, failures = self.service._save, [OSError("disk full")]
+
+        def save_after_one_failure(jobs: dict) -> None:
+            if failures:
+                raise failures.pop()
+            save(jobs)
+
+        return patch.object(self.service, "_save", side_effect=save_after_one_failure)
+
+    async def test_an_allowed_fire_whose_clear_was_not_saved_ends_the_refusal_where_its_run_is_recorded(self) -> None:
+        # The clear is one save and the run's record another. With the first lost, the mark outlived the refusal it
+        # was for and the next refusal wrote no event: while the run was queued, and after it had finished.
+        self.queue.store.get = AsyncMock(return_value=SimpleNamespace(status="completed"))
+        for name, finished in (("while that run is queued", False), ("after that run has finished", True)):
+            with self.subTest(name):
+                self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
+                self.service._active_runs.clear()
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+                await self.service._scheduled_run(self.job["id"])
+                self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+                self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+
+                with self._saving_after_one_failure(), self.assertLogs("app.cron_service", level="ERROR") as logged:
+                    await self.service._scheduled_run(self.job["id"])
+                (line,) = logged.output
+                self.assertIn("to end a refusal", line)
+                self.assertEqual(self._stored()["last_status"], "queued")
+                if finished:
+                    await self.service._finish_run(self.job["id"], "session-1", "agent-job-1")
+                    self.assertEqual(self._stored()["last_status"], "completed")
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+                await self.service._scheduled_run(self.job["id"])
+                await self.service._scheduled_run(self.job["id"])
+
+                self.assertEqual(self.manager.audit.append.await_count, 2)  # one for each refusal
+
+    async def test_a_refusal_stored_before_the_mark_existed_is_audited_once_more_and_never_not_at_all(self) -> None:
+        # A record whose last_status reads refused with no mark: whether its event was written cannot be told.
+        jobs = self.service._load()
+        jobs[self.job["id"]]["last_status"] = OWNER_CREDENTIAL_GONE
+        self.service._save(jobs)
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+        await self.service._scheduled_run(self.job["id"])
+
+        self.manager.audit.append.assert_awaited_once()
+
+    async def test_a_mark_that_is_not_true_itself_is_no_mark_of_this_controllers(self) -> None:
+        # The store is a JSON file, and another program's write of the field is not this controller's word that the
+        # event is written: only `true` is, so beside anything else the refusal writes its event, and then its mark.
+        for stored in (1, "true", [True]):
+            with self.subTest(stored=stored):
+                self.manager.audit.append.reset_mock()
+                jobs = self.service._load()
+                jobs[self.job["id"]].update({"last_status": OWNER_CREDENTIAL_GONE, REFUSAL_AUDITED: stored})
+                self.service._save(jobs)
+                self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+                await self.service._scheduled_run(self.job["id"])
+                await self.service._scheduled_run(self.job["id"])
+
+                self.manager.audit.append.assert_awaited_once()
+                self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+    async def test_the_mark_of_an_audited_refusal_is_the_controllers_own_and_in_no_answer(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        await self.service._scheduled_run(self.job["id"])
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+        with acting_as(ALICE):
+            answers = [
+                await self.service.get_job(self.job["id"]),
+                *await self.service.list_jobs(),
+                await self.service.update_job(self.job["id"], {"name": "renamed", REFUSAL_AUDITED: False}),
+                await self.service.rotate_webhook_key(self.job["id"]),
+            ]
+
+        for answer in answers:
+            self.assertNotIn(REFUSAL_AUDITED, answer)
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)  # nor does an update write it
+
+    async def test_two_refusals_at_once_leave_one_event(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        writing, written = asyncio.Event(), asyncio.Event()
+
+        async def append(**_kwargs) -> None:
+            writing.set()
+            await written.wait()
+
+        self.manager.audit.append = AsyncMock(side_effect=append)
+        first = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.wait_for(writing.wait(), timeout=5)
+        second = asyncio.ensure_future(self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+        await asyncio.sleep(0.05)  # the second is refused while the first one's event is still being written
+        written.set()
+        await first
+
+        self.assertEqual((await second)["reason"], "owner_credential_removed")
+        self.manager.audit.append.assert_awaited_once()
+
+    async def test_a_refusal_in_its_audit_append_holds_no_other_jobs_fire(self) -> None:
+        # One lock for every job was held across the append: bob's fire waited for the event of alice's job.
+        with acting_as(BOB):
+            bobs = await self.service.create_job(name="bob's", goal="g", webhook_enabled=True)
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        writing, written = asyncio.Event(), asyncio.Event()
+        self.addCleanup(written.set)
+
+        async def append(**_kwargs) -> None:
+            writing.set()
+            await written.wait()
+
+        self.manager.audit.append = AsyncMock(side_effect=append)
+        refused = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.wait_for(writing.wait(), timeout=5)
+
+        allowed = await asyncio.wait_for(self.service.trigger_via_webhook(bobs["id"], bobs["webhook_key"]), timeout=5)
+
+        self.assertTrue(allowed["triggered"])
+        self.manager.create_session.assert_awaited_once()
+        self.assertFalse(refused.done(), "the refusal's event was to be still in its append")
+        written.set()
+        await refused
+        self.manager.audit.append.assert_awaited_once()
+        self.assertIs(self._stored()[REFUSAL_AUDITED], True)
+
+    async def test_an_allowed_fire_during_a_refusals_audit_still_ends_that_refusal(self) -> None:
+        # The allowed fire waits for the event being written, so the mark of that event cannot land after it.
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        writing, written = asyncio.Event(), asyncio.Event()
+
+        async def append(**_kwargs) -> None:
+            writing.set()
+            await written.wait()
+
+        self.manager.audit.append = AsyncMock(side_effect=append)
+        refused = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.wait_for(writing.wait(), timeout=5)
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        allowed = asyncio.ensure_future(self.service._scheduled_run(self.job["id"]))
+        await asyncio.sleep(0.05)
+        written.set()
+        await asyncio.gather(refused, allowed)
+        self.manager.create_session.assert_awaited_once()
+        self.assertNotIn(REFUSAL_AUDITED, self._stored())
+        self.service._active_runs.clear()  # that run is over
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service._scheduled_run(self.job["id"])
+
+        self.assertEqual(self.manager.audit.append.await_count, 2)
+
+    async def test_a_deployment_moved_to_the_shared_token_or_to_none_refuses_named_owners(self) -> None:
+        for tokens, shared in (("", "the-shared-token"), ("", None), ("malformed-without-a-colon", None)):
+            with self.subTest(tokens=tokens, shared=shared):
+                self.manager.audit.append.reset_mock()
+                self._forget_the_refusal()
+                self.manager.settings.api_bearer_tokens = tokens
+                self.manager.settings.api_bearer_token = shared
+
+                self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+
+    async def test_an_owner_only_a_later_entry_repeating_a_token_names_is_refused(self) -> None:
+        # A request with a token listed twice proves the first operator listed with it: nothing proves alice.
+        self.manager.settings.api_bearer_tokens = "bob:token-b,alice:token-b"
+        self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+
+        self.manager.settings.api_bearer_tokens = "alice:token-b,bob:token-b"
+        self.assertTrue((await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))["triggered"])
+
+    async def test_an_unowned_job_still_runs_as_anonymous_whatever_the_credentials(self) -> None:
+        unowned = await self.service.create_job(name="shared", goal="g", webhook_enabled=True)
+        self.assertIsNone(unowned["owner"])
+        seen: list[tuple[str, str]] = []
+
+        async def create_session(**_kwargs):
+            seen.append(_who())
+            return {"id": "session-1"}
+
+        self.manager.create_session = create_session
+        self.manager.settings.api_bearer_tokens = ""
+        self.manager.settings.api_bearer_token = None
+
+        result = await self.service.trigger_via_webhook(unowned["id"], unowned["webhook_key"])
+
+        self.assertTrue(result["triggered"])
+        self.assertEqual(seen, [("anonymous", "anonymous")])
+        self.manager.audit.append.assert_not_awaited()
+
+    async def test_a_restored_credential_fires_again_with_no_restart(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        self._assert_refused(await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"]))
+
+        self.manager.settings.api_bearer_tokens = "alice:another-token"
+        result = await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertTrue(result["triggered"])
+
+    async def test_a_refused_fire_is_not_counted_as_a_run(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        stored = self._stored()
+        self.assertEqual(stored["run_count"], 0)
+        self.assertIsNone(stored["last_run_at"])
+
+    async def test_a_refusal_is_answered_before_a_previous_run_is_considered(self) -> None:
+        self.service._active_runs[self.job["id"]] = "session-0"
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+
+        result = await self.service.trigger_via_webhook(self.job["id"], self.job["webhook_key"])
+
+        self.assertEqual(result["reason"], "owner_credential_removed")
+        self.assertEqual(self.service._active_runs, {self.job["id"]: "session-0"}, "the refusal touched the slot")
+
+    async def test_a_refusal_still_stands_when_its_status_or_its_audit_cannot_be_written(self) -> None:
+        self.manager.settings.api_bearer_tokens = "bob:token-b"
+        cases = (
+            ("store unreadable", patch.object(self.service, "_load", side_effect=CronStoreUnreadableError())),
+            ("store unsaveable", patch.object(self.service, "_save", side_effect=OSError("disk full"))),
+            ("audit failing", patch.object(self.manager.audit, "append", new=AsyncMock(side_effect=OSError("full")))),
+        )
+        job = self.service._load()[self.job["id"]]
+        for name, failing in cases:
+            with self.subTest(name), failing, self.assertLogs("app.cron_service", level="ERROR") as logged:
+                result = await self.service._run_job_now(job)
+
+                self.assertEqual(result["reason"], "owner_credential_removed")
+                self.assertTrue(any(self.job["id"] in line for line in logged.output), logged.output)
+            self.manager.create_session.assert_not_awaited()
+            self.queue.enqueue_run.assert_not_awaited()
+
+
 class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
     """A job fires as the operator who owns it, and an unowned job fires as nobody.
 
@@ -375,6 +1229,7 @@ class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
             return {"id": "agent-job-1"}
 
         manager = MagicMock()
+        manager.settings = SimpleNamespace(api_bearer_tokens="alice:token-a", api_bearer_token=None)
         manager.create_session = create_session
         queue = MagicMock()
         queue.enqueue_run = enqueue_run

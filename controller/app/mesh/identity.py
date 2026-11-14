@@ -15,7 +15,10 @@ import json
 import logging
 import os
 import stat
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -28,16 +31,27 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+from ..utils import atomic_write_text, error_text, error_text_for_log
+
 logger = logging.getLogger(__name__)
 
 _PRIVKEY_FILE = "node_private.pem"
 _PUBKEY_FILE = "node_public.pem"
 _META_FILE = "node_meta.json"
+# The files published whole (atomic_write_text), and how the temp file such a publish keeps beside one ends.
+_PUBLISHED_FILES = (_PUBKEY_FILE, _META_FILE)
+_TEMP_SUFFIX = ".tmp"
 
 _KEY_FILE_MODE = 0o600
 _IDENTITY_DIR_MODE = 0o700
 _GROUP_OR_WORLD_BITS = 0o077
 _POSIX = os.name == "posix"
+# A start can find an identity file that another start is still writing: how long it retries the read, and how often.
+# Far longer than that moment, and short, as a file that stays unusable still fails the start.
+_FILE_BEING_WRITTEN_WAIT_SECONDS = 2.0
+_FILE_BEING_WRITTEN_POLL_SECONDS = 0.05
+
+_T = TypeVar("_T")
 
 
 def _mode_bits(path: Path) -> int:
@@ -89,7 +103,7 @@ def _tighten_a_loose_key(path: Path) -> None:
                 "(%s); it is loaded and stays readable: run chmod 600 on it",
                 path,
                 mode,
-                exc,
+                error_text_for_log(exc),
             )
             return
     finally:
@@ -97,6 +111,100 @@ def _tighten_a_loose_key(path: Path) -> None:
     logger.warning(
         "mesh.identity: private key %s was readable by group or others (mode %o); changed it to 0600", path, mode
     )
+
+
+def _is_a_publish_under_way(name: str) -> bool:
+    """Whether ``name`` is the temp file atomic_write_text keeps beside a published file until it is whole.
+
+    ``.<file>.<random>.tmp``, for the two files written that way. The private key is not: it is created in place.
+    """
+    for published in _PUBLISHED_FILES:
+        prefix = f".{published}."
+        if name.startswith(prefix) and name.endswith(_TEMP_SUFFIX) and len(name) > len(prefix) + len(_TEMP_SUFFIX):
+            return True
+    return False
+
+
+def _is_a_publishs_temp_file(entry: Path) -> bool:
+    """Whether ``entry`` is a publish's temp file: named like one, and a regular file, as an atomic write's is.
+
+    A directory or a link under such a name is somebody else's entry, whatever the link points at. An entry that is
+    gone when it is looked at was a publish that has finished since the directory was listed: it is nothing now.
+    """
+    if not _is_a_publish_under_way(entry.name):
+        return False
+    try:
+        return stat.S_ISREG(entry.lstat().st_mode)
+    except FileNotFoundError:
+        return True
+
+
+def _retried_while_another_start_writes(step: Callable[[], _T], failed: str) -> _T:
+    """``step``, retried for a short bound: another start may be writing the file it reads or publishes.
+
+    A start can find the private key empty or part-written (_write_private_file creates it, then fills it), by either
+    way in (the file was already there, or the exclusive create lost), and on Windows a file another start is replacing
+    refuses a reader for an instant. Still failing at the end, it raises a RuntimeError from the step's own error that
+    says what ``failed`` (the file, by its name) and after how long: cryptography's sentence for a key it cannot
+    parse, or a JSON position, names no file. Blocks: this runs before the controller serves requests, in the
+    lifespan or in the manager's __init__.
+
+    The bound is on the retries, not on one try: a step that does not return is not ended by it. A start makes four
+    such steps one after another (the key's read, the two publishes, the meta's read), each with the whole bound.
+    """
+    deadline = time.monotonic() + _FILE_BEING_WRITTEN_WAIT_SECONDS
+    while True:
+        try:
+            return step()
+        except (ValueError, OSError) as exc:
+            if time.monotonic() >= deadline:
+                waited = f"{_FILE_BEING_WRITTEN_WAIT_SECONDS:g} s"
+                raise RuntimeError(
+                    f"mesh.identity: {failed} after {waited}: {type(exc).__name__}: {error_text(exc)}"
+                ) from exc
+            time.sleep(_FILE_BEING_WRITTEN_POLL_SECONDS)
+
+
+def _refused_at_once_where_the_directory_takes_no_new_file(path: Path) -> None:
+    """Create one file of the identity's own beside ``path`` and remove it: a directory that refuses it refuses here.
+
+    A publish begins with a temp file (atomic_write_text), which mkstemp makes. On Windows, Python 3.11 and 3.12
+    answer a refused create there by trying the next name, 2**31 of them, wherever os.access calls the directory
+    writable, and an ACL that denies the create does not change what os.access says: a start with a file to
+    publish over such a directory did not end, and the retries' bound never came into it. Named as a publish's
+    temp file is (_is_a_publish_under_way), so one that could not be removed is still the identity's own.
+    """
+    probe = path.with_name(f".{path.name}.{os.urandom(4).hex()}{_TEMP_SUFFIX}")
+    try:
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _KEY_FILE_MODE))
+    except OSError as exc:
+        raise RuntimeError(
+            f"mesh.identity: {path.name} could not be published: {type(exc).__name__}: {error_text(exc)}"
+        ) from exc
+    try:
+        os.unlink(probe)
+    except OSError as exc:
+        # It was made, so a publish can be: an empty file under a temp name is left, and said.
+        logger.warning("mesh.identity: %s could not be removed (%s); it is empty", probe, type(exc).__name__)
+
+
+def _publish_unless_there(path: Path, text: str) -> None:
+    """Publish ``text`` at ``path`` whole (atomic_write_text), unless the file is there; with a read's patience.
+
+    On Windows a file another start has open, to read it or to put its own copy in place, refuses this start's rename
+    for longer than replace_retrying waits: with eight starts at once a start failed there. Each try looks again
+    first, as what refused the rename may be the start that has published the file since (the same file: every start
+    derives it from the one key).
+    """
+
+    def publish() -> None:
+        if not path.exists():
+            atomic_write_text(path, text)
+
+    if path.exists():
+        return
+    _refused_at_once_where_the_directory_takes_no_new_file(path)
+    _retried_while_another_start_writes(publish, f"{path.name} could not be published")
 
 
 class NodeIdentity:
@@ -114,35 +222,37 @@ class NodeIdentity:
 
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
-            if _POSIX:
-                _tighten_a_loose_key(priv_path)
-            pem = priv_path.read_bytes()
-            self._private_key = Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(pem))
+            self._private_key = self._load_private_key(priv_path)
         else:
             logger.info("mesh.identity: generating new keypair in %s", self._dir)
             self._private_key = Ed25519PrivateKey.generate()
             # Write private key
             priv_pem = self._private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
-            _write_private_file(priv_path, priv_pem)
+            try:
+                _write_private_file(priv_path, priv_pem)
+            except FileExistsError:
+                # Another start made the key between the check and the exclusive create: that key is this node's.
+                logger.info("mesh.identity: another start created the keypair in %s; loading it", self._dir)
+                self._private_key = self._load_private_key(priv_path)
 
         self._public_key: Ed25519PublicKey = self._private_key.public_key()
         pub_raw = self._public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # 32 bytes
 
-        # Write/verify public key file
-        if not pub_path.exists():
-            pub_pem = self._public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-            pub_path.write_bytes(pub_pem)
+        # Write/verify public key file. Published whole, as is the meta below: another start can be reading them.
+        pub_pem = self._public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+        _publish_unless_there(pub_path, pub_pem.decode("ascii"))
 
         self._node_id = hashlib.sha256(pub_raw).hexdigest()
         self._pubkey_b64 = base64.b64encode(pub_raw).decode()
 
         # Write/verify meta
-        if not meta_path.exists():
-            meta_path.write_text(json.dumps({"node_id": self._node_id, "pubkey_b64": self._pubkey_b64}))
+        _publish_unless_there(meta_path, json.dumps({"node_id": self._node_id, "pubkey_b64": self._pubkey_b64}))
 
         # A consistency check, not tamper detection: meta.json sits in the same directory as the key, so whoever
         # can replace the key can replace it too. It catches a corrupt file or keys mixed from two identities.
-        stored = json.loads(meta_path.read_text())
+        stored = _retried_while_another_start_writes(
+            lambda: json.loads(meta_path.read_text()), f"{meta_path.name} could not be read"
+        )
         if stored.get("node_id") != self._node_id:
             raise RuntimeError(
                 "mesh.identity: stored node_id does not match the key (corrupt or mixed identity directory): "
@@ -150,6 +260,16 @@ class NodeIdentity:
             )
 
         logger.info("mesh.identity: node_id=%s", self._node_id)
+
+    def _load_private_key(self, priv_path: Path) -> Ed25519PrivateKey:
+        # The mode is put right once. Only the read and the parse are tried again while another start writes the
+        # file: a key that cannot be tightened would otherwise write its warning at every try.
+        if _POSIX:
+            _tighten_a_loose_key(priv_path)
+        return _retried_while_another_start_writes(
+            lambda: Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(priv_path.read_bytes())),
+            f"{priv_path.name} could not be read",
+        )
 
     def _tighten_a_loose_directory(self) -> None:
         """mkdir's mode applies only to a directory it creates: one an older release made at 0755 keeps that mode.
@@ -209,10 +329,14 @@ class NodeIdentity:
         )
 
     def _other_entries(self) -> list[str]:
-        """The names in the identity directory that are not the identity's own files (an unlistable one counts)."""
+        """The names in the identity directory that are not the identity's own files (an unlistable one counts).
+
+        A publish under way is the identity's own too: another start's, or what a killed start left.
+        """
         own = {_PRIVKEY_FILE, _PUBKEY_FILE, _META_FILE}
         try:
-            return [entry.name for entry in self._dir.iterdir() if entry.name not in own]
+            entries = list(self._dir.iterdir())
+            return [entry.name for entry in entries if entry.name not in own and not _is_a_publishs_temp_file(entry)]
         except OSError as exc:
             return [f"<unlistable: {type(exc).__name__}>"]
 

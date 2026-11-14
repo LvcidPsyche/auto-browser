@@ -45,7 +45,7 @@ from typing import Any, Callable
 
 from ..action_errors import BROWSER_ACTION_BLOCKED, PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError
 from ..network_inspector import url_origin
-from ..utils import spawn_background_task
+from ..utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task
 from .element_world import session_gone
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ def block_summary(block: GateBlock) -> dict[str, str]:
 def stopped_by_gate(exc: BaseException) -> bool:
     """Whether a Playwright failure is a request the gate failed, by the first line of its error only: a selector,
     or a call log, that contains the token is not one, and keeps its own error."""
-    text = getattr(exc, "message", None) or str(exc)
+    text = error_text(exc)
     return bool(_STOPPED_FIRST_LINE.match(str(text).splitlines()[0] if text else ""))
 
 
@@ -266,7 +266,7 @@ class RequestGate:
         try:
             cdp = await self.browser.new_browser_cdp_session()
         except Exception as exc:
-            raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
+            raise RequestGateUnavailable(f"the pre-request gate could not attach: {error_text(exc)[:300]}") from exc
         self._cdp = cdp
         cdp.on("Target.targetCreated", self._on_target)
         cdp.on("Target.targetInfoChanged", self._on_target)
@@ -281,7 +281,7 @@ class RequestGate:
             self._deliberate = True
             await self._detach_cdp()
             if isinstance(exc, Exception):
-                raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
+                raise RequestGateUnavailable(f"the pre-request gate could not attach: {error_text(exc)[:300]}") from exc
             raise
 
     def _attached(self) -> None:
@@ -315,7 +315,10 @@ class RequestGate:
             # as the window-birth watcher expects too. Anything else (a timeout on a live browser) may leave it.
             level = logging.DEBUG if session_gone(exc) else logging.WARNING
             logger.log(
-                level, "pre-request gate: could not detach its session: %s", f"{type(exc).__name__}: {exc}"[:200]
+                level,
+                "pre-request gate: could not detach its session: %s: %s",
+                type(exc).__name__,
+                error_text_for_log(exc),
             )
 
     def ending(self, ending: bool = True) -> None:
@@ -344,7 +347,9 @@ class RequestGate:
                     await session.detach()
             context_id = info["browserContextId"]
         except Exception as exc:
-            raise RequestGateUnavailable(f"the pre-request gate could not read the new context: {exc}") from exc
+            raise RequestGateUnavailable(
+                f"the pre-request gate could not read the new context: {error_text(exc)[:300]}"
+            ) from exc
         if self._on_page_target is not None and info.get("targetId"):
             self._on_page_target(page, info["targetId"])
         if not self.live:
@@ -475,7 +480,7 @@ class RequestGate:
         except TimeoutError:
             return "lookup_error", None, f"Target.getTargetInfo did not answer within {LOOKUP_TIMEOUT_SECONDS:g} s"
         except Exception as exc:
-            text = str(exc)
+            text = error_text(exc)
             return ("no_target" if NO_TARGET_TEXT in text else "lookup_error"), None, text[:300]
         info = reply["targetInfo"]
         return info.get("type") or "unknown", info.get("browserContextId"), None
@@ -518,9 +523,15 @@ class RequestGate:
             self.handler_errors += 1
             logger.error("pre-request gate: the handler failed for a paused request", exc_info=handler_error)
         if verdict.lookup_error is not None:
-            logger.warning("pre-request gate: could not classify a paused request's frame: %s", verdict.lookup_error)
+            logger.warning(
+                "pre-request gate: could not classify a paused request's frame: %s",
+                quoted_for_log(verdict.lookup_error),
+            )
         if reply_error is not None:
-            logger.warning("pre-request gate: Chromium did not take the reply to a paused request: %s", reply_error)
+            logger.warning(
+                "pre-request gate: Chromium did not take the reply to a paused request: %s",
+                error_text_for_log(reply_error),
+            )
         if block is not None and self._on_block is not None:
             try:
                 self._on_block(block)

@@ -13,6 +13,8 @@ import logging
 import shlex
 from pathlib import Path
 
+from ..utils import error_text_for_log
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,7 +73,7 @@ def _init_curator(app) -> None:
         else:
             logger.info("startup.curator: no API key — degraded mode (raw-skill passthrough only)")
     except Exception as exc:
-        logger.warning("startup.curator: adapter init failed — %s", exc)
+        logger.warning("startup.curator: adapter init failed — %s", error_text_for_log(exc))
         app.state.curator_adapter = None
 
 
@@ -112,7 +114,7 @@ def _init_mesh(app) -> None:
         app.state.delegation_manager = mgr
         logger.info("startup.mesh: initialized node_id=%s", identity.node_id[:16])
     except Exception as exc:
-        logger.error("startup.mesh: initialization failed — %s", exc)
+        logger.error("startup.mesh: initialization failed — %s", error_text_for_log(exc))
         app.state.mesh_identity = None
         app.state.peer_registry = None
         app.state.delegation_manager = None
@@ -156,7 +158,7 @@ def _init_harness(app) -> None:
             gateway.harness_service = service
         logger.info("startup.harness: initialized root=%s signed=%s", root, bool(signer))
     except Exception as exc:
-        logger.error("startup.harness: initialization failed — %s", exc)
+        logger.error("startup.harness: initialization failed — %s", error_text_for_log(exc))
         app.state.harness_service = None
 
 
@@ -281,7 +283,7 @@ async def on_session_created(app, session_id: str, page) -> None:
 
         app.state.cdp_sessions[session_id] = await CDPPassthrough.from_page(page)
     except Exception as exc:
-        logger.warning("on_session_created: cdp session failed — %s", exc)
+        logger.warning("on_session_created: cdp session failed — %s", error_text_for_log(exc))
 
     try:
         settings = getattr(app.state, "settings", None)
@@ -293,7 +295,7 @@ async def on_session_created(app, session_id: str, page) -> None:
             await apply_fingerprint(page.context, config)
             logger.debug("on_session_created: stealth profile=%s applied", stealth_profile)
     except Exception as exc:
-        logger.warning("on_session_created: stealth fingerprint failed — %s", exc)
+        logger.warning("on_session_created: stealth fingerprint failed — %s", error_text_for_log(exc))
 
 
 def _release_session_state(app, session_id: str) -> None:

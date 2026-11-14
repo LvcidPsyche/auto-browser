@@ -149,7 +149,7 @@ class IsolatedRefusalLogTests(unittest.IsolatedAsyncioTestCase):
             self.assertRaises(RuntimeError),
         ):
             await BrowserRuntimeService(manager).acquire_session_browser("s9")
-        self.assertIn("isolated session s9 was not started: BROWSER_SANDBOX=on", logs.output[0])
+        self.assertIn("isolated session s9 was not started: 'BROWSER_SANDBOX=on", logs.output[0])
 
 
 class VerifiedOnTests(unittest.TestCase):

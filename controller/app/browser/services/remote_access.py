@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ...auth_policy import credentials_for, is_local_only_host
-from ...utils import UTC
+from ...utils import UTC, error_text_for_log
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
@@ -67,7 +67,7 @@ class BrowserRemoteAccessService:
             if not isinstance(tunnel, dict):
                 raise ValueError(f"expected a JSON object, found {type(tunnel).__name__}")
         except Exception as exc:
-            logger.warning("failed to read remote access info %s: %s", info_path, exc)
+            logger.warning("failed to read remote access info %s: %s", info_path, error_text_for_log(exc))
             payload["status"] = "error"
             payload["source"] = "metadata_file"
             payload["error"] = "remote_access_metadata_unreadable"

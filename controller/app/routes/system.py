@@ -3,21 +3,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..audit import get_current_operator
 from ..browser_sandbox import browser_sandbox_status
 from ..readiness import run_readiness_checks
 from ..run_as import controller_user_status
+from ..utils import error_text_for_log
+from ._utils import ADMIN_ONLY
 
 # A readiness probe must answer within a probe interval, not within the
 # session-creation retry budget (CONNECT_RETRIES x CONNECT_RETRY_DELAY_SECONDS,
 # 60s by default). Failing fast is the correct answer for "are you ready?".
 READYZ_TIMEOUT_SECONDS = 5.0
+# How long a /readyz answer stands, counted from when its probe finished, a failing answer as long as a passing one.
+# The route needs no token and is exempt from the rate limit, so a flood must cost one probe per window, an outage
+# included. Short: an orchestrator's readiness flips late by at most this much.
+READYZ_ANSWER_CACHE_SECONDS = 3.0
 
 if TYPE_CHECKING:
     from ..browser_manager import BrowserManager
@@ -28,9 +33,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEEP_HEALTH_FIXTURE = _REPO_ROOT / "evals" / "fixtures" / "deep_health.html"
-_DEEP_HEALTH_FALLBACK = """<!doctype html>
+# The page the deep probe renders. It is carried here: the image holds only the controller, so no file is read for it.
+_DEEP_HEALTH_HTML = """<!doctype html>
 <html lang="en">
   <head><meta charset="utf-8"><title>Auto Browser deep health</title></head>
   <body><main data-ab-deep-health="ready">Deep health ready</main></body>
@@ -76,7 +80,10 @@ def _let_finish_in_background(connect: "asyncio.Future[Any]") -> None:
 
 def _log_unfinished_connect(connect: "asyncio.Future[Any]") -> None:
     if not connect.cancelled() and connect.exception() is not None:
-        logger.warning("browser connect that outlived a health or readiness probe failed: %s", connect.exception())
+        logger.warning(
+            "browser connect that outlived a health or readiness probe failed: %s",
+            error_text_for_log(connect.exception()),
+        )
 
 
 async def _wait_for_browser(manager: "BrowserManager") -> Any:
@@ -93,19 +100,71 @@ async def _wait_for_browser(manager: "BrowserManager") -> Any:
         raise
 
 
+class _ReadyzAnswer:
+    """The last /readyz answer and the probe that will give the next one.
+
+    Lives on app.state, not this module: the probe is a task on one event loop, and a test or a restart of the
+    lifespan must start without it (app/main.py clears it at startup).
+    """
+
+    __slots__ = ("probe", "ready", "finished_at")
+
+    def __init__(self) -> None:
+        self.probe: "asyncio.Future[bool] | None" = None
+        self.ready = False
+        self.finished_at: float | None = None
+
+
+def _readyz_answer(state: Any) -> _ReadyzAnswer:
+    answer = getattr(state, "readyz_answer", None)
+    if answer is None:
+        answer = state.readyz_answer = _ReadyzAnswer()
+    return answer
+
+
+async def _probe_readiness(manager: "BrowserManager", answer: _ReadyzAnswer) -> bool:
+    """Run the one probe a window gets. Any failure is a not-ready answer, kept like a ready one and logged once."""
+    try:
+        # Bounded. ensure_browser() retries CONNECT_RETRIES times (default
+        # 60) at CONNECT_RETRY_DELAY_SECONDS apart *while holding the global
+        # browser lock*, so with browser-node down this probe used to hang
+        # for a minute or more and every concurrent readyz and every
+        # create_session queued behind it — the API looked dead instead of
+        # reporting "not ready". A readiness probe must answer promptly; it
+        # stops waiting, and leaves the shared connect to finish (see
+        # _wait_for_browser), rather than cancel it mid-connect.
+        await _wait_for_browser(manager)
+        ready = True
+    except TimeoutError:
+        logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)
+        ready = False
+    except Exception:
+        logger.exception("readiness check failed")
+        ready = False
+    answer.ready, answer.finished_at = ready, time.monotonic()
+    return ready
+
+
+async def _is_ready(manager: "BrowserManager", answer: _ReadyzAnswer) -> bool:
+    if answer.finished_at is not None and time.monotonic() - answer.finished_at < READYZ_ANSWER_CACHE_SECONDS:
+        return answer.ready
+    if answer.probe is None or answer.probe.done():
+        answer.probe = asyncio.ensure_future(_probe_readiness(manager, answer))
+    # Shielded: a caller that disconnects or is cancelled ends its own wait, not the probe the others are waiting on.
+    return await asyncio.shield(answer.probe)
+
+
 async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
     started = time.perf_counter()
     checks: list[dict[str, Any]] = []
 
-    fixture_html, fixture_source = _load_deep_health_fixture()
-    if 'data-ab-deep-health="ready"' not in fixture_html:
-        raise RuntimeError("deep health fixture missing ready marker")
+    fixture_html = _DEEP_HEALTH_HTML
     checks.append(
         {
             "name": "fixture",
             "status": "pass",
             "details": {
-                "source": fixture_source,
+                "source": "embedded",
                 "bytes": len(fixture_html.encode("utf-8")),
             },
         }
@@ -148,8 +207,9 @@ async def _new_context(browser: Any) -> Any:
     try:
         return await asyncio.shield(creating)
     except BaseException:
-        if not creating.done():
-            creating.add_done_callback(_close_late_context)
+        # Also when it is already done: a cancel that lands in the turn of the loop in which Chromium answered finds
+        # the context created and handed to nobody. A done future calls the callback soon.
+        creating.add_done_callback(_close_late_context)
         raise
 
 
@@ -172,29 +232,29 @@ async def _close_context(context: Any) -> None:
     closing = _hold(asyncio.ensure_future(context.close()))
     try:
         await asyncio.wait_for(asyncio.shield(closing), timeout=_DEEP_HEALTH_CLOSE_SECONDS)
-    except (TimeoutError, asyncio.CancelledError) as stopped:
+    except TimeoutError:
         logger.warning(
             "deep health probe: closing its browser context took over %ss; left to finish", _DEEP_HEALTH_CLOSE_SECONDS
         )
         closing.add_done_callback(_log_failed_close)
-        if isinstance(stopped, asyncio.CancelledError):
-            raise
+    except asyncio.CancelledError:
+        # The close did not take too long: its wait was cancelled, by the probe's total or with the request. One that
+        # ended in the same turn of the loop was not cut short, and only a failure of it is logged.
+        if not closing.done():
+            logger.warning(
+                "deep health probe: closing its browser context was cut short when the probe was cancelled "
+                "(its total ran out, or its request ended); left to finish"
+            )
+        closing.add_done_callback(_log_failed_close)
+        raise
 
 
 def _log_failed_close(closing: "asyncio.Future[Any]") -> None:
     if not closing.cancelled() and closing.exception() is not None:
         logger.warning(
-            "deep health probe: the browser context it gave up closing failed to close: %s", closing.exception()
+            "deep health probe: the browser context it gave up closing failed to close: %s",
+            error_text_for_log(closing.exception()),
         )
-
-
-def _load_deep_health_fixture() -> tuple[str, str]:
-    try:
-        # The source is named, not its path: the answer goes to any caller of an authenticated endpoint.
-        return _DEEP_HEALTH_FIXTURE.read_text(encoding="utf-8"), "fixture"
-    except OSError:
-        logger.warning("deep health fixture unavailable at %s; using embedded fallback", _DEEP_HEALTH_FIXTURE)
-        return _DEEP_HEALTH_FALLBACK, "embedded"
 
 
 def create_system_router(
@@ -231,7 +291,7 @@ def create_system_router(
                 },
             )
         except Exception as exc:
-            logger.warning("deep health probe failed: %s", exc, exc_info=True)
+            logger.warning("deep health probe failed: %s", error_text_for_log(exc), exc_info=True)
             return JSONResponse(
                 status_code=503,
                 content={
@@ -244,24 +304,10 @@ def create_system_router(
         return JSONResponse(content=payload)
 
     @router.get("/readyz")
-    async def readyz() -> dict[str, str]:
-        try:
-            # Bounded. ensure_browser() retries CONNECT_RETRIES times (default
-            # 60) at CONNECT_RETRY_DELAY_SECONDS apart *while holding the global
-            # browser lock*, so with browser-node down this probe used to hang
-            # for a minute or more and every concurrent readyz and every
-            # create_session queued behind it — the API looked dead instead of
-            # reporting "not ready". A readiness probe must answer promptly; it
-            # stops waiting, and leaves the shared connect to finish (see
-            # _wait_for_browser), rather than cancel it mid-connect.
-            await _wait_for_browser(manager)
+    async def readyz(request: Request) -> dict[str, str]:
+        if await _is_ready(manager, _readyz_answer(request.app.state)):
             return {"status": "ready", "environment": settings.environment_name}
-        except TimeoutError:
-            logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)
-            raise HTTPException(status_code=503, detail="Service unavailable") from None
-        except Exception:
-            logger.exception("readiness check failed")
-            raise HTTPException(status_code=503, detail="Service unavailable") from None
+        raise HTTPException(status_code=503, detail="Service unavailable")
 
     @router.get("/version")
     async def get_version() -> dict[str, str]:
@@ -275,7 +321,7 @@ def create_system_router(
         payload, content_type = metrics.render()
         return Response(content=payload, media_type=content_type)
 
-    @router.get("/maintenance/status")
+    @router.get("/maintenance/status", dependencies=ADMIN_ONLY)
     async def get_maintenance_status() -> dict[str, Any]:
         return {
             "cleanup_on_startup": settings.cleanup_on_startup,
@@ -286,11 +332,11 @@ def create_system_router(
             "last_report": maintenance.last_report,
         }
 
-    @router.post("/maintenance/cleanup")
+    @router.post("/maintenance/cleanup", dependencies=ADMIN_ONLY)
     async def run_maintenance_cleanup() -> dict[str, Any]:
         return await maintenance.run_cleanup()
 
-    @router.get("/readiness")
+    @router.get("/readiness", dependencies=ADMIN_ONLY)
     async def get_readiness(mode: str = "normal") -> JSONResponse:
         if mode not in {"normal", "confidential"}:
             raise HTTPException(status_code=400, detail="mode must be 'normal' or 'confidential'")

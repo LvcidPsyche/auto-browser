@@ -6,12 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from playwright.async_api import Error as PlaywrightError
 
 from app.approvals import ApprovalRequiredError
-from app.models import ApprovalRecord, BrowserActionDecision
+from app.models import ApprovalRecord, BrowserActionDecision, ResumeCheckpoint
 from app.orchestrator import BrowserOrchestrator
-from app.providers.base import ProviderDecision
+from app.providers.base import ProviderAPIError, ProviderDecision
 
 
 class RepeatingAdapter:
@@ -191,6 +192,106 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Stay on the current account.", adapter.last_context_hints)
         self.assertIn("Workflow profile: governed", adapter.last_context_hints)
         self.assertIn("request human takeover", adapter.last_context_hints)
+
+    async def test_run_hands_the_resume_checkpoints_to_the_planner_at_every_step(self) -> None:
+        # STORE-24: they are the planner's data, beside the operator's hints and never merged into them.
+        seen: list[dict] = []
+
+        class RecordingAdapter(RepeatingAdapter):
+            async def decide(self, **kwargs):
+                seen.append(kwargs)
+                return await super().decide(**kwargs)
+
+        checkpoints = [ResumeCheckpoint(step_index=1, status="acted", url="https://x.test/")]
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(RecordingAdapter()))
+
+        await orchestrator.run(
+            session_id="session-1",
+            provider_name="openai",
+            goal="Keep going",
+            max_steps=2,
+            context_hints="Stay on the account.",
+            resume_checkpoints=checkpoints,
+        )
+
+        self.assertEqual(len(seen), 2)
+        for kwargs in seen:
+            self.assertEqual(kwargs["resume_checkpoints"], checkpoints)
+            self.assertEqual(kwargs["context_hints"], "Stay on the account.")
+
+    async def test_a_step_with_no_resume_checkpoints_passes_none(self) -> None:
+        seen: list[dict] = []
+
+        class RecordingAdapter(RepeatingAdapter):
+            async def decide(self, **kwargs):
+                seen.append(kwargs)
+                return await super().decide(**kwargs)
+
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(RecordingAdapter()))
+
+        await orchestrator.step(session_id="session-1", provider_name="openai", goal="Click")
+
+        self.assertIsNone(seen[0]["resume_checkpoints"])
+
+    async def _step_failing_with(self, exc: Exception):
+        class FailingAdapter:
+            default_model = "test-model"
+
+            async def decide(self, **kwargs):
+                raise exc
+
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(FailingAdapter()))
+        return await orchestrator.step(session_id="session-1", provider_name="openai", goal="Click")
+
+    async def test_a_providers_status_is_answered_as_a_fixed_502_or_503_and_never_the_upstreams(self) -> None:
+        # STORE-27: a 401 or a 404 from the provider reached the caller as the step's own status.
+        request = httpx.Request("POST", "https://api.example/v1")
+
+        def upstream(status: int) -> httpx.HTTPStatusError:
+            return httpx.HTTPStatusError("x", request=request, response=httpx.Response(status, request=request))
+
+        def refusal(status: int | None, *, retryable: bool = False) -> ProviderAPIError:
+            return ProviderAPIError(provider="openai", message="no", status_code=status, retryable=retryable)
+
+        cases = [
+            (refusal(401), 502),
+            (refusal(404), 502),
+            (refusal(400), 502),
+            (refusal(429, retryable=True), 503),
+            (refusal(500, retryable=True), 503),
+            (refusal(503, retryable=True), 503),
+            (refusal(None, retryable=True), 503),
+            (refusal(None), 502),
+            (upstream(401), 502),
+            (upstream(404), 502),
+            (upstream(429), 503),
+            (upstream(500), 503),
+            (upstream(503), 503),
+        ]
+        for exc, expected in cases:
+            with self.subTest(exc=repr(exc)), self.assertLogs("app.orchestrator", level="ERROR"):
+                result = await self._step_failing_with(exc)
+                self.assertEqual(result.status, "error")
+                self.assertEqual(result.error_code, expected)
+                self.assertEqual(result.error, "Provider request failed")
+
+    async def test_any_other_failure_says_agent_step_failed_and_names_no_path(self) -> None:
+        # STORE-27: its class and text went into the 300-character message, a PermissionError's path with them.
+        path = "/data/cli-home/tmp8x2k1"
+        for exc in (
+            RuntimeError(f"cannot use {path}"),
+            PermissionError(13, "Permission denied", path),
+            OSError(28, "No space left on device", path),
+            ValueError(path),
+        ):
+            with self.subTest(exc=type(exc).__name__), self.assertLogs("app.orchestrator", level="ERROR") as logged:
+                result = await self._step_failing_with(exc)
+                self.assertEqual((result.status, result.error_code, result.error), ("error", None, "Agent step failed"))
+                self.assertNotIn(path, result.model_dump_json())
+                # The detail is kept for the operator, in the log.
+                written = logged.records[0].getMessage()
+                self.assertIn(type(exc).__name__, written)
+                self.assertIn(path, written)
 
     async def test_governed_workflow_profile_blocks_write_without_approval(self) -> None:
         approval = ApprovalRecord(

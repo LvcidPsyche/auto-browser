@@ -196,25 +196,74 @@ def tokenless_loopback_allowed(settings: Any) -> bool:
     return getattr(settings, "api_allow_tokenless_loopback", False) is True
 
 
+_DOCS_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+
+# Its own route because middleware/http.py judges a cross-site GET of it as a write.
+AUTH_PROFILE_EXPORT_ROUTE = "/auth-profiles/{profile_name}/export"
+
+
+def is_bearer_exempt_path(path: str, *, docs_are_public: bool) -> bool:
+    """Whether a path answers without the bearer token: the one list, the token gate's and the session check's."""
+    # /share/{token}/... authenticates with the signed share token instead
+    # (app/routes/share.py). POST /sessions/{id}/share, which mints one, is not
+    # under this prefix and stays behind the bearer token.
+    if path.startswith("/share/"):
+        return True
+    # /ui/{anything} only redirects to /dashboard, as /ui and /ui/ do, and serves
+    # nothing; answering 401 for old bookmarks like /ui/foo was inconsistent.
+    if path.startswith("/ui/"):
+        return True
+    # /docs, /redoc and /openapi.json serve the API schema, which is public (it is
+    # in the repo) and holds no data. A browser opening /docs cannot send the
+    # bearer token; the schema declares it, so Swagger's Authorize sends it from there.
+    # Only on a loopback deployment, where the browser is the operator's own: an
+    # exposed one answers 401 as it did before they were opened up.
+    if path in _DOCS_PATHS:
+        return docs_are_public
+    return path in {
+        "/healthz",
+        "/readyz",
+        "/mesh/receive",
+        "/version",
+        "/dashboard",
+        "/dashboard/",
+        "/ui",
+        "/ui/",
+    }
+
+
 def has_named_credentials(settings: Any) -> bool:
     """True when operators can be told apart: at least one credential proves who holds it."""
     return any(credential.verifies_identity for credential in credentials_for(settings))
+
+
+def credential_names_operator(settings: Any, operator_id: str) -> bool:
+    """Whether a named credential proves ``operator_id``, by the settings as they are when this is asked.
+
+    A request with a token proves the first credential holding it (match_credential), so a later entry repeating that
+    token proves no one.
+    """
+    proven_by_token: dict[str, str | None] = {}
+    for credential in credentials_for(settings):
+        proven_by_token.setdefault(credential.token, credential.operator_id)
+    return operator_id in proven_by_token.values()
 
 
 _HTTP_OPTIONAL_WHITESPACE = " \t"
 
 
 def normalize_authorization(authorization: str) -> str:
-    """The Authorization header as `<scheme> <token>`, without the spaces and tabs around the token.
+    """The Authorization header as `<scheme> <token>`: the scheme lowercased, no spaces or tabs around the token.
 
     Whitespace is not part of a configured token, so it is not part of the presented
     one either: RFC 7235 allows several spaces after the scheme, and uvicorn's default
     parser (httptools) keeps trailing whitespace that h11 trims. Only HTTP's optional
-    whitespace counts, so both parsers agree. The rate limiter keys on this too: a
-    bucket per spelling would give a token holder a fresh limit for each one.
+    whitespace counts, so both parsers agree. The scheme is case-insensitive and the
+    token is not. The rate limiter keys on this too: a bucket per spelling would give a
+    token holder a fresh limit for each one.
     """
     scheme, _, token = authorization.strip(_HTTP_OPTIONAL_WHITESPACE).partition(" ")
-    return f"{scheme} {token.strip(_HTTP_OPTIONAL_WHITESPACE)}"
+    return f"{scheme.lower()} {token.strip(_HTTP_OPTIONAL_WHITESPACE)}"
 
 
 def match_credential(credentials: Sequence[Credential], authorization: str) -> Credential | None:
@@ -226,7 +275,7 @@ def match_credential(credentials: Sequence[Credential], authorization: str) -> C
     presented = normalize_authorization(authorization).encode()
     matched: Credential | None = None
     for credential in credentials:
-        expected = f"Bearer {credential.token}".encode()
+        expected = f"bearer {credential.token}".encode()
         if hmac.compare_digest(presented, expected) and matched is None:
             matched = credential
     return matched

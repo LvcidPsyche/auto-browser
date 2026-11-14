@@ -24,6 +24,18 @@ That means:
 - MCP clients with HTTP transport support can talk to it directly, sending the controller's token
 - stdio-first clients can use the bridge, which reads the file named by `AUTO_BROWSER_TOKEN_FILE` / `--token-file`; the repo wrapper (`make stdio-bridge`, or `scripts/mcp_stdio_bridge.py`) defaults that to its checkout's `data/api-token` for a loopback URL
 
+The controller speaks MCP protocol versions `2025-11-25` and `2025-06-18`
+(`2025-03-26` is no longer negotiated, since 1.18.0): an `initialize` that asks
+for another is offered `2025-11-25`, and a client that cannot use it disconnects.
+
+The controller keeps the `clientInfo` and the `capabilities` of an `initialize`
+with the MCP session it makes, each an object (a value that is no object is
+kept as `{}`). Each may be nested at most 32 levels (the object
+itself is the first, and a list is a level as an object is) and take at most
+64 KiB written compactly as JSON in UTF-8. An `initialize` past either bound is
+answered with JSON-RPC error `-32602`, whose message names the field and the
+bound, and makes no session.
+
 ## Connect directly over HTTP
 
 Clients that speak MCP's HTTP transport need no bridge: point them at
@@ -290,7 +302,8 @@ curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp \
 The default resource set includes:
 
 - `browser://sessions` for active browser sessions
-- `browser://audit/events` for recent audit events
+- `browser://audit/events` for recent audit events (never notified, so read it
+  with `resources/read`: subscribing to it returns `-32602`)
 - `browser://<session-id>/dom`, `browser://<session-id>/screenshot`,
   `browser://<session-id>/console`, and `browser://<session-id>/network` once a
   session exists
@@ -339,8 +352,16 @@ curl -N "${AUTH[@]}" http://127.0.0.1:8000/mcp \
   -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION"
 ```
 
-When a subscribed resource changes, the stream emits a JSON-RPC notification
-named `notifications/resources/updated` with the updated `uri`.
+When a browser event notifies a resource you subscribed to, the stream emits a
+JSON-RPC notification named `notifications/resources/updated` with its `uri`.
+Only the events listed in
+[`examples/mcp-resources.md`](../examples/mcp-resources.md#subscribing-to-changes)
+notify, each for the URIs listed there; for anything else, read the resource
+again.
+
+An MCP session has one live stream: a new `GET /mcp` ends the older one, and
+`DELETE` or the session's eviction ends it. Notifications are not replayed, so
+after reconnecting read again what you watch.
 
 ## MCP tool profiles and packs
 
@@ -350,9 +371,9 @@ controller serves a selection fixed at startup. `MCP_TOOL_PROFILE` picks a profi
 
 | Profile | Packs | Tools | `tools/list` size | For |
 |---|---|---|---|---|
-| `lean` | `browse` | 7 | about 12 KB | the browsing loop: observe, act, read the page, hand to a person, close |
-| `curated` (default) | `browse`, `sessions`, `tabs`, `downloads`, `auth_profiles`, `wait`, `scripting`, `vision` | 20 (21 with a vision model) | about 25 KB | a browsing agent: adds sessions with options, saved sign-ins, tabs, downloads, waits and `eval_js` |
-| `full` | every pack | 74 (75 with a vision model) | about 68 KB | everything: diagnostics, Witness, admin, the agent queue, the harness |
+| `lean` | `browse` | 7 | about 13 KB | the browsing loop: observe, act, read the page, hand to a person, close |
+| `curated` (default) | `browse`, `sessions`, `tabs`, `downloads`, `auth_profiles`, `wait`, `scripting`, `vision` | 20 (21 with a vision model) | about 29 KB | a browsing agent: adds sessions with options, saved sign-ins, tabs, downloads, waits and `eval_js` |
+| `full` | every pack | 77 (78 with a vision model) | about 83 KB | everything: diagnostics, Witness, admin, the agent queue, the harness |
 
 Sizes are the JSON `tools/list` returns, without a vision model.
 
@@ -376,19 +397,19 @@ tools in the order `tools/list` returns them.
 | `advanced_actions` | full | drag and drop, viewport size | `browser.drag_drop`, `browser.set_viewport` |
 | `storage` | full | cookies, and local and session storage | `browser.get_cookies`, `browser.set_cookies`, `browser.get_local_storage`, `browser.set_local_storage` |
 | `auth_admin` | full | inspecting a saved sign-in's files, saving a session's raw storage state | `browser.get_auth_profile`, `browser.save_auth_state` |
-| `session_admin` | full | attaching to a running Chrome, sharing a session, switching a session to a visible window | `browser.cdp_attach`, `browser.share_session`, `browser.enable_shadow_browse` |
+| `session_admin` | full | attaching to a running Chrome, sharing a session and ending its share links, switching a session to a visible window | `browser.cdp_attach`, `browser.share_session`, `browser.revoke_session_share`, `browser.enable_shadow_browse` |
 | `approvals` | full | listing and deciding approvals over MCP | `browser.list_approvals`, `browser.approve_approval`, `browser.reject_approval`, `browser.execute_approval` |
 | `agent_jobs` | full | the built-in agent queue and its model providers | `browser.list_agent_jobs`, `browser.get_agent_job`, `browser.resume_agent_job`, `browser.discard_agent_job`, `browser.cancel_agent_job`, `browser.queue_agent_step`, `browser.queue_agent_run`, `browser.list_providers` |
 | `proxies` | full | proxy personas | `browser.list_proxy_personas`, `browser.create_proxy_persona`, `browser.delete_proxy_persona` |
-| `cron` | full | agent runs on a schedule or a webhook | `browser.list_cron_jobs`, `browser.create_cron_job`, `browser.delete_cron_job`, `browser.trigger_cron_job` |
+| `cron` | full | agent runs on a schedule or a webhook | `browser.list_cron_jobs`, `browser.create_cron_job`, `browser.delete_cron_job`, `browser.trigger_cron_job`, `browser.rotate_cron_webhook_key`, `browser.revoke_cron_webhook_key` |
 | `harness` | full | the convergence harness | `harness.start_convergence`, `harness.get_status`, `harness.get_trace`, `harness.list_runs`, `harness.list_candidates`, `harness.get_candidate`, `harness.check_drift`, `harness.check_all_drifts`, `harness.graduate` |
 
 ```bash
-MCP_TOOL_PROFILE=lean                                  # 7 tools, 11,934 B
+MCP_TOOL_PROFILE=lean                                  # 7 tools, about 13 KB
 MCP_TOOL_PROFILE=lean MCP_TOOL_PACKS=sessions,tabs     # 14 tools
-MCP_TOOL_PACKS=harness                                 # curated + harness: 29 tools, 34,077 B
-MCP_TOOL_PACKS=-scripting                              # curated without eval_js: 19 tools, 23,913 B
-MCP_TOOL_PROFILE=full MCP_TOOL_PACKS=-harness,-cron    # 61 tools, 57,117 B
+MCP_TOOL_PACKS=harness                                 # curated + harness: 29 tools, about 38 KB
+MCP_TOOL_PACKS=-scripting                              # curated without eval_js: 19 tools, about 27 KB
+MCP_TOOL_PROFILE=full MCP_TOOL_PACKS=-harness,-cron    # 62 tools, about 67 KB
 ```
 
 The rules:
@@ -418,8 +439,10 @@ browser.get_console is in the devtools tool pack, which this controller does not
 ```
 
 `browser.queue_agent_run` (pack `agent_jobs`) accepts `workflow_profile`
-(`fast` or `governed`) and `browser.resume_agent_job` resumes interrupted,
-failed, or step-limited background runs from persisted checkpoints.
+(`fast` or `governed`; any other value is refused and nothing is queued) and
+`browser.resume_agent_job` resumes, from persisted checkpoints, a background run
+that was interrupted or failed, or that stopped at its step limit, for an approval
+or with an error: a job whose record reads `resumable: true`.
 
 Use `workflow_profile=governed` when starting convergence against a live browser session. `harness.graduate` writes only a staged candidate; promotion to the production skill corpus remains a separate governed review step.
 
@@ -445,7 +468,8 @@ Use `workflow_profile=governed` when starting convergence against a live browser
 
 ### Governed approvals on tool calls
 
-Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool assigned a
+Pass `workflow_profile=governed` on a tool call (it defaults to `fast`; a tool assigned a governed kind refuses any
+other value) and every tool assigned a
 governed kind asks for an operator's approval first (most tools that write have one, not all: creating a
 session or a proxy persona does not; see `FORCE_GOVERNED_APPROVALS` below): the call returns
 `approval_required` with an `approval_id`, an operator approves it, and the agent repeats the same call
@@ -554,9 +578,12 @@ workers sharing a store, and a restored backup can leave a file record that diff
 latest word, and the rule then keeps the spend or the rejection. A stored record that no longer
 validates (a navigate approval an earlier version stored for a URL this one refuses) is left out of
 listings and answers as an unknown id, in either store; fetching or listing it logs a warning that names
-it and where it fails, not what it holds. Not covered: two controller processes sharing one approval
-store (file or SQLite) can both claim an approval, since the claim is atomic only within a process;
-several workers or replicas are not supported.
+it and where it fails, not what it holds. An approval the retention has deleted
+(`APPROVAL_RETENTION_DAYS` after its decision, 30 by default; see `docs/production-hardening.md`)
+answers as an unknown id too: a 404 from the approval routes, and for a call that presents its
+`approval_id` the error an id that never existed gets. Not covered: two controller processes sharing one
+approval store (file or SQLite) can both claim an approval, since the claim is atomic only within a
+process; several workers or replicas are not supported.
 
 These refusal messages are the tool call's answer over MCP, `browser.execute_approval` included. REST
 routes answer an approval refusal with fixed text (403 "Not permitted" on `/sessions/{id}/actions/*`,
@@ -564,6 +591,10 @@ routes answer an approval refusal with fixed text (403 "Not permitted" on `/sess
 message, its `code` and its `approval_given_back` there too (the approval guard's refusals,
 `approval_rejected` and the like, answer 409), and a 409 for a decision on a claimed approval, or for an
 approve whose arguments or text are gone, carries its reason as the `detail`, which the dashboard shows.
+So does the 409 that refuses an operator listed in `APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS` an approve
+of an approval they asked for themselves: the approval stays as it was, for another operator to approve
+where one can reach it, in a session nobody owns (in a session the asker owns, and in controller scope,
+none can, and a pending one stays pending).
 
 #### Rejecting or approving while an action holds its approval
 
@@ -617,8 +648,11 @@ them whole, with the same credentials left out, to whoever may read the approval
 the approval binds, which covers the call's own arguments (so a cookie's or a storage value is approved
 without being viewable). The file is removed when the call that spends the approval ends, or at the next
 start for a call whose process died, or whose removal failed (that is logged, and leaves the file), and
-for a file no record names. Until then it stays: an approval left pending, or approved and never run,
-keeps its file, and nothing else sweeps it (expiry is not a final state in the store: one past its
+for a file no record names. The retention removes it too, ahead of the record, when it deletes an
+approval: at a start and in each maintenance sweep, once the decision is older than
+`APPROVAL_RETENTION_DAYS` (`0` deletes nothing). Until then it stays, and nothing else sweeps it: an
+approval left pending keeps its file at any age, and one approved and never run keeps it until it has
+expired and its decision is that old (expiry is not a final state in the store: one past its
 expiry stays `approved`, and is refused when used); a rejected one keeps it for the approval TTL
 (`APPROVAL_TTL_MINUTES`) after the rejection, since an operator may approve it again meanwhile, and the
 file goes at the next approval request or start after that. An approve of one whose arguments are gone
@@ -630,6 +664,64 @@ the same controller process (the 24-hour case), the text is held again and that 
 approved. After a reject, a restart, or on another worker, asking again queues a new approval for the
 operator to decide, and the old one can no longer be approved.
 
+The digest a tool call's approval binds is kept keyed. The record's `action.text` reads
+`<tool> hmac-sha256:<key id>:<digest>`: an HMAC, under a key only the controller holds, over the tool's
+name and the SHA-256 of the call's own arguments, so a value the preview leaves out cannot be guessed
+against what `GET /approvals`, the approval tools or the `approval_required` answer serve. The key is 32
+random bytes, written in hex at the first start to `.tool-call-digest.key` in `APPROVAL_ROOT` (there too
+when `STATE_DB_PATH` holds the records), created with mode 0600, read at every start and never
+replaced; whoever can read `APPROVAL_ROOT` itself reads the key with the records. Keying stops a guess
+made offline, against a listing or a copy of the records without the key, and not one made through the
+controller: the keyed text is the same for the same tool and arguments in every session (`session_id`
+is no part of it), so a caller who can read an approval and may make governed calls can still try a
+value one request at a time. A try made without `approval_id` leaves a pending approval and the record
+of its request (a witness receipt in a session, while `WITNESS_ENABLED` is on; an audit event in
+controller scope). A try that presents an approved `approval_id` with other arguments leaves nothing: a
+miss is refused ("does not match the requested action") and writes no approval, receipt or audit event,
+and the right value runs the approved call and spends the approval.
+
+Records that 1.17.0 and earlier stored with the plain SHA-256 are rewritten at the first start that
+finds them, in both stores, and cover the same call as before; one that cannot be rewritten is logged,
+still matches its call, and is taken at the next start. Until then, or until a decision or a call writes
+that record, what is stored of it (its file, and its row with `STATE_DB_PATH`) holds the plain digest,
+and the controller lists and answers it keyed all the same. A start that cannot use the key file (it
+keys with a key of its own) rewrites none, and a decision or a call there writes the plain digest back:
+it stays until a start that can use the file.
+
+An approval kept under a key the controller no longer holds (the file was removed or replaced before a
+start; a running controller goes on with the key it read) cannot be matched to any call. Approving it is
+refused before the record changes ("its arguments' digest is kept under another key than this controller
+holds ..."), a call that presents one approved earlier is refused with the same reason and told to
+repeat the call without `approval_id`, which asks for a new approval, and each start logs how many such
+approvals are pending or approved; rejecting them ends that warning. An operator's rejection kept under
+that key no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS`, and each
+start logs, in a warning of its own, how many such rejections are stored (one made to end the first
+warning is one of them): reject the call again when it is asked for, turn `AUTONOMOUS_APPROVALS` off, or
+restore the key file. That warning repeats while the rejections are stored. The retention removes each
+one once it is older than `APPROVAL_RETENTION_DAYS`, in controller scope and in an open session too,
+where it keeps an operator's rejection that still matches its call: one kept under a key that is gone
+refuses nothing. Only a process that holds the file's key does so (a start that could not use the file
+is described below). A start counts them before its own retention pass, so the start that removes the
+last of them logs the warning once more. With `APPROVAL_RETENTION_DAYS=0` nothing removes them, and the
+warning repeats until the key file is restored. A key file restored after the retention has removed a
+rejection does not bring it back: reject the call again when it is asked for. When the file cannot be
+used at a start (it holds no key, cannot be read, or cannot be written
+where there is none), the start logs it and keys with a key of its own: the tool call approvals asked for
+in that process work until it ends, and are refused the same way after a restart. To that process every tool call
+approval stored under a key before reads as kept under another key, the file's own among them, so its
+retention removes no operator's rejection on that ground: one in controller scope or in an open session
+stays whatever its age, and the next start that can use the file matches it again. A record that still
+holds the plain SHA-256 is not rewritten by such a start, which logs how many it left, nor by a decision,
+a claim or a give-back of it in that process: under that process's key it would match no call at any
+later start. It matches its call in that process as before, and the next start that can use the file
+rewrites it under the file's key with what was decided of it there: an operator's rejection made there
+still stops the agent's own approval of the call, and an approval made there can still be run until it
+expires. A file that holds no key
+is left as it is, and has to be removed before a start writes a new one. A start that dies between creating the
+file and writing the key leaves one, empty or cut short of its 64 hex characters: no approval was ever
+kept under it, so it is safe to remove. One that held a key and was changed since (edited, or saved in
+another encoding) is better restored, since approvals are kept under the key it held.
+
 In the dashboard (the queue, the confirm dialog, the arguments viewer and the run replay), in the
 `action_summary`, and in the webhook's and the SSE event's `reason`, a character that would hide or
 reorder the text is shown as its code point (`[U+202E]`): format characters such as bidi overrides and
@@ -638,8 +730,8 @@ variation selectors and Hangul fillers. The server's lists of format and default
 are Unicode 17.0's, whatever Unicode its Python knows. In the `reason`, a newline is written `\n`, and a
 tab, a carriage return or another control as its code point (`[U+0009]`), so a multi-line reason
 arrives on one line; field strings are JSON, so their controls show as JSON escapes (above). A tool
-call's preview and arguments are ASCII JSON (`\u202e`). Every answer that carries the record serves its
-fields as stored: the record and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP
+call's preview and arguments are ASCII JSON (`\u202e`). Every answer that carries the record serves such
+characters as they are: the record and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP
 `browser.list_approvals`), the answers to an approve, a reject or an execute over REST and MCP, the
 `approval_required` answer, and witness receipts. The queue lists only pending approvals: read one on
 its row before you decide. Letters that look alike across scripts (a Cyrillic `а` for a Latin `a`), and
@@ -688,7 +780,20 @@ cron job that an earlier version stored with a `start_url` these rules refuse fa
 browser opens, and the controller logs why.
 
 A `type` the agent marked sensitive reads "text hidden at the agent's request (sensitive)":
-the agent can mark any text sensitive, so look at the field it types into. An operator's rejection
+the agent can mark any text sensitive, so look at the field it types into. One it did not mark shows
+its text only where every field the text could go to read as plain when the approval was asked for
+(`field_read: "plain"`): the element the `type` names where it takes text (an input that text is typed
+into, a textarea, a select, an editable element), the control of a `label`, and the fields inside
+either, through open shadow roots. Where one of them read as secret (a password field, say) it reads
+"text hidden: its field reads as secret" (`field_read: "secret"`), and stays so. It reads "text hidden:
+its field has not been read" (`field_read: "unread"`) where there is no such field (a component that
+takes its keys itself, or keeps its field in a closed shadow root), where a frame is among what is
+named and none of them reads as secret (its document is not read), where the read did not answer
+within a second (a field not on the
+page yet), and for any pending `type` approval stored before 1.18.0, until the same action is asked
+for again and its read says plain or secret.
+`GET /approvals` answers that text for it; the approval keeps the text the action must be retried
+with. An operator's rejection
 stops the agent from approving the same request itself (`AUTONOMOUS_APPROVALS=true`) only within its
 session, or in controller scope for the same operator; with `AUTONOMOUS_APPROVALS=true` the agent
 approves its own calls, and can repeat a rejected one in a new session.
@@ -708,11 +813,24 @@ comments decisions were given with, though not a reason or a tool call's argumen
 
 #### Cron jobs and FORCE_GOVERNED_APPROVALS
 
-The cron tools are governed too: `browser.create_cron_job` and `browser.trigger_cron_job` are `write`
-and `browser.delete_cron_job` is `destructive`. A job keeps the `workflow_profile` of the call that
+The cron tools are governed too: `browser.create_cron_job`, `browser.trigger_cron_job` and
+`browser.rotate_cron_webhook_key` are `write`, and `browser.delete_cron_job` and
+`browser.revoke_cron_webhook_key` are `destructive`. In `tools/list`, the rotate tool's annotations say
+`destructiveHint: true` all the same, as the delete and revoke tools' do: it ends the working key at
+once, so a client that runs tools without asking when they say they destroy nothing asks first. A job
+keeps the `workflow_profile` of the call that
 created it, and every run, scheduled or triggered, starts under it, so a job created by a `governed`
 caller cannot be used to run writes without approval. Likewise, a run or step queued by a `governed`
 `browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.
+These three tools refuse a `workflow_profile` (or `policy_profile`) other than `fast` or `governed`, as
+every governed tool does, and create or queue nothing: read as `fast`, a mistyped value stored the job
+`fast`, and left a queued run or step at its request's own profile. `policy_profile` is a second name
+for the same argument, for these tools and for every governed one: a call that gives both is `governed`
+when either says `governed`, and is refused when either holds
+another value (`null` reads as left out). The two queue tools are not governed: their `tools/list` schema
+shows `workflow_profile`, with what it does there, and no `approval_id`, since queuing a run or step asks
+for no approval. That description does not name `FORCE_GOVERNED_APPROVALS`, under which a queued run or
+step runs governed whatever either profile says.
 A job created through REST (`POST /crons`) stores the `workflow_profile` the request body names, `fast`
 by default. A job created before this release stores `fast`: it keeps running as `fast` unless
 `FORCE_GOVERNED_APPROVALS=true` (below). A job's profile is fixed when it is created (jobs cannot be

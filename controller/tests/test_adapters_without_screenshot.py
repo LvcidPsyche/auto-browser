@@ -136,7 +136,7 @@ class AdaptersWithoutScreenshotTests(unittest.IsolatedAsyncioTestCase):
         adapter = OpenAIAdapter(_settings(OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex", CLI_HOME=cli_home))
         commands: list[list[str]] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):
+        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
             commands.append(command)
             output_path = Path(command[command.index("--output-last-message") + 1])
             output_path.write_text('{"action":"done","reason":"x","risk_category":"read"}', encoding="utf-8")

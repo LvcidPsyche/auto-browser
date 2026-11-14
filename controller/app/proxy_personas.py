@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from .session_ownership import may_use, verified_operator
-from .utils import PRIVATE_FILE_MODE, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ class ProxyPersonaStore:
         except FileNotFoundError:
             return {}
         except Exception as exc:
-            logger.error("failed to load proxy persona file %s: %s", self._path, exc)
+            logger.error("failed to load proxy persona file %s: %s", self._path, error_text_for_log(exc))
             raise ProxyPersonaFileError() from exc
         if not isinstance(data, dict):
             logger.error("proxy persona file is not a JSON object: %s", self._path)
@@ -124,7 +124,12 @@ class ProxyPersonaStore:
             try:
                 name, persona = self._normalize_persona(raw_name, raw_persona)
             except ValueError as exc:
-                logger.warning("skipping invalid proxy persona entry %r in %s: %s", raw_name, self._path, exc)
+                logger.warning(
+                    "skipping invalid proxy persona entry %s in %s: %s",
+                    quoted_for_log(raw_name),
+                    self._path,
+                    error_text_for_log(exc),
+                )
                 continue
             normalized[name] = persona
         return normalized
@@ -156,11 +161,11 @@ class ProxyPersonaStore:
                 keys.append(raw_name)
         if len(keys) > 1:
             logger.error(
-                "proxy persona file %s holds %d entries for %r: %r; remove all but one",
+                "proxy persona file %s holds %d entries for %s: %s; remove all but one",
                 self._path,
                 len(keys),
-                name,
-                keys,
+                quoted_for_log(name),
+                quoted_for_log(keys),
             )
             raise ProxyPersonaDuplicateError()
         return raw, (keys[0] if keys else None)
@@ -246,7 +251,7 @@ class ProxyPersonaStore:
         data = self._load()
         # Another operator's persona is reported as missing, so a name leaks nothing.
         if name not in data or not may_use(data[name].get("owner")):
-            raise KeyError(f"Proxy persona not found: {name!r}")
+            raise KeyError(f"Proxy persona not found: {quoted_for_log(name)}")
         return data[name]
 
     def set_persona(
@@ -272,7 +277,7 @@ class ProxyPersonaStore:
         existing = data.get(normalized_name)
         if existing is not None and not may_use(existing.get("owner")):
             # The one place a name is revealed: a single namespace cannot hide a collision.
-            raise PermissionError(f"proxy persona {normalized_name!r} belongs to another operator")
+            raise PermissionError(f"proxy persona {quoted_for_log(normalized_name)} belongs to another operator")
         # An update never changes who owns a persona (nor claims an unowned one); a new
         # persona belongs to its creator when a named credential proved who that is.
         normalized_persona["owner"] = existing["owner"] if existing is not None else verified_operator()
@@ -280,7 +285,7 @@ class ProxyPersonaStore:
         # An entry under this exact key other than the one found is one the store ignores (a typo in "server");
         # the save would overwrite it, so it is refused as a valid entry would be when another operator owns it.
         if key != normalized_name and normalized_name in raw and not may_use(self._owner_of(raw[normalized_name])):
-            raise PermissionError(f"proxy persona {normalized_name!r} belongs to another operator")
+            raise PermissionError(f"proxy persona {quoted_for_log(normalized_name)} belongs to another operator")
         # An update keeps its entry's place in the file and any key an operator added to it by hand; the store's
         # own fields are laid over it.
         entry = {**(raw[key] if key is not None else {}), **normalized_persona}

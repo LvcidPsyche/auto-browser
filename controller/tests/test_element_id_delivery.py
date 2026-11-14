@@ -24,6 +24,7 @@ from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
 from app.browser import element_world
 from app.browser.element_target import ElementTarget
+from app.browser.services import actions
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
 
 REPORT = "quarterly"  # 9 bytes
@@ -57,17 +58,72 @@ document.getElementById('name').addEventListener('keydown', (event) => {
 """
 
 
-async def test_a_select_all_that_moves_focus_empties_nothing(tmp_path: Path) -> None:
-    """Codex 2: focus was checked only after Delete, which had emptied the field the page chose."""
+async def _named(env, session_id: str, by: str, selector: str, label: str) -> dict[str, str]:
+    """How a type names its field: by ``selector``, or by the element_id of the one observe labels ``label``."""
+    if by == "selector":
+        return {"selector": selector}
+    return {"element_id": (await env.element(session_id, label))["element_id"]}
+
+
+@pytest.mark.parametrize("by", ["element_id", "selector"])
+async def test_a_select_all_that_moves_focus_empties_nothing(tmp_path: Path, by: str) -> None:
+    """Codex 2: focus was checked only after Delete, which had emptied the field the page chose. By selector it was
+    not checked through the clear at all (FX9c4's staged review, 15): the decoy was emptied, and took the text."""
     async with browser_env(tmp_path, {"/": SELECT_ALL_MOVES_FOCUS}) as env:
         session_id = await env.create("/")
-        name = await env.element(session_id, "Name")
+        name = await _named(env, session_id, by, "#name", "Name")
 
-        refused = await _refusal(env.manager.type(session_id, element_id=name["element_id"], text="new"))
+        refused = await _refusal(env.manager.type(session_id, text="new", **name))
+
+        assert refused.code == "focus_lost"
+        assert "after select-all (nothing was cleared)" in refused.message
+        page = env.page(session_id)
+        assert [await page.input_value("#name"), await page.input_value("#decoy")] == ["old", "keep me"]
+
+
+# Select-all in Name hands Name's id on to a filled decoy, and focus with it: the selector names the decoy from then
+# on, and the decoy has focus.
+SELECT_ALL_HANDS_THE_ID_ON = """<title>form</title>
+<input id="name" aria-label="Name" value="old">
+<input id="decoy" aria-label="Decoy" value="keep me">
+<script>
+document.getElementById('name').addEventListener('keydown', (event) => {
+  if (!event.ctrlKey || event.key.toLowerCase() !== 'a') return;
+  event.preventDefault();
+  const decoy = document.getElementById('decoy');
+  event.target.id = 'was-name';
+  decoy.id = 'name';
+  decoy.focus();
+  decoy.select();
+});
+</script>
+"""
+
+
+async def test_a_selector_that_names_another_field_after_select_all_empties_nothing(tmp_path: Path) -> None:
+    """The check by selector is of the element the selector named as the type focused it: asked of the selector
+    again, the decoy has focus, the check passes, and the Delete empties the decoy."""
+    async with browser_env(tmp_path, {"/": SELECT_ALL_HANDS_THE_ID_ON}) as env:
+        session_id = await env.create("/")
+
+        refused = await _refusal(env.manager.type(session_id, selector="#name", text="new"))
 
         assert refused.code == "focus_lost"
         page = env.page(session_id)
-        assert [await page.input_value("#name"), await page.input_value("#decoy")] == ["old", "keep me"]
+        assert [await page.input_value("#was-name"), await page.input_value("#name")] == ["old", "keep me"]
+
+
+@pytest.mark.parametrize("by", ["element_id", "selector"])
+async def test_a_field_that_keeps_focus_is_cleared_and_typed_into(tmp_path: Path, by: str) -> None:
+    """The control: the checks through the clear refuse nothing where focus stays."""
+    page_html = '<title>form</title><input id="name" aria-label="Name" value="old">'
+    async with browser_env(tmp_path, {"/": page_html}) as env:
+        session_id = await env.create("/")
+        name = await _named(env, session_id, by, "#name", "Name")
+
+        await env.manager.type(session_id, text="new", **name)
+
+        assert await env.page(session_id).input_value("#name") == "new"
 
 
 # Opus's probe page: the same move, made by the Delete key's own keydown handler.
@@ -85,22 +141,58 @@ document.getElementById('name').addEventListener('keydown', (event) => {
 """
 
 
-async def test_a_delete_that_moves_focus_is_the_documented_limit_of_the_clear(tmp_path: Path) -> None:
+@pytest.mark.parametrize("by", ["element_id", "selector"])
+async def test_a_delete_that_moves_focus_is_the_documented_limit_of_the_clear(tmp_path: Path, by: str) -> None:
     """Opus 2: a keydown handler can move focus within the key it handles, the clear's Delete included.
 
     Chromium then applies the Delete to the field the handler moved to, so that field is emptied; the
     check after the clear refuses before any text goes out. Documented in the residual lists (CHANGELOG,
-    docs/llm-adapters.md, the advisory); if this changes, change them too.
+    docs/llm-adapters.md, the advisory); if this changes, change them too. By selector there was no check, and
+    the text went into the emptied field.
     """
     async with browser_env(tmp_path, {"/": DELETE_MOVES_FOCUS}) as env:
         session_id = await env.create("/")
-        name = await env.element(session_id, "Name")
+        name = await _named(env, session_id, by, "#name", "Name")
 
-        refused = await _refusal(env.manager.type(session_id, element_id=name["element_id"], text="new"))
+        refused = await _refusal(env.manager.type(session_id, text="new", **name))
 
         assert refused.code == "focus_lost"
+        assert "through the clear" in refused.message
         page = env.page(session_id)
         assert [await page.input_value("#name"), await page.input_value("#decoy")] == ["old", ""]
+
+
+# As the clear empties Name, the page puts a copy of it in its place (a copy has the value Name has then, and none
+# of its listeners) and gives the copy focus.
+CLEAR_REPLACES_THE_FIELD = """<title>form</title>
+<input id="name" aria-label="Name" value="old">
+<script>
+document.getElementById('name').addEventListener('input', (event) => {
+  const copy = event.target.cloneNode();
+  event.target.replaceWith(copy);
+  copy.focus();
+});
+</script>
+"""
+
+
+async def test_a_field_replaced_as_it_is_cleared_refuses_a_type_by_selector_which_a_second_type_completes(
+    tmp_path: Path,
+) -> None:
+    """What asking the element found once costs: a page that puts another node in the field's place during the
+    clear is refused, where the selector looked up again finds the new node and the type went on into it. Nothing
+    is typed, the refusal is retryable, and the next type finds the node that is there by then."""
+    async with browser_env(tmp_path, {"/": CLEAR_REPLACES_THE_FIELD}) as env:
+        session_id = await env.create("/")
+        page = env.page(session_id)
+
+        refused = await _refusal(env.manager.type(session_id, selector="#name", text="new"))
+        left = await page.input_value("#name")
+        await env.manager.type(session_id, selector="#name", text="new")
+
+        assert (refused.code, refused.retryable) == ("focus_lost", True)
+        assert "through the clear" in refused.message
+        assert (left, await page.input_value("#name")) == ("", "new")
 
 
 # Name hands focus to the decoy, which is in Name's form; Name is named
@@ -609,9 +701,9 @@ async def test_an_upload_whose_page_stops_answering_once_the_file_is_in_is_recor
         send, set_input_files = world._send, ElementHandle.set_input_files
         stopped = False
 
-        async def stops_once_the_file_is_in(cdp, method, params=None, timeout_ms=None):
+        async def stops_once_the_file_is_in(cdp, method, params=None, timeout_ms=None, **setup):
             if not stopped:
-                return await send(cdp, method, params, timeout_ms)
+                return await send(cdp, method, params, timeout_ms, **setup)
             return await world._within(asyncio.Event().wait(), method, timeout_ms or world.timeout_ms)
 
         async def then_stop(self, *args, **kwargs):
@@ -703,6 +795,37 @@ async def test_type_by_element_id_into_a_contenteditable(tmp_path: Path) -> None
         await env.manager.type(session_id, element_id=notes["element_id"], text="hello")
 
         assert await env.page(session_id).evaluate("document.getElementById('notes').textContent") == "hello"
+
+
+# ── A tab in the text ────────────────────────────────────────────────────────
+
+TWO_FIELDS = """<title>form</title>
+<textarea id="note" aria-label="Note"></textarea>
+<input id="next" aria-label="Next">
+"""
+
+
+@pytest.mark.parametrize("budget", [None, 0.0], ids=["typed-in-time", "past-the-typing-budget"])
+@pytest.mark.parametrize("by", ["element_id", "selector"])
+async def test_a_tab_in_a_typed_text_goes_in_as_text_however_long_the_text_takes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, by: str, budget: float | None
+) -> None:
+    """The orchestrator's read of FX9c4: past the typing budget a tab was pressed as the Tab key, which moves focus
+    on, so the rest of the text went into the next field. Typed in time (the control) it is a character of the
+    text: the same text now goes to the same field however long it takes."""
+    if budget is not None:
+        monkeypatch.setattr(actions, "HUMAN_TYPING_BUDGET_SECONDS", budget)
+    async with browser_env(tmp_path, {"/": TWO_FIELDS}) as env:
+        session_id = await env.create("/")
+        target = {"selector": "#note"}
+        if by == "element_id":
+            target = {"element_id": (await env.element(session_id, "Note"))["element_id"]}
+
+        await env.manager.type(session_id, text="a\tb", **target)
+
+        page = env.page(session_id)
+        assert [await page.input_value("#note"), await page.input_value("#next")] == ["a\tb", ""]
+        assert await page.evaluate("document.activeElement.id") == "note"
 
 
 # ── A world call whose answer is lost after it ran ───────────────────────────

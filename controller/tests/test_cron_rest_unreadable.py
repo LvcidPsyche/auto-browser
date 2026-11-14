@@ -22,6 +22,8 @@ ROUTES = [
     pytest.param("get", "/crons/abc", None, id="get"),
     pytest.param("delete", "/crons/abc", None, id="delete"),
     pytest.param("post", "/crons/abc/trigger", {"webhook_key": "k"}, id="trigger"),
+    pytest.param("post", "/crons/abc/webhook-key/rotate", None, id="rotate"),
+    pytest.param("delete", "/crons/abc/webhook-key", None, id="revoke"),
 ]
 
 

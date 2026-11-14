@@ -31,3 +31,17 @@ async def test_control_drain_waits_for_the_current_tests_own_task() -> None:
     await drain(timeout=2.0)
 
     assert finished == [True]
+
+
+async def test_a_background_task_that_failed_is_named_among_the_failures() -> None:
+    # What fails a test whose task raised: app.utils reports it with no exc_info, by its text and its frames.
+    async def raises() -> None:
+        raise RuntimeError("the guard failed")
+
+    with _background.crashes_expected():
+        task = spawn_background_task(raises())
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)  # the done callbacks run in the loop's next turn
+
+        (named,) = _background._FAILURES.names
+    assert named == "raises (raised RuntimeError: 'the guard failed')", named

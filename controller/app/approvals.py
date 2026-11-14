@@ -4,16 +4,23 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from .approval_backends import ApprovalStoreBackend, FileApprovalStore, SQLiteApprovalStore, UnreadableRecord
+from .approval_backends import (
+    DIGEST_KEY_FILE,
+    ApprovalStoreBackend,
+    FileApprovalStore,
+    SQLiteApprovalStore,
+    UnreadableRecord,
+)
 from .approval_display import UNBOUND_FIELDS, approval_provenance
 
 # The execution side moved to approval_execution.py; importers keep reaching it here.
@@ -33,19 +40,21 @@ from .approval_execution import (
     held_action_approval,
     held_for_execution,
     held_status,
+    held_tool_call_approval,
     refused_before_effect,
     spent_refusal,
 )
 from .models import (
     ApprovalDecider,
+    ApprovalFieldRead,
     ApprovalKind,
     ApprovalOrigin,
     ApprovalRecord,
     ApprovalStatus,
     BrowserActionDecision,
 )
-from .session_ownership import may_use, verified_operator
-from .utils import UTC, utc_now
+from .session_ownership import as_system, may_use, verified_operator
+from .utils import UTC, error_text_for_log, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +73,7 @@ __all__ = [
     "held_action_approval",
     "held_for_execution",
     "held_status",
+    "held_tool_call_approval",
     "refused_before_effect",
     "spent_refusal",
 ]
@@ -79,12 +89,38 @@ KEPT_OVER_THE_FILE = frozenset({"executed", "rejected"})
 SENSITIVE_TEXT_PREFIX = "[sensitive text] hmac-sha256:"
 # How long the text of an undecided sensitive approval is kept in memory.
 SENSITIVE_TEXT_RETENTION = timedelta(hours=24)
+# A tool call's stand-in text as the gateway writes it (McpToolGateway._governed_call_decision), and as an approval
+# keeps it (_keyed): the digest as an HMAC, after the id of the key it is under (_key_id).
+_PLAIN_STAND_IN = re.compile(r"(\S+) sha256:[0-9a-f]{64}")
+_KEYED_STAND_IN = re.compile(r"\S+ hmac-sha256:([0-9a-f]{8}):[0-9a-f]{64}")
+# What a refusal says of a digest whose key this process does not hold (_kept_under_another_key).
+_ANOTHER_KEY = (
+    f"kept under another key than this controller holds ({DIGEST_KEY_FILE} in APPROVAL_ROOT was replaced, or a "
+    "start could not read it)"
+)
 # What an approval of each origin authorises, as a refusal to spend it names it.
 _ORIGIN_NAMES: dict[str, str] = {"action": "a browser action", "tool_call": "a tool call"}
+# What reading a stored time raises when it holds none (_parse_timestamp). OSError: a time with no offset is read as
+# local time, which Windows refuses before 1970 or far ahead.
+_UNREADABLE_TIME = (ValueError, OverflowError, OSError)
 
 
 def _text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _key_id(key: bytes) -> str:
+    """What names a tool call digest key in the records kept under it; it says nothing of the key."""
+    return hmac.new(key, b"tool call digest key id", hashlib.sha256).hexdigest()[:8]
+
+
+def _field_read_after(known: ApprovalFieldRead, read: ApprovalFieldRead) -> ApprovalFieldRead:
+    """What a pending approval says of its type's field (ApprovalRecord.field_read) once a later request for the
+    same action has read it as ``read``. "secret" stays whatever comes after, and a read that did not answer
+    ("unread") changes nothing: it neither hides a text read as plain nor shows one."""
+    if known == "secret" or read == "unread":
+        return known
+    return read
 
 
 @dataclass(frozen=True)
@@ -124,25 +160,48 @@ class ApprovalStore:
         db_path: str | None = None,
         *,
         approval_ttl_minutes: int = 15,
+        retention_days: float = 0,
+        refuse_self_approval: Iterable[str] = (),
         audit: Any = None,
         rejection_receipt: Callable[[ApprovalRecord], Awaitable[None]] | None = None,
+        may_use: Callable[[ApprovalRecord], Awaitable[bool]] | None = None,
     ):
         self._lock = asyncio.Lock()
+        # Operators who may not approve what they asked for (APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS); empty, the
+        # default and a bare store's, refuses nobody.
+        self.refuse_self_approval = frozenset(refuse_self_approval)
         # Where a give-back is recorded (an AuditStore); None in a bare store.
         self.audit = audit
         # Records the witness receipt of an operator's rejection that a give-back
         # applied (the manager's); None in a bare store, which keeps no receipts.
         self.rejection_receipt = rejection_receipt
+        # Whether the current operator may use an approval, which its session's owner decides (the manager's);
+        # None in a bare store, which knows no session and goes by the operator the record names.
+        self.may_use = may_use
         self.file_store = FileApprovalStore(root)
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
         self.approval_ttl = timedelta(minutes=max(1, approval_ttl_minutes))
+        # How long a decided approval is kept after its decision (prune_decided); 0 keeps them all, and is
+        # what a bare store does. The controller passes APPROVAL_RETENTION_DAYS.
+        self.retention_days = retention_days
+        # What the retention has said once and does not repeat at every pass.
+        self._retention_unreadable: set[str] = set()
+        # The same for the arguments sweep, which runs at every create (_rejection_has_lapsed).
+        self._sweep_unreadable: set[str] = set()
+        self._retention_waits_for_sqlite = False
         # Keyed per process, so a stored digest cannot be brute-forced offline.
         # An approval for sensitive text therefore only works in the process
         # that created it: not after a restart, and not in another uvicorn
         # worker or replica. The action asks again rather than matching an
         # unverifiable record.
         self._sensitive_text_key = secrets.token_bytes(32)
+        # The key a tool call's stand-in digest is kept under (_keyed): the file store's DIGEST_KEY_FILE, the same
+        # at every start, read at startup or at first use (_digest_key).
+        self._tool_call_key: bytes | None = None
+        # Whether that key is this process's own, the file's being unusable at this start (_digest_key): the file's
+        # key may then be the very one a record reads as kept under another key by.
+        self._keyed_by_this_process_alone = False
         # The text itself stays in memory only, so an approved sensitive action
         # can still be run through execute_approval by this process.
         # Entries are dropped when the approval executes or is rejected, and
@@ -156,12 +215,15 @@ class ApprovalStore:
 
     async def startup(self) -> None:
         await self.file_store.startup()
+        await asyncio.to_thread(self._digest_key)
         self._primary = self.file_store
         if self.sqlite_store is not None:
             try:
                 await self.sqlite_store.startup()
             except Exception as exc:
-                logger.warning("sqlite approval store unavailable, using file store fallback: %s", exc)
+                logger.warning(
+                    "sqlite approval store unavailable, using file store fallback: %s", error_text_for_log(exc)
+                )
             else:
                 try:
                     await self._catch_sqlite_up()
@@ -169,11 +231,14 @@ class ApprovalStore:
                     raise
                 except Exception as exc:
                     logger.warning(
-                        "sqlite approval store could not catch up with the file store, using file store fallback: %r",
-                        exc,
+                        "sqlite approval store could not catch up with the file store, using file store fallback: "
+                        "%s: %s",
+                        type(exc).__name__,
+                        error_text_for_log(exc),
                     )
                 else:
                     self._primary = self.sqlite_store
+        await self._key_stored_digests()
         await self._sweep_arguments(startup=True)
 
     async def _catch_sqlite_up(self) -> None:
@@ -215,10 +280,11 @@ class ApprovalStore:
                 await self.file_store.upsert(kept)
             except Exception as exc:
                 logger.error(
-                    "approval %s: SQLite's %s record could not be written over the file store's: %r",
+                    "approval %s: SQLite's %s record could not be written over the file store's: %s: %s",
                     record.id,
                     kept.status,
-                    exc,
+                    type(exc).__name__,
+                    error_text_for_log(exc),
                 )
                 unrepaired.append(record.id)
         try:
@@ -236,7 +302,92 @@ class ApprovalStore:
             return False
         if kept.status == "executed":
             return True  # a spend is final at a start
-        return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
+        try:
+            return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
+        except _UNREADABLE_TIME:
+            # Neither record can be shown to be the later one, and the rule errs toward rejected. Raised from here,
+            # the error ended the catch-up, and the start went on with the file records alone: all of them, this
+            # one read by its file record.
+            logger.warning(
+                "approval %s: a time of its file or SQLite record cannot be read, so the rejection stands", record.id
+            )
+            return True
+
+    async def _key_stored_digests(self) -> None:
+        """At a start, rewrite each record that keeps a stand-in's plain digest with the keyed one, in both stores.
+
+        Versions before 1.18.0 stored it plain. Nothing hands out the plain text (get and list key what they return:
+        _handed_out), so this pass reads the backend itself to find it; left alone, the stores would hold it until
+        each record's next write. Nothing but the text changes, so the stores agree as before (_catch_sqlite_up), and
+        the same call still matches (_keyed). A record that cannot be rewritten stays, still matches, and is taken at
+        the next start; the pass never stops one. A process that keys alone (_digest_key) rewrites none, and says how
+        many it left: under its own key no later start could match them, so one start that could not use the key
+        file ended every operator's rejection stored before 1.18.0 (the next good start's retention then removed it).
+
+        Also says, once a start, how many approvals that could still run are kept under a key this process does not
+        hold (_kept_under_another_key), and how many rejections by an operator: nothing else tells an operator
+        before one of the first is refused, or that the others no longer match the call they refused
+        (_operator_rejected).
+        """
+        try:
+            async with self._lock:
+                rewritten = 0
+                failed: list[str] = []
+                unreadable = 0
+                rejections = 0
+                for record in await self._primary.list():
+                    keyed = self._keyed(record.action)
+                    if keyed is record.action:
+                        if self._kept_under_another_key(record.action):
+                            if record.status in {"pending", "approved"}:
+                                unreadable += 1
+                            elif record.status == "rejected" and record.decided_via != "agent":
+                                rejections += 1
+                        continue
+                    if self._keyed_by_this_process_alone:
+                        # Read after _keyed, which reads the key: that is where a process learns that it keys alone.
+                        failed.append(f"{record.id} (this start keys with a key of its own)")
+                        continue
+                    record.action = keyed
+                    try:
+                        await self._write(record)
+                    except Exception as exc:
+                        failed.append(f"{record.id} ({type(exc).__name__}: {error_text_for_log(exc)})")
+                    else:
+                        rewritten += 1
+        except Exception:
+            logger.exception("approval store: could not look for tool call digests an earlier version stored plain")
+            return
+        if rewritten:
+            logger.info(
+                "approval store: %d approval record(s) stored before 1.18.0 now keep their tool call digest keyed",
+                rewritten,
+            )
+        if failed:
+            logger.warning(
+                "approval store: %d approval record(s) stored before 1.18.0 still keep a tool call digest unkeyed, "
+                "as they could not be rewritten; the next start tries again. The first: %s",
+                len(failed),
+                failed[0],
+            )
+        # Two lines, each true alone: a start can find either kind without the other.
+        if unreadable:
+            logger.warning(
+                "approval store: %d pending or approved approval(s) for tool calls are kept under another key than "
+                "%s now holds (replaced since, or unreadable at an earlier start): none can be approved or run, and "
+                "the agent asks again; reject them to end this warning",
+                unreadable,
+                self.file_store.root / DIGEST_KEY_FILE,
+            )
+        if rejections:
+            logger.warning(
+                "approval store: %d operator rejection(s) of tool calls are kept under another key than %s now holds "
+                "(replaced since, or unreadable at an earlier start): they no longer stop an agent's own approval of "
+                "the same call, which matters only under AUTONOMOUS_APPROVALS. Reject the call again when it is asked "
+                "for, turn AUTONOMOUS_APPROVALS off, or restore the key file",
+                rejections,
+                self.file_store.root / DIGEST_KEY_FILE,
+            )
 
     async def _sweep_arguments(self, *, startup: bool = False) -> None:
         """Remove the arguments no approve or call will read again: at each create (under the lock) and at startup.
@@ -271,10 +422,114 @@ class ApprovalStore:
                 await self.discard_arguments(approval_id)
 
     def _rejection_has_lapsed(self, approval: ApprovalRecord) -> bool:
-        """Whether a rejection is older than the approval TTL, after which its tool call's arguments go."""
+        """Whether a rejection is older than the approval TTL, after which its tool call's arguments go.
+
+        One whose decision time cannot be read has not: its arguments stay, and the record is named in the log once,
+        as the retention does (_past_retention). Raised from here, the error left the sweep, and with it the start
+        or the request for an approval the sweep ran in, for as long as the record existed.
+        """
         if approval.decided_at is None:
             return False
-        return self._parse_timestamp(approval.decided_at) + self.approval_ttl <= datetime.now(UTC)
+        try:
+            return self._parse_timestamp(approval.decided_at) + self.approval_ttl <= datetime.now(UTC)
+        except _UNREADABLE_TIME:
+            if approval.id not in self._sweep_unreadable:
+                self._sweep_unreadable.add(approval.id)
+                logger.warning("kept the arguments of approval %s: its decision time cannot be read", approval.id)
+            return False
+
+    async def prune_decided(self, *, open_sessions: Iterable[str] = ()) -> int:
+        """Delete the approvals decided more than ``retention_days`` ago, from both stores: how many went.
+
+        Run at startup and by each maintenance sweep. Kept whatever their age: a pending approval; one an
+        execution holds; an approved one that has not expired, which can still run its action; an operator's
+        rejection in controller scope or in a session of ``open_sessions`` (those live in this process), where
+        it still refuses an agent's approval of the same request (_operator_rejected), unless it is a tool
+        call's kept under a key that is gone, which matches no request (_kept_under_a_key_that_is_gone: never
+        in a process that could not use the key file); and a record whose decision (or, approved, expiry) time
+        cannot be read, named once in the log.
+
+        Nothing goes while SQLite is configured and the file store stands in for it: SQLite is caught up from
+        the file records at its next start, and a record removed meanwhile could not show that SQLite's copy of
+        it is stale (pending there, rejected since).
+
+        The pass runs under the lock and lands whole whatever happens to its caller (_run_through), as a write
+        does. A failure is logged and answers 0, so a start or a sweep goes on, and the next pass takes what
+        this one left.
+        """
+        if self.retention_days <= 0:
+            return 0
+        try:
+            removed, cancelled = await _run_through(self._prune_decided(frozenset(open_sessions)))
+        except Exception:
+            logger.exception("the approval retention pass failed; the next one takes what it left")
+            return 0
+        if cancelled:
+            raise asyncio.CancelledError
+        return removed
+
+    async def _prune_decided(self, open_sessions: frozenset[str]) -> int:
+        async with self._lock:
+            if self.sqlite_store is not None and self._primary is not self.sqlite_store:
+                if not self._retention_waits_for_sqlite:
+                    self._retention_waits_for_sqlite = True
+                    logger.warning(
+                        "approval retention removes nothing while SQLite is unavailable and the file store stands in"
+                    )
+                return 0
+            now = datetime.now(UTC)
+            past = [
+                record.id for record in await self._primary.list() if self._past_retention(record, now, open_sessions)
+            ]
+            # The files first: a record whose file stays keeps its SQLite record too, so the two agree.
+            removed = await self.file_store.remove_many(past)
+            if self.sqlite_store is not None:
+                await self.sqlite_store.remove_many(removed)
+        if not removed:
+            return 0
+        logger.info(
+            "approval retention removed %d approval(s) decided more than %g days ago", len(removed), self.retention_days
+        )
+        if self.audit is not None:
+            try:
+                with as_system():
+                    await self.audit.append(
+                        event_type="approvals_pruned",
+                        status="ok",
+                        action="retention",
+                        details={"count": len(removed), "retention_days": self.retention_days},
+                    )
+            except Exception:
+                logger.exception("could not audit the approval retention pass, which removed %d", len(removed))
+        return len(removed)
+
+    def _past_retention(self, record: ApprovalRecord, now: datetime, open_sessions: frozenset[str]) -> bool:
+        """Whether the retention removes ``record``; prune_decided says what it keeps."""
+        if record.status == "pending" or record.id in self._claims:
+            return False
+        if (
+            record.status == "rejected"
+            and record.decided_via != "agent"
+            and (record.session_id == CONTROLLER_SCOPE or record.session_id in open_sessions)
+            # Under a key that is gone it matches no call, so it refuses nothing: it goes as an agent's does.
+            and not self._kept_under_a_key_that_is_gone(record.action)
+        ):
+            return False
+        try:
+            if record.status == "approved" and not self.has_expired(record):
+                return False
+            if record.decided_at is None:
+                raise ValueError("no decided_at")
+            age = now - self._parse_timestamp(record.decided_at)
+        except _UNREADABLE_TIME:
+            if record.id not in self._retention_unreadable:
+                self._retention_unreadable.add(record.id)
+                logger.warning(
+                    "approval %s is kept by the retention: its decision or expiry time cannot be read", record.id
+                )
+            return False
+        # Compared in seconds: a timedelta cannot hold more days than the calendar has.
+        return age.total_seconds() > self.retention_days * 86400
 
     async def list(
         self,
@@ -282,10 +537,24 @@ class ApprovalStore:
         status: ApprovalStatus | None = None,
         session_id: str | None = None,
     ) -> list[ApprovalRecord]:
-        return await self._primary.list(status=status, session_id=session_id)
+        return [self._handed_out(record) for record in await self._primary.list(status=status, session_id=session_id)]
 
     async def get(self, approval_id: str) -> ApprovalRecord:
-        return await self._primary.get(approval_id)
+        return self._handed_out(await self._primary.get(approval_id))
+
+    def _handed_out(self, record: ApprovalRecord) -> ApprovalRecord:
+        """``record`` as the store hands it out: a stand-in's digest keyed, whatever its stores still hold.
+
+        A record stored before 1.18.0 that a start could not rewrite (_key_stored_digests) keeps its plain digest
+        in the stores. Handed out as stored, it was listed and answered to the repeated call with that digest, and
+        a decision, a claim or a give-back wrote it back plain. Nothing is written here: the next write of the
+        record, or the next start, replaces what the stores hold (in a process that keys alone only the next start
+        that holds the key: _as_the_stores_hold_it). The passes that compare or rewrite what is
+        stored read the backends themselves (_catch_sqlite_up, _key_stored_digests, _write). The record is changed
+        in place: a backend reads one anew at every call, so no one else holds it.
+        """
+        record.action = self._keyed(record.action)
+        return record
 
     async def create_or_reuse_pending(
         self,
@@ -297,12 +566,15 @@ class ApprovalStore:
         observation: dict | None = None,
         origin: ApprovalOrigin = "action",
         arguments: str | None = None,
+        field_read: ApprovalFieldRead = "unread",
     ) -> ApprovalRecord:
         """The pending approval of this action, or a new one; ``arguments`` is a tool call's whole arguments.
 
         They are written beside the record before it, so no listing shows an
         approval whose arguments cannot be read, and the record keeps their size
         and sha256 (the identical call reuses the record, and so its arguments).
+        ``field_read``: how the type's field read for this request (ApprovalRecord.field_read);
+        a reused record takes it as _field_read_after says.
         """
         async with self._lock:
             await self._sweep_arguments()
@@ -316,6 +588,11 @@ class ApprovalStore:
                     # whose text aged out (SENSITIVE_TEXT_RETENTION) could never be approved.
                     self._prune_sensitive_texts()
                     self._sensitive_texts[existing.id] = (action.text or "", time.monotonic())
+                read = _field_read_after(existing.field_read, field_read)
+                if read != existing.field_read:
+                    existing.field_read = read
+                    existing.updated_at = self._later_than(existing.updated_at)
+                    await self._persist(existing)
                 return existing
 
             now = utc_now()
@@ -331,6 +608,7 @@ class ApprovalStore:
                 observation=observation,
                 owner=owner,
                 origin=origin,
+                field_read=field_read,
             )
             if arguments is not None:
                 approval.arguments_size = len(arguments)
@@ -338,7 +616,7 @@ class ApprovalStore:
                 approval.arguments_sha256 = await asyncio.to_thread(_text_sha256, arguments)
                 await self.file_store.write_arguments(approval.id, arguments)
             await self._persist(approval)
-            if approval.action is not action:
+            if self._needs_held_text(approval):
                 self._prune_sensitive_texts()
                 self._sensitive_texts[approval.id] = (action.text or "", time.monotonic())
             return approval
@@ -441,7 +719,7 @@ class ApprovalStore:
             approval.executed_at = None
             if hold.rejection is not None:
                 approval.status = "rejected"
-                approval.decision_comment, approval.decided_via = hold.rejection
+                approval.decision_comment, approval.decided_via, approval.decided_by = hold.rejection
                 approval.decided_at = now
                 approval.approved_expires_at = None
                 self._sensitive_texts.pop(hold.approval_id, None)
@@ -461,7 +739,10 @@ class ApprovalStore:
         rejected = approval.status == "rejected"
         details: dict[str, Any] = {"kind": approval.kind, **approval_provenance(approval)}
         if rejected:
-            details.update(comment=approval.decision_comment, decided_via=approval.decided_via)
+            # Written by the execution's task, as its operator: decided_by names who rejected.
+            details.update(
+                comment=approval.decision_comment, decided_via=approval.decided_via, decided_by=approval.decided_by
+            )
         if self.audit is not None:
             try:
                 await self.audit.append(
@@ -510,7 +791,7 @@ class ApprovalStore:
         """
         if self.audit is None or hold.rejection is None:
             return
-        comment, decided_via = hold.rejection
+        comment, decided_via, decided_by = hold.rejection
         try:
             approval = await self.get(hold.approval_id)
             await self.audit.append(
@@ -523,6 +804,7 @@ class ApprovalStore:
                     "kind": approval.kind,
                     "comment": comment,
                     "decided_via": decided_via,
+                    "decided_by": decided_by,
                     **approval_provenance(approval),
                 },
             )
@@ -569,6 +851,12 @@ class ApprovalStore:
     ) -> ApprovalRecord:
         approval = await self.get(approval_id)
         if approval.session_id != session_id:
+            # Presented in a session that is not its own. A caller who may not use it is answered as for an id no
+            # record answers to, as the listing and the decisions answer: "does not belong" told an operator who
+            # held another's id that it is an approval's.
+            usable = may_use(approval.owner) if self.may_use is None else await self.may_use(approval)
+            if not usable:
+                raise KeyError(approval_id)
             raise PermissionError(f"approval {approval_id} does not belong to session {session_id}")
         # A controller-scope approval has no session whose owner could be asked,
         # so it is the asking operator's alone: another operator's identical call
@@ -593,6 +881,12 @@ class ApprovalStore:
         if not held:
             self._ensure_not_expired(approval)
         if not self._actions_match(approval.action, action):
+            if self._kept_under_another_key(approval.action):
+                # Not "does not match": the call may be the very one it was asked for.
+                raise PermissionError(
+                    f"approval {approval_id} can no longer be matched to a call: its arguments' digest is "
+                    f"{_ANOTHER_KEY}; repeat the call without approval_id to ask for a new approval"
+                )
             raise PermissionError(f"approval {approval_id} does not match the requested action")
         return approval
 
@@ -609,8 +903,12 @@ class ApprovalStore:
         decided_via: ApprovalDecider,
     ) -> Decision:
         """Approve or reject ``approval_id``, or, while its action holds it, put the decision on the claim."""
+        decided_by = verified_operator()
         async with self._lock:
             approval = await self.get(approval_id)
+            if status == "approved" and decided_via != "agent":
+                # Before the claim: withdrawing a reject that waits on one is an approve of the same request.
+                self._refuse_self_approval(approval, decided_by)
             if approval.status == "executed":
                 claim = self._claims.get(approval_id)
                 # Claimed by an action that has not begun, and that a refusal would give
@@ -621,7 +919,7 @@ class ApprovalStore:
                 # A tool call's claim never gives back, so nothing could apply a reject to it.
                 if decided_via != "agent" and claim is not None and claim.may_give_back and not claim.effect:
                     if status == "rejected":
-                        claim.rejection = (comment, decided_via)
+                        claim.rejection = (comment, decided_via, decided_by)
                         return Decision(approval, "deferred")
                     if claim.rejection is not None:
                         claim.rejection = None
@@ -651,6 +949,7 @@ class ApprovalStore:
             approval.decided_at = now
             approval.decision_comment = comment
             approval.decided_via = decided_via
+            approval.decided_by = decided_by
             if status == "approved":
                 approval.approved_expires_at = self._expiry_timestamp(now)
             else:
@@ -659,17 +958,37 @@ class ApprovalStore:
             await self._persist(approval)
         return Decision(approval)
 
+    def _refuse_self_approval(self, approval: ApprovalRecord, decided_by: str | None) -> None:
+        """Refuse an operator of APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS an approve of what they asked for.
+
+        Both named by credentials: an unowned request, or a decider no credential proves, is no one's own.
+        The store cannot tell whether anyone else can reach the approval (the services decide that from its
+        session's owner), so the refusal says where one can.
+        """
+        if decided_by is None or decided_by != approval.owner or decided_by not in self.refuse_self_approval:
+            return
+        raise ServerStateRefusal(
+            f"approval {approval.id}: operator {decided_by} asked for it and may not approve it "
+            "(APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS). Another operator approves it where one can reach it, in a "
+            f"session nobody owns; in a session {decided_by} owns, or in controller scope, no other operator can"
+        )
+
     async def _refuse_what_is_no_longer_whole(self, approval: ApprovalRecord) -> None:
         """Refuse an approve of an approval missing what it was asked with: the agent asks again.
 
         A tool call's arguments, kept until the call spends the approval (a reject
         is not final): gone, the operator could not read what they approve. A
         sensitive text, dropped by a reject or a restart: gone, execute_approval
-        could not type it.
+        could not type it. The key a tool call's digest is kept under
+        (_kept_under_another_key): gone, no call could be matched to the approval.
         """
         if approval.arguments_size is not None and not await self.file_store.has_arguments(approval.id):
             raise ServerStateRefusal(
                 f"approval {approval.id}: its arguments are no longer stored; the agent asks again"
+            )
+        if self._kept_under_another_key(approval.action):
+            raise ServerStateRefusal(
+                f"approval {approval.id}: its arguments' digest is {_ANOTHER_KEY}; the agent asks again"
             )
         if self._needs_held_text(approval) and self._held_text(approval) is None:
             raise ServerStateRefusal(f"approval {approval.id}: its text is no longer held; the agent asks again")
@@ -694,6 +1013,7 @@ class ApprovalStore:
         later than SQLite's was read as a write SQLite missed, and caught up at the next start (a give-back
         reported as failed, revived beside the new approval the agent asked for).
         """
+        approval = await self._as_the_stores_hold_it(approval)
         if self.sqlite_store is None or self._primary is not self.sqlite_store:
             await self.file_store.upsert(approval)
             return
@@ -708,6 +1028,28 @@ class ApprovalStore:
             await self._put_the_file_back(approval.id, before)
             raise
 
+    async def _as_the_stores_hold_it(self, approval: ApprovalRecord) -> ApprovalRecord:
+        """``approval`` to be written: in a process that keys alone, a copy with the action its store holds.
+
+        Such a process rewrites no record stored before 1.18.0 (_key_stored_digests), but hands each out keyed under
+        its own key (_handed_out), and a decision, a claim or a give-back wrote it back so. No later start holds that
+        key: an operator's rejection made there, or made again, no longer stopped the agent's own approval of the
+        call after the next good start, whose retention removed it. A record's action never changes once it is made
+        (a decision, a claim and a give-back change its status alone), so the action the store holds is written back,
+        whatever it is: plain, to be keyed under the file's key by the next good start, as a record nothing wrote; or
+        keyed under that key already, by a good process over the same store between this read and this write. In
+        this process a plain one matches as before, both sides keyed in memory; one keyed under the file's key
+        matches only in a process that holds that key. A record the store does not hold yet (one asked for in this
+        process) is kept under this process's key.
+        """
+        if not self._keyed_by_this_process_alone:
+            return approval
+        try:
+            stored = await self._primary.get(approval.id)
+        except KeyError:
+            return approval
+        return approval.model_copy(update={"action": stored.action})
+
     async def _put_the_file_back(self, approval_id: str, before: ApprovalRecord | None) -> None:
         try:
             if before is None:
@@ -717,9 +1059,10 @@ class ApprovalStore:
         except Exception as exc:
             # The SQLite failure is still raised; the next start may catch this file record up.
             logger.error(
-                "approval %s: its SQLite write failed, and its file record could not be put back: %r",
+                "approval %s: its SQLite write failed, and its file record could not be put back: %s: %s",
                 approval_id,
-                exc,
+                type(exc).__name__,
+                error_text_for_log(exc),
                 exc_info=exc,
             )
 
@@ -727,11 +1070,13 @@ class ApprovalStore:
         # Whatever the rejected record's origin: a rejection only ever restricts,
         # and one stored before origin existed loads as an action approval, so
         # comparing origins dropped every rejection an operator made before the upgrade.
-        requested = approval.action.model_dump(exclude=UNBOUND_FIELDS)
+        # Both keyed (_keyed): a stand-in rejected before 1.18.0 was stored with its plain digest. One kept under a
+        # key that is gone matches nothing, as a sensitive text's digest matches nothing after a restart.
+        requested = self._keyed(approval.action).model_dump(exclude=UNBOUND_FIELDS)
         return any(
             other.kind == approval.kind
             and other.decided_via != "agent"
-            and other.action.model_dump(exclude=UNBOUND_FIELDS) == requested
+            and self._keyed(other.action).model_dump(exclude=UNBOUND_FIELDS) == requested
             for other in await self.list(status="rejected", session_id=approval.session_id)
             # Controller scope is shared by every operator: only the same
             # requester's rejection counts, not another operator's.
@@ -758,7 +1103,7 @@ class ApprovalStore:
         return None
 
     def _stored_action(self, action: BrowserActionDecision) -> BrowserActionDecision:
-        """The action as an approval records it: sensitive text only as a keyed digest.
+        """The action as an approval records it: a sensitive text, and a tool call's digest, only as a keyed digest.
 
         Approvals are written to APPROVAL_ROOT, listed by GET /approvals and the
         approvals MCP tool, and shown to whoever approves. A `type` marked
@@ -766,9 +1111,67 @@ class ApprovalStore:
         while the witness chain and action logs already redacted it.
         """
         if not (action.sensitive and action.text):
-            return action
+            return self._keyed(action)
         digest = hmac.new(self._sensitive_text_key, action.text.encode("utf-8"), hashlib.sha256).hexdigest()
         return action.model_copy(update={"text": f"{SENSITIVE_TEXT_PREFIX}{digest}"})
+
+    def _keyed(self, action: BrowserActionDecision) -> BrowserActionDecision:
+        """``action`` with a tool call stand-in's plain digest (_PLAIN_STAND_IN) as an HMAC under _digest_key.
+
+        The gateway's sha256 covers the call's whole arguments, credentials included, and the preview beside it shows
+        every field but those: kept as it is, a short cookie value or password could be guessed offline against the
+        stored text. Matching keys both sides, so a record stored plain before 1.18.0 still matches its call. Any
+        takeover whose text is a stand-in's, whatever asked for it: a record stored before approvals had an origin
+        is one too, and the services queue no other (_refuse_unrunnable).
+        """
+        if action.action != "request_human_takeover":
+            return action
+        plain = _PLAIN_STAND_IN.fullmatch(action.text or "")
+        if plain is None:
+            return action
+        key = self._digest_key()
+        digest = hmac.new(key, plain.group(0).encode("utf-8"), hashlib.sha256).hexdigest()
+        return action.model_copy(update={"text": f"{plain.group(1)} hmac-sha256:{_key_id(key)}:{digest}"})
+
+    def _kept_under_another_key(self, action: BrowserActionDecision) -> bool:
+        """Whether ``action`` is a stand-in whose digest is keyed by a key this process does not hold.
+
+        The key file was replaced or removed before this start, or one start could not read it and keyed with a
+        key of its own (_digest_key). Whether a call is the one such an approval was asked for cannot be told.
+        """
+        if action.action != "request_human_takeover":
+            return False
+        keyed = _KEYED_STAND_IN.fullmatch(action.text or "")
+        return keyed is not None and keyed.group(1) != _key_id(self._digest_key())
+
+    def _kept_under_a_key_that_is_gone(self, action: BrowserActionDecision) -> bool:
+        """Whether ``action`` is kept under another key (_kept_under_another_key) that no later start will hold.
+
+        Known only to a process that holds the key file's key: the other key is then one the file held before, or
+        one a start that could not use the file made for itself. A process keying alone cannot tell it from the
+        file's own key, under which the next start that reads the file matches the record again. The retention
+        asks this (_past_retention): while it asked _kept_under_another_key, one start that could not read the
+        file deleted every operator's rejection of a tool call past its days.
+        """
+        # In this order: the first reads the key, which is where a process learns that it keys alone.
+        return self._kept_under_another_key(action) and not self._keyed_by_this_process_alone
+
+    def _digest_key(self) -> bytes:
+        """The tool call digest key: the file store's, or this process's own, with a warning, when that is unusable."""
+        if self._tool_call_key is None:
+            try:
+                self._tool_call_key = self.file_store.digest_key()
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "approval store: %s cannot be used (%s), so tool call approvals are keyed by this process alone: "
+                    "after a restart they are refused, and the agent asks again. Restart once it can be read, or "
+                    "written where there is none; a file that holds no key has to be removed first",
+                    self.file_store.root / DIGEST_KEY_FILE,
+                    error_text_for_log(exc),
+                )
+                self._tool_call_key = secrets.token_bytes(32)
+                self._keyed_by_this_process_alone = True
+        return self._tool_call_key
 
     def _prune_sensitive_texts(self) -> None:
         cutoff = time.monotonic() - SENSITIVE_TEXT_RETENTION.total_seconds()
@@ -799,8 +1202,12 @@ class ApprovalStore:
             )
         return action.model_copy(update={"text": text})
 
+    def covers(self, approval: ApprovalRecord, action: BrowserActionDecision) -> bool:
+        """Whether ``approval`` was asked for ``action``, matched as require_approved matches them."""
+        return self._actions_match(approval.action, action)
+
     def _actions_match(self, stored: BrowserActionDecision, requested: BrowserActionDecision) -> bool:
-        return stored.model_dump(exclude=UNBOUND_FIELDS) == self._stored_action(requested).model_dump(
+        return self._keyed(stored).model_dump(exclude=UNBOUND_FIELDS) == self._stored_action(requested).model_dump(
             exclude=UNBOUND_FIELDS
         )
 
@@ -826,9 +1233,16 @@ class ApprovalStore:
         than the claim it turns back.
         """
         now = utc_now()
-        if cls._parse_timestamp(now) > cls._parse_timestamp(stamp):
+        try:
+            stamped = cls._parse_timestamp(stamp)
+            later = stamped + timedelta(microseconds=1)
+        except _UNREADABLE_TIME:
+            # A record whose time cannot be read is no later than now: raised, it could be neither approved nor
+            # rejected, nor asked for again once its field read otherwise, and a pending one stayed so for good (the
+            # retention keeps every pending approval).
             return now
-        later = cls._parse_timestamp(stamp) + timedelta(microseconds=1)
+        if cls._parse_timestamp(now) > stamped:
+            return now
         return later.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @staticmethod

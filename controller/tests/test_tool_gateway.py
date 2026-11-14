@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import unittest
 from pathlib import Path
@@ -16,7 +17,9 @@ from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.tool_gateway import CreateSessionRequest, McpToolGateway, ToolRegistry, ToolSpec
+from app.tool_gateway.gateway import QUEUE_TOOLS
 from app.tool_inputs import EmptyInput
+from app.witness import WitnessPolicyOutcome
 from tests._fake_element_ids import FakePageElementIds
 
 
@@ -68,6 +71,14 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             page_provenance=PageProvenance(),
             element_ids=FakePageElementIds(),
             get_session=AsyncMock(return_value={"id": "session-1"}),
+            # What the gateway's own state changes record through (set_viewport, set_cookies, set_local_storage).
+            audit=SimpleNamespace(append=AsyncMock()),
+            _record_witness_receipt=AsyncMock(),
+            # And what they follow first: an action's witness policy, here one that refuses nothing.
+            witness_policy=SimpleNamespace(evaluate_action=Mock(return_value=WitnessPolicyOutcome(profile="normal"))),
+            _witness_session_context=Mock(),
+            _build_witness_action_context=Mock(),
+            _ensure_witness_remote_ready=AsyncMock(),
             verify_witness_chain=AsyncMock(
                 return_value={
                     "scope": "session-1",
@@ -102,6 +113,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 require_approval_for_uploads=True,
                 force_governed_approvals=False,
                 action_timeout_ms=15000,
+                api_admin_operator_ids=frozenset(),
             ),
             memory=SimpleNamespace(
                 save=AsyncMock(
@@ -186,6 +198,182 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             if not schema.get("description")
         ]
         self.assertEqual(undescribed, [], "add description= to these input fields")
+
+    # Governed tools take fast or governed, nothing else: a typo that ran as fast silently dropped the approval.
+    GOVERNED_CALL = {"session_id": "session-1", "action": {"action": "click", "reason": "r", "selector": "#a"}}
+    UNKNOWN_PROFILES = ("Governed", "strict", "", 1, True, ["governed"])
+
+    async def test_a_governed_tool_refuses_an_unknown_profile_and_runs_nothing(self) -> None:
+        for field, profile in itertools.product(("workflow_profile", "policy_profile"), self.UNKNOWN_PROFILES):
+            with self.subTest(field=field, profile=repr(profile)):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(name="browser.execute_action", arguments={**self.GOVERNED_CALL, field: profile})
+                )
+
+                self.assertTrue(response.isError, response.content[0].text)
+                self.assertEqual(response.structuredContent["error"], "workflow_profile must be one of: fast, governed")
+                self.assertNotIn("Governed", response.structuredContent["error"])
+                self.assertNotIn("strict", response.structuredContent["error"])
+        self.manager.execute_decision.assert_not_awaited()
+        self.manager.require_governed_approval.assert_not_awaited()
+
+    async def test_an_unset_profile_on_a_governed_tool_runs_as_fast(self) -> None:
+        # None is what a client that fills every optional field sends: the same as leaving it out.
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.execute_action", arguments={**self.GOVERNED_CALL, "workflow_profile": None}
+            )
+        )
+
+        self.assertFalse(response.isError, response.content[0].text)
+        self.manager.execute_decision.assert_awaited_once()
+
+    async def test_a_call_is_governed_when_either_of_its_two_profiles_says_so(self) -> None:
+        # policy_profile was read first and the other only without it: {"workflow_profile": "governed",
+        # "policy_profile": "fast"} ran as fast, without the approval one of its two arguments asked for.
+        cases = (
+            ("fast", "governed", True),
+            ("governed", "fast", True),
+            ("governed", "governed", True),
+            (None, "governed", True),
+            ("governed", None, True),
+            ("fast", "fast", False),
+            ("fast", None, False),
+            (None, "fast", False),
+        )
+        for policy_profile, workflow_profile, governed in cases:
+            with self.subTest(policy_profile=policy_profile, workflow_profile=workflow_profile):
+                self.manager.require_governed_approval.reset_mock()
+                arguments = {
+                    **self.GOVERNED_CALL,
+                    "policy_profile": policy_profile,
+                    "workflow_profile": workflow_profile,
+                }
+
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(name="browser.execute_action", arguments=arguments)
+                )
+
+                self.assertFalse(response.isError, response.content[0].text)
+                self.assertEqual(self.manager.require_governed_approval.await_count, 1 if governed else 0)
+
+    async def test_two_profiles_that_disagree_are_still_refused_when_one_is_unknown(self) -> None:
+        # Governed in one argument does not excuse the other: a mistyped value is refused wherever it is.
+        for arguments in (
+            {"policy_profile": "governed", "workflow_profile": "strict"},
+            {"policy_profile": "strict", "workflow_profile": "governed"},
+        ):
+            with self.subTest(arguments=arguments):
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(name="browser.execute_action", arguments={**self.GOVERNED_CALL, **arguments})
+                )
+
+                self.assertTrue(response.isError, response.content[0].text)
+                self.assertEqual(response.structuredContent["error"], "workflow_profile must be one of: fast, governed")
+        self.manager.execute_decision.assert_not_awaited()
+        self.manager.require_governed_approval.assert_not_awaited()
+
+    async def test_a_tool_that_is_not_governed_still_ignores_an_unknown_profile(self) -> None:
+        for profile in self.UNKNOWN_PROFILES:
+            with self.subTest(profile=repr(profile)):
+                response = await self.full_gateway.call_tool(
+                    McpToolCallRequest(
+                        name="browser.get_console", arguments={"session_id": "session-1", "workflow_profile": profile}
+                    )
+                )
+
+                self.assertFalse(response.isError, response.content[0].text)
+        self.assertEqual(self.manager.get_console_messages.await_count, len(self.UNKNOWN_PROFILES))
+
+    async def test_governed_tools_advertise_the_approval_arguments_and_others_are_unchanged(self) -> None:
+        # An agent cannot find the approval retry flow from a schema that does not name it (MCP-20).
+        specs = self.full_gateway._registry.tools
+        for tool in self.full_gateway.list_tools():
+            name = tool["name"]
+            schema = tool["inputSchema"]
+            properties = schema.get("properties", {})
+            with self.subTest(tool=name):
+                if name in QUEUE_TOOLS:
+                    continue  # no governed kind, and they act on the profile: the test below
+                if specs[name].governed_kind is None:
+                    self.assertNotIn("workflow_profile", properties)
+                    self.assertEqual(schema, specs[name].input_model.model_json_schema())
+                    continue
+                self.assertEqual(properties["workflow_profile"]["enum"], ["fast", "governed"])
+                self.assertIn("approval_id", properties)
+                self.assertNotIn("workflow_profile", schema.get("required", []))
+                self.assertNotIn("approval_id", schema.get("required", []))
+                self.assertTrue(properties["workflow_profile"]["description"])
+                self.assertTrue(properties["approval_id"]["description"])
+
+    async def test_the_two_queue_tools_advertise_the_profile_they_act_on_and_no_approval_id(self) -> None:
+        # They have no governed kind, so the test above left them out, and the gateway acts on a top-level
+        # workflow_profile for them all the same (tests/test_cron_governed.py): a client that keeps to the schema,
+        # which allows no other property, could not send it.
+        tools = {tool["name"]: tool["inputSchema"] for tool in self.full_gateway.list_tools()}
+        specs = self.full_gateway._registry.tools
+        self.assertEqual(QUEUE_TOOLS, {"browser.queue_agent_run", "browser.queue_agent_step"})
+        for name in sorted(QUEUE_TOOLS):
+            with self.subTest(tool=name):
+                schema = tools[name]
+                own = specs[name].input_model.model_json_schema()
+                self.assertIs(schema["additionalProperties"], False)
+
+                profile = schema["properties"]["workflow_profile"]
+
+                self.assertEqual((profile["type"], profile["enum"]), ("string", ["fast", "governed"]))
+                # What it does here, which is not what it does on a governed tool: no approval is asked for the call.
+                self.assertIn("request.workflow_profile", profile["description"])
+                self.assertNotIn("approval_id", profile["description"])
+                self.assertNotIn("workflow_profile", schema.get("required", []))
+                # Nothing else is new: queuing asks for no approval, so no approval_id is named.
+                self.assertNotIn("approval_id", schema["properties"])
+                self.assertEqual(
+                    {**schema["properties"], "workflow_profile": None}, {**own["properties"], "workflow_profile": None}
+                )
+                self.assertEqual({**schema, "properties": None}, {**own, "properties": None})
+                self.assertNotIn("workflow_profile", own["properties"])  # the model's own schema is left alone
+
+    async def test_workflow_profile_is_advertised_on_exactly_the_tools_that_refuse_an_unknown_one(self) -> None:
+        # Advertised where the gateway acts on it, and nowhere else: a tool that acts on the profile refuses a value
+        # it does not know before anything runs, and any other tool ignores the argument.
+        advertised = {
+            tool["name"]
+            for tool in self.full_gateway.list_tools()
+            if "workflow_profile" in tool["inputSchema"].get("properties", {})
+        }
+        refusing = set()
+        for name in self.full_gateway._registry.tools:
+            # The argument no tool takes stops one that ignores the profile at its own validation: nothing runs.
+            response = await self.full_gateway.call_tool(
+                McpToolCallRequest(name=name, arguments={"workflow_profile": "strict", "no_such_argument": 1})
+            )
+            if response.content[0].text == "workflow_profile must be one of: fast, governed":
+                refusing.add(name)
+            else:
+                self.assertIn("no_such_argument: Extra inputs are not permitted", response.content[0].text, name)
+
+        self.assertEqual(advertised, refusing)
+        self.assertLessEqual(QUEUE_TOOLS, advertised)
+        self.assertIn("browser.create_cron_job", advertised)
+
+    async def test_a_field_a_governed_model_declares_itself_keeps_its_own_description(self) -> None:
+        tools = {tool["name"]: tool for tool in self.gateway.list_tools()}
+        properties = tools["browser.execute_action"]["inputSchema"]["properties"]
+
+        self.assertIn("authorizes this action", properties["approval_id"]["description"])
+
+    async def test_list_tools_gives_the_same_answer_every_time_and_leaves_the_models_schema_alone(self) -> None:
+        spec = self.full_gateway._registry.get("browser.set_cookies")
+        before = json.dumps(spec.input_model.model_json_schema(), sort_keys=True)
+
+        first, second = self.full_gateway.list_tools(), self.full_gateway.list_tools()
+
+        self.assertEqual(first, second)
+        self.assertEqual(json.dumps(spec.input_model.model_json_schema(), sort_keys=True), before)
+        listed = {tool["name"]: tool for tool in first}["browser.set_cookies"]["inputSchema"]["properties"]
+        self.assertIn("workflow_profile", listed)
+        self.assertNotIn("workflow_profile", spec.input_model.model_json_schema()["properties"])
 
     async def test_list_tools_includes_expected_browser_tools(self) -> None:
         tools = self.gateway.list_tools()
@@ -286,6 +474,16 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.execute_action: action={'action': 'click'", await error_for("browser.click"))
         self.manager.observe.assert_not_awaited()
 
+    async def test_an_unknown_tool_is_named_cut_as_an_unknown_mcp_method_is(self) -> None:
+        # The caller's own text, as long as the body: a name of 60,000 characters was answered whole.
+        name = "browser.x" + "y" * 60_000
+
+        response = await self.gateway.call_tool(McpToolCallRequest(name=name, arguments={}))
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.content[0].text, f"Unknown tool: {name[:200]}...")
+        self.assertEqual(response.structuredContent["error"], response.content[0].text)
+
     async def test_invalid_arguments_drop_pydantics_value_error_prefix(self) -> None:
         response = await self.gateway.call_tool(McpToolCallRequest(name="browser.find_elements", arguments={}))
 
@@ -349,6 +547,24 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 "openWorldHint": False,
             },
         )
+
+    async def test_the_harness_drift_checks_are_not_advertised_as_read_only(self) -> None:
+        # They write drift.json, as their descriptions say; a client may run a read-only tool without asking.
+        tools = {tool["name"]: tool for tool in self.full_gateway.list_tools()}
+
+        for name in ("harness.check_drift", "harness.check_all_drifts"):
+            with self.subTest(name=name):
+                self.assertFalse(tools[name]["annotations"]["readOnlyHint"])
+                self.assertFalse(tools[name]["annotations"]["idempotentHint"])
+        for name in (
+            "harness.get_candidate",
+            "harness.get_status",
+            "harness.get_trace",
+            "harness.list_candidates",
+            "harness.list_runs",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(tools[name]["annotations"]["readOnlyHint"])
 
     async def test_tool_gateway_package_reexports_legacy_input_models(self) -> None:
         payload = CreateSessionRequest(name="reexport-check")
@@ -798,7 +1014,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.require_governed_approval = AsyncMock(return_value=approval)
         page = SimpleNamespace(evaluate=AsyncMock())
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+        self.manager.get_session = AsyncMock(
+            return_value=SimpleNamespace(id="session-1", page=page, lock=asyncio.Lock())
+        )
 
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
@@ -999,6 +1217,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             add_cookies=AsyncMock(),
         )
         fake_session = SimpleNamespace(
+            id="session-1",
             page=FakePage(),
             context=fake_context,
             artifact_dir=Path("."),
@@ -1011,7 +1230,6 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.enable_shadow_browse = AsyncMock(return_value={"enabled": True})
         self.manager.capture_screenshot = AsyncMock(return_value={"screenshot_path": "vision.png"})
         self.manager.get_pii_scrubber_status = lambda: {"enabled": True}
-        self.manager.audit = object()
         self.manager.settings.default_viewport_width = 1280
         self.manager.settings.default_viewport_height = 720
 
@@ -1026,7 +1244,14 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             set_persona=lambda *args, **kwargs: {"name": args[0]},
             delete_persona=lambda name: True,
         )
-        share_manager = SimpleNamespace(create_token=lambda session_id, ttl_seconds: {"token": "share-token"})
+        share_manager = SimpleNamespace(
+            create_token=lambda session_id, ttl_seconds: {
+                "token": "share-token",
+                "session_id": session_id,
+                "scope": "observe",
+                "expires_at": 0,
+            }
+        )
         vision_targeter = SimpleNamespace(find_element=AsyncMock(return_value={"selector": "button"}))
         gateway = McpToolGateway(
             manager=self.manager,
@@ -1246,7 +1471,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             response = await self.full_gateway.call_tool(
                 McpToolCallRequest(
                     name="browser.find_elements",
-                    arguments={"session_id": "session-1", "query": "(a+)+$", "regex": True},
+                    # A shape the input check lets through (it stops only the classic ones): the bound still ends it.
+                    arguments={"session_id": "session-1", "query": "x+x+y", "regex": True},
                 )
             )
         finally:
@@ -1255,6 +1481,36 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent.get("code"), "query_timeout")
         self.assertIn("timed out", response.content[0].text)
+
+    async def test_find_elements_refuses_a_catastrophic_regex_before_the_page_runs_it(self) -> None:
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=[]))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1", "query": "(a+)+$", "regex": True},
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertIn("Invalid arguments for browser.find_elements", response.content[0].text)
+        self.assertIn("backtrack catastrophically", response.content[0].text)
+        page.evaluate.assert_not_awaited()
+
+    async def test_find_elements_takes_the_same_text_with_regex_off(self) -> None:
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=[]))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1", "query": "(a+)+$", "regex": False},
+            )
+        )
+
+        self.assertFalse(response.isError, response.content[0].text)
+        page.evaluate.assert_awaited_once()
 
     async def test_find_elements_invalid_regex_surfaces_structured_error(self) -> None:
         page = SimpleNamespace(evaluate=AsyncMock(return_value={"__invalid_regex": "Unterminated group"}))

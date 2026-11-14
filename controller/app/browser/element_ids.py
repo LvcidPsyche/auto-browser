@@ -114,10 +114,12 @@ class ElementIds:
         *,
         timeout_ms: int | None = None,
         setup_timeout_ms: int | None = None,
+        keep_session: bool = False,
     ) -> Any:
         """Run an observation script, ``(arg, elementIds) => ...``, in the page's isolated world; ``timeout_ms``
-        replaces the world's own deadline (ACTION_TIMEOUT_MS) for a script whose caller bounds it itself, and
-        ``setup_timeout_ms`` for the messages that set the call up (``PageWorld.call``)."""
+        replaces the world's own deadline (ACTION_TIMEOUT_MS) for a script whose caller bounds it itself,
+        ``setup_timeout_ms`` for the messages that set the call up, and ``keep_session`` leaves the page's session
+        as it was when the call runs past its bound (``PageWorld.call``)."""
         world = self._world(page)
         result = await world.call(
             page,
@@ -126,6 +128,7 @@ class ElementIds:
             effect=READ,
             timeout_ms=timeout_ms,
             setup_timeout_ms=setup_timeout_ms,
+            keep_session=keep_session,
         )
         world.remember(result["issued"], result["tag"])
         return result["value"]

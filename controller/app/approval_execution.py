@@ -19,7 +19,9 @@ from typing import Any, TypeVar
 from fastapi import HTTPException
 
 from .action_errors import BrowserActionError, SessionNotFoundError
+from .approval_display import shown_approval
 from .models import ApprovalDecider, ApprovalOrigin, ApprovalRecord, ApprovalStatus
+from .utils import error_text_for_log, quoted_for_log
 
 # The attribute a refusal carries the notes of the approvals given back with it in.
 _GIVEN_BACK_NOTES = "approvals_given_back"
@@ -65,9 +67,9 @@ class ExecutionHold:
         self.effect = False
         # What the action pipeline raised before any change, when it refused.
         self.refusal: Exception | None = None
-        # An operator's reject (comment, decided_via) that arrived after the claim and
+        # An operator's reject (comment, decided_via, decided_by) that arrived after the claim and
         # before the effect: effect_started then refuses, and the give-back applies it.
-        self.rejection: tuple[str | None, ApprovalDecider] | None = None
+        self.rejection: tuple[str | None, ApprovalDecider, str | None] | None = None
         # Set when effect_started refused the action on that rejection: an approve that
         # withdraws it afterwards is told the action was already refused, not that it may start.
         self.stopped = False
@@ -181,6 +183,18 @@ def held_action_approval() -> str | None:
     return None
 
 
+def held_tool_call_approval() -> str | None:
+    """The tool call's approval the current task's execution holds, for its receipts; None if it holds none.
+
+    held_action_approval's sibling, for a change the gateway makes itself (browser.set_cookies and its like) under a
+    governed call's approval, whose receipt names it. Only a live hold counts, as there.
+    """
+    for approval_id, hold in _HELD_APPROVALS.get().items():
+        if hold.active and hold.origin == "tool_call":
+            return approval_id
+    return None
+
+
 class ApprovalRequiredError(HTTPException):
     def __init__(self, approval: ApprovalRecord, message: str | None = None):
         self.approval = approval
@@ -191,7 +205,7 @@ class ApprovalRequiredError(HTTPException):
             "status": "approval_required",
             "message": message or f"{approval.kind} actions require human approval",
             "approval_id": approval.id,
-            "approval": approval.model_dump(),
+            "approval": shown_approval(approval),
         }
         super().__init__(status_code=409, detail=self.payload)
 
@@ -375,7 +389,13 @@ async def _run_through(awaitable: Awaitable[_T]) -> tuple[_T, bool]:
         except Exception as exc:
             if not cancelled:
                 raise
-            logger.warning("%r failed while its caller was cancelled: %r", awaitable, exc, exc_info=exc)
+            logger.warning(
+                "%s failed while its caller was cancelled: %s: %s",
+                quoted_for_log(awaitable),
+                type(exc).__name__,
+                error_text_for_log(exc),
+                exc_info=exc,
+            )
             raise asyncio.CancelledError from exc
 
 

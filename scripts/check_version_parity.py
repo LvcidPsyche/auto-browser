@@ -37,6 +37,11 @@ DUNDER_VERSIONS = (
 
 _DUNDER = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.MULTILINE)
 
+# The metapackage only re-exports the client, so a release of it must require that release's client: its
+# `auto-browser-client>=` floor is held to the version too (bump_version.py moves it).
+METAPACKAGE = "packaging/auto-browser-mcp/pyproject.toml"
+_CLIENT_FLOOR = re.compile(r"^auto-browser-client>=(.+)$")
+
 
 def _pyproject_version(relative: str) -> tuple[str, str]:
     path = REPO_ROOT / relative
@@ -50,6 +55,15 @@ def _dunder_version(relative: str) -> tuple[str, str]:
     if match is None:
         raise SystemExit(f"could not find a '__version__ = \"...\"' in {relative}")
     return relative, match.group(1)
+
+
+def _client_floor() -> tuple[str, str]:
+    data = tomllib.loads((REPO_ROOT / METAPACKAGE).read_text(encoding="utf-8"))
+    for requirement in data["project"].get("dependencies", []):
+        match = _CLIENT_FLOOR.match(requirement)
+        if match:
+            return f"{METAPACKAGE} (auto-browser-client>=)", match.group(1)
+    raise SystemExit(f"could not find an 'auto-browser-client>=' dependency in {METAPACKAGE}")
 
 
 def _npm_versions() -> list[tuple[str, str]]:
@@ -73,6 +87,7 @@ def collect() -> list[tuple[str, str]]:
     versions = [_pyproject_version(path) for path in PYPROJECTS]
     versions += [_dunder_version(path) for path in DUNDER_VERSIONS]
     versions += _npm_versions()
+    versions.append(_client_floor())
     return versions
 
 

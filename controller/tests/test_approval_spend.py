@@ -27,6 +27,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError, ApprovalStore, held_for_execution
+from app.browser.services.actions import _PRESS_PLACE_SCRIPT
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, McpToolCallRequest
@@ -35,6 +36,7 @@ from app.providers.base import ProviderDecision
 from app.tool_gateway.gateway import McpToolGateway
 from app.utils import UTC
 from app.witness import WitnessPolicyOutcome
+from tests.test_browser_manager_actions import FakeFieldHold
 
 SESSION = "session-1"
 START_URL = "https://example.com"
@@ -63,20 +65,49 @@ class FakeLocator:
     def __init__(self, page: "FakePage") -> None:
         self.page = page
         self.first = self
+        # No box until Playwright's hover has put the pointer on it, so every click is one Playwright places.
+        self.box: dict[str, float] | None = None
 
-    async def scroll_into_view_if_needed(self) -> None:
+    async def scroll_into_view_if_needed(self, **_given: Any) -> None:
         return None
 
-    async def bounding_box(self):
-        return None
+    async def bounding_box(self, **_given: Any):
+        return self.box
 
-    async def get_attribute(self, _name: str) -> None:
-        return None
+    async def element_handle(self, **_given: Any) -> SimpleNamespace:
+        # A type finds its field's element and makes its hold on it: the hold of a plain field that keeps focus.
+        # Its approval asks the element for the fields the text could go to: this one, which says nothing secret.
+        # Its clear asks the element whether focus stayed in it: the one answer, which is not empty, says yes.
+        return SimpleNamespace(
+            evaluate_handle=AsyncMock(return_value=FakeFieldHold({})),
+            evaluate=AsyncMock(return_value={"fields": [{}], "frame": False}),
+            dispose=AsyncMock(),
+        )
 
-    async def evaluate(self, *_args: Any) -> bool:
-        return True  # focus checks: the field has focus
+    async def evaluate(self, script: str = "", *_args: Any, **_given: Any) -> Any:
+        if script == _PRESS_PLACE_SCRIPT:
+            return {
+                "x": 5.0,
+                "y": 5.0,
+                "border": [0, 0],
+                "boxless": False,
+                "contents": False,
+                "framed": False,
+                "counted": False,
+            }
+        return True  # focus checks: the field has focus; the pointer check: the target is under it
 
-    async def click(self, **_: object) -> None:
+    async def is_enabled(self, **_: object) -> bool:
+        return True
+
+    async def hover(self, *, trial: bool = False, **_: object) -> None:
+        if trial:
+            return None
+        self.box = {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}
+
+    async def click(self, *, trial: bool = False, **_: object) -> None:
+        if trial:
+            return None
         self.page.clicks += 1
         await self.page.after_click()
 
@@ -84,6 +115,23 @@ class FakeLocator:
         self.page.uploads.append(path)
         if self.page.upload_error is not None:
             raise self.page.upload_error
+
+
+class FakeMouse:
+    """The press the controller makes itself for a click whose target is read: it lands as a click does."""
+
+    def __init__(self, page: "FakePage") -> None:
+        self.page = page
+
+    async def move(self, _x: float, _y: float, **_: object) -> None:
+        return None
+
+    async def down(self, **_: object) -> None:
+        return None
+
+    async def up(self, **_: object) -> None:
+        self.page.clicks += 1
+        await self.page.after_click()
 
 
 class FakePage:
@@ -94,6 +142,7 @@ class FakePage:
         self.evaluated: list[str] = []
         self.evaluated_args: list[Any] = []
         self.keyboard = FakeKeyboard()
+        self.mouse = FakeMouse(self)
         # What a click does after it lands: navigate away, wait, expire the approval.
         self.click_navigates_to: str | None = None
         self.click_started = asyncio.Event()
@@ -703,7 +752,6 @@ class NestedHoldTests(SpendBase):
                 goal="pay",
                 observation={},
                 provider_decision=ProviderDecision(provider="openai", model="m", decision=decision),
-                upload_approved=False,
                 approval_id=approval_id,
                 workflow_profile="governed",
             )

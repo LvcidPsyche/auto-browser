@@ -151,7 +151,6 @@ class ApprovalExecutionTests(unittest.IsolatedAsyncioTestCase):
                 goal="save",
                 observation={},
                 provider_decision=provider_decision,
-                upload_approved=False,
                 approval_id=approval_id,
                 workflow_profile="governed",
             )

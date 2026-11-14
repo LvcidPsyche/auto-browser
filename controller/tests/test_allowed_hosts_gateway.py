@@ -31,7 +31,8 @@ from app.tool_inputs import (
     SetStorageInput,
     WaitForSelectorInput,
 )
-from tests.test_allowed_hosts_reads import gateway_for, manager_for, read_session
+from app.witness import WitnessPolicyOutcome
+from tests.test_allowed_hosts_reads import gateway_for, manager_for, read_session, witness_session_fields
 from tests.test_browser_manager_create_session import _settings
 
 
@@ -40,7 +41,9 @@ def _gateway(tmp_path: Path, allowed_hosts: str) -> tuple[McpToolGateway, AsyncM
     settings.allowed_hosts = allowed_hosts
     manager = BrowserManager(settings)
     context = SimpleNamespace(add_cookies=AsyncMock())
-    manager.get_session = AsyncMock(return_value=SimpleNamespace(context=context))  # type: ignore[method-assign]
+    # The id names the write's audit entry; the rest is what its witness policy reads.
+    session = SimpleNamespace(id="s1", context=context, **witness_session_fields())
+    manager.get_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
     gateway = McpToolGateway(manager=manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace())
     return gateway, context.add_cookies
 
@@ -104,6 +107,11 @@ def _page_tool_gateway() -> tuple[McpToolGateway, SimpleNamespace]:
     manager = SimpleNamespace(
         get_session=AsyncMock(return_value=SimpleNamespace(page=page)),
         _assert_page_allowed=Mock(side_effect=refusal),
+        # The witness policy the gateway's own writes evaluate first; this one refuses nothing.
+        witness_policy=SimpleNamespace(evaluate_action=Mock(return_value=WitnessPolicyOutcome(profile="normal"))),
+        _witness_session_context=Mock(),
+        _build_witness_action_context=Mock(),
+        _ensure_witness_remote_ready=AsyncMock(),
     )
     gateway = McpToolGateway(manager=manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace())
     return gateway, page

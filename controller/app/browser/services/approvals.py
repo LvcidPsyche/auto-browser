@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...approval_display import approval_provenance
+from ...approval_display import approval_provenance, shown_approval
 from ...approvals import CONTROLLER_SCOPE, held_for_execution
 from ...auth_policy import has_named_credentials
 from ...models import ApprovalDecider, ApprovalRecord
-from ...session_ownership import may_use
+from ...session_ownership import may_use, verified_operator
 from ...witness import WitnessApproval
 
 
@@ -53,13 +53,13 @@ class BrowserApprovalService:
             for session in {item.session_id for item in approvals if item.session_id != CONTROLLER_SCOPE}
         }
         return [
-            approval.model_dump()
+            shown_approval(approval)
             for approval in approvals
             if _usable(approval, lookups.get(approval.session_id), named=named)
         ]
 
     async def get(self, approval_id: str) -> dict[str, Any]:
-        return (await self._accessible(approval_id)).model_dump()
+        return shown_approval(await self._accessible(approval_id))
 
     async def arguments(self, approval_id: str) -> dict[str, Any]:
         """A tool call's whole arguments, for whoever may read its approval (KeyError otherwise, as get)."""
@@ -71,8 +71,8 @@ class BrowserApprovalService:
             "arguments": await self.manager.approvals.arguments(approval.id),
         }
 
-    async def _may_use(self, approval: ApprovalRecord) -> bool:
-        """Whether the current operator may use an approval: see _usable."""
+    async def may_use(self, approval: ApprovalRecord) -> bool:
+        """Whether the current operator may use an approval: see _usable. The approval store asks it too."""
         lookup = None
         if approval.session_id != CONTROLLER_SCOPE:
             lookup = await self.manager.session_owner_lookup(approval.session_id)
@@ -81,7 +81,7 @@ class BrowserApprovalService:
     async def _accessible(self, approval_id: str) -> ApprovalRecord:
         """An approval the current operator may not use (see _usable) answers as if it did not exist."""
         approval = await self.manager.approvals.get(approval_id)
-        if not await self._may_use(approval):
+        if not await self.may_use(approval):
             raise KeyError(approval_id)
         return approval
 
@@ -110,6 +110,8 @@ class BrowserApprovalService:
                     "kind": approval.kind,
                     "comment": comment,
                     "decided_via": decided_via,
+                    # The record keeps the decision this withdraw restores, and its decider.
+                    "decided_by": verified_operator(),
                     **approval_provenance(approval),
                 },
             )
@@ -146,8 +148,9 @@ class BrowserApprovalService:
                     action="approve",
                     comment=comment,
                     decided_via=decided_via,
+                    decided_by=verified_operator(),  # of this withdraw: the record names the approver it restores
                 )
-            return {**approval.model_dump(), "message": message}
+            return {**shown_approval(approval), "message": message}
         await self.manager.audit.append(
             event_type="approval_decision",
             status="approved",
@@ -158,11 +161,14 @@ class BrowserApprovalService:
                 "kind": approval.kind,
                 "comment": comment,
                 "decided_via": decided_via,
+                "decided_by": approval.decided_by,
                 **approval_provenance(approval),
             },
         )
-        await self._decision_receipt(approval, action="approve", comment=comment, decided_via=decided_via)
-        return approval.model_dump()
+        await self._decision_receipt(
+            approval, action="approve", comment=comment, decided_via=decided_via, decided_by=approval.decided_by
+        )
+        return shown_approval(approval)
 
     async def reject(
         self,
@@ -185,11 +191,13 @@ class BrowserApprovalService:
                     "kind": approval.kind,
                     "comment": comment,
                     "decided_via": decided_via,
+                    # The claim holds this reject; the record still names the approve it may turn back.
+                    "decided_by": verified_operator(),
                     **approval_provenance(approval),
                 },
             )
             return {
-                **approval.model_dump(),
+                **shown_approval(approval),
                 "message": (
                     f"approval {approval.id} is claimed by an action: the rejection stops the action unless it "
                     "has begun, and the approval then becomes rejected"
@@ -205,20 +213,28 @@ class BrowserApprovalService:
                 "kind": approval.kind,
                 "comment": comment,
                 "decided_via": decided_via,
+                "decided_by": approval.decided_by,
                 **approval_provenance(approval),
             },
         )
-        await self._decision_receipt(approval, action="reject", comment=comment, decided_via=decided_via)
-        return approval.model_dump()
+        await self._decision_receipt(
+            approval, action="reject", comment=comment, decided_via=decided_via, decided_by=approval.decided_by
+        )
+        return shown_approval(approval)
 
     async def rejection_receipt(self, approval: ApprovalRecord) -> None:
         """The witness receipt of an operator's reject that a give-back applied (ApprovalStore.record_given_back).
 
         The reject came while the action held the approval, and was recorded
-        only as deferred; this is the receipt it gets once it took effect.
+        only as deferred; this is the receipt it gets once it took effect. Written
+        by the execution's task, as its operator: decided_by names who rejected.
         """
         await self._decision_receipt(
-            approval, action="reject", comment=approval.decision_comment, decided_via=approval.decided_via
+            approval,
+            action="reject",
+            comment=approval.decision_comment,
+            decided_via=approval.decided_via,
+            decided_by=approval.decided_by,
         )
 
     async def _decision_receipt(
@@ -228,8 +244,13 @@ class BrowserApprovalService:
         action: str,
         comment: str | None,
         decided_via: ApprovalDecider | None,
+        decided_by: str | None,
     ) -> None:
-        """Record a decision on ``approval`` in its session's witness chain, if the session is live."""
+        """Record a decision on ``approval`` in its session's witness chain, if the session is live.
+
+        ``decided_by`` is the operator a named credential proved for the decision (None without one): the
+        receipt's own operator is whoever's task writes it, which for a give-back is not who decided.
+        """
         session = self.manager.sessions.get(approval.session_id)
         if session is None:
             return
@@ -246,7 +267,7 @@ class BrowserApprovalService:
                 reason=approval.reason,
             ),
             target={"kind": approval.kind, "action": approval.action.action, **approval_provenance(approval)},
-            metadata={"comment": comment, "decided_via": decided_via},
+            metadata={"comment": comment, "decided_via": decided_via, "decided_by": decided_by},
             approved_action=approval.action,
         )
 
@@ -338,6 +359,6 @@ class BrowserApprovalService:
                 approved_action=approval.action,
             )
         return {
-            "approval": latest.model_dump(),
+            "approval": shown_approval(latest),
             "execution": execution,
         }

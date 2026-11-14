@@ -3,20 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
-from typing import Sequence
+from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
 from .auth_policy import (
     BIND_SCOPE_EXPOSED,
     Credential,
+    credential_names_operator,
     credentials_for,
     is_local_only_host,
     resolve_bind_scope,
     tokenless_loopback_allowed,
 )
 from .config import Settings
-from .providers.base import BaseProviderAdapter
+from .host_patterns import is_wildcard_pattern
+from .providers.base import BaseProviderAdapter, auth_mode_shown
 from .url_safety import refuse_ambiguous_host
+from .utils import error_text
 
 
 @dataclass(slots=True)
@@ -32,6 +35,19 @@ class RuntimePolicyReport:
 # Production floor for API_BEARER_TOKEN. "Required" alone was satisfied by
 # API_BEARER_TOKEN=x, which is not meaningfully different from no token.
 MIN_PRODUCTION_BEARER_TOKEN_LENGTH = 32
+
+# An entry of APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS with this many characters in a row of a bearer token of the
+# deployment is taken for the token, or a part of it, and is not printed. Eight: a quarter of the shortest token
+# production accepts, and long enough that an operator's id does not stand in a token by chance. At two or three
+# characters it does (an id of two hexadecimal digits stands in one 40-digit token in seven), and the warning
+# would then hide the very id it is there to name.
+MIN_TOKEN_RUN_NOT_PRINTED = 8
+# A token of that length or shorter (a development setup's: production's are 32 or more) has no such run short of
+# itself, so the run that counts for it is one character fewer than it has, and such a token cut short by one is
+# not printed either. Never fewer than this many, which the two or three above rule out: a token of this length or
+# shorter keeps an entry back only where the entry holds it as a word of its own ('dev' hides 'Bearer dev', and does
+# not hide 'developer').
+MIN_SHORT_TOKEN_RUN_NOT_PRINTED = 4
 
 CLI_PROVIDER_CHECKS = (
     {
@@ -82,7 +98,9 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         auth_mode = (getattr(settings, auth_mode_attr.lower()) or "").strip().lower()
         if auth_mode not in allowed_modes:
             supported = ", ".join(sorted(allowed_modes))
-            report.errors.append(f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: {supported}")
+            # A refused start logs this: a value too long to be a mode is not printed (auth_mode_shown).
+            shown = auth_mode_shown(auth_mode) or "<empty>"
+            report.errors.append(f"{auth_mode_attr}={shown} is invalid; expected one of: {supported}")
             continue
 
         if auth_mode == "api":
@@ -170,11 +188,27 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
             _warn_weak_loopback_tokens(credentials, report)
             return
         if tokenless_loopback_allowed(settings):
+            wildcards = [
+                pattern for pattern in settings.controller_allowed_host_patterns if is_wildcard_pattern(pattern)
+            ]
+            if wildcards:
+                # The Host check admits no name by a wildcard on such a controller (middleware/hosts.py); a page that
+                # rebinds a name under one to 127.0.0.1 would otherwise drive it whole, with no token to ask for.
+                report.errors.append(
+                    f"CONTROLLER_ALLOWED_HOSTS lists {', '.join(repr(pattern) for pattern in wildcards)}, and this "
+                    "controller has no API token (API_ALLOW_TOKENLESS_LOOPBACK=true): a wildcard admits a web page "
+                    "that rebinds a name under it to 127.0.0.1. Set API_BEARER_TOKEN (or remove "
+                    "API_ALLOW_TOKENLESS_LOOPBACK: the controller then uses the token in API_TOKEN_FILE, and "
+                    "generates one there if the file holds none, and every client must send it), or list exact host "
+                    "names, whose DNS you control."
+                )
+                return
             report.warnings.append(
                 "API_BEARER_TOKEN is unset and API_ALLOW_TOKENLESS_LOOPBACK=true, so the controller serves "
                 "every route unauthenticated. API_BIND_SCOPE=loopback keeps it off other machines, but any "
                 "process that can reach port 8000, including containers on the compose network, can drive "
-                "the browser. Remove API_ALLOW_TOKENLESS_LOOPBACK to have the controller use its token."
+                "the browser. Remove API_ALLOW_TOKENLESS_LOOPBACK: the controller then uses the token in "
+                "API_TOKEN_FILE, and generates one there if the file holds none, and every client must send it."
             )
             return
         # ensure_api_credential runs first and loads or generates one; this is the
@@ -218,7 +252,131 @@ def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -
     try:
         refuse_ambiguous_host(settings.cdp_connect_url, field_name="CDP_CONNECT_URL")
     except ValueError as exc:
-        report.errors.append(str(exc))
+        report.errors.append(error_text(exc))
+
+
+def _shows_a_token(text: str, credentials: Iterable[Credential], *, an_operator_id: bool) -> bool:
+    """Whether printing ``text`` would show a bearer token of the deployment, whole or in part. Compared without
+    regard to case (_case_free): a token of hexadecimal digits in upper case is the same secret.
+
+    In part is MIN_TOKEN_RUN_NOT_PRINTED of a token's characters in a row, and for a token no longer than that all
+    but one of them, down to MIN_SHORT_TOKEN_RUN_NOT_PRINTED: below it an id holds a token's letters by chance, and
+    only a text that holds the token as a word of its own shows it (_holds_as_a_word: 'Bearer dev', not
+    'developer'). A run that stands in the token's own operator id is no secret, and
+    does not count: with alice-prod:alice-prod-9f8a..., 'alice-prod2' is an id like any other.
+
+    An operator id of API_BEARER_TOKENS shows a token only where it holds one of MIN_TOKEN_RUN_NOT_PRINTED
+    characters or more whole.
+
+    Every length is the token's as it is configured, and each run is that many of its characters, folded: a fold can
+    be longer than what it folds (a sharp s folds to 'ss', the ligature fi to 'fi'), and runs or lengths of the fold
+    stood for fewer of the token's characters: 'boss123' was kept back for a token of a sharp s and '12345', and an
+    operator id for a token of seven. The fold of a text is the folds of its characters one after another, so
+    whatever holds a run in any case holds the run's fold.
+    """
+    folded = _case_free(text)
+    for credential in credentials:
+        configured = credential.token
+        token = _case_free(configured)
+        if an_operator_id:
+            if len(configured) >= MIN_TOKEN_RUN_NOT_PRINTED and token in folded:
+                return True
+            continue
+        run = min(MIN_TOKEN_RUN_NOT_PRINTED, len(configured) - 1)
+        if run < MIN_SHORT_TOKEN_RUN_NOT_PRINTED:
+            if _holds_as_a_word(folded, token):
+                return True
+            continue
+        if token in folded:
+            return True
+        own_id = _case_free(credential.operator_id or "")
+        for start in range(len(configured) - run + 1):
+            part = _case_free(configured[start : start + run])
+            if part in folded and part not in own_id:
+                return True
+    return False
+
+
+def _case_free(text: str) -> str:
+    """``text`` folded so that each of its characters is one with its every case: casefold() of its upper case.
+    casefold() alone leaves dotless i (U+0131) apart from its upper case 'I', which folds to 'i', so a token of it
+    was printed in upper case."""
+    return text.upper().casefold()
+
+
+def _holds_as_a_word(text: str, word: str) -> bool:
+    """Whether ``word`` stands in ``text`` with, on each side, an end of the text or a character that is no letter
+    and no number, of any script (str.isalnum: a Roman numeral and a fraction are numbers): 'dev' in 'Bearer dev',
+    'alice=dev' or "'dev'", not in 'developer' or '4dev'."""
+    start = text.find(word)
+    while start != -1:
+        end = start + len(word)
+        if (start == 0 or not text[start - 1].isalnum()) and (end == len(text) or not text[end].isalnum()):
+            return True
+        start = text.find(word, start + 1)
+    return False
+
+
+def _warn_listed_operators_no_credential_proves(settings: Settings, report: RuntimePolicyReport) -> None:
+    """APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS is compared to the proven operator id exactly (ApprovalStore), so a
+    listed id that no named credential proves refuses nobody, and nothing else would say so.
+
+    The warnings go to the log, and an entry can be a secret in the wrong place: API_BEARER_TOKENS pasted whole
+    (id:token pairs), a token alone, or a token with something round it (Bearer, a quote, alice=) or cut short.
+    Nothing after an entry's colon is printed. What would be printed, the entry or the text before its colon, is
+    printed only when it shows no token of this deployment, whole or in part (_shows_a_token): decided by what it
+    contains, since an entry that is a token and one character more is no token by equality. The entries kept back
+    are counted. The tokens they hold cannot be: an entry that holds one of three tokens that begin alike holds a
+    part of each.
+    """
+    credentials = credentials_for(settings)
+    named = {credential.operator_id for credential in credentials if credential.operator_id}
+    named_whatever_the_case = {name.casefold() for name in named}
+    pairs: set[str] = set()
+    kept_back = 0
+    for listed in sorted(settings.approval_refuse_self_approval_operator_ids):
+        if credential_names_operator(settings, listed):
+            continue
+        # An operator id holds no colon: parse_operator_tokens splits an entry at its first one.
+        before_colon = listed.partition(":")[0].strip()
+        printed = before_colon if ":" in listed else listed
+        # An operator id of API_BEARER_TOKENS, in whatever case, is no secret, though a token may begin with it
+        # (alice-prod:alice-prod-9f8a...): only a whole token in it keeps it out of the log, and only one of
+        # MIN_TOKEN_RUN_NOT_PRINTED characters or more (alice:alice is a development setup's).
+        if _shows_a_token(printed, credentials, an_operator_id=printed.casefold() in named_whatever_the_case):
+            kept_back += 1
+            continue
+        if ":" in listed:
+            pairs.add(before_colon)
+            continue
+        warning = (
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists '{listed}', which no credential in API_BEARER_TOKENS "
+            "proves, so it refuses nobody: a listed id is compared to the operator's id exactly"
+        )
+        if listed in named:
+            warning += (
+                ". Its token is also an earlier entry's, and a token listed twice proves only the first operator "
+                "listed with it"
+            )
+        elif by_case := sorted(name for name in named if name.casefold() == listed.casefold()):
+            warning += f". It differs from '{by_case[0]}' only by case"
+        report.warnings.append(warning)
+    for before_colon in sorted(pairs):
+        report.warnings.append(
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists an entry that begins '{before_colon}:' (the rest is not "
+            "printed). The setting takes operator ids, not id:token pairs: an operator id holds no colon, so the "
+            "entry refuses nobody"
+        )
+    if kept_back:
+        counted = "1 entry that is not printed here, because it holds"
+        if kept_back != 1:
+            counted = f"{kept_back} entries that are not printed here, because each holds"
+        report.warnings.append(
+            f"APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS lists {counted} a bearer token of this deployment or a part of "
+            f"one ({MIN_TOKEN_RUN_NOT_PRINTED} characters in a row, all but one of a token of "
+            f"{MIN_SHORT_TOKEN_RUN_NOT_PRINTED + 1} to {MIN_TOKEN_RUN_NOT_PRINTED}, or a shorter token as a word of "
+            "its own), where it takes operator ids: such an entry refuses nobody"
+        )
 
 
 def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
@@ -226,6 +384,7 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
 
     _validate_api_authentication(settings, report)
     _validate_cdp_connect_url(settings, report)
+    _warn_listed_operators_no_credential_proves(settings, report)
 
     if getattr(settings, "codex_allow_host_exec", False):
         report.warnings.append(

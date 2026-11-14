@@ -58,3 +58,5 @@ packaging/auto-browser-mcp/` is non-empty) or an image (the same diff over `cont
 `browser-node/`, tests aside). A controller-only release bumps every version string as usual and
 says in its CHANGELOG intro that the three packages change only in version (1.10.1, 1.11.0).
 `main` is protected: changes land through a PR with green CI, one merge at a time.
+The controller's own wheel (`auto-browser-controller`) is built only for the release audit and CI to inspect, never
+published; its top-level package is `app`, so it goes only into an environment of its own (`controller/pyproject.toml`).

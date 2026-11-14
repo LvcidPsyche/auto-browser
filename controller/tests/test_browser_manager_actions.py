@@ -1,14 +1,19 @@
 import errno
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services import BrowserRemoteAccessService
+from app.browser.services.actions import _Budget
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
 from app.config import Settings
 from app.utils import UTC
@@ -46,10 +51,40 @@ class FakeKeyboard:
         self.type = AsyncMock()
 
 
+class FakeFieldHold:
+    """A type's hold on the node its text goes to (app.browser.services.actions._TypedField), taken on a FakeLocator:
+    the field the locator named then, whose attributes it reads as they are now, for as long as the node has kept
+    focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away)."""
+
+    def __init__(self, attributes: dict[str, str]) -> None:
+        self.attributes = attributes
+        self.focused = True
+        self.evaluate = AsyncMock(side_effect=self._read)
+        self.dispose = AsyncMock()
+
+    def _read(self, _script: str) -> dict[str, str] | None:
+        if not self.focused:
+            return None
+        names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
+        return {name: self.attributes.get(name) or "" for name in names}
+
+
 class FakeLocator:
     def __init__(self, selector: str, *, attributes: dict[str, str] | None = None) -> None:
         self.selector = selector
         self.attributes = attributes or {}
+        # Focus is in the field once it is clicked (evaluate, below), so the node a type takes hold of is the field:
+        # the type finds the selector's element (element_handle) and makes its hold on that.
+        self.holds: list[FakeFieldHold] = []
+        self.element = SimpleNamespace(
+            evaluate_handle=AsyncMock(side_effect=self._hold),
+            # What is asked of the element itself: whether focus is still in it, by a type's checks through its
+            # clear (it is), and an approval's read of the fields its type's text could go to from there, which is
+            # this one field.
+            evaluate=AsyncMock(side_effect=self._asked),
+            dispose=AsyncMock(),
+        )
+        self.element_handle = AsyncMock(return_value=self.element)
         self.scroll_into_view_if_needed = AsyncMock()
         self.click = AsyncMock()
         self.hover = AsyncMock()
@@ -58,12 +93,25 @@ class FakeLocator:
         self.fill = AsyncMock()
         self.count = AsyncMock(return_value=1)
         self.is_visible = AsyncMock(return_value=True)
+        # A click looks whether its target is enabled before it hovers (_checks_of_a_click); the pages where it is
+        # not yet are tests/test_click_target_chromium.py's.
+        self.is_enabled = AsyncMock(return_value=True)
         self.bounding_box = AsyncMock(return_value={"x": 10, "y": 20, "width": 100, "height": 40})
-        self.get_attribute = AsyncMock(side_effect=lambda name: self.attributes.get(name))
+        self.get_attribute = AsyncMock(side_effect=lambda name, **_given: self.attributes.get(name))
         # The element is what the pointer hits and keeps focus once clicked;
         # tests/test_targeting.py covers the pages where it is not and does not.
         self.evaluate = AsyncMock(return_value=True)
         self.focus = AsyncMock()
+
+    def _hold(self, _script: str, **_given: object) -> FakeFieldHold:
+        self.holds.append(FakeFieldHold(self.attributes))
+        return self.holds[-1]
+
+    def _asked(self, script: str) -> object:
+        if script == ELEMENT_HAS_FOCUS_SCRIPT:
+            return True
+        names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
+        return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "frame": False}
 
     @property
     def first(self) -> "FakeLocator":
@@ -203,6 +251,68 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reload_result["action"], "reload")
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
+
+    async def test_every_wait_of_a_selector_click_is_given_what_is_left_of_one_budget(self) -> None:
+        # The scroll into view, the read of the box and the question what the pointer finds each waited by
+        # Playwright's default, a whole ACTION_TIMEOUT_MS apiece beside the checks' own: a target that left
+        # between two of them held its session for several. One budget is made where the click begins.
+        locator = FakeLocator("#submit")
+        self.session.page.locators["#submit"] = locator
+        # The scroll takes a tenth of a second here, which every wait after it must have less for.
+        locator.scroll_into_view_if_needed = AsyncMock(side_effect=lambda **_given: time.sleep(0.1))
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.click("session-1", selector="#submit")
+
+        whole = self.manager.settings.action_timeout_ms
+        given = {
+            "scroll": locator.scroll_into_view_if_needed.await_args.kwargs.get("timeout"),
+            "box": locator.bounding_box.await_args_list[0].kwargs.get("timeout"),
+            "enabled": locator.is_enabled.await_args_list[0].kwargs.get("timeout"),
+            "trial hover": locator.hover.await_args_list[0].kwargs.get("timeout"),
+        }
+        for step, timeout in given.items():
+            self.assertIsInstance(timeout, int, step)
+        self.assertTrue(whole - 50 < given["scroll"] <= whole, given)
+        self.assertTrue(0 < given["trial hover"] <= given["enabled"] <= given["box"] <= whole - 50, given)
+        # The question has a bound of its own within that (POINTER_CHECK_TIMEOUT_MS).
+        self.assertEqual(locator.evaluate.await_args_list[0].kwargs.get("timeout"), 1000)
+
+    async def test_a_scroll_into_view_that_met_a_replaced_element_is_made_again(self) -> None:
+        # Playwright's scroll finds one element and ends at once when the page replaces it meanwhile ("Element is
+        # not attached to the DOM"), where its click looks the element up again. A disabled button that a form
+        # draws again many times a second ended the click there, one step before the checks that wait for it.
+        gone = PlaywrightError("Locator.scroll_into_view_if_needed: Element is not attached to the DOM")
+        locator = FakeLocator("#submit")
+        self.session.page.locators["#submit"] = locator
+        locator.scroll_into_view_if_needed = AsyncMock(side_effect=[gone, gone, None])
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.click("session-1", selector="#submit")
+        self.assertEqual(locator.scroll_into_view_if_needed.await_count, 3)
+        self.session.page.mouse.down.assert_awaited_once()
+
+        # While the click's budget lasts, and no longer.
+        locator.scroll_into_view_if_needed = AsyncMock(side_effect=gone)
+        with (
+            patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+            patch.object(_Budget, "spent", new_callable=PropertyMock, return_value=True),
+            self.assertRaises(PlaywrightError),
+        ):
+            await self.manager.click("session-1", selector="#submit")
+        self.assertEqual(locator.scroll_into_view_if_needed.await_count, 1)
+
+        # Any other failure is the click's at once: the page closed, or a wait that ran out.
+        for failure in (
+            PlaywrightError("Locator.scroll_into_view_if_needed: Target page, context or browser has been closed"),
+            PlaywrightTimeoutError("Timeout 15000ms exceeded.\n  - Element is not attached to the DOM"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                locator.scroll_into_view_if_needed = AsyncMock(side_effect=failure)
+                with (
+                    patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+                    self.assertRaises(PlaywrightError),
+                ):
+                    await self.manager.click("session-1", selector="#submit")
+                self.assertEqual(locator.scroll_into_view_if_needed.await_count, 1)
 
     async def test_a_long_text_typed_into_a_password_field_leaves_no_trace_of_its_preview(self) -> None:
         # The preview of a field found secret only when typing starts goes, and so does the mark that it was cut.

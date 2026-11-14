@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterable
 
 from .config import Settings
-from .utils import UTC
+from .utils import UTC, error_text_for_log, quoted_for_log
+
+if TYPE_CHECKING:
+    from .approvals import ApprovalStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +52,12 @@ class MaintenanceService:
         settings: Settings,
         *,
         session_provider: Callable[[], Iterable[object]],
+        approval_store: ApprovalStore | None = None,
     ) -> None:
         self.settings = settings
         self.session_provider = session_provider
+        # Its decided approvals past APPROVAL_RETENTION_DAYS go in each sweep (ApprovalStore.prune_decided).
+        self.approval_store = approval_store
         self._task: asyncio.Task | None = None
         # CLEANUP_ON_STARTUP's sweep, run in the background after startup (see startup()).
         self._startup_task: asyncio.Task | None = None
@@ -61,6 +68,9 @@ class MaintenanceService:
         self._last_report: CleanupReport | None = None
         # Set once the convergence harness is initialized (after startup); its old runs go in each sweep.
         self.harness_service = None
+        # Set by app.main: writes the refused takeover-link calls that were only counted, once their window is over
+        # (routes/sessions.py). Run in each sweep; it logs its own failures and raises none.
+        self.write_held_refusals: Callable[[], Awaitable[None]] | None = None
 
     @property
     def last_report(self) -> dict | None:
@@ -130,6 +140,9 @@ class MaintenanceService:
                 # session and request for the whole sweep.
                 reports.append(await asyncio.to_thread(self._cleanup_root, Path(root), retention, protected_roots))
             await self._prune_harness()
+            await self._prune_approvals()
+            if self.write_held_refusals is not None:
+                await self.write_held_refusals()
             completed = datetime.now(UTC)
             self._last_report = CleanupReport(
                 started_at=started.isoformat().replace("+00:00", "Z"),
@@ -152,6 +165,14 @@ class MaintenanceService:
             return
         if pruned:
             logger.info("harness retention sweep removed %d run/candidate directories", pruned)
+
+    async def _prune_approvals(self) -> None:
+        """The approval retention pass, which logs its own failure and raises none."""
+        if self.approval_store is None:
+            return
+        # An operator's rejection in a session still open keeps refusing an agent's approval of that action there.
+        open_sessions = {getattr(session, "id", None) for session in self.session_provider()}
+        await self.approval_store.prune_decided(open_sessions=open_sessions - {None})
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -224,7 +245,10 @@ class MaintenanceService:
             return
         seen.add(path)
         stats.errors += 1
-        logger.warning("cleanup sweep could not handle %s: %s", path, getattr(exc, "strerror", None) or exc)
+        # The path too: an entry's name is whatever was written there (an imported auth profile archive's member).
+        logger.warning(
+            "cleanup sweep could not handle %s: %s", quoted_for_log(os.fspath(path)), error_text_for_log(exc)
+        )
 
     def _cleanup_root(self, root: Path, retention_hours: float, protected_roots: list[Path]) -> CleanupStats:
         stats = CleanupStats(root=str(root), retention_hours=retention_hours)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app import providers
 from app.config import Settings
 from app.providers.base import CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
@@ -25,9 +27,32 @@ from app.providers.openai_adapter import OpenAIAdapter
 UNUSABLE = "set CLI_HOME to a writable directory"
 
 
+@pytest.fixture(autouse=True)
+def _each_test_is_a_process_that_has_logged_nothing():
+    """Each failure of the private CLI home is logged once per process (D1-8): a test that looks for the line needs
+    it not to have been written by an earlier one."""
+    base = providers.base
+    base._LOGGED_HOME_FAILURES.clear()
+    base._LOGGED_NO_HOME_ERRORS.clear()
+    yield
+    base._LOGGED_HOME_FAILURES.clear()
+    base._LOGGED_NO_HOME_ERRORS.clear()
+
+
+def _finished_stream(data: bytes) -> asyncio.StreamReader:
+    stream = asyncio.StreamReader()
+    stream.feed_data(data)
+    stream.feed_eof()
+    return stream
+
+
 async def _spawn_cwd(adapter, **kwargs) -> str | None:
+    # What run_cli reads of a child: its two pipes, and wait() for its exit.
     process = SimpleNamespace(
-        communicate=AsyncMock(return_value=(b"ok", b"")),
+        stdin=None,
+        stdout=_finished_stream(b"ok"),
+        stderr=_finished_stream(b""),
+        wait=AsyncMock(return_value=0),
         returncode=0,
     )
     with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn:
@@ -304,7 +329,7 @@ async def test_the_codex_per_call_directory_is_made_under_the_cli_home() -> None
         adapter = OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex"))
         seen: list[str | None] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):
+        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
             seen.append(cwd)
             output = Path(command[command.index("--output-last-message") + 1])
             output.write_text('{"action":"done","reason":"x","risk_category":"read"}', encoding="utf-8")
@@ -325,3 +350,90 @@ async def test_a_caller_given_cwd_is_kept() -> None:
         adapter = GeminiAdapter(Settings(_env_file=None, CLI_HOME=str(Path(tmp) / "home")))
 
         assert await _spawn_cwd(adapter, cwd=tmp) == tmp
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PermissionError("/data/cli-home/tmpx1"),
+        PermissionError(13, "Permission denied", "/data/cli-home/tmpx1"),
+        OSError(28, "No space left on device", "/data/cli-home/tmpx1"),
+    ],
+    ids=["no errno", "permission denied", "disk full"],
+)
+async def test_a_per_call_directory_that_cannot_be_made_raises_one_error_that_names_no_path(
+    failure: OSError, caplog: pytest.LogCaptureFixture
+) -> None:
+    # D1-7: the OSError's text carried the path, and reached the caller's error as it was.
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, _private_env(tmp), clear=True):
+        adapter = OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex"))
+        adapter.run_cli = AsyncMock()
+
+        with (
+            patch("app.providers.openai_adapter.tempfile.TemporaryDirectory", side_effect=failure),
+            caplog.at_level(logging.ERROR, "app.providers.openai_adapter"),
+            pytest.raises(RuntimeError) as caught,
+        ):
+            await adapter._decide(
+                goal="g", observation={"url": "https://x.test/"}, context_hints=None, previous_steps=[],
+                model_override=None,
+            )  # fmt: skip
+
+        assert UNUSABLE in str(caught.value)
+        assert "/data/cli-home" not in str(caught.value)
+        assert caught.value.__cause__ is None and caught.value.__suppress_context__, "the OSError is not chained"
+        # The path is in the log, where the operator reads it.
+        assert "/data/cli-home/tmpx1" in caplog.text
+        adapter.run_cli.assert_not_awaited()
+
+
+def _a_home_that_cannot_hold_the_directory(tmp: str) -> dict[str, str]:
+    """An environment whose home is a file, so that no candidate directory can be made, for root as for anyone."""
+    home = Path(tmp) / "home-is-a-file"
+    home.write_text("x", encoding="utf-8")
+    return _private_env(str(home))
+
+
+async def test_a_private_home_that_stays_unusable_is_logged_once_and_still_refused_every_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # D1-8: it is checked on every provider call, and wrote its warning and its error on each of them.
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        patch.dict(os.environ, _a_home_that_cannot_hold_the_directory(tmp), clear=True),
+    ):
+        adapter = _adapter()
+        with caplog.at_level(logging.WARNING, "app.providers.base"):
+            with pytest.raises(RuntimeError) as first:
+                adapter.effective_cli_home()
+            written = len(caplog.records)
+            assert written >= 2, "a warning for the candidate and the error that follows it"
+
+            for _ in range(3):
+                with pytest.raises(RuntimeError) as again:
+                    adapter.effective_cli_home()
+                assert UNUSABLE in str(again.value)
+
+        assert UNUSABLE in str(first.value)
+        assert len(caplog.records) == written, "the later calls wrote nothing"
+
+
+async def test_a_private_home_that_fails_for_another_reason_is_logged_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, _a_home_that_cannot_hold_the_directory(tmp), clear=True):
+            with caplog.at_level(logging.WARNING, "app.providers.base"), pytest.raises(RuntimeError):
+                _adapter().effective_cli_home()
+            before = len(caplog.records)
+
+        # Another place and another failure: no home at all.
+        with (
+            patch.dict(os.environ, {"CLI_HOME": ""}, clear=True),
+            patch("app.providers.base.Path.home", side_effect=RuntimeError("Could not determine home directory.")),
+            caplog.at_level(logging.WARNING, "app.providers.base"),
+            pytest.raises(RuntimeError),
+        ):
+            _adapter().effective_cli_home()
+
+    assert len(caplog.records) > before

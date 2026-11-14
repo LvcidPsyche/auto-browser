@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from ..utils import error_text, quoted_for_log
 from .identity import NodeIdentity
 from .models import PeerRecord, SignedEnvelope
 
@@ -89,25 +90,25 @@ def verify_envelope(
     # Resolve sender's pinned public key
     if envelope.sender_node_id != expected_peer.node_id:
         raise EnvelopeVerificationError(
-            f"sender_node_id {envelope.sender_node_id!r} != expected {expected_peer.node_id!r}"
+            f"sender_node_id {quoted_for_log(envelope.sender_node_id)} != expected {expected_peer.node_id!r}"
         )
     if expected_recipient_node_id is not None and envelope.recipient_node_id != expected_recipient_node_id:
         raise EnvelopeVerificationError(
-            f"recipient_node_id {envelope.recipient_node_id!r} != expected {expected_recipient_node_id!r}"
+            f"recipient_node_id {quoted_for_log(envelope.recipient_node_id)} != expected {expected_recipient_node_id!r}"
         )
 
     try:
         pub_raw = base64.b64decode(expected_peer.pubkey_b64)
         pub_key = Ed25519PublicKey.from_public_bytes(pub_raw)
     except Exception as exc:
-        raise EnvelopeVerificationError(f"Failed to load peer public key: {exc}") from exc
+        raise EnvelopeVerificationError(f"Failed to load peer public key: {error_text(exc)}") from exc
 
     canonical = _canonical_bytes(envelope)
     try:
         sig_bytes = base64.b64decode(envelope.signature_b64)
         pub_key.verify(sig_bytes, canonical)
     except Exception as exc:
-        raise EnvelopeVerificationError(f"Signature verification failed: {exc}") from exc
+        raise EnvelopeVerificationError(f"Signature verification failed: {error_text(exc)}") from exc
 
     return envelope.payload
 
@@ -134,11 +135,11 @@ async def send_envelope(peer: PeerRecord, envelope: SignedEnvelope) -> SignedEnv
         async with httpx.AsyncClient(timeout=_SEND_TIMEOUT_SECONDS, verify=True) as client:
             response = await client.post(url, json=payload)
     except httpx.TimeoutException as exc:
-        raise TransportError(f"Timeout sending envelope to {url}: {exc}") from exc
+        raise TransportError(f"Timeout sending envelope to {url}: {error_text(exc)}") from exc
     except httpx.ConnectError as exc:
-        raise TransportError(f"Connection error to {url}: {exc}") from exc
+        raise TransportError(f"Connection error to {url}: {error_text(exc)}") from exc
     except httpx.RequestError as exc:
-        raise TransportError(f"Request error to {url}: {exc}") from exc
+        raise TransportError(f"Request error to {url}: {error_text(exc)}") from exc
 
     if response.status_code not in (200, 201, 202):
         raise TransportError(
@@ -149,4 +150,4 @@ async def send_envelope(peer: PeerRecord, envelope: SignedEnvelope) -> SignedEnv
         data = response.json()
         return SignedEnvelope(**data)
     except Exception as exc:
-        raise TransportError(f"Failed to parse reply envelope from {url}: {exc}") from exc
+        raise TransportError(f"Failed to parse reply envelope from {url}: {error_text(exc)}") from exc

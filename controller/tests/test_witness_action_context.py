@@ -75,13 +75,13 @@ class WitnessActionContextTests(unittest.IsolatedAsyncioTestCase):
 
             inside, release, first_seen = asyncio.Event(), asyncio.Event(), {"done": False}
 
-            async def slow_click(session, locator, coords):
+            async def slow_click(session, locator, coords, **_given):
                 if not first_seen["done"]:
                     first_seen["done"] = True
                     inside.set()
                     await release.wait()
 
-            async def center(locator):
+            async def center(locator, **_given):
                 return (1.0, 1.0)
 
             manager.actions.click_locator_human_like = slow_click

@@ -1,10 +1,13 @@
 """
 webhooks.py — Approval webhook dispatcher for auto-browser.
 
-When APPROVAL_WEBHOOK_URL is configured, POSTs a signed JSON payload
-every time an approval is created or its status changes.
+When APPROVAL_WEBHOOK_URL is configured, POSTs a JSON payload each time an
+action or a governed tool call is held for approval: it came without an
+approval_id and needs one, and the pending approval it waits on is a new one
+or the same one asked for again (actions.py, _require_decision_approval).
+Approving, rejecting or executing an approval posts nothing.
 
-Signature: X-Webhook-Signature: sha256=<hex>
+Signature, when APPROVAL_WEBHOOK_SECRET is set: X-Webhook-Signature: sha256=<hex>
 The signature covers the raw request body using HMAC-SHA256 with
 APPROVAL_WEBHOOK_SECRET as the key (Slack-compatible format).
 """
@@ -228,8 +231,10 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
 async def _post_pinned(target: _Target, raw: bytes, headers: dict[str, str]) -> httpx.Response:
     """Post to the checked addresses in turn, moving on only when one cannot be connected to.
 
-    Nothing was sent to an address that did not connect, so the next one is tried, as httpx's own lookup would; once
-    one connects, its answer (an HTTP error included) is final.
+    Nothing was sent to an address that did not connect, so the next one is tried, as httpx's own lookup would. A TLS
+    handshake that fails or times out is that too: httpx 0.28 raises ConnectError or ConnectTimeout for it, as for a
+    refused connection. Once one connects, its answer (an HTTP error included) is final, and so is a failure after the
+    request began to go out (a read timeout, a dropped connection): the event may have arrived.
     """
     client = get_client(direct=True)
     pinned_headers = {**headers, **target.headers}
@@ -285,10 +290,12 @@ async def dispatch_approval_event(
         "session_id": approval.session_id,
         "kind": approval.kind,
         "status": approval.status,
-        # The reason is agent-written for an action approval; these two are the server's.
+        # An action approval's reason is the agent's, or the server's sentence about it (a governed run's; the
+        # click classifier's, which the agent's reason follows); these two are the server's.
         "origin": approval.origin,
         "action_summary": approval_summary(approval),
-        # Agent-written: shown with its code points, as the dashboard shows it.
+        # Agent-written, wholly or after the server's sentence: shown with its code points, as the dashboard
+        # shows it.
         "reason": shown_code_points(approval.reason),
         # A tool call's whole arguments stay on the controller (GET /approvals/{id}/arguments).
         "arguments_size": approval.arguments_size,

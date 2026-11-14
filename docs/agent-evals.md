@@ -1,7 +1,7 @@
 # Agent Evals
 
 `scripts/agent_eval.py` runs a repeatable matrix of browser-agent cases across providers and workflow profiles.
-It has four modes:
+It has four modes, and `scripts/fixture_eval.py` a fifth:
 
 - Plan mode: prints the provider/profile matrix from `evals/agent_cases.json`.
 - Mock mode: scores deterministic local results with `--mock`.
@@ -28,7 +28,7 @@ Saved result files are named `<case_id>__<provider>__<workflow_profile>.json`. T
 final URL, observed actions, step counts, and provider errors, then aggregates each provider/profile pair.
 Cases can also set `expected_status_by_profile` so a single case can prove that `fast` and `governed`
 diverge, for example `fast=max_steps_reached` while `governed=approval_required`.
-CI validates the eval matrix in plan mode so malformed cases cannot slip into a release branch.
+CI validates the eval matrix in mock mode so malformed cases cannot slip into a release branch.
 
 `make eval` runs mock mode locally, and `make fixture-eval` validates the static fixture coverage for auth-profile reuse,
 popup/download recovery, governed write blocking, upload approval, resume-after-failure, and multi-tab recovery.

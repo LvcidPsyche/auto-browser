@@ -14,6 +14,7 @@ from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...artifacts import in_thread_writing
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
 from ...pii_scrub import pii_words
+from ...utils import error_text_for_log, quoted_for_log
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
 
@@ -48,6 +49,10 @@ def _word_key(block: dict[str, Any]) -> tuple[Any, ...]:
     return block.get("text"), box.get("x"), box.get("y"), box.get("width"), box.get("height")
 
 
+# The result field _scrub_disclosure adds.
+SCRUB_DISCLOSURE = "screenshot_pii_scrub"
+
+
 def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
     """The result field that says a screenshot went out without PII redaction.
 
@@ -55,7 +60,7 @@ def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
     `_scrub_screenshot_if_needed` records the reason on the screenshot dict.
     """
     reason = screenshot.get("pii_scrub_skipped")
-    return {"screenshot_pii_scrub": {"applied": False, "reason": reason}} if reason else {}
+    return {SCRUB_DISCLOSURE: {"applied": False, "reason": reason}} if reason else {}
 
 
 # The unscrubbed-screenshot WARNING's hint, by reason (round 7, item 18). The others (tesseract_not_found, and the
@@ -79,6 +84,56 @@ ARIA_SNAPSHOT_TIMEOUT_MS = 5000
 # frame right after the response that names it, so a minute is ample.
 SHARE_FRAME_LABEL = "share-frame"
 SHARE_FRAME_KEEP_SECONDS = 60.0
+# One frame answers every poll of a session that arrives within this long of its capture's end, and every poll that
+# arrives while it is being taken: a session costs one capture in this long, however many pages watch it, and less
+# than the five seconds between one page's polls, so each of those is a new frame.
+SHARE_FRAME_REUSE_SECONDS = 3.0
+
+
+class ShareFrame:
+    """One capture for the share page and when it ended, kept on its session (BrowserSession.share_frame) for the
+    polls that are answered from it (share_snapshot). It goes with the session."""
+
+    def __init__(self, capture: asyncio.Future[dict[str, Any]]) -> None:
+        self.capture = capture
+        self._ended_at: float | None = None
+        capture.add_done_callback(self._ended)
+
+    def _ended(self, capture: asyncio.Future[dict[str, Any]]) -> None:
+        self._ended_at = time.monotonic()
+        if not capture.cancelled():
+            # Read here: the polls that waited for it may all have gone, and a failure nobody read is reported as
+            # the task is collected.
+            capture.exception()
+
+    def spent(self) -> bool:
+        """Whether a poll that arrives now needs a capture of its own: this one was cancelled, or ended too long ago.
+        A capture that failed answers the polls of its window too, so a page that cannot be captured is not tried
+        once for every poll."""
+        if self._ended_at is None:
+            return False
+        return self.capture.cancelled() or time.monotonic() - self._ended_at >= SHARE_FRAME_REUSE_SECONDS
+
+    async def result(self) -> dict[str, Any]:
+        """The capture's snapshot, or its failure, once it has ended. The capture is every waiting poll's: a poll
+        that is cancelled here stops waiting, and the capture goes on for the rest.
+
+        Not asyncio.shield: from Python 3.13 that reports a capture's failure to the loop's exception handler
+        whenever a poll that waited for it was cancelled first, though the other polls are answered it.
+        """
+        if not self.capture.done():
+            ended: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+            def wake(_capture: asyncio.Future[dict[str, Any]]) -> None:
+                if not ended.done():
+                    ended.set_result(None)
+
+            self.capture.add_done_callback(wake)
+            try:
+                await ended
+            finally:
+                self.capture.remove_done_callback(wake)
+        return dict(self.capture.result())
 
 
 def _prune_share_frames(directory: Path, *, keep: Path) -> None:
@@ -89,7 +144,7 @@ def _prune_share_frames(directory: Path, *, keep: Path) -> None:
                 path.unlink(missing_ok=True)
     except OSError as exc:
         # Housekeeping: a failure must not take the viewer's frame down with it.
-        logger.warning("failed to prune share frames in %s: %s", directory, exc)
+        logger.warning("failed to prune share frames in %s: %s", directory, error_text_for_log(exc))
 
 
 def _staging_path(path: str) -> str:
@@ -180,8 +235,20 @@ class BrowserObservationService:
         waited on the viewer and its artifact directory filled with PNGs. This
         holds the lock for one redacted capture and two reads, and keeps only
         recent frames. It does not emit an observe event or touch the audit log.
+        A frame that could not be scrubbed says so as every other screenshot's result does (_scrub_disclosure).
+
+        Anyone who holds a link can poll, and several pages can be open on one session: one capture answers every
+        poll that arrives while it is taken or within SHARE_FRAME_REUSE_SECONDS of its end (ShareFrame). The session
+        is looked up for every poll first, so a closed session, or one that is not the caller's, is answered as that
+        and never from a frame.
         """
         session = await self.manager.get_session(session_id)
+        frame = session.share_frame
+        if frame is None or frame.spent():
+            frame = session.share_frame = ShareFrame(asyncio.ensure_future(self._take_share_frame(session)))
+        return await frame.result()
+
+    async def _take_share_frame(self, session: "BrowserSession") -> dict[str, Any]:
         async with session.lock:
             # The title is read after the frame, so it is checked after its read too.
             read = start_read(self.manager, session)
@@ -197,6 +264,8 @@ class BrowserObservationService:
                 "url": session.page.url,
                 "title": title,
                 "screenshot_path": screenshot["path"],
+                # A viewer is shown the frame all the same, so the page must be able to say it was not scrubbed.
+                **_scrub_disclosure(screenshot),
             }
         await asyncio.to_thread(_prune_share_frames, Path(session.artifact_dir), keep=Path(screenshot["path"]))
         return snapshot
@@ -264,7 +333,7 @@ class BrowserObservationService:
         if preset is None:
             preset = self.manager.settings.perception_preset_default
         if preset not in ("text", "fast", "normal", "rich"):
-            logger.warning("unknown perception preset %r; falling back to 'normal'", preset)
+            logger.warning("unknown perception preset %s; falling back to 'normal'", quoted_for_log(preset))
             preset = "normal"
 
         if preset == "fast":
@@ -524,7 +593,11 @@ class BrowserObservationService:
                 try:
                     Path(written["path"]).unlink(missing_ok=True)
                 except OSError as error:
-                    logger.warning("could not delete the part a failed capture wrote, %s: %s", written["path"], error)
+                    logger.warning(
+                        "could not delete the part a failed capture wrote, %s: %s",
+                        written["path"],
+                        error_text_for_log(error),
+                    )
                 read.refuse_raised()
             else:
                 _delete_when_done(capture, written["path"])
@@ -551,7 +624,7 @@ class BrowserObservationService:
             await session.context.tracing.stop(path=str(session.trace_path))
             session.trace_recording = False
         except Exception as exc:  # pragma: no cover - depends on external browser support
-            logger.warning("failed to stop tracing for session %s: %s", session.id, exc)
+            logger.warning("failed to stop tracing for session %s: %s", session.id, error_text_for_log(exc))
 
     async def page_summary(self, page: "Page", text_limit: int = 2000) -> dict[str, Any]:
         # One evaluate returns the text, outline, title and focused element, and
@@ -576,7 +649,7 @@ class BrowserObservationService:
         try:
             snapshot = await page.aria_snapshot(mode="ai", timeout=ARIA_SNAPSHOT_TIMEOUT_MS)
         except Exception as exc:
-            logger.debug("failed to capture accessibility snapshot: %s", exc)
+            logger.debug("failed to capture accessibility snapshot: %s", error_text_for_log(exc))
             return unavailable_outline("accessibility_snapshot_unavailable")
         # A large page's snapshot runs to megabytes (3 MB, ~0.25 s to parse, for
         # 20,000 links), so it is parsed off the event loop other sessions share.
@@ -645,7 +718,7 @@ class BrowserObservationService:
             # The file on disk is still the unredacted capture. Say so in the
             # result, the way the OCR-unavailable path does, and audit a failure,
             # not a redaction.
-            logger.warning("screenshot PII redaction error for session %s: %s", session.id, exc)
+            logger.warning("screenshot PII redaction error for session %s: %s", session.id, error_text_for_log(exc))
             screenshot["pii_scrub_skipped"] = "redaction_failed"
             await self._audit_screenshot_scrub(
                 session, "failed", {"event": "pii_redaction", "layer": "screenshot", "reason": "redaction_failed"}
@@ -670,4 +743,4 @@ class BrowserObservationService:
                 details=details,
             )
         except Exception as exc:
-            logger.warning("screenshot PII audit error for session %s: %s", session.id, exc)
+            logger.warning("screenshot PII audit error for session %s: %s", session.id, error_text_for_log(exc))

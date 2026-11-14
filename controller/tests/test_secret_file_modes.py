@@ -182,7 +182,7 @@ async def test_cron_store_with_webhook_keys_is_private(tmp_path: Path, chmods) -
     job = await CronService(path).create_job(name="nightly", goal="check", webhook_enabled=True)
 
     assert job["id"]
-    assert json.loads(path.read_text(encoding="utf-8"))[job["id"]]["webhook_key"]
+    assert json.loads(path.read_text(encoding="utf-8"))[job["id"]]["webhook_key_hash"]
     assert_private(chmods, path)
 
 

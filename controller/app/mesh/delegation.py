@@ -14,6 +14,7 @@ from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Awaitable, Callable, Optional
 
+from ..utils import RefusalLogWindows, error_text, error_text_for_log, held_back_note, quoted_for_log
 from .identity import NodeIdentity
 from .models import (
     DelegationRequest,
@@ -212,6 +213,8 @@ class DelegationManager:
         self._started_at = time.time()
         self._tool_gateway = tool_gateway
         self._approval_fn = approval_fn
+        # Which envelopes that failed verification are logged, by the peer each names as its sender.
+        self._invalid_envelope_log = RefusalLogWindows()
 
     # ------------------------------------------------------------------
     # Outbound
@@ -248,9 +251,9 @@ class DelegationManager:
             logger.warning(
                 "mesh.delegation.reply_verification_failed peer=%s error=%s",
                 peer_node_id,
-                exc,
+                error_text_for_log(exc),
             )
-            raise DelegationError(f"reply envelope verification failed: {exc}") from exc
+            raise DelegationError(f"reply envelope verification failed: {error_text(exc)}") from exc
 
         # Reply timestamp window — symmetric with inbound, closes a MITM replay vector
         # where a captured reply could be re-served long after the original. Against the clock the nonces expire by,
@@ -297,7 +300,7 @@ class DelegationManager:
         sender_id = envelope.sender_node_id
         peer = self._peers.get_optional(sender_id)
         if peer is None:
-            raise DelegationRejected(f"Unknown sender node_id={sender_id!r}")
+            raise DelegationRejected(f"Unknown sender node_id={quoted_for_log(sender_id)}")
 
         # Timestamp window — check before signature verification (cheap, fails fast). Against the clock the nonces
         # expire by, which never moves back (CB3-1): read raw, a clock stepped back put an envelope whose nonce had
@@ -328,14 +331,25 @@ class DelegationManager:
                 expected_recipient_node_id=self._identity.node_id,
             )
         except EnvelopeVerificationError as exc:
-            logger.warning("mesh.delegation.envelope_invalid sender=%s error=%s", sender_id, exc)
-            raise DelegationRejected(f"envelope verification failed: {exc}") from exc
+            # To get here a caller needs no key and no credential, only the id of a registered peer, and the error
+            # quotes the envelope's own fields, as long as the body cap allows. So one line a window for the peer
+            # named, with the count of the rest in the next, and the error quoted and cut as a refused request's path
+            # is (cut unquoted, the field's own quote was cut with it, and the cut mark read as the field's).
+            held_back = self._invalid_envelope_log.due(sender_id, now=time.monotonic())
+            if held_back is not None:
+                logger.warning(
+                    "mesh.delegation.envelope_invalid sender=%s error=%s%s",
+                    sender_id,
+                    error_text_for_log(exc),
+                    held_back_note(held_back, "sender"),
+                )
+            raise DelegationRejected(f"envelope verification failed: {error_text(exc)}") from exc
 
         # Decode request
         try:
             request = DelegationRequest.model_validate(payload)
         except Exception as exc:
-            raise DelegationRejected(f"Malformed DelegationRequest: {exc}") from exc
+            raise DelegationRejected(f"Malformed DelegationRequest: {error_text(exc)}") from exc
 
         # Nonce freshness — now safe to record: the sender is authenticated, and its request decodes (one that does
         # not runs nothing, and neither does its replay). Counted against the sender's own share of the cache, so a
@@ -345,16 +359,27 @@ class DelegationManager:
                 envelope.nonce, stamped_at=envelope.timestamp, now=now, owner=sender_id
             )
         except MeshReplayCacheFull as exc:
-            logger.warning("mesh.delegation.replay_cache_full sender=%s: the envelope was refused: %s", sender_id, exc)
+            logger.warning(
+                "mesh.delegation.replay_cache_full sender=%s: the envelope was refused: %s",
+                sender_id,
+                error_text_for_log(exc),
+            )
             raise
         if not fresh:
-            raise DelegationReplayError(f"nonce replay from sender={sender_id!r}")
+            raise DelegationReplayError(f"nonce replay from sender={quoted_for_log(sender_id)}")
 
         # Policy evaluation
         try:
             grant = self._policy.evaluate(peer, request)
         except PolicyError as exc:
-            logger.info("mesh.policy.denied peer=%s capability=%s reason=%s", sender_id, request.capability, exc)
+            # Quoted and cut, here and below: the capability and the session id are the peer's own text, as long as
+            # its body, and a line break in one must not start a log line. (The reason quotes the capability too.)
+            logger.info(
+                "mesh.policy.denied peer=%s capability=%s reason=%s",
+                sender_id,
+                quoted_for_log(request.capability),
+                error_text_for_log(exc),
+            )
             return DelegationResponse(
                 request_id=request.request_id,
                 status="rejected",
@@ -376,7 +401,7 @@ class DelegationManager:
             logger.info(
                 "mesh.delegation.approval_required peer=%s capability=%s approval_id=%s",
                 sender_id,
-                request.capability,
+                quoted_for_log(request.capability),
                 approval_id,
             )
             try:
@@ -402,7 +427,7 @@ class DelegationManager:
                 logger.info(
                     "mesh.delegation.approval_denied peer=%s capability=%s approval_id=%s status=%s",
                     sender_id,
-                    request.capability,
+                    quoted_for_log(request.capability),
                     approval_id,
                     approval_status,
                 )
@@ -455,7 +480,12 @@ class DelegationManager:
         # session:<verb> → session handler stub
         if cap.startswith("session:"):
             verb = cap[8:]
-            logger.info("mesh.delegation.session_verb verb=%s session_id=%s", verb, request.session_id)
+            logger.info(
+                "mesh.delegation.session_verb verb=%s session_id=%s",
+                quoted_for_log(verb),
+                quoted_for_log(request.session_id),
+            )
             return {"_mesh_error": True, "error": "session delegation not yet wired", "verb": verb}
 
-        return {"_mesh_error": True, "error": f"Unknown capability kind: {cap!r}"}
+        # Quoted, and cut as an unknown MCP method is: the peer's own text, as long as its body.
+        return {"_mesh_error": True, "error": f"Unknown capability kind: {quoted_for_log(cap)}"}

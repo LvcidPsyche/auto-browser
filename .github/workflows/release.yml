@@ -74,6 +74,10 @@ jobs:
               exit 1
             fi
           done
+      - name: Require the tag's CHANGELOG section
+        # github-release reads it as the release notes, but only after publish-pypi has published: a tag without a
+        # section of its own (or with an empty one) failed there, with the packages already on PyPI.
+        run: python scripts/extract_changelog.py "${GITHUB_REF_NAME#v}" > /dev/null
       - name: Build distributions
         run: |
           python -m pip install build

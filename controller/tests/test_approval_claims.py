@@ -239,7 +239,6 @@ class GiveBackScopeTests(SpendBase):
                 goal="save",
                 observation={},
                 provider_decision=ProviderDecision(provider="openai", model="m", decision=decision),
-                upload_approved=False,
                 approval_id=approval_id,
                 workflow_profile="governed",
             )
@@ -683,7 +682,6 @@ class GovernedUploadFileTests(SpendBase):
                 goal="attach",
                 observation={},
                 provider_decision=ProviderDecision(provider="openai", model="m", decision=decision),
-                upload_approved=False,
                 approval_id=None,
                 workflow_profile="governed",
             )
@@ -701,7 +699,6 @@ class GovernedUploadFileTests(SpendBase):
                 goal="attach",
                 observation={},
                 provider_decision=ProviderDecision(provider="openai", model="m", decision=decision),
-                upload_approved=False,
                 approval_id=None,
                 workflow_profile="governed",
             )

@@ -244,16 +244,18 @@ class ServedRequestTests(unittest.TestCase):
             f"Bearer  {STRONG_TOKEN}",
             f"Bearer {STRONG_TOKEN} ",
             f" Bearer {STRONG_TOKEN}\t",
+            # RFC 7235: the scheme is case-insensitive; the token is not, and stays an exact comparison.
+            f"bearer {STRONG_TOKEN}",
         ):
             with self.subTest(header=header):
                 self.assertEqual(client.get("/sessions", headers={"Authorization": header}).status_code, 200)
         for header in (
             f"Bearer {STRONG_TOKEN}x",
             f"Bearer {STRONG_TOKEN[:-1]}",
+            f"Bearer {STRONG_TOKEN.upper()}",
             "Bearer",
             "Bearer  ",
             f"Basic {STRONG_TOKEN}",
-            f"bearer {STRONG_TOKEN}",
             STRONG_TOKEN,
         ):
             with self.subTest(header=header):

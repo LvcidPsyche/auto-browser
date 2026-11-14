@@ -3,6 +3,7 @@ from __future__ import annotations
 from .config import Settings
 from .models import ProviderInfo, ProviderName
 from .providers import ClaudeAdapter, GeminiAdapter, OpenAIAdapter
+from .providers.base import auth_mode_shown
 from .providers.openai_compatible import build_openai_compatible_adapters
 
 
@@ -30,7 +31,8 @@ class ProviderRegistry:
                     provider=name,  # type: ignore[arg-type]
                     configured=configured,
                     model=adapter.default_model,
-                    auth_mode=adapter.auth_mode,
+                    # As shown, not as set: a value that is no mode may be a key on the wrong line (auth_mode_shown).
+                    auth_mode=auth_mode_shown(adapter.auth_mode),
                     detail=adapter.readiness_detail,
                     login_command=adapter.login_command,
                 )

@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..browser_scripts import AB_ATTR_MAX, AB_MAX_ATTRIBUTES, ELEMENT_ASSETS_SCRIPT, cap_text, cap_url
+from ..utils import error_text_for_log, quoted_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class CDPPassthrough:
         try:
             await self._cdp.detach()
         except Exception as exc:
-            logger.debug("cdp session detach failed (page likely closed): %s", exc)
+            logger.debug("cdp session detach failed (page likely closed): %s", error_text_for_log(exc))
 
     @contextlib.asynccontextmanager
     async def _css_agents(self) -> AsyncIterator[None]:
@@ -217,7 +218,7 @@ class CDPPassthrough:
         try:
             await self._send_bounded("CSS.disable")
         except Exception as exc:
-            logger.debug("cdp CSS.disable failed (page likely closed): %s", exc)
+            logger.debug("cdp CSS.disable failed (page likely closed): %s", error_text_for_log(exc))
         finally:
             self._agents_lock.release()
 
@@ -230,7 +231,10 @@ class CDPPassthrough:
             async with self._css_agents():
                 return await self._read_element(selector)
         except Exception as exc:
-            logger.warning("cdp.element_intelligence error selector=%r: %s", selector, exc)
+            # The selector is the caller's, and the error the browser's: quoted and cut.
+            logger.warning(
+                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), error_text_for_log(exc)
+            )
             return {"error": "cdp_element_intelligence_failed", "selector": selector}
 
     async def _read_element(self, selector: str) -> dict[str, Any]:
@@ -258,7 +262,7 @@ class CDPPassthrough:
             )
             node_id = result.get("nodeId", 0)
             if node_id == 0:
-                return {"error": f"Selector not found: {selector!r}"}
+                return {"error": f"Selector not found: {quoted_for_log(selector)}"}
 
             # Gather data in parallel conceptually (sequential here for clarity)
             attrs_raw = await self._cdp.send("DOM.getAttributes", {"nodeId": node_id})
@@ -346,7 +350,9 @@ class CDPPassthrough:
             }
 
         except Exception as exc:
-            logger.warning("cdp.element_intelligence error selector=%r: %s", selector, exc)
+            logger.warning(
+                "cdp.element_intelligence error selector=%s: %s", quoted_for_log(selector), error_text_for_log(exc)
+            )
             return {"error": "cdp_element_intelligence_failed", "selector": selector}
 
     async def raw_cdp_command(self, method: str, params: dict[str, Any] = None) -> dict[str, Any]:
@@ -356,8 +362,10 @@ class CDPPassthrough:
         """
         params = {} if params is None else params
         if not isinstance(method, str) or method not in _ALLOWED_CDP_COMMANDS:
+            # Quoted and cut, as an unknown MCP method is named: the caller's own text, as long as its body.
             raise ValueError(
-                f"CDP command {method!r} is not in the allowed list. Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
+                f"CDP command {quoted_for_log(method)} is not in the allowed list. "
+                f"Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
             )
         _check_params(method, params)
         try:
@@ -366,7 +374,8 @@ class CDPPassthrough:
                     return await self._cdp.send(method, params)
             result = await self._cdp.send(method, params)
         except Exception as exc:
-            logger.warning("cdp.raw_command error method=%r: %s", method, exc)
+            # The method is one of the allowlist's; the error is the browser's.
+            logger.warning("cdp.raw_command error method=%r: %s", method, error_text_for_log(exc))
             return {"error": "cdp_command_failed", "method": method}
         if method.startswith("DOM."):
             _blank_typed_passwords(result)

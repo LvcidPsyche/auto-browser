@@ -127,11 +127,15 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(shown, 'select_option · selector="#payment" · label=""')
 
     def test_what_a_type_types_and_whether_it_replaces_the_field_are_shown(self) -> None:
-        summary = approval_summary(
-            record(action="type", selector="#comment", text="I resign,\neffective today", clear_first=False)
-        )
+        asked = record(action="type", selector="#comment", text="I resign,\neffective today", clear_first=False)
+        # Where its field read plain (ApprovalRecord.field_read); until a read says so the text is hidden.
+        summary = approval_summary(asked.model_copy(update={"field_read": "plain"}))
 
         self.assertEqual(summary, 'type · selector="#comment" · text="I resign,\\neffective today" · clear_first=false')
+        self.assertEqual(
+            approval_summary(asked),
+            'type · selector="#comment" · text hidden: its field has not been read · clear_first=false',
+        )
 
     def test_a_sensitive_type_says_the_agent_hid_its_text_whatever_the_field(self) -> None:
         # The agent marks any field sensitive; the label says who hid the text, not that the field is a password.

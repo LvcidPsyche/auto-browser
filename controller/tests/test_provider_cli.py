@@ -98,7 +98,7 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         )
         adapter = OpenAIAdapter(settings)
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):
+        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
             self.assertIn("exec", command)
             self.assertIn("-c", command)
             self.assertIn("agents={}", command)

@@ -10,8 +10,9 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ...browser.page_read import start_read
+from ...browser.page_read import SESSION_BUSY_DETAIL, start_read
 from ...cdp.passthrough import CDPParamsError, CDPPassthrough
+from ...utils import error_text, error_text_for_log, quoted_for_log
 from .._utils import OFF_LIST_PAGE_DETAIL
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ async def cdp_raw_command(session_id: str, body: dict[str, Any], request: Reques
         try:
             return await _answered(cdp.raw_cdp_command(method, params))
         except CDPParamsError as exc:
-            raise HTTPException(422, str(exc)) from None
+            raise HTTPException(422, error_text(exc)) from None
         except ValueError:
             raise HTTPException(403, "CDP command is not permitted")
 
@@ -59,11 +60,12 @@ async def _allowed_cdp(app, session_id: str) -> AsyncIterator[Any]:
     manager = getattr(app.state, "browser_manager", None)
     session = manager.sessions.get(session_id) if manager is not None else None
     if session is None:
-        raise HTTPException(404, f"No CDP session for {session_id!r}")
+        # The id is the caller's, as long as the path: it is named cut.
+        raise HTTPException(404, f"No CDP session for {quoted_for_log(session_id)}")
     try:
         await asyncio.wait_for(session.lock.acquire(), timeout=CDP_TIMEOUT_SECONDS)
     except TimeoutError:
-        raise HTTPException(409, "The session is busy with another call. Try again.") from None
+        raise HTTPException(409, SESSION_BUSY_DETAIL) from None
     try:
         try:
             read = start_read(manager, session)
@@ -71,7 +73,7 @@ async def _allowed_cdp(app, session_id: str) -> AsyncIterator[Any]:
             raise HTTPException(403, OFF_LIST_PAGE_DETAIL) from None
         cdp = await _get_cdp(app, session_id)
         if cdp is None:
-            raise HTTPException(404, f"No CDP session for {session_id!r}")
+            raise HTTPException(404, f"No CDP session for {quoted_for_log(session_id)}")
         try:
             yield cdp
         except Exception:
@@ -112,8 +114,10 @@ async def _get_cdp(app, session_id: str):
     except TimeoutError:
         raise HTTPException(504, "The browser did not attach to the session's active tab in time.") from None
     except Exception as exc:
-        # Not the old passthrough: it reads a tab other than the one checked, maybe a refused one.
-        logger.warning("cdp: could not attach to the active tab of %s: %s", session_id, exc)
+        # Not the old passthrough: it reads a tab other than the one checked, maybe a refused one. The id is one this
+        # controller made (cdp_sessions holds it); the error is the browser's, which Playwright writes over several
+        # lines (its call log, the browser's own log): quoted and cut.
+        logger.warning("cdp: could not attach to the active tab of %s: %s", session_id, error_text_for_log(exc))
         raise HTTPException(503, "Could not attach to the session's active tab. Try again.") from None
     cdps[session_id] = fresh
     try:

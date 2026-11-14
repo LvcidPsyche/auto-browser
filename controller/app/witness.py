@@ -118,6 +118,8 @@ ActionClass = Literal[
 _HIGH_RISK_CLASSES = {"upload", "post", "payment", "account_change", "destructive", "auth"}
 
 REDACTED = "[REDACTED]"
+# The refusal of an action the policy blocked and gave no reason for (WitnessPolicyOutcome.block_reason).
+WITNESS_POLICY_BLOCKED = "Witness policy blocked this action"
 # Withheld from a restricted receipt by name, at any depth, beside a secret-named key (SECRET_KEY_FRAGMENTS): what an
 # action typed or uploaded, the free text an agent or a tool call wrote (an approval's reason previews the call's
 # arguments; a takeover's is the agent's own words), and an operator's comment on an approval decision. The approval

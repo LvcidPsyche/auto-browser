@@ -42,6 +42,7 @@ from .browser.services import (
     BrowserUploadService,
     BrowserWitnessService,
 )
+from .browser.services.observation import ShareFrame
 from .browser.window_births import WindowBirths
 from .config import Settings
 from .downloads import DownloadCaptureService
@@ -62,7 +63,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
-from .utils import spawn_background_task
+from .utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task
 from .witness import (
     ReceiptList,
     WitnessActionContext,
@@ -152,6 +153,8 @@ class BrowserSession:
     last_auth_state_path: Path | None = None
     # The last screenshot a checked read returned (see capture_session_screenshot).
     last_screenshot: dict[str, str] | None = None
+    # The frame the share page's polls are being answered from (observation.share_snapshot).
+    share_frame: ShareFrame | None = None
     auth_profile_name: str | None = None
     tunnel_error: str | None = None
     mouse_position: tuple[float, float] | None = None
@@ -168,6 +171,9 @@ class BrowserSession:
     owner: str | None = None
     # The browserContextId the pre-request gate owns for this session's context (None while it is off).
     gate_context_id: str | None = None
+    # Set once, as close_session starts tearing the session down; the session stays in manager.sessions until that
+    # teardown has ended. A create_session still running on the session reads it after each of its awaits.
+    closing: bool = False
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -255,8 +261,11 @@ class BrowserManager:
             self.settings.approval_root,
             db_path=self.settings.state_db_path,
             approval_ttl_minutes=self.settings.approval_ttl_minutes,
+            retention_days=self.settings.approval_retention_days,
+            refuse_self_approval=self.settings.approval_refuse_self_approval_operator_ids,
             audit=self.audit,
             rejection_receipt=self.approval_service.rejection_receipt,
+            may_use=self.approval_service.may_use,
         )
         self.artifacts = SessionArtifactService(self.settings.artifact_root)
         self.download_capture = DownloadCaptureService(
@@ -320,6 +329,8 @@ class BrowserManager:
         logger.info("starting browser manager")
         await self.approvals.startup()
         await self.audit.startup()
+        # Once the audit store is up, so the pass's event reaches the half its listings read. No session is open yet.
+        await self.approvals.prune_decided()
         await self.witness.startup()
         if self.settings.witness_enabled:
             await self.witness_remote.startup()
@@ -346,7 +357,9 @@ class BrowserManager:
                 try:
                     await self.close_session(session_id)
                 except Exception as exc:  # pragma: no cover - best effort cleanup
-                    logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
+                    logger.warning(
+                        "failed to close session %s during shutdown: %s", session_id, error_text_for_log(exc)
+                    )
 
         await self.request_gates.release_all()
         await self.window_births.release_all()
@@ -812,10 +825,13 @@ class BrowserManager:
         # fork route had none, and file://localhost/... passed this gate on the
         # strength of its host and opened local files in the browser.
         if parsed.scheme.lower() not in HTTP_URL_SCHEMES:
-            raise PermissionError(f"URL scheme {parsed.scheme!r} is not allowed; only http and https are")
+            # Cut as the host is below: the scheme is the caller's text, as long as its URL.
+            raise PermissionError(f"URL scheme {quoted_for_log(parsed.scheme)} is not allowed; only http and https are")
         host = parsed.hostname
         if not host:
-            raise PermissionError(f"Could not determine hostname for URL: {url}")
+            # No more of the URL than its scheme: a refusal's text is logged and kept in records, and this URL
+            # can hold userinfo and a query, as the caller sent them.
+            raise PermissionError(f"The {parsed.scheme.lower()} URL has no host name")
         patterns = self.settings.allowed_host_patterns
         if not patterns or "*" in patterns:
             return
@@ -824,7 +840,8 @@ class BrowserManager:
             normalized = pattern.removeprefix("*.")
             if fnmatch.fnmatch(host, pattern) or host == normalized or host.endswith(f".{normalized}"):
                 return
-        raise PermissionError(f"Host {host!r} is not allowlisted")
+        # The host is the caller's text, as long as its URL: cut, as a log line's text is.
+        raise PermissionError(f"Host {quoted_for_log(host)} is not allowlisted")
 
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)
@@ -1036,7 +1053,7 @@ class BrowserManager:
             self._assert_runtime_url_allowed(page.url)
         except PermissionError as exc:
             raise RefusedPageError(
-                f"The page navigated on its own to a host ALLOWED_HOSTS does not allow ({exc}) "
+                f"The page navigated on its own to a host ALLOWED_HOSTS does not allow ({error_text(exc)}) "
                 "and is being moved to about:blank. It is not read until it is navigated to an allowed URL."
             ) from exc
         if self.page_provenance.refused_by_another_page(page):

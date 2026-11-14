@@ -1,8 +1,12 @@
 import math
+import os
+import posixpath
 import random
 import re
 from functools import lru_cache
+from pathlib import PurePosixPath
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +31,8 @@ MESH_TIMESTAMP_WINDOW_MAX_SECONDS = 250.0
 # How long one OCR run may take before pytesseract kills tesseract (ACT-27): OCR runs under the session lock, for an
 # observation and, with screenshots redacted, before and after every action.
 OCR_TIMEOUT_SECONDS = 20.0
+# The controller's data directory, as the image and compose have it: what the CLI sandbox closes (app/cli_sandbox.py).
+CLI_SANDBOX_PROTECTED_ROOT = "/data"
 
 
 class Settings(BaseSettings):
@@ -39,6 +45,10 @@ class Settings(BaseSettings):
     # self-asserted X-Operator-Id header. The shared API_BEARER_TOKEN above
     # still works and still leaves identity unverified.
     api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS", repr=False, exclude=True)
+    # Operator ids, comma-separated, of the named credentials above that may use the surfaces no operator owns:
+    # the maintenance sweep and its status, the readiness report, the proxy persona routes and tools and the mesh
+    # peer list, over REST and MCP alike. Empty leaves them to every credential. See app/admin_operators.py.
+    api_admin_operators: str = Field("", alias="API_ADMIN_OPERATORS")
     # Where the controller keeps its own token when neither setting above is set.
     # A loopback controller generates one here on first start and demands it, and
     # a token placed here is used in any scope. Compose pins it to /data/api-token,
@@ -269,6 +279,12 @@ class Settings(BaseSettings):
     max_sessions: int = Field(1, alias="MAX_SESSIONS")
     require_approval_for_uploads: bool = Field(True, alias="REQUIRE_APPROVAL_FOR_UPLOADS")
     approval_ttl_minutes: int = Field(15, alias="APPROVAL_TTL_MINUTES")
+    # Days a decided approval (approved, rejected or executed) is kept after its decision; then its record is
+    # deleted, at startup and in each maintenance sweep (ApprovalStore.prune_decided). 0 keeps them all.
+    approval_retention_days: float = Field(30.0, alias="APPROVAL_RETENTION_DAYS")
+    # Operator ids (named credentials) refused an approve of an approval they asked for; comma-separated, empty
+    # (the default) refuses nobody. An agent's approval under AUTONOMOUS_APPROVALS is not affected.
+    approval_refuse_self_approval_operators: str = Field("", alias="APPROVAL_REFUSE_SELF_APPROVAL_OPERATORS")
     # Lets agents approve their own pending actions: MCP browser.approve_approval
     # and the built-in agent loop. Off, an operator approves every one.
     autonomous_approvals: bool = Field(False, alias="AUTONOMOUS_APPROVALS")
@@ -349,6 +365,16 @@ class Settings(BaseSettings):
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
     # Extra environment variable names (comma-separated) handed to provider CLI children as-is.
     cli_provider_env_passthrough: str = Field("", alias="CLI_PROVIDER_ENV_PASSTHROUGH")
+    # false: provider CLIs start without their Landlock sandbox (app/cli_sandbox.py), as before 1.18.0, with one
+    # warning; with CLI_SANDBOX_REQUIRED=true no provider CLI runs at all.
+    cli_sandbox_enabled: bool = Field(True, alias="CLI_SANDBOX_ENABLED")
+    # true: no provider CLI is run where app/cli_sandbox.py reports one of the conditions its module text lists.
+    # false: one warning, and the CLI runs.
+    cli_sandbox_required: bool = Field(False, alias="CLI_SANDBOX_REQUIRED")
+    # Directories (comma-separated, absolute, with no '..' part) a sandboxed provider CLI may write besides its home,
+    # the temp directories and /dev: a CODEX_HOME or CLAUDE_CONFIG_DIR kept elsewhere, a directory a tool of yours
+    # writes.
+    cli_sandbox_writable: str = Field("", alias="CLI_SANDBOX_WRITABLE")
 
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
@@ -391,7 +417,7 @@ class Settings(BaseSettings):
         alias="USER_AGENT_POOL",
     )
 
-    # Approval webhooks — notified when approvals are created or decided
+    # Approval webhooks — notified each time a call is held for a pending approval, not when one is decided
     approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL", repr=False)
     approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET", repr=False)
     # Off: a webhook host that is, or resolves to, any address that is not global is refused (app/webhooks.py). On,
@@ -460,8 +486,8 @@ class Settings(BaseSettings):
     # next to every secret the controller holds, and the shipped image has
     # neither a browser nor a display for it anyway.
     shadow_browse_enabled: bool = Field(False, alias="SHADOW_BROWSE_ENABLED")
-    # Post-session skill review by an LLM. Off unless asked for: it calls a paid
-    # model on every session close.
+    # Post-session skill review by an LLM. Off unless asked for; nothing calls
+    # the model yet.
     curator_enabled: bool = Field(False, alias="CURATOR_ENABLED")
     curator_provider: str = Field("claude", alias="CURATOR_PROVIDER")
     curator_model: str | None = Field(None, alias="CURATOR_MODEL")
@@ -469,10 +495,15 @@ class Settings(BaseSettings):
     # Cron / webhook triggers
     cron_store_path: str = Field("/data/crons/crons.json", alias="CRON_STORE_PATH")
     cron_max_jobs: int = Field(50, alias="CRON_MAX_JOBS")
+    # The zone cron schedules are read in, the same for the scheduler and every job: UTC unless set, not the host's.
+    cron_timezone: str = Field("UTC", alias="CRON_TIMEZONE")
 
     # Shared session links
     share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET", repr=False)
     share_token_ttl_minutes: int = Field(60, alias="SHARE_TOKEN_TTL_MINUTES")
+    # Which sessions' links were revoked, and up to which stamp (DELETE /sessions/{id}/share): kept so a restart does
+    # not bring a revoked link back.
+    share_revocation_store_path: str = Field("/data/share/revocations.json", alias="SHARE_REVOCATION_STORE_PATH")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -514,6 +545,33 @@ class Settings(BaseSettings):
             raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
         return value
 
+    @field_validator("cron_timezone", mode="before")
+    @classmethod
+    def _cron_timezone_is_known(cls, value: object) -> object:
+        # A misspelt zone stops startup here, with its name in the message, not at the first schedule read in it.
+        # "UTC" needs no lookup (APScheduler has it without the zone database); empty is the default, as unset is.
+        if not isinstance(value, str):
+            return value
+        name = value.strip() or "UTC"
+        if name != "UTC":
+            try:
+                ZoneInfo(name)
+            except (KeyError, OSError, ValueError):  # not found is a KeyError; a directory name is an OSError
+                raise ValueError(
+                    f"CRON_TIMEZONE must be an IANA time zone name such as UTC or America/Chicago, got {value!r}"
+                ) from None
+        return name
+
+    @field_validator("approval_retention_days")
+    @classmethod
+    def _approval_retention_not_negative(cls, value: float) -> float:
+        # Refused, not read as "off" the way the sweep's hours are: this one deletes records, and 0 is how to say keep.
+        if value < 0:
+            raise ValueError(
+                f"APPROVAL_RETENTION_DAYS must be 0 (keep every decided approval) or a number of days, got {value!r}"
+            )
+        return value
+
     @field_validator("mesh_timestamp_window")
     @classmethod
     def _mesh_timestamp_window_bounded(cls, value: float) -> float:
@@ -532,6 +590,24 @@ class Settings(BaseSettings):
         # pytesseract reads 0 as no timeout at all, and a negative one fails every run.
         if value <= 0:
             raise ValueError(f"OCR_TIMEOUT_SECONDS must be more than 0 seconds, got {value!r}")
+        return value
+
+    @field_validator("cli_sandbox_writable")
+    @classmethod
+    def _cli_sandbox_writable_entries(cls, value: str) -> str:
+        # A rule on the data directory, or on one that holds it, would open the controller's files to every CLI.
+        for entry in (item.strip() for item in value.split(",") if item.strip()):
+            written = PurePosixPath(posixpath.normpath("/" + entry.lstrip("/")))
+            if entry.startswith("/") and PurePosixPath(CLI_SANDBOX_PROTECTED_ROOT).is_relative_to(written):
+                raise ValueError(
+                    f"CLI_SANDBOX_WRITABLE must not name {CLI_SANDBOX_PROTECTED_ROOT} or a directory that holds it, "
+                    f"got {entry!r}"
+                )
+            # Linux reads a '..' after the link before it, which a CLI may have made: where it leads is not the text's.
+            if ".." in PurePosixPath(entry).parts:
+                raise ValueError(f"CLI_SANDBOX_WRITABLE takes no path with a '..' part, got {entry!r}")
+            if not os.path.isabs(entry):
+                raise ValueError(f"CLI_SANDBOX_WRITABLE takes absolute paths, got {entry!r}")
         return value
 
     @field_validator("cdp_connect_url", mode="before")
@@ -577,8 +653,22 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.cli_provider_env_passthrough.split(",") if item.strip()]
 
     @property
+    def cli_sandbox_writable_paths(self) -> list[str]:
+        return [item.strip() for item in self.cli_sandbox_writable.split(",") if item.strip()]
+
+    @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def api_admin_operator_ids(self) -> frozenset[str]:
+        return frozenset(item.strip() for item in self.api_admin_operators.split(",") if item.strip())
+
+    @property
+    def approval_refuse_self_approval_operator_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.strip() for item in self.approval_refuse_self_approval_operators.split(",") if item.strip()
+        )
 
     @property
     def mcp_allowed_origin_list(self) -> list[str]:

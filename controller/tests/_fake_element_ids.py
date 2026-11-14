@@ -23,5 +23,6 @@ class FakePageElementIds:
         *,
         timeout_ms: int | None = None,
         setup_timeout_ms: int | None = None,
+        keep_session: bool = False,
     ) -> Any:
         return await page.evaluate(script, arg)

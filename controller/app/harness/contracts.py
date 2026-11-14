@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..url_safety import refuse_ambiguous_host
+from ..utils import error_text
 
 PostconditionKind = Literal[
     "url_contains",
@@ -51,7 +52,7 @@ def _check_regex(value: str) -> None:
     try:
         re.compile(value)
     except (re.error, RecursionError, OverflowError) as err:
-        raise ValueError(f"url_matches value must be a valid regex: {err}") from None
+        raise ValueError(f"url_matches value must be a valid regex: {error_text(err)}") from None
 
 
 class Postcondition(HarnessModel):

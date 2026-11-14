@@ -24,7 +24,7 @@ from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
-from ...utils import UTC, run_to_completion, utc_now
+from ...utils import UTC, error_text, error_text_for_log, quoted_for_log, run_to_completion, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -68,7 +68,7 @@ def _task_cancelled() -> bool:
 
 def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
     """A page the controller itself loaded (a start_url, shadow browse's page) that failed for a reason of its own."""
-    text = getattr(exc, "message", None) or str(exc)
+    text = error_text(exc)
     first_line = text.splitlines()[0] if text else ""
     net_error = _NET_ERROR.match(first_line)
     if net_error:
@@ -79,7 +79,8 @@ def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
         reason = "the browser could not open it"
     # The operator's log keeps what the agent is not told: a failure that is no load failure is the one to look at.
     level = logging.INFO if reason != "the browser could not open it" else logging.WARNING
-    logger.log(level, "%s: the page did not load: %s", action, first_line[:300])
+    # The browser's first line, which can quote the page's URL: quoted, an ESC as its escape, and cut.
+    logger.log(level, "%s: the page did not load: %s", action, quoted_for_log(first_line))
     return BrowserActionError(
         _LOAD_FAILED[action].format(reason=reason), action=action, status_code=400, retryable=True
     )
@@ -192,8 +193,11 @@ class BrowserSessionService(SessionCreation):
         """
         try:
             record = await self.manager.session_store.get(session_id)
-        except Exception:  # message enrichment only; any store failure means "unknown"
-            logger.debug("no readable record for session %s", session_id, exc_info=True)
+        except Exception as exc:  # message enrichment only; any store failure means "unknown"
+            # The id is the caller's own text (a mesh peer's, an MCP caller's): quoted and cut. The error by its class
+            # alone, which tells no record (KeyError) from a store that failed: its text, and a traceback of it,
+            # repeat the id whole, and a ValidationError's the record's own fields.
+            logger.debug("no readable record for session %s: %s", quoted_for_log(session_id), type(exc).__name__)
             return None, None
         return (record.status, record.close_reason) if may_use(record.owner) else (None, None)
 
@@ -230,6 +234,9 @@ class BrowserSessionService(SessionCreation):
     async def _close_locked(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         session_id = session.id
         failed_steps: list[str] = []
+        # With the look at the tunnel below, and before the first await: a create still running on this session sees
+        # the mark at its next step, so a tunnel that reaches the session after this look is that create's to release.
+        session.closing = True
         try:
             if session.tunnel is not None:
                 await self._teardown_step(
@@ -331,7 +338,9 @@ class BrowserSessionService(SessionCreation):
                 )
             )
         except Exception as exc:
-            logger.error("could not record session %s as closed: %s", session.id, f"{type(exc).__name__}: {exc}"[:200])
+            logger.error(
+                "could not record session %s as closed: %s: %s", session.id, type(exc).__name__, error_text_for_log(exc)
+            )
 
     async def _lock_for_close(self, session: "BrowserSession") -> bool:
         """Take the session lock for closing, even from an action stuck on its page.
@@ -399,9 +408,10 @@ class BrowserSessionService(SessionCreation):
                 raise
             self._mark_gate_ending(browser, session_id, False)
             logger.error(
-                "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
+                "the isolated browser of session %s did not close (%s: %s): its pre-request gate stays attached",
                 session_id,
-                f"{type(exc).__name__}: {exc}"[:200],
+                type(exc).__name__,
+                error_text_for_log(exc),
             )
             return False
         await self._teardown_step(
@@ -423,7 +433,7 @@ class BrowserSessionService(SessionCreation):
                 "could not mark the pre-request gate of session %s's browser as %s: %s",
                 session_id,
                 "ending" if ending else "still in use",
-                exc,
+                error_text_for_log(exc),
             )
 
     @staticmethod
@@ -443,7 +453,7 @@ class BrowserSessionService(SessionCreation):
                 raise
             logger.warning("the step to %s for session %s was cancelled on its own", label, session_id)
         except Exception as exc:
-            logger.warning("failed to %s for session %s: %s", label, session_id, exc)
+            logger.warning("failed to %s for session %s: %s", label, session_id, error_text_for_log(exc))
         else:
             return True
         if failed_steps is not None:
@@ -588,7 +598,7 @@ class BrowserSessionService(SessionCreation):
             )
         except Exception as exc:
             # Chromium's text can name host paths, and over MCP this message reaches the agent: it is logged here.
-            logger.warning("shadow browse: the sandboxed headed Chromium did not start: %s", exc)
+            logger.warning("shadow browse: the sandboxed headed Chromium did not start: %s", error_text_for_log(exc))
             raise RuntimeError(
                 "Shadow browsing could not start its sandboxed headed Chromium. On Linux the sandbox needs "
                 "unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1, or an AppArmor profile "
@@ -659,7 +669,7 @@ class BrowserSessionService(SessionCreation):
                     self._roll_back_shadow(context, headed_browser, shadow_session, shadow_session_id)
                 )
             except Exception as exc:  # the error to raise is the one that started the rollback (R5C-11)
-                logger.error("the rollback of shadow session %s failed: %s", shadow_session_id, exc)
+                logger.error("the rollback of shadow session %s failed: %s", shadow_session_id, error_text_for_log(exc))
             raise
 
         await manager.audit.append(
@@ -737,7 +747,7 @@ class BrowserSessionService(SessionCreation):
             # have moved meanwhile, so its URL is shown as for any other read.
             return self.manager._shown_url(page), "", True
         except PlaywrightError as exc:
-            logger.debug("page snapshot failed for session %s: %s", session.id, exc)
+            logger.debug("page snapshot failed for session %s: %s", session.id, error_text_for_log(exc))
             return "", "", False
         # And after the read: the page can move while its title is read, and come back.
         if read.moved():
@@ -804,7 +814,10 @@ class BrowserSessionService(SessionCreation):
             await self.manager._persist_session(session, status="active")
         except Exception as exc:
             logger.warning(
-                "%s in session %s ran, but its session record could not be saved: %s", action, session.id, exc
+                "%s in session %s ran, but its session record could not be saved: %s",
+                action,
+                session.id,
+                error_text_for_log(exc),
             )
 
     def isolation_payload(self, session: "BrowserSession") -> dict[str, Any]:
@@ -852,7 +865,9 @@ class BrowserSessionService(SessionCreation):
         except Exception as exc:
             session.tunnel = None
             session.tunnel_error = "isolated tunnel provisioning failed"
-            logger.warning("failed to provision isolated tunnel for session %s: %s", session.id, exc)
+            logger.warning(
+                "failed to provision isolated tunnel for session %s: %s", session.id, error_text_for_log(exc)
+            )
 
     @staticmethod
     def auth_root_for(base_root: str, session_id: str) -> Path:

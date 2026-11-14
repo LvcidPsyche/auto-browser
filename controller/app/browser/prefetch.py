@@ -23,6 +23,8 @@ import json
 import logging
 from typing import Any
 
+from ..utils import error_text, error_text_for_log
+
 logger = logging.getLogger(__name__)
 
 SETTINGS_URL = "chrome://settings/performance"
@@ -48,7 +50,7 @@ async def turn_prefetch_off(browser: Any) -> Any:
     try:
         return await asyncio.wait_for(_set_pref(browser), timeout=PREF_TIMEOUT_SECONDS)
     except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        return {"error": f"{type(exc).__name__}: {error_text(exc)}"[:300]}
 
 
 async def _set_pref(browser: Any) -> Any:
@@ -104,4 +106,4 @@ async def _bounded_cleanup(step: Any, what: str) -> None:
     try:
         await asyncio.wait_for(step, timeout=CLEANUP_TIMEOUT_SECONDS)
     except Exception as exc:
-        logger.warning("prefetch preference: could not %s: %s", what, f"{type(exc).__name__}: {exc}"[:200])
+        logger.warning("prefetch preference: could not %s: %s: %s", what, type(exc).__name__, error_text_for_log(exc))

@@ -52,7 +52,9 @@ def register(registry, gateway):
             description=(
                 "Create a browser automation job that runs on a cron schedule "
                 "and/or via an HTTP webhook trigger. "
-                "The agent will pursue 'goal' for up to max_steps actions."
+                "The agent will pursue 'goal' for up to max_steps actions. "
+                "Every run of the job, scheduled or triggered, starts under this call's workflow_profile "
+                "(governed whatever it says where the deployment forces governed approvals)."
             ),
             input_model=CreateCronJobInput,
             handler=gateway._create_cron_job,
@@ -73,6 +75,30 @@ def register(registry, gateway):
             input_model=CronJobIdInput,
             handler=gateway._trigger_cron_job,
             governed_kind="write",
+            pack="cron",
+        ),
+        ToolSpec(
+            name="browser.rotate_cron_webhook_key",
+            description=(
+                "Replace a cron job's webhook key, or give the job its first. The previous key stops working at once. "
+                "The new key is in this result only and cannot be read again."
+            ),
+            input_model=CronJobIdInput,
+            handler=gateway._rotate_cron_webhook_key,
+            governed_kind="write",
+            # It ends the working key at once: a client that runs non-destructive tools without asking must ask.
+            destructive_hint=True,
+            pack="cron",
+        ),
+        ToolSpec(
+            name="browser.revoke_cron_webhook_key",
+            description=(
+                "Remove a cron job's webhook key. Its webhook trigger is then refused until a new key is made; "
+                "the job's schedule is not touched."
+            ),
+            input_model=CronJobIdInput,
+            handler=gateway._revoke_cron_webhook_key,
+            governed_kind="destructive",
             pack="cron",
         ),
     ]:

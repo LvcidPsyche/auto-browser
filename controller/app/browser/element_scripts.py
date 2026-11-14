@@ -15,8 +15,11 @@ MARKER_ATTRIBUTE = "data-auto-browser-target"
 # controls shadow the form's own properties, in this world too: in
 # <form><input name="parentNode"></form>, form.parentNode is that input, so a
 # walk up the tree that read it could be steered onto the element it was
-# looking for. Defines `dom`. In the main world (a selector target's focus
-# check) a page may have replaced one of them: the property is read as it is then.
+# looking for. A document's named elements shadow its properties likewise, in
+# the main world: with <img name="activeElement"> on the page,
+# document.activeElement is that img there. Defines `dom`. In the main world (a
+# selector target's focus check) a page may have replaced one of them: the
+# property is read as it is then.
 _DOM_JS = """const dom = (() => {
   const getter = (proto, name) => {
     const descriptor = Object.getOwnPropertyDescriptor(proto, name);
@@ -33,6 +36,9 @@ _DOM_JS = """const dom = (() => {
   const tagName = getter(Element.prototype, 'tagName');
   const isConnected = getter(Node.prototype, 'isConnected');
   const ownerDocument = getter(Node.prototype, 'ownerDocument');
+  const nodeType = getter(Node.prototype, 'nodeType');
+  const documentActive = getter(Document.prototype, 'activeElement');
+  const shadowActive = getter(ShadowRoot.prototype, 'activeElement');
   const dom = {
     // The element above: the parent element, or the host of the shadow root the element is in.
     up(el) {
@@ -46,6 +52,21 @@ _DOM_JS = """const dom = (() => {
       return false;
     },
     root: method(Node.prototype, 'getRootNode'),
+    // The focused element of a root, a document or a shadow root: null in the root of a tree that is in neither (a
+    // fragment, or an element the page took out of its tree). Whether a root is a shadow root is not read off the root:
+    // a page can give its own open shadow root a `host` (as it can an activeElement), which read as a property made the
+    // walk stop at the component. The prototype's getter is asked instead, and it throws for a fragment that is no
+    // shadow root, which has no focused element.
+    active(root) {
+      const type = nodeType.call(root);
+      if (type === 9) return documentActive.call(root);
+      if (type !== 11) return null;
+      try {
+        return shadowActive.call(root);
+      } catch (error) {
+        return null;
+      }
+    },
     shadowRoot: (el) => shadowRoot.call(el),
     tag: (el) => tagName.call(el).toUpperCase(),
     // Attached, and to this document: one a same-origin frame adopted has the frame's box.
@@ -438,13 +459,155 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # a selector target, without it.
 ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
   {_DOM_JS}
-  let active = dom.root(el).activeElement;
-  for (let root = active && dom.shadowRoot(active); root && root.activeElement; root = dom.shadowRoot(active)) {{
-    active = root.activeElement;
+  let active = dom.active(dom.root(el));
+  for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
+    active = dom.active(root);
   }}
   if (!active) return false;
   if (refuseFrames && active !== el && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) return false;
   return dom.within(active, el);
+}}"""
+
+# A field's own attributes, as is_sensitive_field reads them. Needs `dom`.
+_FIELD_ATTRIBUTES_JS = """(node) => {
+    const read = (name) => dom.attr(node, name) || '';
+    return {
+      type: read('type'),
+      name: read('name'),
+      id: read('id'),
+      placeholder: read('placeholder'),
+      'aria-label': read('aria-label'),
+      autocomplete: read('autocomplete'),
+    };
+  }"""
+
+# A type's hold on the node its text goes to. Defines `held`.
+# take(el): the node keys go to while focus is in the element: the innermost focused element from the element's
+# root, through open shadow roots, where it is the element or inside it. Not a frame: keys sent then go to its
+# document's own focused node, which this document cannot hold. A blur or a focus on the node from then on says
+# focus left it, though it came back (a field whose key sent focus to a password field, whose own key sent it back).
+# So does a focusin in the node's own open shadow root: focus that goes from the node into its shadow tree and back
+# fires neither a blur nor a focus on it (both ends of the move are the node, seen from outside the tree), and a
+# move into a root further down passes through that root too. A root the node has only since the take was heard by
+# nothing, so it says the same.
+# read(hold): the node's own attributes, as is_sensitive_field reads them, while it is still the innermost focused
+# element of its root and focus never left it; else null. One the page took out of its document is no root's
+# focused element. Run in the main world too, on a locator, for a selector target (see _DOM_JS).
+_HELD_FIELD_JS = f"""{_DOM_JS}
+const held = {{
+  focused(from) {{
+    let active = dom.active(dom.root(from));
+    for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
+      active = dom.active(root);
+    }}
+    return active || null;
+  }},
+  take(el) {{
+    const hold = {{ node: null, root: null, target: el, left: false, listener: null }};
+    const active = held.focused(el);
+    if (!active || !dom.within(active, el) || ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) {{
+      return hold;
+    }}
+    hold.node = active;
+    hold.root = dom.shadowRoot(active);
+    hold.listener = () => {{ hold.left = true; }};
+    for (const type of ['blur', 'focus']) active.addEventListener(type, hold.listener, true);
+    if (hold.root) hold.root.addEventListener('focusin', hold.listener, true);
+    return hold;
+  }},
+  read(hold) {{
+    const node = hold.node;
+    if (!node || hold.left || dom.shadowRoot(node) !== hold.root || held.focused(node) !== node) return null;
+    return ({_FIELD_ATTRIBUTES_JS})(node);
+  }},
+  release(hold) {{
+    if (!hold.node) return;
+    for (const type of ['blur', 'focus']) hold.node.removeEventListener(type, hold.listener, true);
+    if (hold.root) hold.root.removeEventListener('focusin', hold.listener, true);
+  }},
+}};"""
+
+# By selector the hold is a handle of the page's, taken on the locator's element: read, then read once more as it
+# is released (the handle is then given back). The release is in a finally: a read that throws (in the main world
+# a page can have replaced what it calls) left the hold's listeners on the node.
+FIELD_HOLD_TAKE_SCRIPT = f"""(el) => {{
+  {_HELD_FIELD_JS}
+  return held.take(el);
+}}"""
+FIELD_HOLD_READ_SCRIPT = f"""(hold) => {{
+  {_HELD_FIELD_JS}
+  return held.read(hold);
+}}"""
+FIELD_HOLD_RELEASE_SCRIPT = f"""(hold) => {{
+  {_HELD_FIELD_JS}
+  try {{
+    return held.read(hold);
+  }} finally {{
+    held.release(hold);
+  }}
+}}"""
+# By element_id the hold is the world's, kept under a nonce (the registry's fieldHolds, made here: a registry an
+# earlier version made has none). Taking it answers its first read. Both are reads, which the world sends again
+# when an answer is lost: a second take under the nonce reads the hold the first took, and a second release finds
+# none and answers null, as for a node that lost focus. The hold keeps the element, so the release finds it by its
+# id though the page has taken it out of the document. The hold leaves the registry, and its listeners the node, in
+# a finally: taken out first, a read that then threw left listeners nothing could find again.
+ELEMENT_FIELD_HOLD_SCRIPT = f"""(el, nonce, registry) => {{
+  {_HELD_FIELD_JS}
+  if (!registry.fieldHolds) registry.fieldHolds = new Map();
+  if (!registry.fieldHolds.has(nonce)) registry.fieldHolds.set(nonce, held.take(el));
+  return held.read(registry.fieldHolds.get(nonce));
+}}"""
+ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
+  {_HELD_FIELD_JS}
+  const hold = registry.fieldHolds && registry.fieldHolds.get(nonce);
+  if (!hold) return null;
+  try {{
+    return held.read(hold);
+  }} finally {{
+    registry.fieldHolds.delete(nonce);
+    held.release(hold);
+  }}
+}}"""
+
+# What an approval reads of the element its type names, before the type runs: every field the text could go to from
+# there. No node has focus for the text yet, so there is none to hold; the type's focus can put the text in the
+# element itself where it takes text (an input, a textarea, a select, an editable element), in the control of the
+# label it is, or in a field inside either, through open shadow roots. All of it in one call: the attributes of
+# each such field, and whether a frame is among what is named (the element, or one inside it), whose document is
+# not read. An input no typed text goes into (a hidden one, a checkbox, a button) is no field: a form's hidden
+# token would say secret of the whole form. A closed shadow root shows no node past it. Run in the main world
+# too, on a selector's element (see _DOM_JS).
+NAMED_FIELDS_SCRIPT = f"""(el) => {{
+  {_DOM_JS}
+  const frames = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'];
+  const noText = ['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color'];
+  const takesText = (node) =>
+    dom.matches(node, 'input, textarea, select, [contenteditable]:not([contenteditable="false" i])') &&
+    (dom.tag(node) !== 'INPUT' || !noText.includes((dom.attr(node, 'type') || '').trim().toLowerCase()));
+  const fields = new Set();
+  let frame = false;
+  const look = (node) => {{
+    if (frames.includes(dom.tag(node))) frame = true;
+    else if (takesText(node)) fields.add(node);
+  }};
+  const lookInside = (root) => {{
+    for (const node of root.querySelectorAll('*')) {{
+      look(node);
+      const shadow = dom.shadowRoot(node);
+      if (shadow) lookInside(shadow);
+    }}
+  }};
+  const named = [el];
+  if (dom.tag(el) === 'LABEL' && el.control) named.push(el.control);
+  for (const node of named) {{
+    look(node);
+    const shadow = dom.shadowRoot(node);
+    if (shadow) lookInside(shadow);
+    lookInside(node);
+  }}
+  if (el.isContentEditable === true) fields.add(el);
+  return {{ fields: Array.from(fields, {_FIELD_ATTRIBUTES_JS}), frame }};
 }}"""
 
 # Playwright's selectOptions, on the element: scrolls an enabled, visible

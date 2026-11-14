@@ -31,7 +31,7 @@ from .browser_sandbox import (
     refusal,
     verified_on,
 )
-from .utils import spawn_background_task
+from .utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +315,7 @@ class DockerBrowserNodeProvisioner:
         try:
             orphans = client.containers.list(all=True, filters={"label": f"{_MANAGED_LABEL}=true"})
         except Exception as exc:
-            logger.warning("Could not list orphaned browser containers: %s", exc)
+            logger.warning("Could not list orphaned browser containers: %s", error_text_for_log(exc))
             return
         still_running: set[str] = set()
         for container in orphans:
@@ -323,7 +323,7 @@ class DockerBrowserNodeProvisioner:
             try:
                 container.remove(force=True)
             except Exception as exc:
-                logger.warning("Failed to remove orphaned browser container %s: %s", name, exc)
+                logger.warning("Failed to remove orphaned browser container %s: %s", name, error_text_for_log(exc))
                 # It may still have its profile mounted: leave that directory.
                 still_running.add((getattr(container, "labels", None) or {}).get(_SESSION_ID_LABEL, ""))
                 continue
@@ -344,7 +344,7 @@ class DockerBrowserNodeProvisioner:
         except FileNotFoundError:
             return
         except OSError as exc:
-            logger.warning("Could not list leftover session runtime dirs in %s: %s", root, exc)
+            logger.warning("Could not list leftover session runtime dirs in %s: %s", root, error_text_for_log(exc))
             return
         client = self._ensure_context()
         for session_id in leftovers:
@@ -365,7 +365,7 @@ class DockerBrowserNodeProvisioner:
         try:
             listed = client.networks.list(filters={"label": f"{_MANAGED_LABEL}=true"})
         except Exception as exc:
-            logger.warning("Could not list orphaned browser session networks: %s", exc)
+            logger.warning("Could not list orphaned browser session networks: %s", error_text_for_log(exc))
             return
         orphans = []
         for network in listed:
@@ -389,13 +389,17 @@ class DockerBrowserNodeProvisioner:
                     network.disconnect(controller_id, force=True)
                 except Exception as exc:
                     # Usually "is not connected": nothing to undo.
-                    logger.debug("Controller was not attached to orphaned network %s: %s", name, exc)
+                    logger.debug(
+                        "Controller was not attached to orphaned network %s: %s", name, error_text_for_log(exc)
+                    )
                 else:
                     self._forget_session_subnets(network)
             try:
                 network.remove()
             except Exception as exc:
-                logger.warning("Failed to remove orphaned browser session network %s: %s", name, exc)
+                logger.warning(
+                    "Failed to remove orphaned browser session network %s: %s", name, error_text_for_log(exc)
+                )
                 continue
             self._forget_session_subnets(network)
             logger.info("Reaped orphaned browser session network %s", name)
@@ -464,7 +468,9 @@ class DockerBrowserNodeProvisioner:
                 await asyncio.to_thread(self._cleanup_pending_container, pending)
             except Exception as exc:  # the original error is the one to raise; this one is logged
                 logger.warning(
-                    "Could not release browser container %s after a failed provision: %s", pending.container_name, exc
+                    "Could not release browser container %s after a failed provision: %s",
+                    pending.container_name,
+                    error_text_for_log(exc),
                 )
             raise
 
@@ -488,7 +494,9 @@ class DockerBrowserNodeProvisioner:
             self._cleanup_pending_container(pending)
         except Exception as exc:  # its caller is gone, so this is logged, not raised
             logger.warning(
-                "Could not release browser container %s after a cancelled provision: %s", pending.container_name, exc
+                "Could not release browser container %s after a cancelled provision: %s",
+                pending.container_name,
+                error_text_for_log(exc),
             )
 
     async def _report_abandoned_provision(
@@ -499,7 +507,9 @@ class DockerBrowserNodeProvisioner:
             await provisioning
         except Exception as exc:  # it removed what it had made (_provision_container_sync), and its caller is gone
             logger.warning(
-                "isolated session %s: provisioning failed after its create was cancelled: %s", session_id, exc
+                "isolated session %s: provisioning failed after its create was cancelled: %s",
+                session_id,
+                error_text_for_log(exc),
             )
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
@@ -540,15 +550,15 @@ class DockerBrowserNodeProvisioner:
         except (OSError, ValueError) as exc:
             if setting == "on":
                 raise RuntimeError(
-                    f"BROWSER_SANDBOX=on, but the seccomp profile {path} cannot be read ({exc}): the session's "
-                    "browser could not be sandboxed, so it was not started. Restore "
+                    f"BROWSER_SANDBOX=on, but the seccomp profile {path} cannot be read ({error_text(exc)}): the "
+                    "session's browser could not be sandboxed, so it was not started. Restore "
                     "app/browser/seccomp/chromium-sandbox.json or set ISOLATED_BROWSER_SECCOMP_PROFILE."
                 ) from exc
             logger.warning(
                 "Seccomp profile %s cannot be read (%s): isolated browsers start under Docker's default profile, "
                 "where Chromium's sandbox cannot run, so BROWSER_SANDBOX=auto falls back to an unsandboxed Chromium.",
                 path,
-                exc,
+                error_text_for_log(exc),
             )
             return [_NO_NEW_PRIVILEGES], "builtin"
         shipped = Path(path).resolve() == SECCOMP_PROFILE_PATH.resolve()
@@ -564,8 +574,9 @@ class DockerBrowserNodeProvisioner:
             try:
                 options = (self._ensure_context().info() or {}).get("SecurityOptions") or []
             except Exception as exc:  # the API is unreachable here; container creation will say so itself
-                self._seccomp_error = str(exc)[:300]
-                logger.debug("docker info failed (%s); assuming seccomp support", exc)
+                # Quoted and cut, as startup's WARNING writes it.
+                self._seccomp_error = error_text_for_log(exc)
+                logger.debug("docker info failed (%s); assuming seccomp support", error_text_for_log(exc))
                 return True
             self._seccomp_supported = any(str(option).startswith("name=seccomp") for option in options)
         return self._seccomp_supported
@@ -680,7 +691,10 @@ class DockerBrowserNodeProvisioner:
                 except Exception as exc:
                     # The answer only decides whether to warn; GwPriority is sent either way, so a version that
                     # cannot be read never fails a session. Assumed supported, which drops only the warning.
-                    logger.debug("could not read the Docker API version (%s); assuming GwPriority is honoured", exc)
+                    logger.debug(
+                        "could not read the Docker API version (%s); assuming GwPriority is honoured",
+                        error_text_for_log(exc),
+                    )
                     self._gw_priority_ok = True
             return self._gw_priority_ok
 
@@ -740,14 +754,14 @@ class DockerBrowserNodeProvisioner:
         try:
             existing = self._safe_get_container(client, container_name)
         except Exception as exc:
-            logger.warning("Could not look up a stale container %s: %s", container_name, exc)
+            logger.warning("Could not look up a stale container %s: %s", container_name, error_text_for_log(exc))
             return "could not be looked up"
         if existing is None:
             return None
         try:
             existing.remove(force=True)
         except Exception as exc:
-            logger.warning("Could not remove stale container %s: %s", container_name, exc)
+            logger.warning("Could not remove stale container %s: %s", container_name, error_text_for_log(exc))
             return "could not be removed"
         return None
 
@@ -764,7 +778,7 @@ class DockerBrowserNodeProvisioner:
                 internal=False,
             )
         except Exception as exc:
-            if _ADDRESS_POOL_EXHAUSTED in str(exc).lower():
+            if _ADDRESS_POOL_EXHAUSTED in error_text(exc).lower():
                 raise RuntimeError(
                     f"Docker has no free address pool for the session network {network_name}: every isolated "
                     "session gets its own bridge network, and the daemon's default pools allow about 30. Close "
@@ -774,7 +788,7 @@ class DockerBrowserNodeProvisioner:
             # The daemon answers 409 Conflict ("network with name ... already exists"). A
             # leftover of this session id carrying our labels was already removed, so this
             # one belongs to someone else and is never removed here.
-            if getattr(exc, "status_code", None) == 409 or "already exists" in str(exc).lower():
+            if getattr(exc, "status_code", None) == 409 or "already exists" in error_text(exc).lower():
                 raise RuntimeError(
                     f"A Docker network named {network_name} already exists and is not a session network of this "
                     "controller (it lacks the auto-browser.managed and auto-browser.session_id labels), so it is "
@@ -804,7 +818,9 @@ class DockerBrowserNodeProvisioner:
             try:
                 network.disconnect(controller_id, force=True)
             except Exception as exc:
-                logger.warning("Could not disconnect the controller from session network %s: %s", name, exc)
+                logger.warning(
+                    "Could not disconnect the controller from session network %s: %s", name, error_text_for_log(exc)
+                )
             else:
                 # Its peers can no longer reach the controller on it.
                 self._forget_session_subnets(network)
@@ -814,7 +830,7 @@ class DockerBrowserNodeProvisioner:
         try:
             network.remove()
         except Exception as exc:
-            logger.warning("Could not remove session network %s: %s", name, exc)
+            logger.warning("Could not remove session network %s: %s", name, error_text_for_log(exc))
             return
         self._forget_session_subnets(network)
 
@@ -922,7 +938,9 @@ class DockerBrowserNodeProvisioner:
                 if problem is None:
                     raise
                 # The container's failure is the one reported (R5C-10); the network's is logged beside it.
-                logger.warning("Could not release session network %s: %s", runtime.network_name, exc)
+                logger.warning(
+                    "Could not release session network %s: %s", runtime.network_name, error_text_for_log(exc)
+                )
         if problem is not None:
             # The container may still run with the profile and downloads mounted: emptying them under it is not a
             # release. They stay, as the startup sweep leaves a container's that it could not remove.
@@ -950,7 +968,7 @@ class DockerBrowserNodeProvisioner:
         try:
             container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(client, name)
         except Exception as exc:  # an unreachable daemon is not a gone container (NAV-16)
-            logger.warning("Could not look up browser container %s: %s", name, exc)
+            logger.warning("Could not look up browser container %s: %s", name, error_text_for_log(exc))
             return "could not be looked up", exc, None
         if container is None:
             return None, None, None
@@ -963,9 +981,11 @@ class DockerBrowserNodeProvisioner:
         except Exception as exc:
             if keep:
                 # Nothing removes a kept container, so it may still run: a partial teardown, not a release (R5C-4).
-                logger.warning("Could not stop browser container %s: %s", name, exc)
+                logger.warning("Could not stop browser container %s: %s", name, error_text_for_log(exc))
                 return "could not be stopped", exc, None
-            logger.debug("Could not stop browser container %s: %s", name, exc)  # the forced removal below stops it
+            logger.debug(
+                "Could not stop browser container %s: %s", name, error_text_for_log(exc)
+            )  # the forced removal below stops it
         if keep:
             return None, None, None
         try:
@@ -973,7 +993,7 @@ class DockerBrowserNodeProvisioner:
         except not_found:
             return None, None, None  # gone already: nothing holds the profile
         except Exception as exc:
-            logger.warning("Could not remove browser container %s: %s", name, exc)
+            logger.warning("Could not remove browser container %s: %s", name, error_text_for_log(exc))
             return "could not be removed", exc, container
         return None, None, None
 
@@ -1000,7 +1020,9 @@ class DockerBrowserNodeProvisioner:
                     network.disconnect(controller_id, force=True)
                 except Exception as exc:
                     logger.warning(
-                        "Could not disconnect the controller from session network %s: %s", runtime.network_name, exc
+                        "Could not disconnect the controller from session network %s: %s",
+                        runtime.network_name,
+                        error_text_for_log(exc),
                     )
                 else:
                     self._forget_session_subnets(network)
@@ -1013,7 +1035,7 @@ class DockerBrowserNodeProvisioner:
                     "Could not disconnect browser container %s from session network %s: %s",
                     runtime.container_name,
                     runtime.network_name,
-                    exc,
+                    error_text_for_log(exc),
                 )
         self._remove_session_network(network, runtime.session_id, controller_id)
 
@@ -1034,7 +1056,10 @@ class DockerBrowserNodeProvisioner:
         """
         if not _SESSION_DIR_NAME.fullmatch(session_id or "") or session_id in {".", ".."}:
             # One plain path component only: an id like 'a/../b' resolves inside the runtime root, but names b.
-            logger.warning("Refusing to remove the runtime dir of session %r: not a plain directory name", session_id)
+            logger.warning(
+                "Refusing to remove the runtime dir of session %s: not a plain directory name",
+                quoted_for_log(session_id),
+            )
             return
         runtime_root = self._local_runtime_root(session_id)
         try:
@@ -1053,7 +1078,14 @@ class DockerBrowserNodeProvisioner:
                     # The helper's host path is built from the validated id, never from a resolved path.
                     self._empty_as_browser_user(client, session_id, Path(session_id))
             failures: list[str] = []
-            shutil.rmtree(resolved, onerror=lambda _func, path, exc: failures.append(f"{path}: {exc[1]}"))
+            # Each quoted and cut: an entry here is the browser's, by a name the controller did not choose, and the
+            # error's text repeats it.
+            shutil.rmtree(
+                resolved,
+                onerror=lambda _func, path, exc: failures.append(
+                    f"{quoted_for_log(path)}: {error_text_for_log(exc[1])}"
+                ),
+            )
             if resolved.exists():
                 left = sum(1 for _ in resolved.rglob("*"))
                 logger.warning(
@@ -1066,7 +1098,7 @@ class DockerBrowserNodeProvisioner:
             else:
                 logger.debug("Removed isolated session runtime dir %s", resolved)
         except Exception as exc:
-            logger.warning("Could not remove runtime dir for session %s: %s", session_id, exc)
+            logger.warning("Could not remove runtime dir for session %s: %s", session_id, error_text_for_log(exc))
 
     @staticmethod
     def _real_browser_dirs(runtime_root: Path) -> bool:
@@ -1122,7 +1154,9 @@ class DockerBrowserNodeProvisioner:
                 labels={**_session_labels(session_id), _ROLE_LABEL: "cleanup"},
             )
         except Exception as exc:
-            logger.warning("Could not empty session %s's browser dirs as the browser user: %s", session_id, exc)
+            logger.warning(
+                "Could not empty session %s's browser dirs as the browser user: %s", session_id, error_text_for_log(exc)
+            )
 
     def _ensure_context(self):
         if self._client is None:
@@ -1183,7 +1217,7 @@ class DockerBrowserNodeProvisioner:
         except Exception as exc:
             raise RuntimeError(
                 f"Could not find the controller container {self._controller_container_id!r} on the isolation "
-                f"Docker daemon ({exc}). {hint}"
+                f"Docker daemon ({error_text(exc)}). {hint}"
             ) from exc
         self._controller_container = container
         return container
@@ -1193,7 +1227,7 @@ class DockerBrowserNodeProvisioner:
         try:
             return str(self._get_controller_container(client).id)
         except Exception as exc:
-            logger.debug("Controller container lookup failed during cleanup: %s", exc)
+            logger.debug("Controller container lookup failed during cleanup: %s", error_text_for_log(exc))
             return self._controller_container_id or None
 
     async def _wait_for_ws_endpoint(self, container, endpoint_file: Path) -> str:
@@ -1215,7 +1249,7 @@ class DockerBrowserNodeProvisioner:
             try:
                 endpoint = await asyncio.to_thread(read_endpoint_file, endpoint_file)
             except EndpointFileError as exc:
-                raise RuntimeError(f"Isolated browser container {container.name}: {exc}") from None
+                raise RuntimeError(f"Isolated browser container {container.name}: {error_text(exc)}") from None
             if endpoint:
                 return endpoint
             await asyncio.sleep(0.25)

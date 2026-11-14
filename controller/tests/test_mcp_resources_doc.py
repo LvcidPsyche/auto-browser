@@ -7,19 +7,24 @@ No browser/network — inspects the module source and the doc text.
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
+from app.mcp_transport import McpHttpTransport
+
 _REPO = Path(__file__).resolve().parents[2]
 _DOC = _REPO / "examples" / "mcp-resources.md"
+_CLIENTS_DOC = _REPO / "docs" / "mcp-clients.md"
 _TRANSPORT = _REPO / "controller" / "app" / "mcp_transport.py"
 
 
 class McpResourcesDocTests(unittest.TestCase):
     def setUp(self) -> None:
-        if not _DOC.exists() or not _TRANSPORT.exists():  # repo layout absent in the controller image
-            self.skipTest(f"doc-sync sources unavailable: {_DOC}")
+        if not _DOC.exists() or not _CLIENTS_DOC.exists() or not _TRANSPORT.exists():  # repo layout absent in the image
+            self.skipTest(f"doc-sync sources unavailable: {_DOC}, {_CLIENTS_DOC}")
         self.doc = _DOC.read_text(encoding="utf-8")
+        self.clients_doc = _CLIENTS_DOC.read_text(encoding="utf-8")
         self.transport = _TRANSPORT.read_text(encoding="utf-8")
 
     def test_documented_resource_schemes_exist_in_code(self) -> None:
@@ -45,6 +50,30 @@ class McpResourcesDocTests(unittest.TestCase):
         self.assertIn("-32002", self.transport)
         self.assertIn("-32002", self.doc)
         self.assertIn("-32602", self.doc)
+
+    def test_the_doc_does_not_promise_a_notification_for_every_change(self) -> None:
+        self.assertNotIn("whenever that resource changes", self.doc)
+        self.assertNotIn("When a subscribed resource changes", self.clients_doc)
+
+    def test_the_doc_says_a_session_has_one_stream_and_that_notifications_are_not_replayed(self) -> None:
+        self.assertIn("one live stream", self.clients_doc)
+        self.assertIn("not replayed", self.clients_doc)
+
+    def test_documented_notifications_match_the_code(self) -> None:
+        uris = [f"browser://s/{kind}" for kind in ("screenshot", "dom", "console", "network")]
+        for event in ("observe", "action", "session", "approval"):
+            with self.subTest(event=event):
+                row = re.search(rf"^\| `{event}`[^|]*\| (.+) \|$", self.doc, re.MULTILINE)
+                self.assertIsNotNone(row, f"{event} is missing from the notification table")
+                documented = set(re.findall(r"browser://<id>/(\w+)", row.group(1)))
+
+                notified = McpHttpTransport._updated_resource_uris({"event": event, "session_id": "s"}, subscribed=uris)
+
+                self.assertEqual(documented, {uri.rsplit("/", 1)[1] for uri in notified})
+
+    def test_the_doc_says_the_audit_events_are_read_not_notified(self) -> None:
+        self.assertIn("browser://audit/events", self.doc)
+        self.assertIn("poll it with `resources/read`", self.doc)
 
 
 if __name__ == "__main__":

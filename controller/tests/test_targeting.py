@@ -52,6 +52,7 @@ def _service(page) -> tuple[BrowserActionService, SimpleNamespace]:
             human_typing_max_delay_ms=2,
             default_viewport_width=1280,
             default_viewport_height=720,
+            action_timeout_ms=15000,  # a click's budget when its caller names none
         ),
         get_session=lambda _sid: _as_awaitable(session),
         _run_action=run_action,

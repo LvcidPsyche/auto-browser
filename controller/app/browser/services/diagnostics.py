@@ -19,8 +19,9 @@ from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
 from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
-from ...utils import UTC, spawn_background_task
+from ...utils import UTC, error_text, error_text_for_log, quoted_for_log, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
+from ..page_read import REFUSED_NETWORK_LOG_DETAIL, locked_read
 from ..window_births import BirthVerdict
 from .observation import _scrub_disclosure
 
@@ -166,21 +167,24 @@ class BrowserDiagnosticsService:
         url_contains: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        async with session.lock:
-            inspector = session.network_inspector
-            if inspector is None:
+        # The log holds the URL of every request, the refused page's included: refused as a raw CDP read of that
+        # page is, with a text that names no host (this is what an MCP caller reads). The page is checked before and
+        # under the lock and after the summary, which awaits: the entries are read last, with nothing awaited between
+        # them and that check.
+        try:
+            async with locked_read(self.manager, session):
+                summary = await self.manager._session_summary(session)
+                inspector = session.network_inspector
+                if inspector is None:
+                    return {"session": summary, "enabled": False, "entries": [], "summary": {}}
                 return {
-                    "session": await self.manager._session_summary(session),
-                    "enabled": False,
-                    "entries": [],
-                    "summary": {},
+                    "session": summary,
+                    "enabled": True,
+                    "entries": inspector.entries(limit=limit, method=method, url_contains=url_contains),
+                    "summary": inspector.summary(),
                 }
-            return {
-                "session": await self.manager._session_summary(session),
-                "enabled": True,
-                "entries": inspector.entries(limit=limit, method=method, url_contains=url_contains),
-                "summary": inspector.summary(),
-            }
+        except PermissionError:
+            raise PermissionError(REFUSED_NETWORK_LOG_DETAIL) from None
 
     def attach_popup(self, page: "Page", session: "BrowserSession") -> None:
         """Attach to a page the context reports, refused until its opener has judged it.
@@ -377,7 +381,7 @@ class BrowserDiagnosticsService:
         session.attached_pages.add(page)
 
         page.on("console", lambda message: self._keep_output(page, session.console_messages, console_entry(message)))
-        page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, str(error)))
+        page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, error_text(error)))
         page.on("request", lambda request: self._on_request_started(session, page, request))
         page.on("requestfailed", lambda request: self._record_request_failure(session, page, request))
         page.on("response", lambda response: self._on_response(page, response))
@@ -548,7 +552,9 @@ class BrowserDiagnosticsService:
             except PlaywrightError:
                 self.manager.page_provenance.blank_failed(page)
                 if page.is_closed():
-                    logger.debug("page for session %s closed while it was moved off %s", session.id, url)
+                    logger.debug(
+                        "page for session %s closed while it was moved off %s", session.id, quoted_for_log(url)
+                    )
                     return
                 raise
             except BaseException:
@@ -730,7 +736,7 @@ class BrowserDiagnosticsService:
                 logger.warning(
                     "failed to persist download metadata for session %s: %s",
                     session.id,
-                    exc,
+                    error_text_for_log(exc),
                 )
 
     async def screenshot_diff(self, session_id: str) -> dict[str, Any]:
@@ -814,7 +820,7 @@ class BrowserDiagnosticsService:
                 "height": img_a.height,
             }
         except Exception as exc:
-            logger.warning("screenshot diff failed: %s", exc)
+            logger.warning("screenshot diff failed: %s", error_text_for_log(exc))
             return {
                 "error": "screenshot_diff_failed",
                 "changed_pixels": -1,

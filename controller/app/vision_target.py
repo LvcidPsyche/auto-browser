@@ -17,18 +17,83 @@ Usage:
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
 import httpx
+from PIL import Image
 
 from .config import ANTHROPIC_DEFAULT_BASE_URL
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+
+class VisionReplyError(RuntimeError):
+    """The model's reply cannot be used as an answer: not found is an answer, this is not.
+
+    Its message says what was wrong and never quotes the reply, which is model output about a page.
+    """
+
+
+def _refused(raw_text: str, why: str, error_class: str) -> VisionReplyError:
+    """The error for an unusable reply, logged by its length and the failure's class: never the reply itself."""
+    logger.warning("vision targeting: unusable reply of %d characters: %s", len(raw_text), error_class)
+    return VisionReplyError(f"The vision model's reply could not be used: {why}.")
+
+
+def _reply_object(raw_text: str) -> dict[str, Any]:
+    """The reply as the JSON object the prompt asks for; anything else raises VisionReplyError."""
+    text = raw_text
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    try:
+        reply = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise _refused(raw_text, "it was not JSON", type(exc).__name__) from None
+    if not isinstance(reply, dict):
+        raise _refused(raw_text, "it was not a JSON object", type(reply).__name__)
+    return reply
+
+
+def _finite_number(value: Any) -> float | None:
+    """``value`` as a float, if it is a JSON number a float can hold; a boolean is not one (Python's bool is an int)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _checked_point(reply: dict[str, Any], raw_text: str, image_bytes: bytes) -> tuple[int, int, float]:
+    """A ``found: true`` reply's point and confidence, checked against the screenshot that was sent."""
+    numbers: dict[str, float] = {}
+    # confidence has always been optional in a reply (0.0 if missing); a point without an x or a y is not a point.
+    for name, value in (("x", reply.get("x")), ("y", reply.get("y")), ("confidence", reply.get("confidence", 0.0))):
+        number = _finite_number(value)
+        if number is None:
+            raise _refused(raw_text, f"its {name} was not a finite number", type(value).__name__)
+        numbers[name] = number
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            width, height = image.size
+    except Exception as exc:
+        # Whatever its decoder raises for an unreadable image: the point cannot be checked, so it is not vouched for.
+        raise _refused(raw_text, "the screenshot's size could not be read", type(exc).__name__) from None
+    if not (0 <= numbers["x"] < width and 0 <= numbers["y"] < height):
+        raise _refused(raw_text, f"its point is outside the screenshot ({width}x{height})", "outside_screenshot")
+    return int(numbers["x"]), int(numbers["y"]), numbers["confidence"]
+
 
 _SYSTEM_PROMPT = """\
 You are a precise UI element locator. You will be shown a screenshot of a web page
@@ -93,7 +158,8 @@ class VisionTargeter:
         if not path.exists():
             raise FileNotFoundError(f"Screenshot not found: {path}")
 
-        image_b64 = base64.standard_b64encode(path.read_bytes()).decode()
+        image_bytes = path.read_bytes()
+        image_b64 = base64.standard_b64encode(image_bytes).decode()
 
         payload = {
             "model": self.model,
@@ -141,33 +207,19 @@ class VisionTargeter:
                 raw_text = block.get("text", "").strip()
                 break
 
-        # Parse JSON response
-        try:
-            # Strip markdown code fences if present
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-            result = json.loads(raw_text)
-        except (json.JSONDecodeError, IndexError) as exc:
-            logger.warning("vision targeting: failed to parse response %r: %s", raw_text, exc)
-            return {
-                "x": 0,
-                "y": 0,
-                "found": False,
-                "confidence": 0.0,
-                "description": f"parse error: {exc}",
-                "selector_hint": None,
-                "raw_response": raw_text,
-            }
-
+        reply = _reply_object(raw_text)
+        found = reply.get("found")
+        if not isinstance(found, bool):
+            raise _refused(raw_text, "its found field was missing or neither true nor false", type(found).__name__)
+        # A not-found reply's coordinates are not read: it may omit them or send junk.
+        x, y, confidence = _checked_point(reply, raw_text, image_bytes) if found else (0, 0, 0.0)
         return {
-            "x": int(result.get("x", 0)),
-            "y": int(result.get("y", 0)),
-            "found": bool(result.get("found", False)),
-            "confidence": float(result.get("confidence", 0.0)),
-            "description": str(result.get("description", "")),
-            "selector_hint": result.get("selector_hint"),
+            "x": x,
+            "y": y,
+            "found": found,
+            "confidence": confidence,
+            "description": str(reply.get("description", "")),
+            "selector_hint": reply.get("selector_hint"),
             "model": self.model,
         }
 

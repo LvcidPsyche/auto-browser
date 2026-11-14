@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -8,6 +9,40 @@ from pydantic import BaseModel
 
 from ..models import McpToolDescriptor
 from .selection import PACKS, resolve_tool_selection
+
+# What every governed tool also accepts (McpToolGateway._call_tool reads and removes them before it validates a call),
+# advertised so a client can find the approval flow. Not required, and a model's own declaration of one is kept.
+_GOVERNED_CALL_ARGUMENTS: dict[str, dict[str, Any]] = {
+    "workflow_profile": {
+        "type": "string",
+        "enum": ["fast", "governed"],
+        "description": (
+            "governed: a call that can change something waits for approval. It answers status approval_required with "
+            "an approval_id; call again with that id once it is granted. fast, the default, runs it directly unless "
+            "this tool or deployment always requires approval."
+        ),
+    },
+    "approval_id": {
+        "type": "string",
+        "description": "ID of the granted approval for exactly this call, from its approval_required answer.",
+    },
+}
+
+# Tools that queue an agent step or run: its request carries its own workflow_profile (McpToolGateway._call_tool).
+QUEUE_TOOLS = frozenset({"browser.queue_agent_run", "browser.queue_agent_step"})
+# They have no governed kind, and the gateway acts on a top-level workflow_profile for them all the same: it refuses
+# one it does not know, and governed overrides the request's own. Advertised with what it does there, since their
+# schema allows no property it does not name. No approval_id: queuing asks for no approval.
+_QUEUE_CALL_ARGUMENTS: dict[str, dict[str, Any]] = {
+    "workflow_profile": {
+        "type": "string",
+        "enum": ["fast", "governed"],
+        "description": (
+            "governed: the queued run or step runs governed, whatever request.workflow_profile says. fast, the "
+            "default, leaves that to request.workflow_profile."
+        ),
+    },
+}
 
 READ_ONLY_TOOL_NAMES = {
     "browser.get_auth_profile",
@@ -33,8 +68,6 @@ READ_ONLY_TOOL_NAMES = {
     "browser.list_tabs",
     "browser.pii_scrubber_status",
     "browser.readiness_check",
-    "harness.check_all_drifts",
-    "harness.check_drift",
     "harness.get_candidate",
     "harness.get_status",
     "harness.get_trace",
@@ -190,7 +223,7 @@ class ToolRegistry:
                 McpToolDescriptor(
                     name=spec.name,
                     description=spec.description,
-                    inputSchema=spec.input_model.model_json_schema(),
+                    inputSchema=_advertised_schema(spec),
                     annotations=spec.annotations(),
                 ).model_dump(exclude_none=True)
                 for spec in self._tools.values()
@@ -198,3 +231,20 @@ class ToolRegistry:
             self._descriptor_cache_json = json.dumps(descriptors, separators=(",", ":"))
 
         return json.loads(self._descriptor_cache_json)
+
+
+def _advertised_schema(spec: ToolSpec) -> dict[str, Any]:
+    """``spec``'s input schema as a client sees it: a governed tool's gains the approval arguments and a queue tool's
+    its workflow_profile, in a deep copy, never the model's own dict (pydantic may hand the same one back to the next
+    caller)."""
+    schema = copy.deepcopy(spec.input_model.model_json_schema())
+    if spec.governed_kind is not None:
+        added = _GOVERNED_CALL_ARGUMENTS
+    elif spec.name in QUEUE_TOOLS:
+        added = _QUEUE_CALL_ARGUMENTS
+    else:
+        return schema
+    properties = schema.setdefault("properties", {})
+    for name, definition in added.items():
+        properties.setdefault(name, definition)
+    return schema

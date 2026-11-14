@@ -117,8 +117,11 @@ def test_rest_answers_409_with_the_fixed_text(path: Path, verb: str, url: str, b
 )
 async def test_mcp_gets_the_same_fixed_text(path: Path, tool: str, arguments: dict):
     before = _write(path, TWO_FOR_A)
+    settings = SimpleNamespace(
+        force_governed_approvals=False, autonomous_approvals=False, api_admin_operator_ids=frozenset()
+    )
     gateway = McpToolGateway(
-        manager=SimpleNamespace(settings=SimpleNamespace(force_governed_approvals=False, autonomous_approvals=False)),
+        manager=SimpleNamespace(settings=settings),
         orchestrator=SimpleNamespace(),
         job_queue=SimpleNamespace(),
         tool_profile="full",

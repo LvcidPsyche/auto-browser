@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import Settings
-from ..models import BrowserActionDecision, ProviderName
+from ..models import BrowserActionDecision, ProviderName, ResumeCheckpoint
 from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         model = model_override or self.default_model
         content: list[dict[str, Any]] = [
@@ -177,6 +178,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                     observation=observation,
                     context_hints=context_hints,
                     previous_steps=previous_steps,
+                    resume_checkpoints=resume_checkpoints,
                 ),
             }
         ]

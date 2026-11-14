@@ -93,6 +93,7 @@ def _profile_name(value: str) -> str:
     if value in PROFILES:
         return value
     names = tuple(PROFILES)
+    # %r: the operator's own MCP_TOOL_PROFILE, no caller's text.
     logger.warning(
         "MCP_TOOL_PROFILE=%r is not a tool profile%s; serving %s. Use %s or %s.",
         value,

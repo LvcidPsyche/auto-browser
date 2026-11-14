@@ -12,25 +12,30 @@ the manager call under test is replaced.
 
 from __future__ import annotations
 
+import errno
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.action_errors import BrowserActionError, BrowserUnreachableError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError
+from app.audit import FileAuditStore
 from app.auth_state import AuthStateDecryptError
 from app.browser.services.session_creation import SessionLimitError
 from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
-from app.routes._utils import OFF_LIST_PAGE_DETAIL
+from app.routes._utils import HIDDEN_CAUSE_FRAMES, OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
+from app.routes.operations import CRON_TRIGGER_RUN_REFUSED_DETAIL, create_operations_router
 
 SID = "s-missing"
 
@@ -42,10 +47,14 @@ class Route:
     verb: str
     path: str
     body: dict | None
-    method: str  # the manager attribute the route awaits
+    method: str  # the attribute the route calls, on the manager unless `owner` names another service of app.main
     # Route-specific answers that exist on purpose and must survive the fix.
     permission: tuple[int, str] = (403, "Not permitted")
     runtime: tuple[int, str] = (500, "Internal error")
+    owner: str = "manager"
+    sync: bool = False  # the route calls `method` without awaiting it
+    # False for a route that answers a ValueError with its own text, on purpose (a job's state refusal).
+    value_error_is_generic: bool = True
 
     @property
     def id(self) -> str:
@@ -53,6 +62,8 @@ class Route:
 
 
 _ELEMENT = {"selector": "#a"}
+_AGENT_BODY = {"provider": "openai", "goal": "inspect the page"}
+_AGENT_DOWN = (503, "Service unavailable")
 SESSION_ROUTES = [
     Route("get", f"/sessions/{SID}/observe", None, "observe", permission=(403, OFF_LIST_PAGE_DETAIL)),
     Route("post", f"/sessions/{SID}/observe", {}, "observe", permission=(403, OFF_LIST_PAGE_DETAIL)),
@@ -89,6 +100,15 @@ SESSION_ROUTES = [
         "post", f"/sessions/{SID}/fork?start_url=https://example.com/", None, "fork_session", runtime=(409, "Conflict")
     ),
     Route("post", f"/sessions/{SID}/storage-state", {"path": "state.json"}, "save_storage_state"),
+    Route("get", f"/sessions/{SID}", None, "get_session_record"),
+    Route("post", f"/sessions/{SID}/screenshot", {}, "capture_screenshot", permission=(403, OFF_LIST_PAGE_DETAIL)),
+    Route(
+        "post", f"/sessions/{SID}/tabs/activate", {"index": 0}, "activate_tab", permission=(403, OFF_LIST_TAB_DETAIL)
+    ),
+    Route("post", f"/sessions/{SID}/tabs/close", {"index": 0}, "close_tab"),
+    Route("post", f"/sessions/{SID}/tabs/open", {"url": "https://example.com/"}, "open_tab"),
+    Route("post", f"/sessions/{SID}/auth-profiles", {"profile_name": "p1"}, "save_auth_profile"),
+    Route("get", f"/sessions/{SID}/network-log", None, "get_network_log", permission=(403, OFF_LIST_PAGE_DETAIL)),
 ]
 
 # Records of a session: they outlive it, so an id that never existed answers an
@@ -109,6 +129,39 @@ OTHER_ROUTES = [
     Route("post", "/approvals/a-1/execute", None, "execute_approval", permission=(409, "Conflict")),
     Route("get", "/auth-profiles/p1/export", None, "export_auth_profile"),
     Route("post", "/auth-profiles/import", {"archive_path": "a.tgz"}, "import_auth_profile"),
+    Route("get", "/sessions", None, "list_sessions"),
+    # An unknown session is a plain 404 here, the session store's KeyError, not the coded one the session routes give.
+    Route("get", f"/sessions/{SID}/auth-state", None, "get_auth_state_info"),
+    Route("get", "/auth-profiles/p1", None, "get_auth_profile"),
+    Route("get", "/remote-access", None, "get_remote_access_info", sync=True),
+    Route("get", "/audit/events", None, "list_audit_events"),
+    Route("get", "/approvals", None, "list_approvals"),
+    Route("get", "/approvals/a-1", None, "get_approval"),
+    Route("get", "/approvals/a-1/arguments", None, "approval_arguments"),
+    Route("get", "/pii-scrubber", None, "get_pii_scrubber_status", sync=True),
+    # The agent routes keep their own answers: an unknown session (the orchestrator's KeyError) is 404 "Unknown
+    # session", and a RuntimeError from a run is 503. The enqueue routes check the session first, so that call stands
+    # in for the route.
+    Route("get", "/agent/jobs", None, "list_jobs", owner="job_queue"),
+    Route("get", "/agent/jobs/j-1", None, "get_job", owner="job_queue"),
+    Route("post", f"/sessions/{SID}/agent/step", _AGENT_BODY, "step", owner="orchestrator", runtime=_AGENT_DOWN),
+    Route("post", f"/sessions/{SID}/agent/run", _AGENT_BODY, "run", owner="orchestrator", runtime=_AGENT_DOWN),
+    Route("post", f"/sessions/{SID}/agent/jobs/step", _AGENT_BODY, "get_session"),
+    Route("post", f"/sessions/{SID}/agent/jobs/run", _AGENT_BODY, "get_session"),
+    Route(
+        "post",
+        "/agent/jobs/j-1/resume",
+        None,
+        "resume_job",
+        owner="job_queue",
+        # 503 for a full queue alone (test_agent_http.py): any other RuntimeError is a fault like the rest.
+        value_error_is_generic=False,
+    ),
+    Route("post", "/agent/jobs/j-1/discard", None, "discard_job", owner="job_queue", value_error_is_generic=False),
+    Route("post", "/agent/jobs/j-1/cancel", None, "cancel_job", owner="job_queue", value_error_is_generic=False),
+    # A decision the approval's state refuses is a conflict, as an execute's is. The two had no typed_route_errors.
+    Route("post", "/approvals/a-1/approve", {}, "approve", permission=(409, "Conflict")),
+    Route("post", "/approvals/a-1/reject", {}, "reject", permission=(409, "Conflict")),
 ]
 
 ALL_ROUTES = SESSION_ROUTES + RECORD_ROUTES + OTHER_ROUTES
@@ -150,10 +203,10 @@ def _call(client: TestClient, route: Route):
 
 def _raising(route: Route, exc: BaseException):
     *owners, name = route.method.split(".")
-    target = main_module.manager
+    target = getattr(main_module, route.owner)
     for owner in owners:
         target = getattr(target, owner)
-    return patch.object(target, name, new=AsyncMock(side_effect=exc))
+    return patch.object(target, name, new=(Mock if route.sync else AsyncMock)(side_effect=exc))
 
 
 @pytest.mark.parametrize("route", SESSION_ROUTES, ids=lambda r: r.id)
@@ -235,7 +288,23 @@ def test_a_forks_page_refusal_answers_as_the_page_routes_do(client: TestClient, 
     assert (response.status_code, response.json()) == (403, {"detail": OFF_LIST_PAGE_DETAIL})
 
 
-@pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
+@pytest.mark.parametrize("route", [r for r in ALL_ROUTES if r.runtime == (409, "Conflict")], ids=lambda r: r.id)
+def test_a_runtime_error_answered_409_is_logged_with_its_cause(
+    client: TestClient, route: Route, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A tested 409 keeps its answer; only the log line is the operator's way to the cause.
+    with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(route, RuntimeError("boom-cause")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()) == (409, {"detail": "Conflict"})
+    logged = [r for r in caplog.records if r.name == "app.routes.sessions" and "answered 409 for" in r.getMessage()]
+    assert logged, "the route answered 409 without logging the RuntimeError"
+    assert logged[0].levelno == logging.WARNING
+    # As a hidden cause, by its class and text in the record, and not by exc_info.
+    assert ": answered 409 for RuntimeError: 'boom-cause'" in logged[0].getMessage()
+    assert logged[0].exc_info is None
+
+
+@pytest.mark.parametrize("route", [r for r in ALL_ROUTES if r.value_error_is_generic], ids=lambda r: r.id)
 def test_value_error_is_400_without_its_message(client: TestClient, route: Route) -> None:
     with _raising(route, ValueError("bad value at /srv/secret/path")):
         response = _call(client, route)
@@ -400,31 +469,769 @@ def test_unexpected_error_is_logged_and_answers_generically(
     assert response.json() == {"detail": detail}
     if status == 500:
         # The log line is the only place the cause survives.
-        logged = [r for r in caplog.records if r.name.startswith("app.routes") and r.exc_info]
+        logged = [r for r in caplog.records if r.name.startswith("app.routes") and r.levelno == logging.ERROR]
         assert logged, "the route answered 500 without logging the exception"
-        assert logged[0].exc_info[0] is RuntimeError
+        # The error by its class and its text, quoted, in the record itself (internal_error): not by exc_info.
+        assert ": answered 500 for RuntimeError: 'boom at /srv/secret/path'" in logged[0].getMessage()
+        assert logged[0].exc_info is None
 
 
-def test_unknown_approval_is_404(client: TestClient) -> None:
-    # execute_approval raises a plain KeyError(approval_id); GET /approvals/{id}
-    # already answers that 404 through the app handler.
-    response = client.post("/approvals/nope/execute")
-    assert response.status_code == 404, response.text
-    assert response.json() == {"detail": "Not found: nope"}
+@pytest.mark.parametrize(
+    "route", [route for route in ALL_ROUTES if route.method in ("create_session", "fork_session")], ids=lambda r: r.id
+)
+def test_a_create_or_fork_conflict_is_logged_as_a_hidden_cause_and_not_by_its_traceback(
+    client: TestClient, route: Route, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The RuntimeError behind the 409 was written by exc_info, which prints its text as it is: a persona's name or
+    # a URL the caller sent among it. A line break, an ESC and 5,000 characters.
+    theirs = "persona p\nWARNING:app.main:forged by a caller\x1b[2J" + "x" * 5000
+    with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(route, RuntimeError(theirs)):
+        response = _call(client, route)
+
+    assert (response.status_code, response.json()) == (409, {"detail": "Conflict"})
+    (logged,) = _warnings_of(caplog, "app.routes.sessions")
+    assert logged.exc_info is None
+    first, *where = logged.getMessage().splitlines()
+    assert ": answered 409 for RuntimeError: 'persona p\\nWARNING:app.main:forged by a caller\\x1b[2Jxxx" in first, (
+        first
+    )
+    assert "\x1b" not in logged.getMessage() and len(first) < 500, first[:120]
+    assert where and all(line.startswith("  ") and "forged" not in line for line in where), where
+
+
+# The three errors a route answers with a fixed text. A server-side fault raises them too (a state file that no longer
+# decodes is a ValueError, one the process may not read a PermissionError), and the answer says nothing of the cause.
+FIXED_ANSWERS = {PermissionError: (403, "Not permitted"), ValueError: (400, "Invalid request")}
+FIXED_ANSWERS[FileNotFoundError] = (404, "Not found")
+LIST_SESSIONS = Route("get", "/sessions", None, "list_sessions")
+
+
+def _warnings_of(caplog: pytest.LogCaptureFixture, logger: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == logger and r.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize("error", FIXED_ANSWERS, ids=lambda error: error.__name__)
+def test_an_error_answered_with_a_fixed_text_leaves_its_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture, error: type[Exception]
+) -> None:
+    status, detail = FIXED_ANSWERS[error]
+    with caplog.at_level(logging.WARNING, logger="app.routes.sessions"), _raising(LIST_SESSIONS, error("boom-cause")):
+        response = _call(client, LIST_SESSIONS)
+
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    (logged,) = _warnings_of(caplog, "app.routes.sessions")
+    first, *where = logged.getMessage().splitlines()
+    assert first == f"list sessions failed: answered {status} for {error.__name__}: 'boom-cause'"
+    # Where it was raised: the frames of a traceback, the route's own among them.
+    assert where and all(line.startswith("  ") for line in where), where
+    assert any("sessions.py" in line for line in where), where
+
+
+def test_a_state_file_that_no_longer_decodes_is_answered_as_before_and_logged(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A kill in the middle of an append can leave a multi-byte character cut in two. The route takes no input a
+    # store could refuse, so "Invalid request" was all anyone was told, and the log held nothing.
+    (tmp_path / "events.jsonl").write_bytes(b'{"half": "caf\xc3')
+    store = FileAuditStore(tmp_path, max_events=1000)
+
+    async def list_audit_events(**kwargs):
+        return [event.model_dump() for event in await store.list(**kwargs)]
+
+    application = FastAPI()
+    manager = SimpleNamespace(list_audit_events=list_audit_events, sessions={})
+    application.include_router(
+        create_operations_router(manager=manager, proxy_store=SimpleNamespace(), cron_service=SimpleNamespace())
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.routes.operations"):
+        response = TestClient(application, raise_server_exceptions=False).get("/audit/events")
+
+    assert (response.status_code, response.json()) == (400, {"detail": "Invalid request"})
+    (logged,) = _warnings_of(caplog, "app.routes.operations")
+    first, *where = logged.getMessage().splitlines()
+    assert first.startswith("audit events listing failed: answered 400 for UnicodeDecodeError: "), first
+    assert "can't decode byte 0xc3" in first
+    assert any("audit.py" in line for line in where), where
+
+
+def test_a_line_break_in_a_routes_argument_or_in_the_errors_text_starts_no_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Both are the caller's as often as not: an id from the path, which an error then quotes.
+    logger = logging.getLogger("app.routes.sessions")
+    theirs = "a1\nWARNING:app.main:a line of the caller's own\r\x1b[2J"
+
+    with caplog.at_level(logging.WARNING, logger=logger.name), pytest.raises(HTTPException) as answered:
+        with typed_route_errors(logger, "get approval failed for approval %s", theirs):
+            raise PermissionError(f"approval {theirs} is not approved")
+
+    assert (answered.value.status_code, answered.value.detail) == (403, "Not permitted")
+    (logged,) = _warnings_of(caplog, logger.name)
+    message = logged.getMessage()
+    first, *where = message.splitlines()
+    assert "\r" not in message and "\x1b" not in message
+    assert first.count("a line of the caller's own") == 2, first
+    assert where and all(line.startswith("  ") for line in where), where
+
+
+def test_an_error_that_keeps_its_own_answer_is_not_logged_as_a_hidden_cause(caplog: pytest.LogCaptureFixture) -> None:
+    logger = logging.getLogger("app.routes.sessions")
+    kept = [
+        (HTTPException(status_code=409, detail="busy"), HTTPException),
+        (SessionNotFoundError("s1"), SessionNotFoundError),
+        (BrowserUnreachableError("down"), HTTPException),
+    ]
+
+    for error, answered_as in kept:
+        with caplog.at_level(logging.WARNING, logger=logger.name), pytest.raises(answered_as):
+            with typed_route_errors(logger, "observe failed for session %s", "s1"):
+                raise error
+
+    assert _warnings_of(caplog, logger.name) == []
+
+
+def _the_routes_line(caplog: pytest.LogCaptureFixture) -> tuple[str, list[str]]:
+    """The one warning the routes wrote, as its first line and the frames under it."""
+    (logged,) = [r for r in caplog.records if r.name.startswith("app.routes") and r.levelno == logging.WARNING]
+    first, *where = logged.getMessage().splitlines()
+    return first, where
+
+
+@pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
+@pytest.mark.parametrize("error", FIXED_ANSWERS, ids=lambda error: error.__name__)
+def test_every_route_leaves_the_cause_of_its_fixed_answer_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route, error: type[Exception]
+) -> None:
+    # FB-1: a route that caught the class itself answered through an HTTPException, which typed_route_errors lets
+    # pass, so its fixed text went out with nothing logged (open tab, a screenshot, an approval's "Conflict").
+    if error is ValueError and not route.value_error_is_generic:
+        pytest.skip("the route answers a ValueError with the error's own text")
+    status, detail = route.permission if error is PermissionError else FIXED_ANSWERS[error]
+
+    with caplog.at_level(logging.WARNING), _raising(route, error("boom-cause")):
+        response = _call(client, route)
+
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    first, where = _the_routes_line(caplog)
+    assert first.endswith(f": answered {status} for {error.__name__}: 'boom-cause'"), first
+    assert where and all(line.startswith("  ") for line in where), where
+
+
+OWN_REFUSALS = [route for route in ALL_ROUTES if route.permission != (403, "Not permitted")]
+
+
+@pytest.mark.parametrize("route", OWN_REFUSALS, ids=lambda r: r.id)
+def test_a_permission_error_the_os_raised_is_not_answered_as_the_routes_own_refusal(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # FB-1: an approve or a reject while the approval directory refuses the write answered "Conflict", and a
+    # screenshot or an observe the disk refuses said the page is on a host ALLOWED_HOSTS does not allow. One the
+    # operating system raises carries an errno; none of the controller's own refusals does.
+    denied = PermissionError(errno.EACCES, "Permission denied", "/data/approvals/a-1.json")
+
+    with caplog.at_level(logging.WARNING), _raising(route, denied):
+        response = _call(client, route)
+
+    assert (response.status_code, response.json()) == (403, {"detail": "Not permitted"})
+    first, _where = _the_routes_line(caplog)
+    assert ": answered 403 for PermissionError: " in first and "Permission denied" in first, first
+
+
+def _answered_and_logged(
+    caplog: pytest.LogCaptureFixture, error: Exception, message: str = "thing failed", *args: object
+) -> tuple[HTTPException, str]:
+    """What typed_route_errors answers for ``error``, and the one line it writes."""
+    logger = logging.getLogger("app.routes.sessions")
+    with caplog.at_level(logging.WARNING, logger=logger.name), pytest.raises(HTTPException) as answered:
+        with typed_route_errors(logger, message, *args):
+            raise error
+    (logged,) = _warnings_of(caplog, logger.name)
+    return answered.value, logged.getMessage()
+
+
+def test_a_long_error_text_is_cut_in_the_log_and_the_line_says_so(caplog: pytest.LogCaptureFixture) -> None:
+    # The text quotes what the caller sent as often as not, and nothing bounded it (2 MB in the reader's probe).
+    _answer, message = _answered_and_logged(caplog, ValueError("A" * 10_000))
+
+    first = message.splitlines()[0]
+    assert first.startswith("thing failed: answered 400 for ValueError: 'AAAA"), first[:80]
+    assert len(first) < 400, len(first)
+    assert "10000 characters" in first, first[-80:]
+
+
+def test_a_long_argument_of_the_route_is_cut_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    # An id from the path, as long as the server lets a request line be.
+    _answer, message = _answered_and_logged(caplog, ValueError("no"), "get thing failed for thing %s", "s" * 5000)
+
+    first = message.splitlines()[0]
+    assert first.startswith("get thing failed for thing 'ssss"), first[:80]
+    assert len(first) < 400, len(first)
+
+
+def _raise_from_depth(depth: int) -> None:
+    if depth:
+        _raise_from_depth(depth - 1)
+        return
+    raise ValueError("deep")
+
+
+def test_only_the_frames_nearest_the_raise_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    logger = logging.getLogger("app.routes.sessions")
+    with caplog.at_level(logging.WARNING, logger=logger.name), pytest.raises(HTTPException):
+        with typed_route_errors(logger, "thing failed"):
+            _raise_from_depth(30)
+
+    (logged,) = _warnings_of(caplog, logger.name)
+    _first, *where = logged.getMessage().splitlines()
+    # A line a frame, written by the controller: the file, the line and the function. What an interpreter prints of
+    # a frame is its own (two lines on Python 3.12, and from 3.13 as many as the call is written over, which made
+    # ten lines of a record thirteen), so the record was as long as the Python it ran on made it.
+    code = _raise_from_depth.__code__
+    calls, raises = code.co_firstlineno + 2, code.co_firstlineno + 4
+    # The nearest three: two of the calls, and the raise itself last.
+    assert where == [f"  {code.co_filename}:{line} in _raise_from_depth" for line in (calls, calls, raises)], where
+
+
+class _PrintsALineBreak:
+    def __str__(self) -> str:
+        return "a\nINJECTED"
+
+    __repr__ = __str__
+
+
+class _OddStr(str):
+    def __repr__(self) -> str:
+        return "odd\nINJECTED BY REPR"
+
+
+@pytest.mark.parametrize("argument", [_PrintsALineBreak(), _OddStr("odd")], ids=["an object", "a str subclass"])
+def test_an_argument_that_prints_a_line_break_starts_no_log_line(
+    caplog: pytest.LogCaptureFixture, argument: object
+) -> None:
+    # FB-10: only a str was written as its repr, by repr(), which a subclass answers as it likes.
+    _answer, message = _answered_and_logged(caplog, ValueError("v"), "x failed for %s", argument)
+
+    first, *where = message.splitlines()
+    assert "INJECTED" in first, first
+    assert where and all(line.startswith("  ") for line in where), where
+
+
+class _CannotBePrinted:
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr\nINJECTED")
+
+
+def test_an_argument_that_cannot_be_printed_is_named_by_its_class_and_the_answer_stands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # No route passes one today (ids from a path, and numbers). The line is written while an error is being
+    # answered: a failure to print an argument must not take that answer's place.
+    answer, message = _answered_and_logged(caplog, ValueError("v"), "x failed for %s", _CannotBePrinted())
+
+    assert (answer.status_code, answer.detail) == (400, "Invalid request")
+    first, *where = message.splitlines()
+    assert first == "x failed for <a _CannotBePrinted that could not be printed>: answered 400 for ValueError: 'v'"
+    assert where and all(line.startswith("  ") for line in where), where
+
+
+def test_a_number_among_the_arguments_is_still_a_number(caplog: pytest.LogCaptureFixture) -> None:
+    _answer, message = _answered_and_logged(caplog, ValueError("v"), "tab %d failed", 3)
+
+    assert message.splitlines()[0] == "tab 3 failed: answered 400 for ValueError: 'v'"
+
+
+class _NoText(ValueError):
+    def __str__(self) -> str:
+        raise RuntimeError("no text for you")
+
+
+def test_an_error_whose_text_cannot_be_made_is_logged_by_its_class_and_still_answered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # FB-10: str(cause) ran outside any try, so such an error turned the fixed 400 into an unhandled exception.
+    answer, message = _answered_and_logged(caplog, _NoText())
+
+    assert (answer.status_code, answer.detail) == (400, "Invalid request")
+    assert message.splitlines()[0].startswith("thing failed: answered 400 for _NoText: "), message
+
+
+def test_a_models_refusal_is_logged_by_field_and_kind_and_never_by_the_value(caplog: pytest.LogCaptureFixture) -> None:
+    # pydantic prints the value each refused field was given, and the cron trigger's body holds the webhook key.
+    from app.tool_inputs import TriggerCronJobInput
+
+    body = {"job_id": "j1", "webhook_key": ["sentinel-webhook-key"]}  # not on the line a frame quotes
+    with pytest.raises(ValueError) as refused:
+        TriggerCronJobInput.model_validate(body)
+    assert "sentinel-webhook-key" in str(refused.value)  # what str() of it would have written
+
+    _answer, message = _answered_and_logged(caplog, refused.value)
+
+    assert "sentinel-webhook-key" not in message
+    assert "webhook_key: string_type" in message.splitlines()[0], message
+
+
+PERSONA_BODY = {"name": "us-east", "server": "http://proxy.example:8080"}
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (PermissionError("proxy persona 'us-east' belongs to another operator"), 409, "Conflict"),
+        (PermissionError(errno.EACCES, "Permission denied", "/data/personas.json"), 403, "Not permitted"),
+        (ValueError("persona server is required"), 400, "Invalid request"),
+        (RuntimeError("No PROXY_PERSONA_FILE configured"), 400, "Invalid request"),
+    ],
+    ids=["another operator's", "the OS refuses the file", "a ValueError", "no file configured"],
+)
+def test_a_proxy_persona_that_is_not_saved_leaves_the_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture, error: Exception, status: int, detail: str
+) -> None:
+    # Another operator's persona is a conflict. A file the operating system will not let the store write was
+    # answered as one too, and none of the four left a line.
+    with caplog.at_level(logging.WARNING), patch.object(main_module.proxy_store, "set_persona", side_effect=error):
+        response = client.post("/proxy-personas", json=PERSONA_BODY)
+
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    first, _where = _the_routes_line(caplog)
+    assert first.startswith("set proxy persona failed for persona 'us-east': "), first
+    assert f": answered {status} for {type(error).__name__}: " in first, first
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (PermissionError("auth profile 'shop' belongs to another operator"), 403, "Not permitted"),
+        (ValueError("Invalid cron schedule 'every day': Wrong number of fields"), 400, "Invalid request"),
+    ],
+    ids=["PermissionError", "ValueError"],
+)
+def test_a_cron_job_that_is_not_created_leaves_the_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture, error: Exception, status: int, detail: str
+) -> None:
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(main_module.cron_service, "create_job", new=AsyncMock(side_effect=error)),
+    ):
+        response = client.post("/crons", json={"name": "nightly", "goal": "check the page", "schedule": "0 9 * * *"})
+
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    first, _where = _the_routes_line(caplog)
+    assert f": answered {status} for {type(error).__name__}: " in first and str(error.args[0]) in first, first
+
+
+@pytest.mark.parametrize(
+    ("verb", "path"),
+    [("post", "/crons/{job_id}/webhook-key/rotate"), ("delete", "/crons/{job_id}/webhook-key")],
+    ids=["rotate", "revoke"],
+)
+def test_a_cron_job_id_the_route_refuses_leaves_the_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture, verb: str, path: str
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        response = getattr(client, verb)(path.format(job_id="j" * 51))
+
+    assert (response.status_code, response.json()) == (400, {"detail": "Invalid request"})
+    first, _where = _the_routes_line(caplog)
+    assert ": answered 400 for ValidationError: " in first and "job_id: string_too_long" in first, first
+
+
+def test_a_cron_trigger_refused_for_its_key_leaves_a_line_that_names_the_job(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No job has this id: the answer is the one for a wrong key, and the log says a trigger was refused.
+    with caplog.at_level(logging.WARNING):
+        response = client.post("/crons/no-such-job/trigger", json={"webhook_key": "sentinel-key"})
+
+    assert (response.status_code, response.json()) == (403, {"detail": "Not permitted"})
+    first, _where = _the_routes_line(caplog)
+    refused = "cron trigger refused for job 'no-such-job': answered 403 for WebhookKeyRefusedError: "
+    assert first.startswith(refused), first
+    assert "sentinel-key" not in first
+
+
+def test_a_cron_trigger_with_a_body_the_route_refuses_logs_no_part_of_the_key(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The body's key, sent in a shape the model refuses: pydantic's own text for it quotes the value.
+    with caplog.at_level(logging.WARNING):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": ["sentinel-webhook-key"]})
+
+    assert (response.status_code, response.json()) == (400, {"detail": "Invalid request"})
+    first, where = _the_routes_line(caplog)
+    assert ": answered 400 for ValidationError: " in first and "webhook_key: string_type" in first, first
+    assert "sentinel-webhook-key" not in "\n".join([first, *where])
+    # A record of four lines at most, for a mistake any caller can repeat. The frames are pydantic's, a call written
+    # over several lines: as Python 3.14 prints them the record was thirteen lines.
+    assert 1 <= len(where) <= 3 and all(re.fullmatch(r"  .+:\d+ in \S+", line) for line in where), where
+
+
+def test_a_cron_trigger_whose_body_the_json_reader_cannot_go_down_is_an_invalid_request(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A body nested past what Python's JSON reader goes down raises RecursionError, a RuntimeError and no ValueError:
+    # an unhandled 500, for a caller who needs no key of the job. How deep that is is the interpreter's own, so the
+    # reader is stood in for.
+    gave_up = RecursionError("maximum recursion depth exceeded while decoding a JSON object from a unicode string")
+    with caplog.at_level(logging.WARNING), patch.object(Request, "json", new=AsyncMock(side_effect=gave_up)):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+
+    assert response.status_code == 400, response.text
+    assert response.json() == {"detail": "Invalid request"}
+    first, _where = _the_routes_line(caplog)
+    assert first.startswith("cron trigger failed for job 'job-1': answered 400 for RecursionError: "), first
+
+
+def test_a_cron_trigger_whose_run_raises_a_value_error_leaves_the_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Raised with the key proved, so it is no "Invalid request" of the caller's: the 409 of a run that cannot start.
+    error = ValueError("start_url must use http or https")
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=error)),
+    ):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+
+    assert (response.status_code, response.json()) == (409, {"detail": CRON_TRIGGER_RUN_REFUSED_DETAIL})
+    first, _where = _the_routes_line(caplog)
+    assert first == f"cron trigger failed for job 'job-1': answered 409 for ValueError: {str(error)!r}"
+
+
+def test_a_share_refused_for_its_lifetime_leaves_the_cause_in_the_log(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(main_module.manager, "get_session", new=AsyncMock()),
+        patch.object(main_module.share_manager, "create_token", side_effect=ValueError("ttl_seconds must be positive")),
+    ):
+        response = client.post(f"/sessions/{SID}/share")
+
+    assert (response.status_code, response.json()) == (400, {"detail": "Invalid request"})
+    first, _where = _the_routes_line(caplog)
+    assert first == f"share failed for session '{SID}': answered 400 for ValueError: 'ttl_seconds must be positive'"
+
+
+def _shared_observe(client: TestClient, error: Exception):
+    token_info = {"valid": True, "session_id": SID}
+    with (
+        patch.object(main_module.share_manager, "token_info", return_value=token_info),
+        patch.object(main_module.manager, "share_snapshot", new=AsyncMock(side_effect=error)),
+    ):
+        return client.get("/share/sentinel-token/observe")
+
+
+def test_a_shared_observe_the_os_refuses_is_a_logged_server_error_and_no_refused_page(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # It told the link's viewer that the page is on a host ALLOWED_HOSTS does not allow, and logged nothing.
+    denied = PermissionError(errno.EACCES, "Permission denied", "/data/artifacts/s1/frame.png")
+    with caplog.at_level(logging.WARNING):
+        response = _shared_observe(client, denied)
+
+    assert (response.status_code, response.json()) == (500, {"detail": "Internal error"})
+    logged = [r for r in caplog.records if r.name == "app.routes.share" and r.levelno == logging.ERROR]
+    assert logged and ": answered 500 for PermissionError: " in logged[0].getMessage()
+    assert "[Errno 13] Permission denied" in logged[0].getMessage()
+
+
+def test_a_shared_observe_of_a_refused_page_is_answered_as_before_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The shared page asks every five seconds for as long as it is open: its refusal is not a line each time.
+    with caplog.at_level(logging.WARNING):
+        response = _shared_observe(client, PermissionError("Host 'evil.example' is not allowlisted"))
+
+    assert (response.status_code, response.json()) == (403, {"detail": OFF_LIST_PAGE_DETAIL})
+    assert [r for r in caplog.records if r.name.startswith("app.routes")] == []
+
+
+APPROVAL_ID_ROUTES = [
+    Route("get", "/approvals/{}", None, "get_approval"),
+    Route("get", "/approvals/{}/arguments", None, "approval_arguments"),
+    Route("post", "/approvals/{}/approve", {}, "approve"),
+    Route("post", "/approvals/{}/reject", {}, "reject"),
+    Route("post", "/approvals/{}/execute", None, "execute_approval"),
+]
+
+
+def _with_id(route: Route, record_id: str) -> Route:
+    return replace(route, path=route.path.format(record_id))
+
+
+@pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
+def test_an_unknown_approval_id_is_an_ordinary_404_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # The store raises a plain KeyError(approval_id) and nothing mapped it, so the app's handler answered it: with
+    # its warning for a KeyError nothing maps, forty lines of traceback at WARNING for a caller's typo.
+    with caplog.at_level(logging.WARNING):
+        response = _call(client, _with_id(route, "nope"))
+
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: nope"})
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("app")] == []
+
+
+@pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
+def test_an_unknown_approval_id_of_any_length_is_cut_in_the_answer(client: TestClient, route: Route) -> None:
+    # The 404 repeated the id whole: a path of 60,000 characters was answered with a body of 60,025.
+    response = _call(client, _with_id(route, "x" + "y" * 60_000))
+
+    assert response.status_code == 404, response.text[:200]
+    detail = response.json()["detail"]
+    assert detail.startswith("Not found: xyyyy") and detail.endswith("y..."), detail[-40:]
+    assert len(response.text) < 300
+
+
+@pytest.mark.parametrize("route", APPROVAL_ID_ROUTES, ids=lambda r: r.id)
+def test_an_approval_routes_other_key_errors_are_not_an_unknown_approval(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # Only the KeyError that names the id asked for is the store's "no such approval". Any other still reaches the
+    # app's handler: a bug's is logged there, and a session that has gone keeps its own answer.
+    route = _with_id(route, "a-1")
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: internal_dict_key"})
+    assert ["unmapped KeyError" in r.getMessage() for r in caplog.records if r.name == "app.main"] == [True]
+
+    with _raising(route, SessionNotFoundError("a-1", status="closed")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()["code"]) == (404, "session_closed")
+
+
+# Three more routes whose service raises a plain KeyError for an id it does not hold, and what their 404 says.
+UNKNOWN_ID_ROUTES = [
+    (Route("get", "/auth-profiles/{}", None, "get_auth_profile"), "Not found: {}"),
+    (Route("get", "/crons/{}", None, "get_job", owner="cron_service"), "Not found: Cron job not found: {}"),
+    (Route("get", "/sessions/{}/auth-state", None, "get_auth_state_info"), "Not found: {}"),
+]
+_UNKNOWN_ID_ROUTE_IDS = [route.id for route, _ in UNKNOWN_ID_ROUTES]
+
+
+def _app_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name.startswith("app") and r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(("route", "detail"), UNKNOWN_ID_ROUTES, ids=_UNKNOWN_ID_ROUTE_IDS)
+def test_an_unknown_id_is_an_ordinary_404_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route, detail: str
+) -> None:
+    # No patching: the real service is asked for an id it does not hold. Each raised a plain KeyError that nothing
+    # mapped, so the app's handler answered it and wrote its WARNING, with where it was raised, for a caller's typo.
+    with caplog.at_level(logging.WARNING):
+        response = _call(client, _with_id(route, "nope-1"))
+
+    assert (response.status_code, response.json()) == (404, {"detail": detail.format("nope-1")})
+    assert _app_warnings(caplog) == []
+
+
+def test_an_unknown_auth_profile_named_with_spaces_round_it_is_that_404_too(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The service looks a name up stripped, and its KeyError carries the name so.
+    with caplog.at_level(logging.WARNING):
+        response = client.get("/auth-profiles/%20nope-1%20")
+
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: nope-1"})
+    assert _app_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(("route", "detail"), UNKNOWN_ID_ROUTES[1:], ids=_UNKNOWN_ID_ROUTE_IDS[1:])
+def test_an_unknown_id_of_any_length_is_cut_in_its_404_and_writes_no_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route, detail: str
+) -> None:
+    # A profile's name is 120 characters at most, and a longer one is a 400. These two ids are as long as the path:
+    # the session store raises the same KeyError for an id that could name no record.
+    long_id = "x" + "y" * 3000
+    with caplog.at_level(logging.WARNING):
+        response = _call(client, _with_id(route, long_id))
+
+    key = detail.format(long_id).removeprefix("Not found: ")
+    assert (response.status_code, response.json()) == (404, {"detail": f"Not found: {key[:200]}..."})
+    assert _app_warnings(caplog) == []
+
+
+# Routes that answer an id they do not know with a 404 of their own words, which name the id. No patching: the real
+# service, or the real manager, holds no such persona, job or session.
+NO_INSPECTOR, NO_CDP = "No network inspector for session {!r}", "No CDP session for {!r}"
+OWN_WORDS_404_ROUTES = [
+    (
+        Route("delete", "/proxy-personas/{}", None, "delete_persona", owner="proxy_store", sync=True),
+        "Proxy persona not found: {!r}",
+    ),
+    (Route("delete", "/crons/{}", None, "delete_job", owner="cron_service"), "Cron job not found: {}"),
+    (Route("get", "/sessions/{}/network/requests", None, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("get", "/sessions/{}/network/hooks", None, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("post", "/sessions/{}/network/hooks", {"url_pattern": "*"}, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("delete", "/sessions/{}/network/hooks/x", None, "sessions.get", sync=True), NO_INSPECTOR),
+    (Route("get", "/sessions/{}/cdp/element?selector=a", None, "sessions.get", sync=True), NO_CDP),
+    (Route("post", "/sessions/{}/cdp/raw", {"method": "DOM.getDocument"}, "sessions.get", sync=True), NO_CDP),
+]
+
+
+@pytest.mark.parametrize(("route", "words"), OWN_WORDS_404_ROUTES, ids=[route.id for route, _ in OWN_WORDS_404_ROUTES])
+def test_a_404_in_a_routes_own_words_cuts_a_long_id(client: TestClient, route: Route, words: str) -> None:
+    # Each repeated the caller's id whole: an id of 60,000 characters came back in a body of 60,033 bytes or more.
+    long_id = "x" + "y" * 59_999
+    response = _call(client, _with_id(route, long_id))
+
+    # The cut mark after the id, and after its closing quote where the words quote it ('xyyy'...).
+    assert (response.status_code, response.json()) == (
+        404,
+        {"detail": words.replace("}", "}...").format(long_id[:200])},
+    )
+    assert len(response.content) < 1024
+    # An id of an ordinary length is named whole, in the route's words as before.
+    response = _call(client, _with_id(route, "nope-1"))
+    assert (response.status_code, response.json()) == (404, {"detail": words.format("nope-1")})
+
+
+@pytest.mark.parametrize("route", [route for route, _ in UNKNOWN_ID_ROUTES], ids=_UNKNOWN_ID_ROUTE_IDS)
+def test_these_routes_other_key_errors_are_not_an_unknown_id(
+    client: TestClient, caplog: pytest.LogCaptureFixture, route: Route
+) -> None:
+    # Only the KeyError the service raises for the id asked for is its "no such record". Any other still reaches the
+    # app's handler: a bug's is logged there, and a session that has gone keeps its own answer.
+    route = _with_id(route, "a-1")
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()) == (404, {"detail": "Not found: internal_dict_key"})
+    assert ["unmapped KeyError" in r.getMessage() for r in caplog.records if r.name == "app.main"] == [True]
+
+    with _raising(route, SessionNotFoundError("a-1", status="closed")):
+        response = _call(client, route)
+    assert (response.status_code, response.json()["code"]) == (404, "session_closed")
+
+
+def _unmapped(client: TestClient, caplog: pytest.LogCaptureFixture, error: KeyError, route: Route = SESSION_ROUTES[0]):
+    """The answer to a KeyError nothing maps, and the one record the app's handler writes for it."""
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, error):
+        response = _call(client, route)
+    assert response.status_code == 404, response.text[:200]
+    logged = [r for r in caplog.records if r.name == "app.main" and r.levelno == logging.WARNING]
+    assert logged, "an unmapped KeyError was answered 404 without a log line"
+    (record,) = logged
+    assert "unmapped KeyError" in record.getMessage()
+    return response, record
+
+
+def _as_a_handler_writes(record: logging.LogRecord) -> str:
+    """The record's message and whatever a handler writes under it: the traceback of exc_info, a stack."""
+    return logging.Formatter().format(record)
 
 
 def test_unmapped_key_error_is_404_and_logged(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
     # A plain KeyError from a bug looks the same to the client as an unknown id,
     # so the handler is the only place it can be told apart.
-    route = SESSION_ROUTES[0]
-    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
-        response = _call(client, route)
-    assert response.status_code == 404, response.text
+    response, record = _unmapped(client, caplog, KeyError("internal_dict_key"))
     assert response.json() == {"detail": "Not found: internal_dict_key"}
-    logged = [r for r in caplog.records if r.name == "app.main" and r.levelno == logging.WARNING]
-    assert logged, "an unmapped KeyError was answered 404 without a log line"
-    assert "unmapped KeyError" in logged[0].getMessage()
-    assert logged[0].exc_info and logged[0].exc_info[0] is KeyError
+    first, *where = record.getMessage().splitlines()
+    assert first.startswith(f"unmapped KeyError on 'GET' '/sessions/{SID}/observe': answered 404 for KeyError: ")
+    assert "internal_dict_key" in first
+    # Where it was raised is in the message (log_hidden_cause), a line a frame and three at most, and not a
+    # traceback a handler prints under it.
+    assert 1 <= len(where) <= 3 and all(re.fullmatch(r"  .+:\d+ in \S+", line) for line in where), where
+    assert record.exc_info is None and _as_a_handler_writes(record) == record.getMessage()
+
+
+def test_an_unmapped_key_errors_log_line_shows_a_control_character_of_the_path_escaped(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # request.url.path drops a line feed and a carriage return and nothing else: an ESC or a vertical tab the caller
+    # put in the path reached the log as itself.
+    route = Route("get", "/sessions/no%1B[2Jpe%0B", None, "get_session_record")
+    _response, record = _unmapped(client, caplog, KeyError("internal_dict_key"), route)
+    message = record.getMessage()
+    assert "\x1b" not in message and "\x0b" not in message
+    assert "\\x1b[2Jpe" in message
+
+
+def test_an_unmapped_key_errors_log_line_cuts_a_path_of_any_length(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The path is the caller's, as long as the server lets a request line be.
+    route = Route("get", "/sessions/" + "s" * 5000, None, "get_session_record")
+    _response, record = _unmapped(client, caplog, KeyError("internal_dict_key"), route)
+    first = record.getMessage().splitlines()[0]
+    assert "/sessions/ssss" in first
+    assert len(first) < 400
+
+
+def test_an_unmapped_key_errors_whole_record_is_cut_whatever_the_key_holds(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A KeyError quotes its key, an id as often as not, and the record carried the error whole (exc_info) under a
+    # path cut at 200 characters: an id of 60,000 wrote a record of 63,000, and the 404 repeated it as well.
+    response, record = _unmapped(client, caplog, KeyError("k" * 60_000))
+
+    first = record.getMessage().splitlines()[0]
+    assert "kkkk" in first and "(cut from 60" in first and first.endswith(" characters)"), first[-80:]
+    assert len(first) < 600
+    assert "k" * 300 not in _as_a_handler_writes(record)
+    detail = response.json()["detail"]
+    assert detail.startswith("Not found: kkkk") and detail.endswith("k..."), detail[-40:]
+    assert len(response.text) < 300
+
+
+class _TextAsItIs(KeyError):
+    """A KeyError that prints its text unquoted, as SessionNotFoundError does: a plain one prints its key's repr."""
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+def test_an_unmapped_key_errors_text_starts_no_line_of_the_record(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    _response, record = _unmapped(client, caplog, _TextAsItIs("id\nWARNING:app.main:forged by a caller\r\x85end"))
+
+    first, *where = _as_a_handler_writes(record).splitlines()
+    assert "forged by a caller" in first
+    assert [line for line in where if "forged" in line] == [], where
+
+
+# A session id as a caller can write one in a path: a line break, a carriage return and an ESC.
+FORGED_ID = "x%0AWARNING:app.main:forged by a caller%0D%1B[2J"
+# Two lines beside the routes' fixed answers, which quote and cut what the caller wrote. Shadow browsing is off by
+# default and is refused before the session is looked up, so its line held the id as it came; no record answers to
+# the id the second route is asked for, and the KeyError the app's handler logs quotes it.
+LINES_THAT_NAME_THE_SESSION = [
+    ("post", "/sessions/{id}/shadow-browse", 400, "app.routes.session_diagnostics", "shadow browse refused for "),
+    ("get", "/sessions/{id}/witness/verify", 404, "app.main", "unmapped KeyError on 'GET' "),
+]
+
+
+@pytest.mark.parametrize("more", ["", "A" * 3000], ids=["a short id", "a long one"])
+@pytest.mark.parametrize(
+    ("verb", "path", "status", "logger", "begins"), LINES_THAT_NAME_THE_SESSION, ids=["shadow browse", "unmapped"]
+)
+def test_a_session_id_with_a_line_break_starts_no_line_of_the_log(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    verb: str,
+    path: str,
+    status: int,
+    logger: str,
+    begins: str,
+    more: str,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        response = getattr(client, verb)(path.replace("{id}", FORGED_ID + more))
+
+    assert response.status_code == status, response.text[:200]
+    (record,) = _warnings_of(caplog, logger)
+    written = _as_a_handler_writes(record)
+    first, *where = written.splitlines()
+    assert first.startswith(begins) and "forged by a caller" in first, first[:200]
+    assert [line for line in where if "forged" in line] == [], where
+    assert "\r" not in written and "\x1b" not in written
+    # The caller's text is cut, so the first line is bounded; the lines under it are the frames a hidden cause keeps,
+    # each a file's absolute path, as long as the checkout's: their number is bounded, not their length.
+    assert len(first) < 1000 and "A" * 201 not in written, len(first)
+    assert len(where) <= HIDDEN_CAUSE_FRAMES, where
+    assert [line for line in where if not re.fullmatch(r"  .+:\d+ in \S+", line)] == [], where
 
 
 def test_unknown_session_is_not_logged_as_an_unmapped_key_error(

@@ -28,6 +28,8 @@ from tests.test_approval_spend import SESSION, SpendBase
 
 ALICE = OperatorIdentity(id="alice", source="token")
 BOB = OperatorIdentity(id="bob", source="token")
+# An approval id no record answers to.
+UNKNOWN_ID = "0" * 12
 
 
 class ReplayTests(SpendBase):
@@ -97,6 +99,30 @@ class ReplayTests(SpendBase):
         self.assertFalse(done.isError, done.content[0].text)
         self.assertEqual(self.navigations, ["https://example.com/a"])
 
+    async def test_an_element_approval_does_not_cover_another_element(self) -> None:
+        action = {"action": "click", "reason": "pay", "element_id": "op-" + "a" * 24, "risk_category": "payment"}
+        approval_id = await self.approved_governed(action)
+
+        replay = await self.governed({**action, "element_id": "op-" + "b" * 24}, approval_id)
+
+        self.assertTrue(replay.isError)
+        self.assertIn("does not match the requested action", replay.content[0].text)
+        self.assertEqual(self.page.clicks, 0)
+        self.assertEqual(await self.status(approval_id), "approved")
+
+    async def test_a_click_approval_does_not_cover_a_type(self) -> None:
+        # The two differ in `action` alone, so this pins that field: the click carries the same text a type would use.
+        click = {"action": "click", "reason": "pay", "selector": "#pay", "text": "typed", "risk_category": "payment"}
+        approval_id = await self.approved_governed(click)
+
+        replay = await self.governed({**click, "action": "type"}, approval_id)
+
+        self.assertTrue(replay.isError)
+        self.assertIn("does not match the requested action", replay.content[0].text)
+        self.assertEqual(self.page.clicks, 0)
+        self.assertEqual(self.page.keyboard.typed, [])
+        self.assertEqual(await self.status(approval_id), "approved")
+
     async def test_a_governed_storage_write_covers_only_its_value(self) -> None:
         arguments = {
             "session_id": SESSION,
@@ -160,8 +186,33 @@ class OperatorReplayTests(SpendBase):
         with self.assertRaises(SessionNotFoundError):
             await self.post(BOB, f"/sessions/{SESSION}/actions/execute", body)
         on_bobs_session = await self.post(BOB, "/sessions/session-2/actions/execute", body)
+        unknown = await self.post(BOB, "/sessions/session-2/actions/execute", {**body, "approval_id": UNKNOWN_ID})
         by_alice = await self.post(ALICE, f"/sessions/{SESSION}/actions/execute", body)
 
-        self.assertEqual((on_bobs_session.status_code, on_bobs_session.json()), (403, {"detail": "Not permitted"}))
+        # On Bob's own session it is told what an id no record answers to is told, in the route's own 404 (the
+        # app's handler for a KeyError nothing maps wrote a WARNING for each): "does not belong" told him the id
+        # is an approval's.
+        self.assertEqual(on_bobs_session.status_code, 404, on_bobs_session.text)
+        self.assertEqual(on_bobs_session.json()["detail"].replace(approval_id, UNKNOWN_ID), unknown.json()["detail"])
+        self.assertEqual(unknown.status_code, 404, unknown.text)
         self.assertEqual(by_alice.status_code, 200, by_alice.text)
         self.assertEqual(self.page.clicks, 1)
+
+    async def test_another_operators_approval_uploads_nothing_for_them(self) -> None:
+        for session in (SESSION, "session-2"):
+            upload_dir = Path(self.settings.upload_root) / session
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "report.pdf").write_bytes(b"%PDF-1.4")
+        action = {"action": "upload", "reason": "attach", "selector": "#file", "file_path": "report.pdf"}
+        with acting_as(ALICE):
+            approval_id = await self.approved(BrowserActionDecision(**action, risk_category="upload"))
+        body = {"selector": "#file", "file_path": "report.pdf", "approved": True}
+
+        on_bobs_session = await self.post(
+            BOB, "/sessions/session-2/actions/upload", {**body, "approval_id": approval_id}
+        )
+        unknown = await self.post(BOB, "/sessions/session-2/actions/upload", {**body, "approval_id": UNKNOWN_ID})
+
+        self.assertEqual(on_bobs_session.status_code, 404, on_bobs_session.text)
+        self.assertEqual(on_bobs_session.json()["detail"].replace(approval_id, UNKNOWN_ID), unknown.json()["detail"])
+        self.assertEqual(unknown.status_code, 404, unknown.text)

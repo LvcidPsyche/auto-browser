@@ -11,6 +11,7 @@ from PIL import Image
 from pytesseract import Output, TesseractNotFoundError
 
 from .config import OCR_TIMEOUT_SECONDS
+from .utils import error_text
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ class OCRExtractor:
             # The catch-all behind ocr_extraction_failed: its hint says what to check, and this says which applies
             # (a missing temporary directory, a tesseract error, an unreadable image). A timeout, which that hint does
             # not cover, says itself.
-            if isinstance(exc, RuntimeError) and str(exc) == _TESSERACT_TIMEOUT:
+            if isinstance(exc, RuntimeError) and error_text(exc) == _TESSERACT_TIMEOUT:
                 logger.warning(
                     "OCR of %s timed out after %g seconds (OCR_TIMEOUT_SECONDS); tesseract was stopped",
                     image_path,

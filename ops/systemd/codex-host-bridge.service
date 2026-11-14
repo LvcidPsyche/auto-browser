@@ -10,5 +10,44 @@ ExecStart=/usr/bin/env python3 scripts/codex_host_bridge.py --socket-path data/h
 Restart=on-failure
 RestartSec=2
 
+# Optional: keep the bridge, and the Codex it starts, from the controller's secrets in this checkout. Uncomment the
+# PrivateUsers=, InaccessiblePaths= and ExecStartPre= lines below, then `systemctl --user daemon-reload` and restart
+# the unit.
+# - The paths repeat WorkingDirectory=: change them with it. A leading "-" passes over a path that is not there.
+# - The data directory itself is not named. The bridge's socket is data/host-bridge/codex.sock, and systemd cannot
+#   nest a writable path inside an inaccessible one. data/cli-home is named: it holds the sign-ins of the container's
+#   CLIs, and the bridge's Codex signs in under the bridge's own home.
+# - In a user unit these settings work inside a user namespace (PrivateUsers=). Where the host restricts unprivileged
+#   user namespaces (Ubuntu 24.04 and later do by default: kernel.apparmor_restrict_unprivileged_userns=1) the unit
+#   starts with PrivateUsers= and InaccessiblePaths= on and hides nothing, with no error; without the PrivateUsers=
+#   line it hides nothing anywhere. Measured by hand in user units on GitHub-hosted runners on 2026-11-13; no CI job
+#   runs this unit.
+# - The ExecStartPre= line checks for that: it refuses to start the bridge while a path the option names can still be
+#   read. A refused start is tried again every RestartSec=, and each try writes the line's message to the journal
+#   (journalctl --user -u codex-host-bridge). The check's list is not made from the InaccessiblePaths= lines: add a
+#   path to it, or take one out of it, as you do there.
+# - The option hides what is at a named path when the unit starts, and nothing that comes there later: a path made
+#   after the start (the controller's first start writes data/api-token), a file replaced by a rename (the controller
+#   writes data/proxy-personas.json that way, and most editors save .env that way) or removed and made again is
+#   readable to the bridge's Codex until the bridge is restarted. The check runs at a start only, and passes a path
+#   that is not there. Start the controller once before the bridge, and restart the bridge
+#   (systemctl --user restart codex-host-bridge) after the controller's first start and after any change to .env or
+#   to the proxy personas.
+# - Afterwards check that the bridge still answers, and that a command its Codex runs cannot read data/api-token, once
+#   that file is there: one that is not there cannot be read either. See "Closing the checkout's secrets to the
+#   bridge" in docs/deployment.md.
+#PrivateUsers=yes
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/.env
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/api-token
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/takeover-token
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/proxy-personas.json
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/auth
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/witness
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/mesh/identity
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/ssh
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/browser-profile
+#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/cli-home
+#ExecStartPre=/bin/sh -c 'for f in .env data/api-token data/takeover-token data/proxy-personas.json data/auth data/witness data/mesh/identity data/ssh data/browser-profile data/cli-home; do [ ! -r "$$f" ] || { echo "the option is on and $$f is still readable: this host does not let a user unit hide paths" >&2; exit 78; }; done'
+
 [Install]
 WantedBy=default.target

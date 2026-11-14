@@ -32,8 +32,10 @@ from .models import (
     validate_coordinate_pair,
     validate_url,
 )
+from .regex_guard import catastrophic_repeat
 from .result_shaping import ResultDetail
 from .url_safety import refuse_ambiguous_host, refuse_another_navigation_host
+from .utils import holds_lone_surrogate, holds_lone_surrogate_in_a_key
 
 __all__ = [
     "AgentJobIdInput",
@@ -117,14 +119,33 @@ class HarnessStartConvergenceInput(StrictInputModel):
     )
     max_attempts: int | None = Field(default=None, ge=1, le=20)
 
+    @field_validator("contract")
+    @classmethod
+    def validate_metadata_keys(cls, value: TaskContract) -> TaskContract:
+        _refuse_lone_surrogate_key(value.metadata, field_name="contract.metadata")
+        return value
+
     @field_validator("mock_final_observation")
     @classmethod
     def validate_mock_final_url(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        _refuse_lone_surrogate_key(value, field_name="mock_final_observation")
         # Its url is shown with its credentials left out, read as a browser reads it (previews.py), so
         # one a browser reads as another host is refused, as the other URLs a preview redacts are.
         if value is not None and isinstance(value.get("url"), str):
             refuse_ambiguous_host(value["url"], field_name="mock_final_observation.url")
         return value
+
+
+def _refuse_lone_surrogate_key(value: Any, *, field_name: str) -> None:
+    """Refuse a value the input does not type when a key of a dict inside it holds a lone surrogate.
+
+    The model refuses one in a key of the value's own (a dict[str, Any] types its keys), and nothing typed a key
+    below: the call ran under workflow_profile=fast, and under governed it was answered "utf-8", the first
+    argument of the error its arguments raised when they were written out for the approval. A lone surrogate in a
+    string that is no key is still taken: the harness replaces it, and the approval shows it by its escape.
+    """
+    if holds_lone_surrogate_in_a_key(value):
+        raise ValueError(f"{field_name} must not hold a lone surrogate (half of a UTF-16 pair) in a key")
 
 
 class HarnessGetStatusInput(StrictInputModel):
@@ -270,8 +291,12 @@ def _offset_field() -> Any:
     )
 
 
+# The most characters a tool's max_chars accepts (the MCP DOM resource's cap too).
+MAX_TOOL_RESULT_CHARS = 1_000_000
+
+
 def _max_chars_field() -> Any:
-    return Field(default=20_000, ge=1_000, le=1_000_000, description="Most characters to return.")
+    return Field(default=20_000, ge=1_000, le=MAX_TOOL_RESULT_CHARS, description="Most characters to return.")
 
 
 class ReadDownloadInput(SessionIdInput):
@@ -355,7 +380,7 @@ class AgentJobIdInput(StrictInputModel):
 
 class ResumeAgentJobInput(AgentJobIdInput):
     max_steps: int | None = Field(
-        default=None, ge=1, le=20, description="Steps to allow from here. Omitted: what the job had left."
+        default=None, ge=1, le=20, description="Steps to allow from here. Omitted: what the job was first given."
     )
 
 
@@ -481,6 +506,11 @@ class SetCookiesInput(SessionIdInput):
         for index, cookie in enumerate(self.cookies):
             if not isinstance(cookie, dict):
                 raise ValueError(f"cookies[{index}] must be an object")
+            # A cookie's values are free (Any), so pydantic does not refuse one as it does in a str field, such as
+            # set_local_storage's key and value: the browser would store U+FFFD in its place, another cookie than
+            # the one sent. What was sent is not repeated.
+            if holds_lone_surrogate(cookie):
+                raise ValueError(f"cookies[{index}] must not hold a lone surrogate (half of a UTF-16 pair)")
             name = str(cookie.get("name") or "").strip()
             value = cookie.get("value")
             domain = str(cookie.get("domain") or "").strip()
@@ -554,6 +584,13 @@ class FindElementsInput(SessionIdInput):
             raise ValueError("find_elements accepts either selector or query, not both")
         return self
 
+    @model_validator(mode="after")
+    def refuse_catastrophic_regex(self) -> "FindElementsInput":
+        # app.regex_guard: the classic shapes only, and not a proof; the 10 s guard on the read stays.
+        if self.regex and self.query and (reason := catastrophic_repeat(self.query)):
+            raise ValueError(reason)
+        return self
+
 
 class DragDropInput(SessionIdInput):
     source_selector: str | None = Field(default=None, max_length=2000)
@@ -603,6 +640,10 @@ class ShareSessionInput(SessionIdInput):
     ttl_minutes: int = Field(default=60, ge=1, le=1440, description="How long the share link works.")
 
 
+class RevokeSessionShareInput(SessionIdInput):
+    """End every share link of one session that has been minted so far."""
+
+
 class ShadowBrowseInput(SessionIdInput):
     pass
 
@@ -642,7 +683,8 @@ class CreateCronJobInput(StrictInputModel):
     enabled: bool = True
     webhook_enabled: bool = False
     # Every run of the job starts under it. Over MCP the gateway sets it from the creating call's
-    # workflow_profile, so it is not in the tool's schema; a REST body (an operator) names it.
+    # workflow_profile, which tools/list advertises for every governed tool, so this field stays out
+    # of the model's schema; a REST body (an operator) names it.
     workflow_profile: SkipJsonSchema[WorkflowProfile] = "fast"
 
     @field_validator("start_url")

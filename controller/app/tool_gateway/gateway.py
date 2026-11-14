@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import datetime
-import decimal
 import difflib
-import enum
 import hashlib
 import json
 import logging
-import math
 import re
 import time
-import uuid
-from pathlib import Path, PurePath
-from typing import Any, get_args
+from pathlib import Path
+from typing import Any, Literal, get_args
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -27,6 +22,7 @@ from ..action_errors import (
     BrowserUnreachableError,
     SessionNotFoundError,
 )
+from ..admin_operators import require_admin_operator
 from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
@@ -50,11 +46,13 @@ from ..models import (
     McpToolCallContent,
     McpToolCallRequest,
     McpToolCallResponse,
+    WorkflowProfile,
 )
 from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..run_as import controller_user_status
 from ..session_ownership import verified_operator
+from ..session_share import ensure_links_revocable, mint_share_token, revoke_share_links
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
@@ -98,6 +96,7 @@ from ..tool_inputs import (
     ReadDownloadInput,
     ReadinessCheckInput,
     ResumeAgentJobInput,
+    RevokeSessionShareInput,
     SaveAuthProfileInput,
     SaveAuthStateInput,
     SaveMemoryProfileInput,
@@ -115,11 +114,13 @@ from ..tool_inputs import (
     VisionFindInput,
     WaitForSelectorInput,
 )
+from ..utils import capped_for_log, error_text, error_text_for_log, json_key, json_safe, quoted_for_log
 from .drag import drag_drop
 from .packs import register_all
 from .previews import preview_arguments
-from .registry import ToolRegistry, ToolSpec
+from .registry import QUEUE_TOOLS, ToolRegistry, ToolSpec
 from .selection import withheld_tool_message
+from .write_records import cookie_digest, recorded_write
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +161,19 @@ SESSION_STARTER_TOOLS = (
     "browser.wait_for_selector",
 )
 IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
-# Tools that queue an agent step or run: its request carries its own workflow_profile (_call_tool).
-QUEUE_TOOLS = frozenset({"browser.queue_agent_run", "browser.queue_agent_step"})
+# The tools whose approval_id is what they act on, not an approval presented for the call itself.
+APPROVAL_DECISION_TOOLS = frozenset({"browser.approve_approval", "browser.reject_approval", "browser.execute_approval"})
+# The tools whose lookup answers an id it does not hold with a KeyError that names the id and nothing else: the
+# argument that holds the id, and what the call is told (_unknown_id_message), in the wording of an unknown session.
+# By tool: job_id is a cron job's argument too, and profile_name a memory profile's.
+_NO_AGENT_JOB = ("job_id", "No agent job with id {}. List agent jobs to find one.")
+UNKNOWN_ID_ANSWERS: dict[str, tuple[str, str]] = {
+    "browser.get_agent_job": _NO_AGENT_JOB,
+    "browser.resume_agent_job": _NO_AGENT_JOB,
+    "browser.discard_agent_job": _NO_AGENT_JOB,
+    "browser.cancel_agent_job": _NO_AGENT_JOB,
+    "browser.get_auth_profile": ("profile_name", "No auth profile named {}. List auth profiles to find one."),
+}
 
 
 # Characters of a governed tool call's arguments shown to the approving operator.
@@ -175,6 +187,8 @@ _JSON_CHARACTER = re.compile(r"\\ud[89ab][0-9a-f]{2}\\u[0-9a-f]{4}|\\u[0-9a-f]{4
 # putting in a model's context; the text result still carries its URL.
 _INLINE_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 _INLINE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+# Why a screenshot the result was to carry was withheld (image_omitted): a closed set, never a path or an error's text.
+ImageOmitted = Literal["no_artifact_root", "outside_artifact_root", "unsupported_type", "unreadable", "too_large"]
 
 
 def _page_of(content: str, *, offset: int, max_chars: int) -> dict[str, Any]:
@@ -212,54 +226,19 @@ def _read_inline_image(path: Path) -> bytes | None:
 
 
 _ACTION_NAMES = frozenset(get_args(ActionName))
-
-
-# Types strict JSON has no form for that a result may still carry, sent as their text.
-_SENT_AS_TEXT = (datetime.date, datetime.time, PurePath, uuid.UUID, decimal.Decimal)
-
-
-def _json_safe(value: Any) -> Any:
-    """``value`` with only what strict JSON can hold: NaN and the infinities become null, a tuple or set a list,
-    an Enum its value, and a known type (_SENT_AS_TEXT) its text.
-
-    Any other object raises TypeError rather than going out as its ``str()``: a repr is not a result anyone shaped,
-    and can hold what model_dump would have left out (a BrowserSession's holds its totp_secret).
-    """
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {_json_key(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, enum.Enum):
-        return _json_safe(value.value)
-    if isinstance(value, _SENT_AS_TEXT):
-        return str(value)
-    raise TypeError(f"a {type(value).__name__} is not sent in a tool result")
-
-
-def _json_key(key: Any) -> str:
-    """A dict key as json.dumps spells it (``1``, ``true``, ``null``), or a known type's text; any other refused."""
-    if isinstance(key, str):
-        return key
-    if key is None or isinstance(key, (bool, int, float)):
-        return json.dumps(key)
-    if isinstance(key, _SENT_AS_TEXT):
-        return str(key)
-    raise TypeError(f"a {type(key).__name__} key is not sent in a tool result")
+# A tuple, and not a set: a non-string a client sends, a list included, can be compared with it (_pop_policy_profile).
+_WORKFLOW_PROFILES = get_args(WorkflowProfile)
 
 
 def _json_safe_detail(detail: dict[str, Any]) -> dict[str, Any]:
-    """An error's detail as strictly as a result (_json_safe), less any entry that cannot be: an error answer
+    """An error's detail as strictly as a result (json_safe), less any entry that cannot be: an error answer
     still goes out, with what it can say."""
     safe: dict[str, Any] = {}
     for key, value in detail.items():
         try:
-            safe[_json_key(key)] = _json_safe(value)
+            safe[json_key(key)] = json_safe(value)
         except (TypeError, ValueError, RecursionError) as exc:
-            logger.warning("left %r out of an error's detail: %s", key, exc)
+            logger.warning("left %s out of an error's detail: %s", quoted_for_log(key), error_text_for_log(exc))
     return safe
 
 
@@ -424,7 +403,12 @@ class McpToolGateway:
                     result = await spec.handler(arguments)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
             try:
-                result = _json_safe(result)
+                result = json_safe(result)
+                # From the result as json_safe left it (a Path is its text), and before it is encoded, so the text
+                # and the structured result say the same.
+                image, image_omitted = await self._inline_image(spec.name, result)
+                if image_omitted is not None:
+                    result = {**result, "image_omitted": image_omitted}
                 text = json.dumps(result, ensure_ascii=False, allow_nan=False)
             except (TypeError, ValueError, RecursionError):
                 # The handler has run: say so, rather than "Tool execution failed", which reads as nothing done.
@@ -435,7 +419,6 @@ class McpToolGateway:
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.
             content: list[McpToolCallContent | McpImageContent] = [McpToolCallContent(text=text)]
-            image = await self._inline_image(spec.name, result)
             if image is not None:
                 content.append(image)
             return McpToolCallResponse(content=content, structuredContent=result, isError=False)
@@ -467,7 +450,7 @@ class McpToolGateway:
             )
         except CronJobDisabledError as exc:
             # The agent can enable the job, or stop triggering it; a code tells it which refusal this is.
-            message = str(exc.args[0]) if exc.args else "job is disabled"
+            message = error_text(exc.args[0]) if exc.args else "job is disabled"
             return self._refusal_response(message, {"error": message, "code": "cron_job_disabled"}, exc)
         except BrowserUnreachableError as exc:
             # Its message names the endpoint and Playwright's reason: the log has them (runtime.py), the caller not.
@@ -479,7 +462,11 @@ class McpToolGateway:
             # source_selector or source_x/source_y", "Memory profile not found").
             # Surface them so the calling agent can self-correct, instead of
             # collapsing them into the opaque catch-all below.
-            message = str(exc.args[0]) if exc.args else exc.__class__.__name__
+            message = error_text(exc.args[0]) if exc.args else exc.__class__.__name__
+            if isinstance(exc, KeyError) and (presented_as := self._presented_as(payload, message)):
+                message = self._unknown_approval_message(spec, message, presented_as)
+            elif isinstance(exc, KeyError):
+                message = self._unknown_id_message(payload, message) or message
             return self._refusal_response(message, {"error": message}, exc)
         except FileNotFoundError as exc:
             # Lookups that miss raise FileNotFoundError with a message naming
@@ -490,7 +477,7 @@ class McpToolGateway:
             if exc.errno is not None:
                 logger.exception("tool %s failed", payload.name)
                 return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
-            message = str(exc.args[0]) if exc.args else "Not found"
+            message = error_text(exc.args[0]) if exc.args else "Not found"
             return self._refusal_response(message, {"error": message, "code": "not_found"}, exc)
         except PermissionError as exc:
             # Policy refusals raise PermissionError with a reason for the caller:
@@ -503,7 +490,7 @@ class McpToolGateway:
             if exc.errno is not None:
                 logger.exception("tool %s failed", payload.name)
                 return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
-            message = str(exc.args[0]) if exc.args else "Not permitted"
+            message = error_text(exc.args[0]) if exc.args else "Not permitted"
             return self._refusal_response(message, {"error": message, "code": "not_permitted"}, exc)
         except PlaywrightError as exc:
             # The browser's answer about the caller's own page: a selector that
@@ -512,7 +499,7 @@ class McpToolGateway:
             # like a crash and an eval_js error could not be debugged.
             # Keep the reason; drop Playwright's call log and the stack frames of
             # its own evaluation wrapper, which say nothing about the page.
-            message = (getattr(exc, "message", None) or str(exc)).split("\nCall log:")[0]
+            message = error_text(exc).split("\nCall log:")[0]
             message = message.split("\n    at ")[0].strip()
             code = "timeout" if isinstance(exc, PlaywrightTimeoutError) else "browser_error"
             return self._refusal_response(message[:2000], {"error": message[:2000], "code": code}, exc)
@@ -520,35 +507,41 @@ class McpToolGateway:
             logger.exception("tool %s failed", payload.name)
             return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
 
-    async def _inline_image(self, tool_name: str, result: Any) -> McpImageContent | None:
-        """The result's screenshot as MCP image content, when the tool's job is to show the page."""
+    async def _inline_image(self, tool_name: str, result: Any) -> tuple[McpImageContent | None, ImageOmitted | None]:
+        """The result's screenshot as MCP image content, when the tool's job is to show the page, and otherwise why not.
+
+        The image and None; None and a reason code when the result was to carry one and it was withheld; two Nones
+        when it was not to carry one.
+        """
         path_value = inline_screenshot_path(tool_name, result)
         if path_value is None:
-            return None
+            return None, None
         artifact_root = getattr(getattr(self.manager, "settings", None), "artifact_root", None)
         if not artifact_root:
-            return None
-        path = Path(path_value).resolve()
-        # The path comes from the manager, but it is read back and sent to the
-        # client, so it has to be a screenshot artifact and nothing else.
-        if not path.is_relative_to(Path(artifact_root).resolve()):
-            logger.warning("not inlining %s: outside the artifact root", path)
-            return None
-        mime_type = _INLINE_IMAGE_TYPES.get(path.suffix.lower())
-        if mime_type is None:
-            return None
+            return None, "no_artifact_root"
         try:
+            path = Path(path_value).resolve()
+            # The path comes from the manager, but it is read back and sent to the
+            # client, so it has to be a screenshot artifact and nothing else.
+            if not path.is_relative_to(Path(artifact_root).resolve()):
+                logger.warning("not inlining %s: outside the artifact root", path)
+                return None, "outside_artifact_root"
+            mime_type = _INLINE_IMAGE_TYPES.get(path.suffix.lower())
+            if mime_type is None:
+                return None, "unsupported_type"
             data = await asyncio.to_thread(_read_inline_image, path)
-        except OSError as exc:
-            logger.debug("could not inline screenshot %s: %s", path, exc)
-            return None
+        except (OSError, ValueError) as exc:
+            # A failure here is the image's, not the result's: the handler ran, and only the image is withheld.
+            logger.debug("could not inline screenshot %s: %s", path_value, error_text_for_log(exc))
+            return None, "unreadable"
         if data is None:
-            return None
-        return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type)
+            return None, "too_large"
+        return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type), None
 
     def _unknown_tool_message(self, name: str) -> str:
         """Point a mistyped or guessed tool name at the tool the caller meant."""
-        message = f"Unknown tool: {name}"
+        # Cut, as an unknown MCP method is: the caller's own text, as long as the body.
+        message = f"Unknown tool: {capped_for_log(name)}"
         served = list(self._registry.tools)
         # A client that rewrote the dot, or dropped the namespace.
         for candidate in (name.replace("_", ".", 1), f"browser.{name}"):
@@ -673,7 +666,27 @@ class McpToolGateway:
 
     @staticmethod
     def _pop_policy_profile(spec: ToolSpec, raw_arguments: dict[str, Any]) -> str:
-        profile = str(raw_arguments.pop("policy_profile", "") or raw_arguments.get("workflow_profile") or "fast")
+        """The call's profile, from policy_profile and workflow_profile: governed when either says governed.
+
+        Fast when neither names one (None is unset). The two are one argument under two names, and a call that
+        gives both need not agree with itself: read in order, policy_profile=fast hid workflow_profile=governed, and
+        the call went without the approval one of its two arguments asked for.
+
+        A tool the profile changes something for refuses anything else, in words that do not repeat what was sent:
+        read as fast, a typo silently dropped the approval it asked for. Those are the governed tools (the cron job a
+        governed caller creates stores it) and the two that queue an agent run or step, which a governed caller's
+        profile forces governed (_call_tool). Any other tool ignores the argument.
+        """
+        policy_profile = raw_arguments.pop("policy_profile", None)
+        workflow_profile = raw_arguments.get("workflow_profile")
+        if spec.governed_kind is not None or spec.name in QUEUE_TOOLS:
+            for value in (policy_profile, workflow_profile):
+                if value is not None and value not in _WORKFLOW_PROFILES:
+                    raise ValueError(f"workflow_profile must be one of: {', '.join(_WORKFLOW_PROFILES)}")
+        if "governed" in (policy_profile, workflow_profile):
+            profile = "governed"
+        else:
+            profile = str(policy_profile or workflow_profile or "fast")
         if "workflow_profile" not in spec.input_model.model_fields:
             raw_arguments.pop("workflow_profile", None)
         return profile
@@ -685,6 +698,73 @@ class McpToolGateway:
             approval_id = raw_arguments.pop("approval_id", approval_id)
         governed_approval_id = raw_arguments.pop("governed_approval_id", None)
         return str(governed_approval_id or approval_id) if governed_approval_id or approval_id else None
+
+    @staticmethod
+    def _presented_as(payload: McpToolCallRequest, approval_id: str) -> list[str]:
+        """The arguments in which a call presented ``approval_id``, as _pop_policy_approval_id reads them; often none.
+
+        Compared stripped. A tool whose model strips its strings (the three that decide an approval) asks the store
+        for the stripped id, and the store's KeyError names that one: compared with the id as it was sent, a pasted
+        id with a line break after it was no id the call had presented.
+        """
+        arguments = payload.arguments if isinstance(payload.arguments, dict) else {}
+        wanted = approval_id.strip()
+        return [
+            name
+            for name in ("approval_id", "governed_approval_id")
+            if (value := arguments.get(name)) and str(value).strip() == wanted
+        ]
+
+    @staticmethod
+    def _unknown_id_message(payload: McpToolCallRequest, missing: str) -> str | None:
+        """What a call is told of an agent job id or an auth profile name no record answers to, where it was told the
+        id and nothing else; None for any other KeyError, which keeps its own text.
+
+        ``missing`` is the KeyError's text, and the miss is the one meant only where that is the id the call sent in
+        the tool's argument (UNKNOWN_ID_ANSWERS), compared stripped as _presented_as compares, since the auth profile
+        store looks up the stripped name. A job the caller may not use raises the same KeyError as one that never
+        was, so they read alike here, as on the REST routes. The id is cut as a session's is in the wording this
+        matches (action_errors.SessionNotFoundError); the two input models bound it at 120 characters today.
+        """
+        argument, wording = UNKNOWN_ID_ANSWERS.get(payload.name, ("", ""))
+        arguments = payload.arguments if isinstance(payload.arguments, dict) else {}
+        sent = arguments.get(argument)
+        if not isinstance(sent, str) or sent.strip() != missing.strip():
+            return None
+        return wording.format(capped_for_log(missing))
+
+    def _unknown_approval_message(self, spec: ToolSpec, approval_id: str, presented_as: list[str]) -> str:
+        """What a call is told of an approval id no record answers to, where it was told the id and nothing else.
+
+        The store raises a KeyError naming the id for one it does not hold and for a record that no longer
+        validates, and the manager the same for one the caller may not use, so they read alike here as they do on
+        the REST routes (404). The first sentence is what the controller knows, and is true of each of them; it does
+        not say the approval never existed, which it cannot know (the retention may have deleted it before it was
+        turned off, or a backup was restored). The retention deletes a decided approval, so an agent that kept an old
+        id meets this without having mistyped anything.
+
+        The advice names the argument that held the id: a call can present one as governed_approval_id, and told to
+        leave approval_id out it would send the unknown id again. A decision's own call has no other to repeat, and
+        cannot know which argument the call that needed the approval used.
+        """
+        days = self.manager.settings.approval_retention_days
+        named = " and ".join(presented_as)
+        if spec.name in APPROVAL_DECISION_TOOLS:
+            again = "To get a new approval, repeat the call that needed one without this approval id."
+        else:
+            again = f"Repeat the call without {named} to ask for a new approval."
+        # The id quoted, and cut as an unknown MCP method is: governed_approval_id is read before any model bounds it,
+        # so it is as long as the call.
+        known = (
+            f"Unknown approval {quoted_for_log(approval_id)} (presented as {named}): this controller holds no "
+            "approval of that id that this call can use."
+        )
+        if days <= 0:
+            return f"{known} {again}"
+        return (
+            f"{known} It may never have existed, or may have been deleted, as a decided approval can be once "
+            f"APPROVAL_RETENTION_DAYS ({days:g}) have passed since its decision. {again}"
+        )
 
     async def _require_governed_tool_approval(
         self,
@@ -760,7 +840,8 @@ class McpToolGateway:
         canonical arguments are now hashed into ``text``, which matching compares,
         and previewed in the reason the operator reads. Credential-bearing fields
         are left out of the preview (approvals are stored and sent to webhooks);
-        the hash still covers them.
+        the hash still covers them, so the approval store keeps it only keyed
+        (ApprovalStore._keyed): a short credential could be guessed against it.
 
         ``arguments_size`` is the length of the whole text View all shows
         (_governed_call_arguments), which a cut preview names: its own one-line
@@ -769,7 +850,9 @@ class McpToolGateway:
         """
         args = arguments.model_dump(mode="json", exclude={"session_id", "approval_id"}, exclude_none=True)
         canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        # surrogatepass: a value the tool's input does not type (harness.start_convergence's metadata) can hold a
+        # lone surrogate, which UTF-8 refuses, and the caller was answered "utf-8". Any other text hashes as before.
+        digest = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
         reason = f"Approve {spec.name}"
         if arguments_size is not None:
             # Every character past ASCII as its \uXXXX escape: a homoglyph host, an invisible name or a
@@ -829,7 +912,7 @@ class McpToolGateway:
             raise RuntimeError("Memory profiles are not enabled.")
         profile = await self.manager.memory.get(payload.profile_name)
         if profile is None:
-            raise KeyError(f"Memory profile not found: {payload.profile_name!r}")
+            raise KeyError(f"Memory profile not found: {quoted_for_log(payload.profile_name)}")
         return profile.model_dump()
 
     async def _list_memory_profiles(self, _: EmptyInput) -> list[dict[str, Any]]:
@@ -1004,7 +1087,9 @@ class McpToolGateway:
         return self.manager.get_remote_access_info(payload.session_id)
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
-        # The same report as GET /readiness, the pre-request gate's and the window-birth watcher's states included.
+        # The same report as GET /readiness, the pre-request gate's and the window-birth watcher's states included,
+        # for the callers that route answers (routes/_utils.require_admin makes the same check).
+        require_admin_operator(self.manager.settings)
         report = run_readiness_checks(
             self.manager.settings,
             mode=payload.mode,
@@ -1180,7 +1265,13 @@ class McpToolGateway:
 
     async def _set_viewport(self, payload: SetViewportInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        await session.page.set_viewport_size({"width": payload.width, "height": payload.height})
+        size = {"width": payload.width, "height": payload.height}
+        async with recorded_write(self.manager, session, "browser.set_viewport", size) as write:
+            # Under the session lock and bounded, as a storage write: a viewport change cannot land under another
+            # call's coordinates, and a hung renderer cannot hold the call.
+            async with locked_read(self.manager, session):
+                write.reached_page = True
+                await bounded(session.page.set_viewport_size(size))
         return {"session_id": payload.session_id, "width": payload.width, "height": payload.height}
 
     async def _get_cookies(self, payload: GetCookiesInput) -> dict[str, Any]:
@@ -1206,17 +1297,22 @@ class McpToolGateway:
 
     async def _set_cookies(self, payload: SetCookiesInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        # Cookies are scoped to a site, so ALLOWED_HOSTS has to cover the site
-        # each one is for: otherwise a caller confined to one host plants a
-        # session cookie on another. All are checked before any is added.
-        for cookie in payload.cookies:
-            url = str(cookie.get("url") or "").strip()
-            domain = str(cookie.get("domain") or "").strip()
-            if url:
-                self.manager._assert_url_allowed(url)
-            if domain:
-                self.manager._assert_url_allowed(f"https://{domain.lstrip('.')}/")
-        await session.context.add_cookies(payload.cookies)
+        digest = {"cookies": [cookie_digest(cookie) for cookie in payload.cookies]}
+        async with recorded_write(
+            self.manager, session, "browser.set_cookies", digest, risk_category="account_change"
+        ) as write:
+            # Cookies are scoped to a site, so ALLOWED_HOSTS has to cover the site
+            # each one is for: otherwise a caller confined to one host plants a
+            # session cookie on another. All are checked before any is added.
+            for cookie in payload.cookies:
+                url = str(cookie.get("url") or "").strip()
+                domain = str(cookie.get("domain") or "").strip()
+                if url:
+                    self.manager._assert_url_allowed(url)
+                if domain:
+                    self.manager._assert_url_allowed(f"https://{domain.lstrip('.')}/")
+            write.reached_page = True
+            await session.context.add_cookies(payload.cookies)
         return {"session_id": payload.session_id, "set": len(payload.cookies)}
 
     async def _get_local_storage(self, payload: GetStorageInput) -> dict[str, Any]:
@@ -1224,9 +1320,9 @@ class McpToolGateway:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
         if payload.key:
-            script = f"() => window.{payload.storage_type}Storage.getItem({payload.key!r})"
+            script = f"(k) => window.{payload.storage_type}Storage.getItem(k)"
             async with locked_read(self.manager, session):
-                value = await bounded(session.page.evaluate(script))
+                value = await bounded(session.page.evaluate(script, payload.key))
             return {"session_id": payload.session_id, "key": payload.key, "value": value}
         script = (
             f"() => Object.fromEntries("
@@ -1242,10 +1338,15 @@ class McpToolGateway:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
         script = f"([k, v]) => window.{payload.storage_type}Storage.setItem(k, v)"
-        # Refused before the write, and after it if the page moved meanwhile: the
-        # value may then be in a refused page's storage.
-        async with locked_read(self.manager, session):
-            await bounded(session.page.evaluate(script, [payload.key, payload.value]))
+        digest = {"storage_type": payload.storage_type, "key": payload.key}
+        async with recorded_write(
+            self.manager, session, "browser.set_local_storage", digest, risk_category="account_change"
+        ) as write:
+            # Refused before the write, and after it if the page moved meanwhile: the
+            # value may then be in a refused page's storage.
+            async with locked_read(self.manager, session):
+                write.reached_page = True
+                await bounded(session.page.evaluate(script, [payload.key, payload.value]))
         return {"session_id": payload.session_id, "key": payload.key, "set": True}
 
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:
@@ -1284,20 +1385,30 @@ class McpToolGateway:
         if self.share_manager is None:
             raise RuntimeError("Session sharing is not configured")
         await self.manager.get_session(payload.session_id)  # verify session exists
-        return self.share_manager.create_token(
-            payload.session_id,
-            ttl_seconds=payload.ttl_minutes * 60,
+        return await mint_share_token(
+            self.share_manager, self.manager.audit, payload.session_id, ttl_seconds=payload.ttl_minutes * 60
         )
+
+    async def _revoke_session_share(self, payload: RevokeSessionShareInput) -> dict[str, Any]:
+        if self.share_manager is None:
+            raise RuntimeError("Session sharing is not configured")
+        await ensure_links_revocable(self.manager, payload.session_id)
+        return await revoke_share_links(self.share_manager, self.manager.audit, payload.session_id)
 
     async def _enable_shadow_browse(self, payload: ShadowBrowseInput) -> dict[str, Any]:
         return await self.manager.enable_shadow_browse(payload.session_id)
 
+    # The proxy persona tools are the /proxy-personas routes' operations, for the callers those routes answer: each
+    # makes the check their dependency makes (routes/_utils.require_admin) before it reads or changes the store.
+
     async def _list_proxy_personas(self, _: EmptyInput) -> list[dict[str, Any]]:
+        require_admin_operator(self.manager.settings)
         if self.proxy_store is None:
             return []
         return self.proxy_store.list_personas()
 
     async def _create_proxy_persona(self, payload: CreateProxyPersonaInput) -> dict[str, Any]:
+        require_admin_operator(self.manager.settings)
         if self.proxy_store is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured")
         return self.proxy_store.set_persona(
@@ -1309,6 +1420,7 @@ class McpToolGateway:
         )
 
     async def _delete_proxy_persona(self, payload: ProxyPersonaNameInput) -> dict[str, Any]:
+        require_admin_operator(self.manager.settings)
         if self.proxy_store is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured")
         deleted = self.proxy_store.delete_persona(payload.name)
@@ -1341,6 +1453,16 @@ class McpToolGateway:
             raise RuntimeError("Cron service not initialized")
         deleted = await self.cron_service.delete_job(payload.job_id)
         return {"job_id": payload.job_id, "deleted": deleted}
+
+    async def _rotate_cron_webhook_key(self, payload: CronJobIdInput) -> dict[str, Any]:
+        if self.cron_service is None:
+            raise RuntimeError("Cron service not initialized")
+        return await self.cron_service.rotate_webhook_key(payload.job_id)
+
+    async def _revoke_cron_webhook_key(self, payload: CronJobIdInput) -> dict[str, Any]:
+        if self.cron_service is None:
+            raise RuntimeError("Cron service not initialized")
+        return await self.cron_service.revoke_webhook_key(payload.job_id)
 
     async def _trigger_cron_job(self, payload: CronJobIdInput) -> dict[str, Any]:
         if self.cron_service is None:

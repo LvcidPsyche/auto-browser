@@ -20,6 +20,7 @@ API_BEARER_TOKEN=<strong-random-secret>
 REQUIRE_OPERATOR_ID=true
 AUTH_STATE_ENCRYPTION_KEY=<44-char-fernet-key>
 REQUIRE_AUTH_STATE_ENCRYPTION=true
+SHARE_TOKEN_SECRET=<strong-random-secret>
 REQUEST_RATE_LIMIT_ENABLED=true
 METRICS_ENABLED=true
 CONTROLLER_ALLOWED_HOSTS=<controller-ingress-hosts>
@@ -43,23 +44,36 @@ Downloads a page starts are capped by `DOWNLOAD_MAX_BYTES` (default 256 MiB; a l
 `CONTROLLER_ALLOWED_HOSTS` protects the controller itself from unexpected HTTP Host headers.
 Keep `ALLOWED_HOSTS` for browser navigation targets, and set `CONTROLLER_ALLOWED_HOSTS`
 to the hostnames operators use to reach the controller, such as `browser.example.com`
-or `localhost,127.0.0.1,::1` for a local-only install.
+or `localhost,127.0.0.1,::1` for a local-only install. An entry is an exact name, an
+IPv6 address with or without brackets (`[::1]`, `::1`), a suffix such as `*.example.com`,
+or `*`. Brackets round anything else (`[localhost]`, `[*]`) and a bare `*.` stop the
+controller at startup.
 
 When it is unset and the controller runs without a bearer credential (a loopback
 deployment with `API_ALLOW_TOKENLESS_LOOPBACK=true`), only loopback Host names —
 `localhost`, `127.0.0.1`, `[::1]` — are answered. An unauthenticated API that accepts
 any Host header can be driven by a web page through DNS rebinding, so this default
-holds until you either list the names clients use or let the controller use a token.
-`/healthz` is exempt.
+holds until you either list the exact names clients use or let the controller use a
+token. `/healthz` is exempt.
+
+On a controller without a bearer credential, a wildcard (`*`, `*.example.com`) admits
+no Host: anyone who can get a name under it can point that name at 127.0.0.1, and a
+page served from it would then drive the controller whole, with no token to ask for.
+Such a controller does not start with a wildcard in the list, and says what works
+instead: a token, or exact host names. An exact name is only as safe as its DNS:
+list only names whose DNS you control, or run with a token. A single-label name such as
+`controller` can be answered by another host on the same network (mDNS, LLMNR, a DHCP
+search domain). A controller with a token admits by its wildcards as before.
 
 ## API token
 
-Every API and MCP request carries `Authorization: Bearer <token>`. `API_BEARER_TOKEN`
+Every API and MCP request carries `Authorization: Bearer <token>`, apart from the health
+checks, `/version`, the dashboard page, share links and `/mesh/receive`. `API_BEARER_TOKEN`
 (or named `API_BEARER_TOKENS`) sets it. Without either, the controller uses the token in
 `API_TOKEN_FILE` (`/data/api-token`, which the shipped compose maps to `./data/api-token`
 on the host), and a loopback controller outside production generates one there on first
-start: 0600, and given to the data directory's owner when the controller runs as root
-(the shipped image does), so host clients can read it.
+start: 0600 and owned by the user the controller runs as (see "Who the controller runs as" below), or, when it
+runs as root (`CONTROLLER_RUN_AS=root`), given to the data directory's owner, so host clients can read it.
 An exposed or production controller never generates one; it refuses to start without a
 token, from either source.
 
@@ -82,7 +96,19 @@ token, from either source.
 - `API_ALLOW_TOKENLESS_LOOPBACK=true` serves a loopback controller with no token.
   Any process that can reach port 8000, containers on the compose network
   included, can then drive the browser. It never applies to an exposed or
-  production controller.
+  production controller. Such a controller refuses (403) a POST, PUT, PATCH or DELETE that a browser marks as
+  `Sec-Fetch-Site: cross-site` or `same-site`, or whose `Origin` is not the host and port in its `Host` header: a web
+  page on another origin, or on another port of the same host, must be served from the controller's own origin. A
+  token does not help a page (nothing checks one on such a controller, and no route answers a CORS preflight, so a
+  page on another origin cannot send one to a controller that has a token either); a browser extension, or a
+  non-browser client that names an origin, needs the controller to have a token, and sends it.
+  `GET /auth-profiles/{name}/export`, which writes an archive, is refused the same way when a browser marks it so.
+  A request with neither header (curl, an SDK) is served. `/mesh/receive` is signed, and `/mcp` keeps its own Origin
+  check and `MCP_ALLOWED_ORIGINS`. A loopback reverse proxy in front of such a controller must pass the browser's
+  `Host` through with its port, or the controller needs a token: a proxy that rewrites `Host`, or listens on a port
+  other than the scheme's default and forwards the name without it, leaves the browser's `Origin` naming another host
+  or port, so every write from the dashboard it serves is refused. In nginx, use `proxy_set_header Host $http_host;`:
+  `$host` drops the port.
 - `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
 ## Chromium's sandbox (BROWSER_SANDBOX)
@@ -361,8 +387,9 @@ What per-session networks do not change:
   takeover token stops agents without file access to the controller's host, and only those:
   under compose `./data` belongs to the host user, so an agent running as that user on the
   host (a local MCP setup) can read `data/takeover-token`, and so can the controller's own
-  `cli` providers, which run as the controller's uid (see the known limit under the CLI
-  providers); so can anything that reads the session container's own copy of the password.
+  `cli` providers wherever their sandbox is off, cannot be used, or leaves that file open (see
+  "The CLI sandbox" under the CLI providers); so can anything that reads the session
+  container's own copy of the password.
   Open the dashboard and the takeover link in a browser no agent drives: such an agent can
   read the dashboard's sessionStorage, where the tokens are kept. That link carries
   the password in its fragment, `#password=…`, so noVNC connects without asking; a
@@ -480,10 +507,159 @@ shadow browse's headed browser), and Tesseract, which screenshot redaction's OCR
 also makes itself non-dumpable at startup, so a process of its uid cannot read the controller's own environment
 through `/proc/PID/environ`.
 
-Known limit: a child running as the controller's uid can still read the controller's files: `data/api-token`,
-`data/takeover-token`, the mesh and witness keys. The CLI providers (`OPENAI_AUTH_MODE=cli` and the others) and the
-Codex host bridge's Codex are such children, and page content they are shown can prompt-inject them. Use `api` mode
-where that matters. The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
+#### The CLI sandbox
+
+A provider CLI (`OPENAI_AUTH_MODE=cli` and the others) runs as the controller's user, and page content it is shown
+can prompt-inject it. On Linux with Landlock (kernel 5.13 or later, with Landlock enabled) the controller starts each
+provider CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a Landlock ruleset and then
+execs the CLI. Of `/data` the CLI can then open only `CLI_HOME` and what `CLI_SANDBOX_WRITABLE` names there, to read
+and write, and the screenshot its own call names (Codex's `--image`), to read. Kept in their default places,
+`data/api-token`, `data/takeover-token`, the auth profiles, the witness and mesh keys and the tunnel key cannot be
+opened, and neither can another session's screenshots or anything else under `/data`; nothing there can be listed or
+run. Each answers `EACCES`, to a CLI that runs as root as to any other. A `stat`, an inotify watch and a connection to
+a Unix socket under `/data` are not refused (below), and the conditions below say where a secret is left open.
+
+Outside `/data` a CLI can read, list and run what it could before, and write only in its home (wherever that is),
+the temp directories (`/tmp`, `/var/tmp`, and those its own `TMPDIR`, `TEMP` and `TMP` name where they lie outside
+`/data`), `/dev`, and the directories `CLI_SANDBOX_WRITABLE` names: root too, since the ruleset binds root as it
+binds anyone. That is what the list is for: the controller is not under the sandbox, and what a CLI could leave in
+the controller's own home (a `usercustomize.py` in its Python user site, an ssh config with a `ProxyCommand`) ran at
+the controller's next start, outside it. Each directory is given as its resolved path. One written outside `/data`
+that resolves into it is not given, and neither is one whose path has a `..` part: Linux reads the `..` after any
+link before it, which a CLI may have made. Beyond that a CLI cannot list `/` itself or make, remove or rename an
+entry directly in it, and an entry made directly in `/` after the CLI started has no rule and stays closed to it. It
+cannot mount or unmount anything (Landlock refuses that to every process it restricts). It runs with `no_new_privs`,
+so a setuid program it starts gains nothing: in the image that is no change, since the entrypoint and compose set it
+for the controller and its children already; on a Linux host run it is new. On a kernel older than 5.19 Landlock
+also refuses a sandboxed process every rename or link from one directory to another (`EXDEV`), in `CLI_HOME` as
+anywhere.
+
+Whatever a CLI needs under `/data` (its sign-in state, a `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `GEMINI_CLI_HOME`, a
+`TMPDIR`, the file `GOOGLE_APPLICATION_CREDENTIALS` names, a CA bundle, the CLI's own binary) has to be inside
+`CLI_HOME`, or, where it cannot move, the CLI started without the sandbox (`CLI_SANDBOX_ENABLED=false`, below). A
+binary that `which` finds under `/data` outside `CLI_HOME` cannot be run under the ruleset: the step then fails as
+`Provider request failed`, with the launcher's `126` or `127` line in the log, where a binary that cannot be run when
+the CLI is started directly fails the step as `Agent step failed` (`502` either way). Whatever a CLI writes outside
+its home, the temp directories and `/dev` (a `CODEX_HOME` or `CLAUDE_CONFIG_DIR` set to a directory elsewhere, which
+the adapters pass on; a directory a tool of yours writes) has to be named in `CLI_SANDBOX_WRITABLE`, comma-separated
+absolute paths. `/data`, a directory that holds it and a path with a `..` part are refused when the settings are
+read. An entry under `/data` is yours to choose (a secret kept in it is reported, below), and one that is not a
+directory when a call is made is passed over with one warning. So is one that, once resolved, lies in no directory
+given to the CLI: one in `/tmp` linked to `/opt/toolcache`, say, since `/tmp`'s rule covers where the entry is
+written and not where it leads, which a CLI may swap. A CLI that cannot run under the ruleset (it needs
+something under `/data` that cannot move into `CLI_HOME`, or it fails there) can be started without it:
+`CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI without the launcher, and a CLI then reads
+and writes what the controller's user can, as before 1.18.0.
+
+Where the sandbox would leave a secret open, or would not hold, the controller writes a warning, once in the life of
+the process for each distinct line, which names the condition (a secret's setting by its name and never its value, a
+directory by its path), and runs the CLI: without the sandbox, or under it with something left open, or under it
+without its home. Where several conditions hold, only the first in this list is named (no Landlock hides an open
+setting until Landlock is there):
+
+- **`CLI_SANDBOX_ENABLED=false`.** The CLI starts without the launcher, and no probe runs.
+- **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
+  seccomp profile refuses Landlock's system calls (Docker's default profile allows them), or the launcher's probe
+  failed for another reason: at the first CLI call the controller runs the launcher in a mode that applies the
+  ruleset and exits. The CLI starts without the launcher, as it did before 1.18.0. The launcher's own answer (it
+  applied the ruleset, or it refused to) is taken once for the process. A probe that did not finish (it timed out
+  after 30 seconds, or could not be started) is run again at the next CLI call; the calls that started while it ran
+  take its answer. The probe runs outside the call's own timeout, so on a host where it keeps timing out every CLI
+  call waits 30 seconds before it starts, and then runs without the launcher.
+- **`CLI_HOME` is `/data` or a directory that holds it,** as written, with no `..` part. The CLI starts without the
+  launcher.
+- **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or to a place no directory
+  given to the CLI holds, or is not a directory, or has a `..` part:** a link, which a CLI that may write where the
+  home is written can have made (a home in `/tmp`, swapped for a link to `/data/approvals`, to `/` or to any
+  directory outside `/tmp`: `/tmp`'s rule covers where the home is written, not where it leads), or a `..`, which
+  Linux reads after any link before it (`/data/x/..` is not `/data` where `x` is a link). The CLI starts under the
+  launcher without it, with no rule for its home: it writes there only where another directory given holds where it
+  resolves. The warning names `CLI_HOME`, its path and where it resolves (or
+  that it is not a directory, or has a `..` part); a `CLI_HOME` that is a link on purpose is to be set to its real
+  path, and one with a `..` part written without it.
+- **A CLI may write the controller's own home, or a directory in it, or a place the controller reads at its start.**
+  The home is judged as `HOME` names it and as the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank
+  (the CLI's `HOME` is then the controller's), or a directory a CLI may write (`CLI_HOME`, an entry of
+  `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's home, holds it or lies in it: its `.ssh` or its Python user
+  site, say. The places read at the start are each home's `.ssh` and `.local` and Python's user base, wherever
+  `PYTHONUSERBASE` puts it: a directory a CLI may write that is, holds or lies in one of them is reported wherever it
+  is (a `PYTHONUSERBASE` in `/tmp`, say). A `CLI_HOME` in the controller's home is the CLI's own, as is the private
+  directory there that a host run falls back to when its `CLI_HOME` cannot be made, and is not reported unless it is,
+  holds or lies in one of those places. The CLI starts under the launcher, and what it leaves there the controller
+  may run at its next start, where it is a Python user site or an ssh config.
+- **A secret is kept outside `/data`, in a directory a CLI may write, or is a directory that holds one, or its path
+  has a `..` part.** `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`, `WITNESS_ROOT`, `MESH_IDENTITY_DIR`,
+  `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and `BROWSER_WS_ENDPOINT_FILE` are checked, each resolved first, so
+  a `/data` that is a symbolic link to another place holds none of them. "In a directory a CLI may write" (`CLI_HOME`,
+  or an entry of `CLI_SANDBOX_WRITABLE` under `/data`) is as written or once resolved: a path written there counts
+  wherever it resolves, since the CLI can replace a link there with a file of its own. A secret's directory that
+  holds one counts too (`AUTH_ROOT=/data/auth` with `CLI_SANDBOX_WRITABLE=/data/auth/sub`), and so does a path with
+  a `..` part, wherever it resolves: Linux reads the `..` after any link before it, which a CLI may have made
+  (`AUTH_ROOT=/data/cli-home/slot/../../auth` is the `auth` in the directory two levels above wherever `slot` points,
+  and a CLI can make `slot` a link). The CLI starts under the launcher, which closes `/data` and not that place. A
+  Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it sets. Only these
+  eight are checked: any other store kept outside `/data` (`APPROVAL_ROOT`, which holds the approvals' digest key,
+  `STATE_DB_PATH`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `AUDIT_ROOT`, `MEMORY_ROOT`, `HARNESS_ROOT`,
+  `MESH_PEERS_PATH`, the tunnel's `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`, `ISOLATED_TUNNEL_INFO_ROOT` and
+  `REMOTE_ACCESS_INFO_PATH`) is readable by a CLI, with no warning.
+
+`CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
+with `Provider request failed` (`502`), and the log names the condition in one error line. So
+`CLI_SANDBOX_ENABLED=false` with `CLI_SANDBOX_REQUIRED=true` runs no provider CLI at all. `GET /agent/providers` still
+reports such a provider as configured. A launcher that cannot apply its ruleset at a real start, after its probe
+passed, fails that call the same way, and the CLI is never started without it.
+
+What the sandbox does not stop, and what does not work under it:
+
+- **Metadata, and names learnt by watching.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or
+  extended attributes: to a file under `/data` whose path it knows, a CLI can do whatever of those the file's own
+  permissions allow. Outside its home it cannot list a directory there, but it can place an inotify watch on one
+  (Landlock has no hook for a watch) and read the names of the entries made in it afterwards.
+- **Another CLI call's files.** Every call's CLI reads and writes all of `CLI_HOME`: the sign-in state, and the
+  per-call directory of a call that runs at the same time. So a CLI can write a regular `decision.json` into the
+  directory of another Codex call that runs at the same time, and the controller takes it as that call's decision.
+- **What an earlier call left.** The sandbox closes paths. A copy of a secret, or a hard link to one, that a process
+  made before the sandbox was on (a CLI under 1.17.0, a call while Landlock could not be used or the sandbox was
+  off) is open to a CLI where it lies: inside `CLI_HOME`, which is the CLI's own; anywhere beside `/data` that a CLI
+  can open, such as `/tmp`; or, where `/data` is no mount of its own (an image run with no volume), as a hard link
+  beside it. A sandboxed CLI cannot make such a link itself (`EXDEV`). Where a CLI may have been prompt-injected
+  before, rotate the secrets.
+- **Signals and connections.** The ruleset handles files and nothing of the network, and Landlock's file rights name
+  no connect. A CLI is a process of the controller's user with the container's network: it can signal the
+  controller, it can open a TCP connection to the controller's port (a local client like any other, which lacks the
+  API token wherever the controller demands one) and to whatever else the container reaches, and it can connect to a
+  listening Unix socket under `/data` and talk over it (measured). `data/host-bridge/codex.sock` is one: where the
+  Codex host bridge runs beside a `cli` provider and the socket's permissions let the controller's user connect, a
+  sandboxed `claude` or `gemini` can ask the bridge's Codex, which runs outside the sandbox.
+- **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the
+  next CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller
+  takes only as a regular file of at most 1 MiB and never through a link at its own name, and Codex's `config.toml`,
+  which the controller reads for the paths it names. The temp directories are shared with the controller's own
+  children: the OCR's input image is there while it runs.
+- **What the controller's user can read outside `/data`, and the sockets it can connect to.** With the isolation
+  overlay that includes the Docker socket.
+- **Truncation, on a kernel older than 6.2.** Landlock could not deny `truncate` before its third ABI. There a CLI
+  can empty a file under `/data` that the controller's user may write, though it can neither read nor write it, and
+  so a file outside `/data` that the controller's user may write.
+- **A tool that builds its own mount namespace.** Landlock refuses mounting or unmounting to every process it
+  restricts.
+- **Codex's own sandbox.** Codex wraps each command its model asks for in a sandbox of its own, whose helper opens
+  `/` for reading before it makes its rules. This sandbox refuses that open (`/` itself has no rule, and a rule there
+  would make every name under `/data` listable), the helper goes on without its rule on `/`, and the command ends with
+  `Failed to execvp sh: Permission denied`. So with the CLI sandbox on, Codex (measured with codex-cli 0.114.0)
+  cannot run a command of its model's, in any `CODEX_SANDBOX_MODE`. The decision the controller asks Codex for needs
+  none: the page goes in on stdin, the screenshot as `--image`. Claude Code's and Gemini's own sandboxes are not
+  tested under this one.
+- **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
+  part of it, is mounted at a second path of the container too, what is mounted there is open to the CLI: to read
+  like anything else beside `/data`, and to write as well where that path lies in a directory a CLI may write (inside
+  `CLI_HOME`, through the home's rule). Mount it once, as the compose files do.
+- **The Codex host bridge's Codex.** It runs on the host as the bridge's user and not under this launcher, so it can
+  read what that user can: `data/api-token`, `data/takeover-token` and the mesh and witness keys when the checkout
+  is that user's. The bridge's unit has an option that closes those to it ("Closing the checkout's secrets to the
+  bridge", below). Use `api` mode where that matters.
+
+The Playwright driver and the browsers it launches, like the provider CLIs, are ordinary
 processes of the controller's user: their environment holds none of the controller's own tokens or keys (a proxy
 setting that carries credentials excepted), but their memory holds page content and what is typed into pages, which
 a command one of them runs could read where the host lets a process ptrace another of the same user
@@ -584,6 +760,50 @@ In `APP_ENV=production`, startup now fails fast if:
 - OpenAI is set to `host_bridge` mode but the bridge socket is missing, stale, not a real Unix socket, or failing `/healthz`
 - `CLI_HOME` is set but the expected auth-state files are missing for that CLI
 
+#### Closing the checkout's secrets to the bridge
+
+The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbox, and a page shown to the model can
+prompt-inject it as it can any CLI: what that user can read, it can read. The unit template
+(`ops/systemd/codex-host-bridge.service`) carries an option against that, off as shipped. Its `InaccessiblePaths=`
+lines, commented out, name the checkout's `.env`; the places of the controller's secrets under `data/` (`api-token`,
+`takeover-token`, `auth`, `witness`, `mesh/identity`, `ssh` and `browser-profile` are their settings' defaults, and
+`proxy-personas.json` is the place `.env.example` gives `PROXY_PERSONA_FILE`, which has no default); and
+`data/cli-home`, which holds the sign-ins of the container's CLIs (the bridge's Codex signs in under the bridge's own
+home). Each has a leading `-`, so that one that is not there is passed over. An `ExecStartPre=` line, commented out
+too, refuses to start the bridge while one of those paths can still be read. To turn the option on, take the comment
+marks off the `PrivateUsers=yes`, `InaccessiblePaths=` and `ExecStartPre=` lines, change the paths with
+`WorkingDirectory=` if your checkout is elsewhere, add any other place you keep a secret, then reload and restart the
+unit. The check's list is not made from the `InaccessiblePaths=` lines: add a path to it, or take one out of it, as
+you do there. The data directory itself is not named, and must not be: the bridge's socket is
+`data/host-bridge/codex.sock`, and systemd cannot nest a writable path inside an inaccessible one.
+
+In a user unit these settings work inside a user namespace (`PrivateUsers=`). No CI job runs the unit; it was run by
+hand in user units on GitHub-hosted runners on 2026-11-13. On Ubuntu 22.04 (systemd 249) the option closes the paths
+it names. With the `PrivateUsers=yes` line left commented, the paths stay readable, and the `ExecStartPre=` check
+refuses the start. Where the host restricts unprivileged user namespaces (Ubuntu 24.04 and later do by default:
+`kernel.apparmor_restrict_unprivileged_userns=1`), the unit starts with `PrivateUsers=` and `InaccessiblePaths=` on
+and the paths stay readable, with no error: that is what the `ExecStartPre=` check is for. There it refuses the
+start, and the journal (`journalctl --user -u codex-host-bridge`) has "the option is on and .env is still readable:
+this host does not let a user unit hide paths" (the first path it finds readable). A refused start is tried again
+every `RestartSec=`, as any failed start of the unit is, and each try writes the message again.
+
+The option hides what is at a named path when the unit starts, and nothing that comes there later. A path made after
+the start (the controller's first start writes `data/api-token`), a file replaced by a rename (the controller writes
+`proxy-personas.json` that way at every change, and most editors save `.env` that way) and a file removed and made
+again are readable to the bridge's Codex until the bridge is restarted. A file rewritten in place, and whatever is
+made inside a directory that was hidden at the start, stay hidden. The check runs at a start only and passes a path
+that is not there, so it sees none of this. Start the controller once before the bridge, and restart the bridge
+(`systemctl --user restart codex-host-bridge`) after the controller's first start and after any change to `.env` or
+to the proxy personas.
+
+After turning the option on, check that a step through the bridge still works, and that a command the bridge's Codex
+runs cannot read `data/api-token`: make that check once the file is there, outside the unit, since a file that is not
+there cannot be read either. The option closes the paths it names and nothing else: the rest of what the bridge's
+user can read stays open to its Codex, under `data/` the session records (`sessions`), the approvals and their
+digest key (`approvals`), the jobs and the audit log among it. And it speaks of reading only: where the checkout is
+the bridge's user's, what it does not hide is the bridge's Codex's to write as well, `data/mesh/peers.json` (the list
+of peers `/mesh/receive` trusts) among it.
+
 ## Generate an auth-state encryption key
 
 ```bash
@@ -621,6 +841,36 @@ curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq
 
 `/readiness` answers `503` when a check fails, so `-f` prints nothing; drop `-f` to see which check.
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
+With `API_ADMIN_OPERATORS` set, `/readiness` and `/maintenance/status` answer `403` to the shared token: send a
+listed operator's named token (see [production hardening](./production-hardening.md)).
+
+## Stopping the controller
+
+`docker compose stop` and `restart` send the controller SIGTERM. uvicorn stops taking connections and waits up to 5
+seconds for the requests in flight (the image starts it with `--timeout-graceful-shutdown 5`), cancels what is still
+running, and then the controller cleans up: the maintenance loop, the cron scheduler and the job queue stop, and
+every session is closed, one after another (an isolated session can take about 10 seconds). Compose gives the
+controller `stop_grace_period: 60s` for all of it, so the cleanup has 55; Docker kills a controller still running
+after that, and a session whose close was cut short can leave its container or tunnel behind.
+
+An event stream a client holds open (`GET /mcp`, `GET /sessions/{id}/events`) never ends by itself, so a stop with
+one open always waits the 5 seconds. The log then shows uvicorn's
+`Cancel N running task(s), timeout graceful shutdown exceeded` at ERROR, and one INFO line from the controller for
+each stream it ended (`the event stream on '/mcp' was still open at the shutdown limit: ended`). That is a normal
+stop, not a crash: the stream's body is finished and its connection closed, and a client can open it again when
+the controller is back. A client that is still connected and has stopped reading is sent the end of the body while
+its buffers have room. Once they are full it cannot be: the controller waits up to one second for it and logs that
+the stream was `left unfinished`, and uvicorn asks the transport to close (and logs
+`ASGI callable returned without completing response.` at ERROR, where it writes that line). A connection that
+still holds bytes its client has not taken stays until they are gone or the process ends. A call still running at
+the limit is cancelled too, and for that one uvicorn logs `Exception in ASGI application` with a traceback that ends
+in `CancelledError`.
+
+If you start uvicorn yourself (your own image or command, a process manager), give it the limit too, in seconds and
+well under what your supervisor waits before it kills the process:
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5`. Without it uvicorn waits for
+every open stream, so the cleanup runs only once each stream's client has gone, and never where the supervisor
+kills the process first.
 
 ## What ALLOWED_HOSTS refuses, and what it does not
 
@@ -827,9 +1077,13 @@ once reached, is final. (A judgement still running when `activate_tab`'s 10 seco
 clean later; nothing known runs that long, since a target id read that hangs gives up after 7.5 seconds: three
 reads of at most 2 seconds, and the waits between them.) It is blanked rather than kept open because,
 unjudged, it may be a refused page's window with a script planted in it. If the watcher's session dies while
-the browser lives, a replacement attaches at once; until it is up, every popup reported in those sessions is
-refused as unjudged, and stays so until the agent navigates it (a replacement cannot judge a window born
-before it). The replacement registers every live session on that browser before it discovers the browser's
+the browser lives and has a watched session, a replacement's attach starts at once (behind another browser's attach
+in progress); until it is up, every popup
+reported in those sessions is refused as unjudged, and stays so until the agent navigates it (a replacement
+cannot judge a window born before it). An attach that fails is tried three more times, about 2 seconds apart,
+while the browser still has that lost watcher and a watched session; after the last one, and where the watcher was
+lost with no session watched, the watcher stays lost until a session is created on that browser.
+The replacement registers every live session on that browser before it discovers the browser's
 targets, so the windows that exist by then are its entries too: a page the controller knows (its target id
 cached) counts as reported and clean; a window with an opener is unjudged, refused if it is reported and swept
 as soon as the replacement is up and the session does not count; a window with no opener is clean. While no
@@ -846,10 +1100,11 @@ attached, lost or attach failed).
 
 ### Reading a refused page again
 
-Observe, screenshots, the page-reading MCP tools and actions other than navigation answer that a
-refused page is not read (REST: 403), also after the controller has sent it back to `about:blank`, and
-after the page has loaded an allowed URL on its own (a refused host's redirect, a script). The taint
-clears only in two ways:
+Observe, screenshots, the page-reading MCP tools, the network log (`GET /sessions/{id}/network/requests`,
+`GET /sessions/{id}/network-log`, `browser.get_network_log` and the `browser://<id>/network` resource) and
+actions other than navigation answer that a refused page is not read (REST: 403), also after the controller
+has sent it back to `about:blank`, and after the page has loaded an allowed URL on its own (a refused host's
+redirect, a script). The taint clears only in two ways:
 
 - the agent navigates the page to an allowed URL, and that navigation returns a response that ends on an
   allowed http(s) URL, no hop of its redirect chain was refused, no commit during it came from a refused
@@ -915,6 +1170,12 @@ verdict is clean, including when the popup closed before the verdict landed; a r
 else refusing the popup meanwhile, drops them, and so does a popup that closed before its target id could be
 read (unjudged).
 
+The network log is not served at all while the session's active page is refused: `GET /sessions/{id}/network/requests`
+and `GET /sessions/{id}/network-log` answer `403`, `browser.get_network_log` is a refusal and
+`browser://<id>/network` answers `-32603`. Navigate the page to an allowed URL to read it again (see above); what it
+holds then is below. A page that moves onto a refused host while the log is read is refused too, and a session
+another call holds past the bound answers `409` over REST.
+
 The network log withholds a request made by a refused page, and one that navigates a top-level page to
 a refused host. Such a request is recorded with `"withheld": "page off ALLOWED_HOSTS"`, its URL cut to
 the origin (`scheme://host:port`), its method reduced to a standard one or `OTHER`, and its status,
@@ -971,8 +1232,8 @@ refuses afterwards if either changed, the page closed, or the page is refused no
 one allowed URL to another meanwhile is read. This covers observe, every screenshot (deleted when
 refused, and when the read is cancelled before it is checked), the snapshots around an action, the share
 page's frame and title (the share poll answers 403), `browser.eval_js`, `browser.wait_for_selector`,
-`browser.get_html`, `browser.find_elements`, the storage tools (refused before a write and checked after
-it), `browser.drag_drop`, the DOM resource and the CDP routes. Tab listings, session summaries, approval
+`browser.get_html`, `browser.find_elements`, the storage tools and `browser.set_viewport` (refused before
+a write and checked after it), `browser.drag_drop`, the DOM resource and the CDP routes. Tab listings, session summaries, approval
 requests and saved auth profiles leave the title empty in the same cases, and a bot challenge found on a
 page that moved while it was probed is refused instead of described.
 
@@ -982,7 +1243,8 @@ summaries, the snapshots an action returns, approval requests and the `navigatio
 
 The page-reading MCP tools (`browser.eval_js`, `browser.get_html`, `browser.find_elements`,
 `browser.get_local_storage` and `browser.set_local_storage`, for local or session storage,
-`browser.drag_drop` and the `browser://<session>/dom` resource) take the session lock: they wait up to
+`browser.drag_drop` and the `browser://<session>/dom` resource) and `browser.set_viewport` take the
+session lock: they wait up to
 10 seconds for a session another call holds and then fail, and give up on a page that does not answer
 within 30 seconds (a `browser.find_elements` text query within 10, `query_timeout`; a drag: 30 seconds,
 plus `ACTION_TIMEOUT_MS` for each end named by a selector or `element_id`, the most that end waits for
@@ -1146,7 +1408,8 @@ If a workflow types real credentials into a page, scrubbing does not protect the
 ### Production boot fails closed
 
 - this is intentional in `APP_ENV=production`
-- check required env vars first: bearer token, operator ID enforcement, encryption key, rate limiting
+- check required env vars first: bearer token, operator ID enforcement, encryption key, `SHARE_TOKEN_SECRET`,
+  `CONTROLLER_ALLOWED_HOSTS`, `ALLOWED_HOSTS` (not empty, not `*`), rate limiting
 - if using `*_AUTH_MODE=cli` or `host_bridge`, verify the expected auth files or socket actually exist
 
 ### Actions fail after redirects or external handoffs
@@ -1210,6 +1473,124 @@ unprivileged `browser` user (uid 10001). The entrypoint starts as root only to t
 ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
 `./data/browser-profile` and `./data/downloads` end up owned by uid 10001.
 
+## Cron jobs and webhook keys
+
+Schedules are read in the zone `CRON_TIMEZONE` names, `UTC` by default, whatever the host's own zone is: set it to an
+IANA zone name such as `America/Chicago` for a job to fire at that zone's hour. A name the zone database does not know
+stops the controller at startup, and the name is in the message. The controller image carries the zone database. In a
+zone with daylight saving time, a job set inside the hour the clocks skip fires an hour later by the clock that night,
+and one set inside the hour they repeat is due twice, once in each pass of that hour (`30 1 * * *` in `America/Chicago`
+is due at 01:30 before the change and again at 01:30 after it). The second is a fire like any other: it is skipped,
+with a warning in the log, while the run the first started is still queued or running, and, as for every fire, one the
+scheduler reaches more than five minutes late is not made and several it missed are made once.
+
+A cron job runs on a schedule, or when `POST /crons/{job_id}/trigger` is sent its webhook key (on a controller with a
+token, the bearer token is needed as well, as on any route). The key is 256 random bits, answered once by the call that
+makes it, `POST /crons` or a rotation. The store keeps only its SHA-256 hash (a store edited by hand can hold a key or
+a hash that cannot be read: such a job's webhook refuses every key until it is rotated), and reads answer
+`webhook_key_id`, a short non-secret id derived from the hash that tells keys apart:
+
+- **Rotate** with `POST /crons/{job_id}/webhook-key/rotate` or `browser.rotate_cron_webhook_key`: a new key, answered
+  once; the old key stops working at once, and a job with no webhook gets its first.
+- **Revoke** with `DELETE /crons/{job_id}/webhook-key` or `browser.revoke_cron_webhook_key`: the key is removed, and
+  a trigger is refused as for a job that never had one (a stored key that cannot be read stays: `revoked: false`).
+  A rotation brings the webhook back.
+
+A trigger answers `403` for the key and for nothing else: an unknown job, a job with no key, a wrong key and a job
+whose stored key cannot be read, with nothing to say which. With the key proved, what stops the run is answered as
+itself and never as `403`: among them
+`409` for a disabled job, for the session cap, for an auth profile that is gone or has become another operator's and,
+in one fixed text that names no cause, for anything else the controller refuses of the run's session or of the job
+as it is stored (an auth state older than `AUTH_STATE_MAX_AGE_HOURS`, a `start_url` that `ALLOWED_HOSTS` no longer
+lists or whose load the pre-request gate stops, a stored field of a type a run cannot take); `422` for an auth state
+that cannot be decrypted; `503` for a full job queue, for a browser that cannot be reached and, in one fixed text
+that says the key was accepted and to try again, for a `start_url` that did not load or a browser that was not ready
+for a session. The server log has the cause of that fixed `409` and of that `503`. A `400` is the request itself: its
+body, or a job id in the path that is blank or longer than 50 characters. Two more answers start nothing and are
+`200`, so read `triggered` and not the status alone: `"reason": "previous_run_active"` while the job's last run
+is still queued or running, and `"reason": "owner_credential_removed"` when no named credential in
+`API_BEARER_TOKENS` names the job's owner any more, each beside `"triggered": false`.
+
+Each change writes one audit event (`cron_webhook_key_rotated`, `cron_webhook_key_revoked`) without the key or its hash, and
+another operator's job answers as one that does not exist. A key made before 1.18.0 is replaced by its hash on the
+first start after the upgrade and goes on working; if the store cannot be re-saved then, the job keeps working from
+the plaintext key still in the file, and the failure is logged and retried at the next start.
+
+A job's `last_status` reads `queued` from the fire that queued a run until that run is over, and then the agent
+job's final status (`completed`, `failed`, `cancelled`, `interrupted` or `discarded`), or `unknown` when its record
+cannot say; a fire refused for its owner's credential writes `refused: owner credential removed`.
+`completed` means the run ended without an error, not that it reached its goal: a run that stopped at its step limit,
+or to wait for an approval or a takeover, reads `completed` too, and the agent job's `result.status` says which.
+
+## Share links
+
+`POST /sessions/{id}/share` (over MCP, `browser.share_session`) mints a link to a live session for someone who holds no
+API token: a signed token that expires after `ttl_minutes` (60 by default, 1440 at most). Whoever holds it can open
+`/share/{token}`, a page that shows the session's screen, URL and title and asks for a new frame every five seconds.
+The link reads nothing else of the session and cannot act on it, and the token is the whole credential: anyone the
+link reaches can watch until it expires or is revoked. Set `SHARE_TOKEN_SECRET`, or links stop working at each restart
+(the controller then signs with a key it makes at startup).
+
+`DELETE /sessions/{id}/share` (over MCP, `browser.revoke_session_share`) revokes: every link of that session minted
+so far answers `403` from then on, whatever time it had left, and a link minted afterwards works. Whoever may use the
+session may revoke its links, as for the mint. A closed session's links can be revoked too, by its id, while its
+record is kept: such a link shows nothing live, but still opens the frames that were taken for it until it expires.
+The MCP tool is governed as `destructive`, so a `governed` call of it waits for an operator's approval; the route
+does not.
+
+- A link carries its mint's stamp, and a revoke ends the links stamped up to its own: a stamp in milliseconds that
+  orders mints and revokes, the clock's time except after a corrupt store or a clock set back, when stamps run ahead
+  of it (not after a restart without the file, when a revoke can miss a link minted before the clock was set back).
+  A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links are
+  revoked, which ends it too.
+- Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
+  so a restart does not bring a revoked link back. One is kept at least 24 hours, the longest a link lives, or
+  `SHARE_TOKEN_TTL_MINUTES` where that is longer (no link is minted for longer than 24 hours, whatever it says), and
+  dropped by the first revoke after that. The age is read from the controller's clock: a revoke made while the
+  clock runs ahead drops revocations that much too soon, and their links work again once it is set right. A restart
+  without the file brings back the revoked links that have not expired, and ends every link minted since the file
+  was last found corrupt (below).
+- The file is written at each mint as well as at each revoke. A mint that cannot be saved hands out no link, and a
+  revoke that cannot be saved revokes nothing: each answers `503` (over MCP, the tool's error with the same text), as
+  while the file cannot be read.
+- A file the controller cannot read as it starts (a permission fault, say) is left where it is: no link is honoured,
+  and a mint or a revoke answers `503`, until one of those, or a restart, can read it. A file that reads as
+  something the controller did not write can no longer say which links were revoked: the controller logs an error,
+  revokes every link minted before that moment, whatever its stamp, and writes the file again. One it cannot write
+  again counts as one it cannot read: no link is honoured until a mint, a revoke or a restart can write it.
+
+Anyone who holds a link can poll it, so two bounds apply beside the general rate limit, which counts each client
+apart. A link is answered 150 polls a minute, room for ten open pages (they ask for 120, and more in one minute when
+their polls arrive late), and `429` with `Retry-After` past that.
+And one capture answers every poll of a session that arrives while it is taken or within three seconds of its end,
+whichever link the poll came by: a watched session costs one capture in that time however many pages watch it. The
+token is checked and the session looked up for every poll first, so a poll of a revoked link or of a closed session
+is refused, never answered from a frame taken earlier.
+
+A frame is PII-scrubbed as every screenshot is (see "What PII scrubbing covers, and what it does not"). One that could
+not be (no OCR, or a redaction that failed) is shown as it was captured, the page says so above it, and the poll's
+answer carries `screenshot_pii_scrub: {"applied": false, "reason": ...}` as every other screenshot's result does. With
+`PII_SCRUB_SCREENSHOT_STRICT=true` such a frame is withheld instead: the poll answers `503` with a fixed text that
+names no setting, and the page shows that text in place of the frame.
+
+The audit log records a link's mint, its first view and a revoke. It names a link by `token_sha256`, the SHA-256 of
+the token as the link carries it, never by the token: the digest ties a view to its mint and opens nothing.
+
+- `share_minted` is written by the mint, as the operator who made the link, before the token is answered. A mint
+  whose event cannot be written fails, and answers no token; so does one whose audit fails after its event is
+  written (the trim of the log that follows it, say).
+- `share_revoked` is written by a revoke, as the operator who made it, with `revoked_before`: the stamp, in
+  milliseconds, that the session's links are ended up to. The revocation is saved first: a revoke whose event
+  cannot be written answers `500` with the links ended.
+- `share_viewed` is written the first time a valid token is shown something of its session: the page, a frame or a
+  frame's image. Once per token while the controller runs: it remembers the 4,096 tokens viewed last, so after a
+  restart, or once a token is forgotten, its next view is recorded again. A view whose event cannot be written is
+  answered `500`; so is one whose audit fails after its event is written (the trim of the log that follows it,
+  say): that event is written again at the link's next view, so the log can hold it twice. A link revoked or expired
+  while its first view's event is being written is refused, with that event written. The event's operator is
+  `anonymous` unless the viewer also proved a named credential (`API_BEARER_TOKENS`), whatever an `X-Operator-Id`
+  header on the request says.
+
 ## Backups
 
 Back up at least:
@@ -1221,7 +1602,8 @@ Back up at least:
 - `/data/audit/`
 - `/data/witness/`, whole: the chains with their `*.anchor.json` files, `.anchors-migrated` and `keys/` (since 1.11.2 a chain restored without its anchor fails verification, and receipts verify only against the key that signed them)
 - `/data/crons/` if you use cron jobs
-- `/data/approvals/` if pending approvals and operators' rejections should survive a restore; a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
+- `/data/share/` if a share link revoked before the copy must stay revoked after a restore (a link lives 24 hours at most)
+- `/data/approvals/` if pending approvals and operators' rejections should survive a restore, whole, with its `.tool-call-digest.key` (a glob such as `approvals/*` leaves a dot file out): approvals for tool calls are matched under that key, also when `/data/db/` holds the records, and restored without it they are refused and asked for again, and an operator's rejection of a tool call no longer stops an agent's own approval of the same call under `AUTONOMOUS_APPROVALS` (each start then logs a warning with how many pending or approved approvals are kept under the lost key, if there are any, and another with how many operator rejections are, if there are any); a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
 
 ## Cleanup
 
@@ -1235,6 +1617,8 @@ curl -s http://127.0.0.1:8000/maintenance/cleanup \
   -H "Authorization: Bearer ${API_BEARER_TOKEN:-$(cat data/api-token)}" \
   -H 'X-Operator-Id: ops' | jq
 ```
+
+With `API_ADMIN_OPERATORS` set, only a listed operator's named token may run it; the shared token is answered `403`.
 
 ## Credential handoff checklist
 

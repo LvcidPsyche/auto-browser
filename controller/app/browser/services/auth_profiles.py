@@ -17,7 +17,15 @@ from urllib.parse import urlparse
 
 from ...audit import get_current_operator
 from ...session_ownership import may_use, verified_operator
-from ...utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, replace_retrying, utc_now
+from ...utils import (
+    PRIVATE_FILE_MODE,
+    UTC,
+    atomic_write_text,
+    error_text_for_log,
+    quoted_for_log,
+    replace_retrying,
+    utc_now,
+)
 from ...witness import WitnessActionContext
 from ..page_read import title_or_blank
 
@@ -54,6 +62,29 @@ PROFILES_DIRNAME = "profiles"
 # archives from older releases or other boxes still import.
 EXPORTER_SIDECAR_SUFFIX = ".exporter.json"
 _FOREIGN_SESSION_STATE = "storage_state_path points into the saved auth state of another operator's session"
+
+
+class ForeignAuthProfileError(PermissionError):
+    """require_access's refusal of a profile another operator owns: the only one that a read answers as missing."""
+
+
+class UncheckedAuthProfileError(PermissionError):
+    """read_metadata's strict refusal: the profile's profile.json does not parse, so its owner cannot be checked.
+
+    A class of its own for the caller that has to tell it from another refusal: the cron webhook trigger answers
+    403 for a wrong key and for nothing else it can name.
+    """
+
+
+def _no_saved_profile(profile_name: str) -> FileNotFoundError:
+    # Named for the caller, not by the path under AUTH_ROOT: this is what an agent sees after a mistyped auth_profile.
+    return FileNotFoundError(
+        f"No saved auth profile {quoted_for_log(profile_name)}. browser.list_auth_profiles lists the saved ones."
+    )
+
+
+def _no_file_in_auth_root(relative_path: str) -> FileNotFoundError:
+    return FileNotFoundError(f"No file {quoted_for_log(os.fspath(relative_path))} in the auth directory")
 
 
 def _staged_beside(path: Path) -> Path:
@@ -121,7 +152,7 @@ def _put_metadata_back(previous: str | None, metadata_path: Path) -> None:
             "could not put back the metadata of an auth profile's failed save, %s (%s): it names the saving "
             "operator as owner of the previous login",
             metadata_path,
-            exc,
+            error_text_for_log(exc),
         )
 
 
@@ -156,13 +187,15 @@ def _roll_back(previous: Path | None, state_path: Path) -> bool:
     except OSError as exc:
         if previous is None:
             logger.error(
-                "could not remove the new state of an auth profile's failed first save, %s (%s)", state_path, exc
+                "could not remove the new state of an auth profile's failed first save, %s (%s)",
+                state_path,
+                error_text_for_log(exc),
             )
         else:
             logger.error(
                 "could not put an auth profile's previous state back after a failed save; it is kept at %s (%s)",
                 previous,
-                exc,
+                error_text_for_log(exc),
             )
         return False
     return True
@@ -184,7 +217,7 @@ def _remove_quietly(path: Path, what: str) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
-        logger.warning("could not remove %s, %s: %s", what, path, exc)
+        logger.warning("could not remove %s, %s: %s", what, path, error_text_for_log(exc))
 
 
 class BrowserAuthProfileService:
@@ -488,8 +521,7 @@ class BrowserAuthProfileService:
 
     async def get(self, profile_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
-        self.require_access(normalized, action="reading an auth profile")
-        profile_dir = self.dir(normalized, create=False)
+        self.require_read_access(normalized, action="reading an auth profile", missing=KeyError(normalized))
         metadata = self.read_metadata(normalized)
         state_path = self.resolve_state_path(normalized, must_exist=False)
         profile_root_str = os.path.realpath(os.fspath(self.root()))
@@ -501,10 +533,12 @@ class BrowserAuthProfileService:
         state_exists = os.path.exists(state_path_str)
         if not state_exists and not metadata:
             raise KeyError(normalized)
+        auth_state = self.manager.auth_state.inspect(Path(state_path_str) if state_exists else None)
+        # Its absolute path on the controller, as the profile's directory was: a caller names the profile.
+        auth_state.pop("path", None)
         return {
             "profile_name": normalized,
-            "profile_dir": str(profile_dir),
-            "auth_state": self.manager.auth_state.inspect(Path(state_path_str) if state_exists else None),
+            "auth_state": auth_state,
             "metadata": metadata,
         }
 
@@ -517,7 +551,9 @@ class BrowserAuthProfileService:
             # Listing another operator's profiles would leak both their existence
             # and the sites they hold logins for. Checked before `get` so that a
             # genuine containment error still raises instead of being skipped.
-            if not self.accessible(directory.name):
+            # A directory whose name is no profile name is no profile (a file manager's .Trash-1000, lost+found): it
+            # is skipped, where the name's ValueError failed the list for every profile beside it.
+            if not self.names_a_profile(directory.name) or not self.accessible(directory.name):
                 continue
             try:
                 profiles.append(await self.get(directory.name))
@@ -531,7 +567,8 @@ class BrowserAuthProfileService:
 
     async def export(self, profile_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
-        self.require_access(normalized, action="exporting an auth profile")
+        not_found = FileNotFoundError(f"auth profile '{normalized}' not found")
+        self.require_read_access(normalized, action="exporting an auth profile", missing=not_found)
         auth_root = Path(self.manager.settings.auth_root).resolve()
         profile_root = self.root()
         profile_dir = self.dir(normalized, create=False)
@@ -542,7 +579,7 @@ class BrowserAuthProfileService:
             raise PermissionError("auth profile path must stay inside auth profile root")
 
         if not os.path.isdir(profile_dir_str):
-            raise FileNotFoundError(f"auth profile '{normalized}' not found")
+            raise not_found
 
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         archive_name = f"{normalized}-{ts}.tar.gz"
@@ -775,7 +812,7 @@ class BrowserAuthProfileService:
         record no owner and are unaffected, and profiles that pre-date this
         release stay usable — ownership starts applying the moment named
         credentials do, with no migration and no risk of locking anyone out of
-        their own logins.
+        their own logins. The refusal names nobody: who owns a profile is not the caller's to learn.
         """
         normalized = self.normalize_name(profile_name)
         owner = self.owner_of(normalized)
@@ -784,10 +821,30 @@ class BrowserAuthProfileService:
             return operator
         if operator is not None and operator == owner:
             return owner
-        raise PermissionError(
-            f"auth profile '{normalized}' belongs to operator '{owner}'; "
+        raise ForeignAuthProfileError(
+            f"auth profile '{normalized}' belongs to another operator; "
             f"{action} requires authenticating as that operator"
         )
+
+    def require_read_access(self, profile_name: str, *, action: str, missing: Exception) -> None:
+        """A read's owner check: another operator's profile raises ``missing``, what the read raises when none exists.
+
+        The difference between the two would tell a caller that a profile exists and is someone else's, so every
+        read answers both alike, over REST and MCP. A write cannot: it calls require_access and stays refused,
+        or it would replace the other's profile or sit beside it. Metadata that cannot be read has no owner to
+        name, so it is not known to be another's and keeps its own refusal.
+        """
+        try:
+            self.require_access(profile_name, action=action)
+        except ForeignAuthProfileError:
+            raise missing from None
+
+    def state_path_to_load(self, profile_name: str) -> Path:
+        """The state file a session opened from this profile loads, with the owner check before anything is loaded."""
+        self.require_read_access(
+            profile_name, action="opening a session from an auth profile", missing=_no_saved_profile(profile_name)
+        )
+        return self.resolve_state_path(profile_name, must_exist=True)
 
     def accessible(self, profile_name: str) -> bool:
         try:
@@ -829,11 +886,7 @@ class BrowserAuthProfileService:
             existing.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
             return existing[0]
         if must_exist:
-            # Named for the caller, not by the path under AUTH_ROOT: this is
-            # what an agent sees after a mistyped auth_profile.
-            raise FileNotFoundError(
-                f"No saved auth profile {profile_name!r}. browser.list_auth_profiles lists the saved ones."
-            )
+            raise _no_saved_profile(profile_name)
         return base_path
 
     def read_metadata(self, profile_name: str, *, strict: bool = False) -> dict[str, Any]:
@@ -860,7 +913,7 @@ class BrowserAuthProfileService:
         if isinstance(payload, dict):
             return payload
         if strict:
-            raise PermissionError(
+            raise UncheckedAuthProfileError(
                 f"auth profile '{profile_name}' has unreadable metadata, so its owner cannot be "
                 "checked; restore or delete its profile.json"
             )
@@ -882,7 +935,9 @@ class BrowserAuthProfileService:
         os.makedirs(os.path.dirname(candidate_str), exist_ok=True)
 
         if must_exist and not os.path.exists(candidate_str):
-            raise FileNotFoundError(f"No file {os.fspath(relative_path)!r} in this session's auth directory")
+            raise FileNotFoundError(
+                f"No file {quoted_for_log(os.fspath(relative_path))} in this session's auth directory"
+            )
         return Path(candidate_str)
 
     def storage_state_source(self, relative_path: str) -> Path:
@@ -904,7 +959,11 @@ class BrowserAuthProfileService:
         profile_root = Path(os.path.realpath(os.fspath(self.root())))
         if source.is_relative_to(profile_root) and source != profile_root:
             profile_name = source.relative_to(profile_root).parts[0]
-            self.require_access(profile_name, action="opening a session from an auth profile")
+            self.require_read_access(
+                profile_name,
+                action="opening a session from an auth profile",
+                missing=_no_file_in_auth_root(relative_path),
+            )
             return source
         session_dir = self._session_auth_dir_of(source)
         if session_dir is not None:
@@ -979,10 +1038,11 @@ class BrowserAuthProfileService:
         if not candidate_str.startswith(root_prefix):
             raise PermissionError("path must stay inside the auth root")
 
-        os.makedirs(os.path.dirname(candidate_str), exist_ok=True)
-
-        if must_exist and not os.path.exists(candidate_str):
-            raise FileNotFoundError(f"No file {os.fspath(relative_path)!r} in the auth directory")
+        # A read makes nothing: a directory it left under profiles/ would answer as a profile to the next read (export).
+        if not must_exist:
+            os.makedirs(os.path.dirname(candidate_str), exist_ok=True)
+        elif not os.path.exists(candidate_str):
+            raise _no_file_in_auth_root(relative_path)
         return Path(candidate_str)
 
     @staticmethod
@@ -1009,6 +1069,14 @@ class BrowserAuthProfileService:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", normalized):
             raise ValueError("auth profile names may contain letters, numbers, dots, underscores, and hyphens")
         return normalized
+
+    @classmethod
+    def names_a_profile(cls, name: str) -> bool:
+        """Whether ``name`` is a profile name as it stands: what a profile's directory is called."""
+        try:
+            return cls.normalize_name(name) == name
+        except ValueError:
+            return False
 
     @staticmethod
     def write_tar(source_dir: Path, dest: Path) -> None:

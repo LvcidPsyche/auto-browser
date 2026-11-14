@@ -137,9 +137,9 @@ class ProviderResilienceTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(
                 self.adapter.run_cli(command=[sys.executable, "-c", "import time; time.sleep(30)"], env={"PATH": ""})
             )
-            for _ in range(100):
-                if created:
-                    break
+            # Until the spawn has returned, however long that takes: a process's first CLI call probes the CLI
+            # sandbox before it, and a cancel that lands there starts no process at all.
+            while not created and not task.done():
                 await asyncio.sleep(0.05)
             self.assertEqual(len(created), 1)
             task.cancel()

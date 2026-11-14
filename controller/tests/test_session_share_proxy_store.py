@@ -61,6 +61,33 @@ class SessionShareManagerTests(unittest.TestCase):
         self.assertFalse(info["valid"])
         self.assertEqual(info["error"], "Invalid token")
 
+    def test_a_signed_payload_that_is_not_an_object_is_invalid(self) -> None:
+        # Only a holder of the signing key can make one; token_info raised AttributeError for it.
+        manager = SessionShareManager(secret="secret123", ttl_minutes=10)
+        for payload in ([1], "session-1", 1, None):
+            payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            token = f"{payload_b64}.{manager._sign(payload_b64)}"
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "invalid share token: payload is not an object"):
+                    manager.validate_token(token)
+                self.assertEqual(manager.token_info(token), {"valid": False, "error": "Invalid token"})
+
+    def test_a_signed_payload_too_deep_to_read_or_whose_exp_is_infinite_is_invalid(self) -> None:
+        # Only a holder of the signing key can make one; token_info raised RecursionError and OverflowError for them.
+        manager = SessionShareManager(secret="secret123", ttl_minutes=10)
+        depth = 1_000_000  # deeper than json.loads reads on any Python
+        infinite = [
+            f'{{"session_id": "session-1", "exp": {exp}, "scope": "observe"}}'
+            for exp in ("Infinity", "-Infinity", "1e309")
+        ]
+        for payload in ("[" * depth + "]" * depth, *infinite):
+            payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+            token = f"{payload_b64}.{manager._sign(payload_b64)}"
+            with self.subTest(payload=payload[:60]):
+                with self.assertRaisesRegex(ValueError, "^invalid share token: "):
+                    manager.validate_token(token)
+                self.assertEqual(manager.token_info(token), {"valid": False, "error": "Invalid token"})
+
     def test_rejects_unsupported_scope(self) -> None:
         manager = SessionShareManager(secret="secret123", ttl_minutes=10)
 
@@ -146,7 +173,7 @@ class ShareHttpTests(unittest.TestCase):
 
     def test_share_session_uses_default_ttl_without_body(self) -> None:
         get_session = AsyncMock(return_value=SimpleNamespace(id="session-1"))
-        create_token = Mock(return_value={"token": "tok", "session_id": "session-1"})
+        create_token = Mock(wraps=main_module.share_manager.create_token)  # a whole token: its mint is audited
 
         with (
             patch.object(main_module.manager, "get_session", get_session),

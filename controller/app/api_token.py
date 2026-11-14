@@ -32,7 +32,7 @@ from typing import Any
 
 from .auth_policy import BIND_SCOPE_LOOPBACK, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
 from .runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH
-from .utils import PRIVATE_FILE_MODE, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,7 @@ def ensure_takeover_token(settings: Any) -> None:
                     "Make it a file the controller's user can read, or set TAKEOVER_TOKEN; "
                     "GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
                     path,
-                    exc,
+                    error_text_for_log(exc),
                 )
                 return
             except OSError as exc:
@@ -183,7 +183,7 @@ def ensure_takeover_token(settings: Any) -> None:
                     "be tightened (%s). Make it owned by the controller's user with mode 0600 (or 0400), or set "
                     "TAKEOVER_TOKEN; GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
                     path,
-                    exc,
+                    error_text_for_log(exc),
                 )
                 return
             logger.info("Using the takeover token in %s (sha256 fingerprint %s)", path, _fingerprint(token))
@@ -191,7 +191,7 @@ def ensure_takeover_token(settings: Any) -> None:
         logger.warning(
             "No takeover token: %s. GET /sessions/{session_id}/takeover-link answers 503 until TAKEOVER_TOKEN is "
             "set or TAKEOVER_TOKEN_FILE %s holds a usable token (or can be written) and the controller restarts.",
-            exc,
+            error_text_for_log(exc),
             path,
         )
         return
@@ -323,7 +323,9 @@ def _read_token_file(path: Path) -> str | None:
     except (FileNotFoundError, NotADirectoryError):
         return None
     except (OSError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"Could not read API_TOKEN_FILE {path}: {exc}. Fix the file, or {_WAYS_OUT}.") from exc
+        raise RuntimeError(
+            f"Could not read API_TOKEN_FILE {path}: {error_text(exc)}. Fix the file, or {_WAYS_OUT}."
+        ) from exc
     if not token:
         return ""
     if len(token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH or not all("!" <= char <= "~" for char in token):
@@ -344,7 +346,7 @@ def _generate_token_file(path: Path) -> str:
     except OSError as exc:
         raise RuntimeError(
             f"No API credential was configured and the controller could not save a generated token "
-            f"to API_TOKEN_FILE {path}: {exc}. To start, {_WAYS_OUT}."
+            f"to API_TOKEN_FILE {path}: {error_text(exc)}. To start, {_WAYS_OUT}."
         ) from exc
     _match_parent_owner(path)
     return token
@@ -402,7 +404,7 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         try:
             os.close(fd)
         except OSError as exc:
-            logger.warning("could not close %s %s after its mode check failed: %s", name, path, exc)
+            logger.warning("could not close %s %s after its mode check failed: %s", name, path, error_text_for_log(exc))
         raise
     os.close(fd)
     if kept is None:  # nothing to tighten
@@ -435,7 +437,7 @@ def _check_the_mode_was_kept(path: Path, name: str) -> str:
             "controller's user can read it.",
             name,
             path,
-            exc.strerror or exc,
+            error_text_for_log(exc),
         )
         return "its mode could not be checked"
     if mode & _GROUP_OR_OTHER_BITS:
@@ -471,7 +473,7 @@ def _warn_about_an_open_link_target(path: Path, name: str) -> None:
             "%s %s is a symlink whose target's mode could not be checked (%s); the token already read from it is used.",
             name,
             path,
-            exc,
+            error_text_for_log(exc),
         )
         return
     if mode & _GROUP_OR_OTHER_BITS:
@@ -488,10 +490,11 @@ def _warn_about_an_open_link_target(path: Path, name: str) -> None:
 def _match_parent_owner(path: Path) -> None:
     """Give a root-written token file to whoever owns its directory.
 
-    The controller image runs as root and ./data belongs to the user who cloned
-    the repo, so without this the host user, the stdio bridge and CI's runner
-    could not read a 0600 root-owned file. Docker Desktop, rootless Docker and
-    userns-remap map ownership their own way (not verified per platform).
+    The controller image runs as root only with CONTROLLER_RUN_AS=root, and ./data
+    belongs to the user who cloned the repo, so without this the host user, the
+    stdio bridge and CI's runner could not read a 0600 root-owned file. Docker
+    Desktop, rootless Docker and userns-remap map ownership their own way (not
+    verified per platform).
     """
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None or geteuid() != 0:
@@ -507,7 +510,7 @@ def _match_parent_owner(path: Path) -> None:
             path,
             path.parent,
             parent.st_uid,
-            exc,
+            error_text_for_log(exc),
         )
 
 

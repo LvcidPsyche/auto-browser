@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .utils import error_text_for_log
+
 logger = logging.getLogger(__name__)
 
 # PRAGMA synchronous takes no bound parameter, so the value is checked against SQLite's own before it is written in.
@@ -46,7 +48,7 @@ def configure_sqlite_connection(
     try:
         mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
     except sqlite3.DatabaseError as exc:
-        logger.warning("sqlite WAL unavailable for %s: %s", db_path or "<memory>", exc)
+        logger.warning("sqlite WAL unavailable for %s: %s", db_path or "<memory>", error_text_for_log(exc))
     else:
         if mode is not None and str(mode[0]).lower() != "wal":
             logger.warning("sqlite WAL not enabled for %s: journal_mode=%s", db_path or "<memory>", mode[0])

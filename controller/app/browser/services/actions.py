@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import re
+import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ... import events as _events
 from ...action_errors import BrowserActionError, SessionNotFoundError
@@ -20,14 +24,41 @@ from ...approvals import (
     ApprovalRequiredError,
     held_action_approval,
     held_for_execution,
+    held_tool_call_approval,
     refused_before_effect,
 )
-from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
-from ...utils import spawn_background_task
+from ...models import (
+    READ_ONLY_ACTIONS,
+    ApprovalFieldRead,
+    ApprovalKind,
+    ApprovalOrigin,
+    BrowserActionDecision,
+    totp_host_allowed,
+)
+from ...utils import error_text, error_text_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
+from ..click_target import (
+    CHECKED_LABELS,
+    CLICK_LABEL_PHRASES,
+    TARGET_READ_ACTIONS,
+    PressNeedsApproval,
+    classified_reason,
+    classified_risk,
+    press_is_read,
+    read_click_target,
+    reading_presses,
+    refuse_press_not_asked_about,
+    same_element_at,
+)
 from ..element_ids import selector_hint, target_element_id
-from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from ..element_scripts import (
+    ELEMENT_HAS_FOCUS_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+    NAMED_FIELDS_SCRIPT,
+)
 from ..element_world import READ
 from ..page_read import title_or_blank
 from .element_actions import FOCUS_CLICK_TIMEOUT_MS, JITTER_PX, ElementActions
@@ -46,18 +77,99 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A placed click the controller refused before its press: nothing was pressed.
+TARGET_MOVED = "target_moved"
+
+
+def _target_left_the_pointer() -> BrowserActionError:
+    """The target had no box any more once Playwright's checks had passed, or once it had put the pointer on it."""
+    return BrowserActionError(
+        "Nothing was pressed: the target is no longer shown. Observe the page again and retry.",
+        code=TARGET_MOVED,
+        status_code=409,
+        retryable=True,
+    )
+
+
+def _target_not_under_the_pointer() -> BrowserActionError:
+    """Where Playwright's hover had put the pointer, the pointer did not find the target: the page took it away
+    since, something lies over it there, or it is in a frame the page has something over."""
+    return BrowserActionError(
+        "Nothing was pressed: where the click was placed, the pointer does not find the target. Observe the page "
+        "again and retry.",
+        code=TARGET_MOVED,
+        status_code=409,
+        retryable=True,
+    )
+
+
+def _target_has_no_box() -> BrowserActionError:
+    """The target has no box of its own (display: contents): Playwright places a click on it on one of its children.
+
+    A position is counted from the corner of a box, so there is none to give Playwright, and the point it picks
+    itself it does not tell: where the press would land cannot be read.
+    """
+    return BrowserActionError(
+        "Nothing was pressed: the target has no box of its own (its children are laid out in its place), so where a "
+        "press on it would land cannot be read. Name an element inside it.",
+        code="target_has_no_box",
+        status_code=409,
+        retryable=False,
+    )
+
+
 # Times the human-like mouse path's 4-18 ms gaps. perf_counter, not the event
 # loop's clock: that is time.monotonic, which ticks every 15.6 ms on Windows
 # before Python 3.13, coarser than what is being measured.
 _step_clock = time.perf_counter
 
-# Whether the element (or a label for it) is what the pointer at (x, y) hits.
-# Runs in the element's own frame; a target inside a child frame was already
-# checked, across frame boundaries, by Playwright's trial click. For selector
-# targets only: an element named by element_id takes a stricter check in the
-# isolated world (element_target.py), where a label for it does not count.
-_RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
-  if (window !== window.top) return true;
+# Whether the element (or a label for it) is what the pointer at (x, y) hits, in the element's own document.
+# For selector targets only: an element named by element_id takes a stricter check in the isolated world
+# (element_target.py), where a label for it does not count.
+# (x, y) is a point of the main frame's viewport. In a child frame the script cannot tell where its document
+# lies in that viewport, and answered yes for every point: "checked by Playwright", whose checks are made at
+# Playwright's own point, the middle of what the viewport shows of the element, and not at the middle of its
+# box, where the press goes. So there it answers 'framed' until it is given ``box``, the element's box in the
+# main frame's viewport (Playwright's bounding_box): the point is carried into the document by the two boxes,
+# in proportion, which is exact where the frames on the way are moved or scaled, and at the middle of the box
+# where one is turned; not where a frame on the way runs in a process of its own and has a border or padding
+# (``arrived``, below). _receives_pointer_at asks it of the element, then of each frame element on the way up.
+# The way up from what the pointer hits goes by the slot a node is given to, as a click's event does: a label
+# slotted into a component's button is that button's. By its parents alone it was not, which only sent the
+# click to Playwright's placing while nothing asked the target after that; the same question is asked there now.
+# ``arrived``: the pointer is at (x, y) now, and the element, in a frame, is asked as well whether the pointer is
+# over it as the browser has it (:hover). The box that carries the point is Playwright's, and in a frame that is
+# in a process of its own (another site's, a sandboxed one) Playwright counts a box from the corner of the frame's
+# border: with a border or padding there, every box is up and left of its element by that much, the point was
+# carried by that same box, and the answer was yes wherever the pointer was. No box comes into :hover. It is
+# asked inside :is(), since a document in quirks mode matches a bare :hover to links alone, and of the label
+# where a label stands for the element. Before a human-like press only, where a no hands the click to
+# Playwright's placing: a yes can be an old one (a document is not told of a pointer that went on into another
+# process's, so the rest of the question stands), and a no a wrong one (a person moving the real pointer over a
+# headed browser).
+# ``wide``: the element is the target of a click Playwright placed, and it is asked as Playwright's own check of a
+# click asks it: an element inside a button or a link is taken for that button or link (its retarget,
+# "button-link"), unless it is a field or editable text. A selector that names a card's text names a node, and where
+# another piece of the card's link lay over that node (a span stretched over the card, a ::before over a button) the
+# pointer found the link or the button and not the node: Playwright's hover said yes, this question said no, and a
+# no ends a placed click. Never of a frame on the way up, which must itself be what the pointer finds, and not
+# before a human-like press, where a no only hands the click to the placing.
+# ``box`` is ``true`` where (x, y) is already a point of el's own document: where that document saw the pointer
+# arrive (_POINTER_WATCH_SCRIPT), for the target of a placed click in a frame. Nothing is carried then.
+# ``onlyFrames``, given only where it is true: that document saw no move, so the pointer is over another one, and only a
+# frame that is el or inside it (a video in a card) can be what the pointer finds there. Playwright's own check of a
+# click takes the pointer over a frame inside its target for the target.
+_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide, onlyFrames]) => {
+  const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
+  const field = el.matches('input, textarea, select') || el.isContentEditable;
+  const target = (wide && !field && el.closest('button, [role=button], a, [role=link]')) || el;
+  if (window !== window.top && box !== true) {
+    if (!box) return 'framed';
+    const own = el.getBoundingClientRect();
+    if (!(own.width > 0 && own.height > 0 && box.width > 0 && box.height > 0)) return false;
+    x = own.left + ((x - box.x) * own.width) / box.width;
+    y = own.top + ((y - box.y) * own.height) / box.height;
+  }
   let hit = document.elementFromPoint(x, y);
   while (hit && hit.shadowRoot) {
     const inner = hit.shadowRoot.elementFromPoint(x, y);
@@ -65,23 +177,208 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
     hit = inner;
   }
   if (!hit) return false;
+  if (onlyFrames && !hit.matches('iframe, frame, object, embed')) return false;
   const label = hit.closest ? hit.closest('label') : null;
-  if (label && label.control === el) return true;
-  for (let node = hit; node; node = node.parentNode || node.host) {
-    if (node === el) return true;
+  if (label && label.control === el) return over(label);
+  for (let node = hit; node; node = node.assignedSlot || node.parentNode || node.host) {
+    if (node === target) return over(target);
   }
   return false;
 }"""
 
+# (el) => a record of the next move of the pointer that el's document sees: ``at`` is null until one comes, then
+# the point it came to, in that document's own viewport, and false where the document runs no script (a frame
+# sandboxed without allow-scripts: a mail's body), which runs no listener either though it answers the driver's
+# questions: it is asked with a made-up event, of an EventTarget of its own, which nothing of the page's hears.
+# Set up for the target of a placed click inside a frame, once Playwright's hover is done and before the
+# controller puts the pointer on the same point itself (a move to the point the pointer is on is sent to the page
+# as any other). The browser hands a move to the one document under the pointer, in that document's own
+# coordinates, whatever lies between it and the screen: a frame's border and padding, a frame of another process,
+# a turn. So the record is where the pointer is, where the target's two boxes only told where Playwright counts it
+# to be. A trusted pointermove, heard on the way down, so that a listener of the page's that stops it at the target
+# does not keep it from the record; or the mousemove after it, where a listener the page put on the window first
+# stops the pointermove there (a pointermove has the point in fractions of a pixel, a mousemove in whole ones). The
+# listener takes one and goes, or goes when the record is read (_POINTER_SEEN_SCRIPT), or when the click ends
+# (_POINTER_WATCH_STOP_SCRIPT). Where no script runs, it is never called.
+_POINTER_WATCH_SCRIPT = """(el) => {
+  const view = el.ownerDocument.defaultView;
+  const seen = { at: false };
+  const probe = new EventTarget();
+  probe.addEventListener('watch', () => { seen.at = null; });
+  probe.dispatchEvent(new Event('watch'));
+  const note = (event) => {
+    if (!event.isTrusted) return;
+    seen.at = [event.clientX, event.clientY];
+    seen.stop();
+  };
+  const moves = ['pointermove', 'mousemove'];
+  seen.stop = () => moves.forEach((type) => view.removeEventListener(type, note, true));
+  moves.forEach((type) => view.addEventListener(type, note, true));
+  return seen;
+}"""
+
+# (el, seen) => the record of _POINTER_WATCH_SCRIPT, read in el's own document (the driver refuses a handle of
+# another), and the end of its watch.
+_POINTER_SEEN_SCRIPT = "(el, seen) => { seen.stop(); return seen.at; }"
+# (seen) => the end of the watch, where the click ends with its record not read.
+_POINTER_WATCH_STOP_SCRIPT = "(seen) => seen.stop()"
+
+# (el) => the point Playwright's click picks on el, as the ``position`` that names it: the middle of what the
+# viewport shows of the first of el's boxes that it shows a part of (an inline element broken over lines
+# has a box a line, and one around a block an empty box before and after the block: the first box whatever its
+# size was the corner pixel of such a card), counted from the corner of its padding box, with the widths of the
+# border at that corner. Playwright presses a position where it is given, so the controller knows the point; the
+# point Playwright picks itself it cannot ask for. The middle is of what is shown along each axis, however
+# thin: taken so only where an axis showed a whole pixel, a wide card with 0.9 px of its height on the screen
+# (area enough for Playwright to pick it) was aimed at above the screen. Of a box the viewport shows nothing
+# of, it is the middle of the box, which Playwright's hover scrolls to.
+# ``screen`` is [the box Playwright finds for el, in the main frame's viewport; that viewport's size, asked for
+# in a frame only]. Playwright counts a position from the box it finds: the box around the whole of el, turned
+# with it. That is not always the box around el's boxes as the screen has them (getBoundingClientRect): an
+# element of several boxes inside something CSS turns or skews has the two apart, 26 px on a link over two
+# lines turned 30 degrees. Counted from the script's own box, the position named a point beside such a link,
+# and Playwright's hover waited the click's time out there, where its own click pressed the link. In the main
+# frame the place is counted from Playwright's box where that box is not the script's size. Of one size they
+# are one box (Playwright's holds the script's), and the script's own is the one to count from: it is read in
+# the run that picks the point, and Playwright's a round trip earlier, so a target the page moved between the
+# two was aimed at off by its move, and the hover waited the click's time out. ``counted``: the place is counted
+# from Playwright's box, which is then read again once the script has run (_place_of). In a frame the two boxes
+# are in different coordinates, and the place is counted from the script's own: such a link in a frame is a limit
+# the docs name.
+# In a frame the script sees what the frame shows of el, which is not what Playwright goes by: it cuts a box
+# by the screen alone, whatever a frame on the way cuts off, and the click's checks have just passed at that
+# point. So there it answers ``framed``, and is asked again with the size of the main frame's viewport as
+# well: what is shown is then what the screen shows, and no longer what the frame does. Cut by both, a card
+# link wider than its frame was placed at the middle of what the frame shows, a point nothing had checked;
+# with something of the frame's own there Playwright's hover waited the click's time out, where its own
+# click pressed the link. (Where the frame does not show Playwright's point, the checks have failed before
+# this is asked, as Playwright's own click does.) The two boxes of el differ in size where a frame on the
+# way is scaled: the place is then in the screen's pixels, as Playwright counts a position from the box it
+# finds on the screen (in the frame's own pixels the point was twice as far along in a frame drawn at half
+# its size).
+# ``boxless``: el has no box at all, so there is no corner to count from; ``contents``: because its children are
+# laid out in its place (display: contents), and not because it is not shown.
+_PRESS_PLACE_SCRIPT = """(el, screen) => {
+  const view = el.ownerDocument.defaultView;
+  const framed = view !== view.top;
+  const style = view.getComputedStyle(el);
+  const border = [parseInt(style.borderLeftWidth, 10) || 0, parseInt(style.borderTopWidth, 10) || 0];
+  const whole = el.getBoundingClientRect();
+  const boxes = Array.from(el.getClientRects());
+  const [seen, size] = screen || [];
+  let [left, top, right, bottom] = [0, 0, view.innerWidth, view.innerHeight];
+  let [wider, taller] = [1, 1];
+  let corner = [whole.left, whole.top];
+  const sized = (box) => Math.abs(box.width - whole.width) < 0.5 && Math.abs(box.height - whole.height) < 0.5;
+  const counted = Boolean(seen && !framed && !sized(seen));
+  if (counted) {
+    corner = [seen.x, seen.y];
+  } else if (seen && framed && size && whole.width > 0 && whole.height > 0 && seen.width > 0 && seen.height > 0) {
+    [wider, taller] = [seen.width / whole.width, seen.height / whole.height];
+    const across = (x) => whole.left + (x - seen.x) / wider, down = (y) => whole.top + (y - seen.y) / taller;
+    [left, top, right, bottom] = [across(0), down(0), across(size[0]), down(size[1])];
+  }
+  // As Playwright takes the first quad with an area over 0.99 inside the viewport, measured here on the rectangle
+  // round each box: a long thin box of less, turned, has a rectangle of more (a limit the docs name).
+  const shown = (box) =>
+    Math.max(0, Math.min(box.right, right) - Math.max(box.left, left)) *
+    Math.max(0, Math.min(box.bottom, bottom) - Math.max(box.top, top));
+  const picked = boxes.find((box) => shown(box) > 0.99);
+  const first = picked || boxes[0] || whole;
+  const middle = (low, high, from, to) => (picked ? (Math.max(low, from) + Math.min(high, to)) / 2 : (low + high) / 2);
+  return {
+    x: (middle(first.left, first.right, left, right) - corner[0]) * wider - border[0],
+    y: (middle(first.top, first.bottom, top, bottom) - corner[1]) * taller - border[1],
+    border,
+    boxless: boxes.length === 0,
+    contents: style.display === 'contents',
+    framed,
+    counted,
+  };
+}"""
+
+# How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
+# 20 to 500 ms between its looks.
+ENABLED_POLL_SECONDS = 0.1
+# How many times a placed click counts its place again from a box the page changed while the place was read
+# (_place_of).
+PLACE_RECOUNTS = 2
+# What Playwright says of an element the page took out of the document while a step was waiting on it.
+_NOT_ATTACHED = "Element is not attached to the DOM"
+# The check that the pointer finds a target inside frames (_receives_pointer_at): how many documents it asks, the
+# target's own first, and how long it waits for the element it asks about. A target seven frames down is asked
+# all the way up. Deeper, the check before a human-like press cannot tell and gives the click to Playwright's own
+# placing; asked again where Playwright has placed the pointer, it goes by what the documents it asked have said.
+POINTER_CHECK_FRAMES = 8
+POINTER_CHECK_TIMEOUT_MS = 1000
+# How far the target's box of a placed click in a frame may have moved or changed its size, each way, between the
+# placing and the question, for the record of where the pointer arrived to be taken (_receives_pointer_at's
+# ``placed_by``).
+PLACED_BOX_MOVED_PX = 0.5
+
+
+async def _each_on_its_own(steps: list[Callable[[], Awaitable[Any]]]) -> None:
+    """Run each step of a give-back (a handle's dispose, a watch's stop), whatever the one before did.
+
+    A step that fails is let go: what it gives back goes with the page. A cancellation (it is no Exception) at one
+    skipped the rest, which the page then kept for good: it is raised once every step has run.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    for step in steps:
+        try:
+            with contextlib.suppress(Exception):
+                await step()
+        except asyncio.CancelledError as exc:
+            cancelled = cancelled or exc
+    if cancelled is not None:
+        raise cancelled
+
+
+def _box_kept(box: dict[str, float] | None, placed_by: dict[str, float] | None) -> bool:
+    """Whether ``box`` is where ``placed_by`` was and of its size, to PLACED_BOX_MOVED_PX each way: a frame scaled
+    about the target's corner keeps the corner of its box."""
+    if not box or not placed_by:
+        return False
+    return all(abs(box[edge] - placed_by[edge]) <= PLACED_BOX_MOVED_PX for edge in ("x", "y", "width", "height"))
+
+
+class _Budget:
+    """What is left of a click's budget, for each of its waits in turn.
+
+    Given the whole budget each, the waits of one click could hold its session for several budgets, on a target
+    that kept every one of them waiting to the end: Playwright's own click has one deadline for all its checks.
+
+    It bounds the click's waits for its target, and nothing else. A page that stops answering holds a click
+    still: the pointer's moves and the questions asked of a handle wait for the page, with no bound to give
+    them. A page busy for 6 seconds once the checks had passed held a click for 7 under a budget of 3, and the
+    click then ended as a timeout with nothing pressed; one busy for 7 seconds from the mouse going down held it
+    for 8, and the click pressed.
+    """
+
+    def __init__(self, timeout_ms: float) -> None:
+        self.timeout_ms = timeout_ms
+        self._ends = time.monotonic() + timeout_ms / 1000
+
+    @property
+    def spent(self) -> bool:
+        return time.monotonic() >= self._ends
+
+    def left_ms(self, at_most: int | None = None) -> int:
+        # Never 0, which Playwright reads as no limit at all: a wait begun with nothing left has a millisecond,
+        # and ends as the timeout it is. ``at_most``: for a wait that has a bound of its own within the budget.
+        left = max(1, round((self._ends - time.monotonic()) * 1000))
+        return left if at_most is None else min(left, at_most)
+
+
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
 # longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
-# rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
+# rest goes in as plain text (insert_text), its newlines pressed as Enter.
 HUMAN_TYPING_BUDGET_SECONDS = 20.0
 # The least a keystroke or the final insert is given once the budget is spent, before it counts as hung. The worst
 # case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest
 # of the text is then bounded by max(deadline, now) + this.
 HUMAN_TYPING_STEP_FLOOR_SECONDS = 2.0
-_CONTROL_KEYS = {"\n": "Enter", "\r": "Enter", "\t": "Tab"}
+_CONTROL_KEYS = {"\n": "Enter", "\r": "Enter"}
 _CONTROL_KEY_PATTERN = re.compile("([" + "".join(_CONTROL_KEYS) + "])")
 
 # Where the TOTP autofill looks for a one-time-code field, most specific first.
@@ -106,6 +403,18 @@ _NOT_A_ONE_TIME_CODE = re.compile(
     r"phone|\btel\b|currency|locale|lang|product|sku|order|track|captcha|cvv|cvc|csc|card|cc-",
     re.IGNORECASE,
 )
+# What a type's target says of its text where the text is shown (text_target_payload), and is withheld until the
+# field is known not to be secret (withhold_text_preview, give_back_text_preview).
+_TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
+# How long a type's hold on the node its text goes to waits (_TypedField): by selector for the whole take (the field
+# found, which had focus a moment before, the hold made on it and its first read; a type that clears its field first
+# finds it earlier, under a bound of its own, and the take's two other calls share this one), and from then on for the
+# page's answer to each read and give-back. No read waits for a field once the text is in: a hold on a node the page took
+# away (the text's Enter submitted its form) fails at once, where a read by selector waited this long for each
+# attribute of a field that was gone.
+# And how long the read of a type's field for its approval takes at most, before the approval is asked for
+# (_approval_field_read): one that has not answered by then leaves the field unread.
+FIELD_RECHECK_TIMEOUT_MS = 1000
 _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   type: el.getAttribute('type') || '',
   name: el.getAttribute('name') || '',
@@ -164,6 +473,198 @@ def _tab_count(snapshot: dict[str, Any]) -> int | None:
     return len(tabs) if isinstance(tabs, list) else None
 
 
+def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
+    """Whether a read through a type's hold says its node is not secret; None is no read (no node held, or one that
+    did not keep focus)."""
+    return attributes is not None and not BrowserActionService.is_sensitive_field(attributes)
+
+
+async def _answered_soon(call: Awaitable[Any]) -> Any:
+    """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own, and
+    a page that stops answering would hold the type, and its session, with it.
+
+    The bound is this one call's. Steps that must answer within it together are either awaited as one call (an
+    approval's read of the fields its text could go to, _named_fields: finding the element and asking it) or share
+    one end (a take's, through _arrives_by and _left_until); steps bounded one by one can take the bound each (a
+    give-back's)."""
+    return await asyncio.wait_for(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
+
+
+def _left_until(ends: float) -> float:
+    """The seconds left until the loop's time ``ends``: none once it has passed."""
+    return max(0.0, ends - asyncio.get_running_loop().time())
+
+
+async def _arrives_by(call: Awaitable[Any], ends: float, give_back: Callable[[Any], Coroutine[Any, Any, None]]) -> Any:
+    """The handle ``call`` answers, where it answers by the loop's time ``ends``: else the call's error, or the
+    bound's. A call asked once ``ends`` has passed gets the bound's error whatever it answers. One that answered by
+    then keeps its answer however late the loop runs its caller again.
+
+    The call is a task of its own, which giving up on it (the bound passed, the caller was cancelled) does not
+    cancel. A cancelled call does not stop the page: the handle is made all the same, and the answer that carries it
+    finds nobody to give it back. One that arrives after it was given up on is given back as it arrives, by
+    ``give_back``, in the background: nothing waits for that.
+    """
+    step = asyncio.ensure_future(call)
+    try:
+        left = _left_until(ends)
+        if not left:
+            # Asked once the bound had passed (an earlier step of the take used it up): asyncio.wait with no time
+            # left would still find a step done that answers within a loop turn or two, and hand its handle over.
+            raise TimeoutError
+        # Not wait_for(shield(step)): on Python 3.11 wait_for answered a caller cancelled once the step had answered
+        # with that answer, and on 3.14 shield hands a failure of a step given up on to the loop's exception
+        # handler, which logs it at ERROR. asyncio.wait neither cancels the step nor raises its error.
+        done, _ = await asyncio.wait({step}, timeout=left)
+        if not done:
+            raise TimeoutError
+        return step.result()
+    except BaseException:
+        # Whether or not the step is done: one that finished in the iteration its caller was cancelled was not
+        # handed to it, and a done task still runs this callback (soon).
+        _GIVEN_UP.add(step)
+        step.add_done_callback(lambda arrived: _given_back_late(arrived, give_back))
+        raise
+
+
+# The steps given up on that have not answered yet: the loop keeps only a weak reference to a task.
+_GIVEN_UP: set["asyncio.Future[Any]"] = set()
+
+
+def _given_back_late(arrived: "asyncio.Future[Any]", give_back: Callable[[Any], Coroutine[Any, Any, None]]) -> None:
+    _GIVEN_UP.discard(arrived)
+    if arrived.cancelled() or arrived.exception() is not None:
+        return  # nothing arrived: the step failed, as its take already has
+    spawn_background_task(give_back(arrived.result()))
+
+
+async def _disposed_soon(handle: Any) -> None:
+    """Give a handle back, within the bound: one the page does not answer for goes with its document."""
+    with contextlib.suppress(Exception):
+        await _answered_soon(handle.dispose())
+
+
+async def _hold_released_soon(hold: Any) -> None:
+    """Give back a hold nothing reads any more: by its release script first, which takes its listeners off the node,
+    and then the handle, each within the bound and on its own."""
+    await _each_on_its_own(
+        [lambda: _answered_soon(hold.evaluate(FIELD_HOLD_RELEASE_SCRIPT)), lambda: _answered_soon(hold.dispose())]
+    )
+
+
+class _TypedField:
+    """A type's hold on the node its text goes to, taken just before the first keystroke and given back once the text
+    is in: the innermost focused element in the field the type names (element_scripts._HELD_FIELD_JS).
+
+    ``not_secret`` says whether the text's preview may be shown: the node read as not secret through the hold when it
+    was taken and again as it was given back, and kept focus in between. Read by the type's selector or element_id
+    instead, the field was found anew each time: a key of the text that sent focus on to a password field left the
+    rest of the text there unread, and by selector a field turned secret and then replaced read as its replacement.
+
+    By element_id the hold is the element ids' world's, under a nonce, and a take that fails raises, as the element's
+    other steps do. By selector it is a handle of the page's, made on the handle of the element the selector finds
+    and then read: three calls of the type's own, within FIELD_RECHECK_TIMEOUT_MS together, and a handle that arrives
+    once its call was given up on (the bound passed, the type was cancelled) is given back as it arrives
+    (_arrives_by). In one Locator.evaluate_handle the timeout bounded only the wait for the element, and the hold was
+    the type's only once Playwright had disposed of the element's handle, with no bound either: a page that did not
+    answer held the type, and a type cancelled then had made a hold it could not give back. A hold that cannot be
+    taken or read says secret, the text typed all the same, as when the field's attributes could not be read. On
+    either path every call after the take answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
+
+    A type by selector that clears its field first finds the selector's element earlier, as soon as it has focus
+    (find, within a bound of its own; the take's two other calls then share the take's): its checks that focus stays
+    there through the clear (require_focus) are asked of that element, and the hold is then made on it. A locator
+    finds its element anew at each call, which is not the same check: by then the page can have made the selector
+    match another node (a select-all handler that hands the field's id on).
+    """
+
+    def __init__(self, element: Any, locator: Any) -> None:
+        self._element = element
+        self._locator = locator
+        # By element_id: what the world keeps the hold under, once it is taken.
+        self._nonce: str | None = None
+        # By selector: the handle of the element the selector found, and the hold made on it.
+        self._found: Any = None
+        self._handle: Any = None
+        self.not_secret = False
+
+    async def find(self) -> None:
+        """By selector, find the element the selector names now, which the type has just focused. One that is not
+        found within FIELD_RECHECK_TIMEOUT_MS leaves none: the check that follows then refuses the type."""
+        if self._element is not None:
+            return
+        with contextlib.suppress(Exception):
+            await self._find(asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000)
+
+    async def _find(self, ends: float) -> None:
+        finding = self._locator.element_handle(timeout=FIELD_RECHECK_TIMEOUT_MS)
+        self._found = await _arrives_by(finding, ends, _disposed_soon)
+
+    async def require_focus(self, during: str) -> None:
+        """By selector, refuse the type unless keyboard focus is still in the element found (find), as
+        ElementActions.require_focus does for an element_id. A check that cannot be made refuses too: no element
+        was found, or it does not answer within FIELD_RECHECK_TIMEOUT_MS."""
+        focused = False
+        if self._found is not None:
+            with contextlib.suppress(Exception):
+                focused = bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT)))
+        if not focused:
+            raise BrowserActionError(
+                f"Keyboard focus would not stay in the target field{during}, so nothing was typed.",
+                action="type",
+                code="focus_lost",
+                retryable=True,
+            )
+
+    async def take(self) -> None:
+        if self._element is not None:
+            self._nonce = secrets.token_hex(16)
+            self.not_secret = _reads_not_secret(await self._element.hold_field(self._nonce))
+            return
+        ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
+        try:
+            if self._found is None:
+                await self._find(ends)
+            holding = self._found.evaluate_handle(FIELD_HOLD_TAKE_SCRIPT)
+            self._handle = await _arrives_by(holding, ends, _hold_released_soon)
+            read = self._handle.evaluate(FIELD_HOLD_READ_SCRIPT)
+            self.not_secret = _reads_not_secret(await asyncio.wait_for(read, _left_until(ends)))
+        except Exception:
+            self.not_secret = False
+
+    async def release(self) -> None:
+        """Read the node once more and give the hold back, whatever ended the type: each step on its own, and a
+        cancellation raised once all have run (_each_on_its_own). The read, which gives the page's side back in the
+        same call, says secret when it fails or does not answer; by selector, a handle's disposal that fails or does
+        not answer leaves the read's answer as it was.
+
+        What the controller holds is given back whatever the page does: by selector both handles are disposed of.
+        The page's side goes with the release script, which takes the hold's listeners off the node and, by
+        element_id, the hold out of the world's fieldHolds. Where that script never runs (a page that does not
+        answer it), the node keeps the listeners, and the world its entry, until the document goes. Nothing reads
+        such a hold: each type takes its own, by its own handle or under its own nonce. A type refused at its
+        clear took no hold: by selector the element it found is given back, and by element_id nothing was taken.
+        """
+        still_not_secret = False
+
+        async def read_again() -> None:
+            nonlocal still_not_secret
+            if self._element is not None:
+                attributes = await self._element.release_field(self._nonce, within_ms=FIELD_RECHECK_TIMEOUT_MS)
+            else:
+                attributes = await _answered_soon(self._handle.evaluate(FIELD_HOLD_RELEASE_SCRIPT))
+            still_not_secret = _reads_not_secret(attributes)
+
+        steps: list[Any] = []
+        if self._nonce is not None or self._handle is not None:
+            steps.append(read_again)
+        for handle in (self._handle, self._found):
+            if handle is not None:
+                steps.append(lambda handle=handle: _answered_soon(handle.dispose()))
+        await _each_on_its_own(steps)
+        self.not_secret = self.not_secret and still_not_secret
+
+
 class BrowserActionService:
     """Encapsulates browser action execution and approval orchestration."""
 
@@ -188,20 +689,7 @@ class BrowserActionService:
             await self.manager.window_births.close_unreported(session)
             await self.manager._settle(session.page)
             spawn_background_task(self.manager.window_births.close_unreported(session))
-            challenge = await self.manager._check_bot_challenge(session)
-            if challenge:
-                logger.warning("bot challenge detected after navigation: %s", challenge)
-                try:
-                    await self.manager.request_human_takeover(
-                        session.id,
-                        reason=f"Bot challenge detected: {challenge['signal']}",
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "failed to request human takeover after bot challenge on session %s: %s",
-                        session.id,
-                        exc,
-                    )
+            # A bot challenge it lands on is the pipeline's to find and hand over, as after every action.
 
         return await self.manager._run_action(session, "navigate", {"url": url}, operation)
 
@@ -225,13 +713,16 @@ class BrowserActionService:
                 target["x"], target["y"] = await self.elements.click(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
-                await locator.scroll_into_view_if_needed()
-                coords = await self.locator_center(locator)
+                # One budget for every wait of the click, as Playwright's own click has one timeout. The scroll
+                # and the read of the box each waited by Playwright's default, a whole budget more apiece.
+                budget = self._budget(None)
+                await self._scroll_into_view(locator, budget)
+                coords = await self.locator_center(locator, timeout_ms=budget.left_ms())
                 if coords is None:
-                    await locator.click()
+                    await self.click_as_playwright_places_it(session, locator, budget=budget)
                 else:
                     target["x"], target["y"] = coords
-                    await self.click_locator_human_like(session, locator, coords)
+                    await self.click_locator_human_like(session, locator, coords, budget=budget)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "click", target, operation)
@@ -323,32 +814,54 @@ class BrowserActionService:
             preview_chars=80,
             scrubber=self.manager.pii_scrubber,
         )
+        preview = {key: payload[key] for key in _TEXT_PREVIEW_KEYS if key in payload}
+        # Withheld until a read of the field's attributes has said it is not secret, from before the pipeline: a type
+        # it refuses before the operation runs (a policy block, a page ALLOWED_HOSTS refuses) reads no field, and
+        # withheld only as the operation began, its blocked record kept the preview under a standard receipt.
+        self.withhold_text_preview(payload)
 
         async def operation() -> None:
-            element = None
+            element = locator = None
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
-                if self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
-                    self.withhold_text_preview(payload)
                 await self.elements.focus(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
-                if await self.locator_is_sensitive_input(locator):
-                    self.withhold_text_preview(payload)
                 await locator.scroll_into_view_if_needed()
                 await self.focus_verified(session, locator, action="type")
-            if clear_first:
-                await session.page.keyboard.press("Control+a")
-                await asyncio.sleep(0.03)
+            field = _TypedField(element, locator)
+
+            async def require_focus(during: str) -> None:
+                # By element_id as the element's other steps ask it. By selector the element the selector named as
+                # it was focused is asked (_TypedField.find): with no check, a page whose select-all handler moved
+                # focus to another field had that field emptied by the Delete, and the text typed into it.
                 if element is not None:
+                    await self.elements.require_focus(element, during=during)
+                else:
+                    await field.require_focus(during)
+
+            try:
+                if clear_first:
+                    await field.find()
+                    await session.page.keyboard.press("Control+a")
+                    await asyncio.sleep(0.03)
                     # A select-all handler can move focus and select another field, which Delete would empty.
-                    await self.elements.require_focus(element, during=" after select-all (nothing was cleared)")
-                await session.page.keyboard.press("Delete")
-                await asyncio.sleep(0.05)
-                if element is not None:
+                    await require_focus(" after select-all (nothing was cleared)")
+                    await session.page.keyboard.press("Delete")
+                    await asyncio.sleep(0.05)
                     # A page can move focus once the clear has gone in, before the text does.
-                    await self.elements.require_focus(element, during=" through the clear")
-            await self.type_text_human_like(session.page, text)
+                    await require_focus(" through the clear")
+                # Read just before the first keystroke, and again once the text is in: a page can make the field a
+                # password field as it is focused or cleared (a login form that does so as it is focused), or as the
+                # text goes in. Read before the focus, a field turned so kept the preview of the text typed into it.
+                # Both reads are of the node that has focus as the text begins, held from then until the text is in
+                # (_TypedField): a key of the text can send focus on to another field, which takes the rest.
+                await field.take()
+                await self.type_text_human_like(session.page, text)
+            finally:
+                await field.release()
+            if field.not_secret:
+                self.give_back_text_preview(payload, preview)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "type", payload, operation)
@@ -439,10 +952,18 @@ class BrowserActionService:
             # the gateway checked it), that approval is given back.
             refused_before_effect(exc)
             raise
+        # Before the target's read gives the decision another kind: the agent's own label, and whether the
+        # action is one whose target is read at all.
+        label = decision.risk_category
+        reads_its_target = self._reads_its_target(decision)
+        decision, asked_for_its_target = await self._click_risk_from_its_target(
+            session, decision, approval_id=approval_id
+        )
         approval = await self.require_decision_approval(
             session_id,
             decision,
             approval_id=approval_id,
+            fallback_reason=asked_for_its_target,
         )
         # The receipt names the approval the action runs under: this call's own, or
         # the one an outer layer holds for it (a governed call's governed_approval_id).
@@ -458,13 +979,100 @@ class BrowserActionService:
             "approval_checked": approval is not None or held is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
-        with action_witness_context(witness_context):
-            # Uploads go through manager.upload, which checks and claims the
-            # approval itself.
-            if approval is None or decision.action == "upload":
-                return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
-            async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
-                return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+        # An action whose target was read has each press read once more, at the pointer, against the kind
+        # it runs approved for (click_target.refuse_press_not_asked_about).
+        approved = approval.kind if approval is not None else None
+        presses = reading_presses(decision.action, label, approved) if reads_its_target else nullcontext()
+        try:
+            with action_witness_context(witness_context), presses:
+                # Uploads go through manager.upload, which checks and claims the
+                # approval itself.
+                if approval is None or decision.action == "upload":
+                    return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+                async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
+                    return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
+        except PressNeedsApproval as stopped:
+            # Stopped with the pointer over a button of a kind nobody was asked about (the action named its
+            # wrapper, or the page showed it as the pointer arrived): asked for now, as the read before the
+            # decision asks. An approval the action ran under is spent: its action had begun.
+            asks = decision.model_copy(update={"risk_category": stopped.kind})
+            await self.require_decision_approval(
+                session_id,
+                asks,
+                approval_id=None,
+                fallback_reason=classified_reason(
+                    stopped.kind, label, decision.reason, decision.action, at_the_press=True
+                ),
+            )
+            raise
+
+    async def _click_risk_from_its_target(
+        self, session: "BrowserSession", decision: BrowserActionDecision, *, approval_id: str | None = None
+    ) -> tuple[BrowserActionDecision, str | None]:
+        """A click labelled read, write or upload, as what it lands on records it (click_target.py), and the
+        reason of the approval it asks for when its target gave it a kind that asks (None otherwise). A type
+        too: it puts the caret in its target by a press on it, and aimed at a button it pressed the button.
+
+        Before the approval decision, so a button the model gave such a label that deletes, pays, posts or
+        changes the account asks for approval as an honest label would, and a form submit called read is recorded
+        as a write. Not when the caller presents the approval this very action asked for: it runs under that
+        one.
+        """
+        if not self._reads_its_target(decision):
+            return decision, None
+        presented = await self._kind_of_the_approval_presented(session, decision, approval_id)
+        if presented is not None:
+            return decision.model_copy(update={"risk_category": presented}), None
+        target = await read_click_target(self.manager.element_ids, session.page, decision, session_id=session.id)
+        risk = classified_risk(target, decision.risk_category)
+        if risk is None:
+            return decision, None
+        # The operator is asked in the controller's words: the agent's reason alone is the steered model's.
+        reason = (
+            classified_reason(risk, decision.risk_category, decision.reason, decision.action)
+            if risk in CLICK_LABEL_PHRASES
+            else None
+        )
+        return decision.model_copy(update={"risk_category": risk}), reason
+
+    @staticmethod
+    def _reads_its_target(decision: BrowserActionDecision) -> bool:
+        """Whether ``decision`` presses a target that is read first, and again at each press: a click or a
+        type whose label asks for nothing in the fast profile.
+
+        Not inside an outer layer's approval: a governed run's, which an operator gave for this very action, or
+        the one execute_approval runs, whose action was read when it was asked for.
+        """
+        return (
+            decision.action in TARGET_READ_ACTIONS
+            and decision.risk_category in CHECKED_LABELS
+            and held_action_approval() is None
+            and held_tool_call_approval() is None
+        )
+
+    async def _kind_of_the_approval_presented(
+        self, session: "BrowserSession", decision: BrowserActionDecision, approval_id: str | None
+    ) -> ApprovalKind | None:
+        """The kind of the approval the caller presents, when that approval was asked for this very action as
+        a button of a kind of the table; None for any other id, which changes nothing.
+
+        The retry read its target anew, and a target that could not be read then (a busy page) gave it no
+        kind: it ran asking for nothing, the approval it presented stayed approved, and that approval ran the
+        action again. The action now takes its kind from the approval, which require_approved then checks
+        and the run spends, whatever the target reads as by now.
+        """
+        if not approval_id:
+            return None
+        try:
+            approval = await self.manager.approvals.get(approval_id)
+        except KeyError:
+            return None
+        if approval.session_id != session.id or approval.origin != "action":
+            return None
+        if approval.kind not in CLICK_LABEL_PHRASES:
+            return None
+        asked = decision.model_copy(update={"risk_category": approval.kind})
+        return approval.kind if self.manager.approvals.covers(approval, asked) else None
 
     def _refuse_a_host_off_the_list(self, decision: BrowserActionDecision) -> None:
         """Refuse a navigate whose URL ALLOWED_HOSTS refuses, before an approval for it is asked for or spent.
@@ -634,6 +1242,7 @@ class BrowserActionService:
             observation=None if session is None else await self._approval_observation(session),
             origin=origin,
             arguments=arguments,
+            field_read=await self._approval_field_read(session, decision),
         )
         if session is None:
             # No session means no witness receipt to carry the request, so the
@@ -726,6 +1335,57 @@ class BrowserActionService:
             arguments=arguments,
         )
 
+    async def _approval_field_read(
+        self, session: "BrowserSession | None", decision: BrowserActionDecision
+    ) -> ApprovalFieldRead:
+        """How the field of the type an approval is asked for reads (ApprovalRecord.field_read): "plain" or "secret"
+        by its attributes, "unread" where the read does not answer or finds no field to say. Unread too, and nothing
+        read: an action that is no type, and a type the caller marked sensitive (that text is hidden and stored as a
+        digest already).
+
+        The approval is asked for before the type runs, so before any read of its field, and its summary (the
+        webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole. No node has
+        focus for the text yet (the type reads the node it holds: _TypedField), so what is read is every field the
+        text could go to from the element the selector or the element_id names, as they are now
+        (element_scripts.NAMED_FIELDS_SCRIPT): secret if one of them is, plain only where there is one and all are,
+        and unread where there is none or a frame is among them, whose document is not read. Read as the named
+        element's own attributes, a component, a label or a frame around a password field said plain, and the
+        approval showed the password. The whole read answers within FIELD_RECHECK_TIMEOUT_MS, the approval not yet
+        asked for: by selector it waited ACTION_TIMEOUT_MS for a field not on the page.
+        """
+        if session is None or decision.action != "type" or decision.sensitive:
+            return "unread"
+        try:
+            named = await _answered_soon(self._named_fields(session.page, decision))
+            fields = named["fields"]
+            if any(self.is_sensitive_field(field) for field in fields):
+                return "secret"
+            return "plain" if fields and not named["frame"] else "unread"
+        except Exception:
+            return "unread"
+
+    async def _named_fields(self, page: "Page", decision: BrowserActionDecision) -> Mapping[str, Any]:
+        """What NAMED_FIELDS_SCRIPT answers of the element ``decision`` names, by element_id or by selector: one
+        question, so every field is read as it is at one moment.
+
+        By selector it is asked of the handle of the element the selector finds, as a type takes its hold
+        (_TypedField): the element found once, and its handle given back whatever the read does, in the background,
+        also where it arrives once the caller, whose bound is the read's, has given the read up. Six get_attribute
+        calls found the field anew each time, and one the page replaced between them read plain while it was a
+        password field.
+        """
+        target = self.resolve_target(selector=decision.selector, element_id=decision.element_id)
+        if target.get("element_id"):
+            element = self.manager.element_ids.element(page, target["element_id"])
+            return await element.evaluate(NAMED_FIELDS_SCRIPT, effect=READ, within_ms=FIELD_RECHECK_TIMEOUT_MS)
+        ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
+        finding = page.locator(target["selector"]).first.element_handle(timeout=FIELD_RECHECK_TIMEOUT_MS)
+        found = await _arrives_by(finding, ends, _disposed_soon)
+        try:
+            return await found.evaluate(NAMED_FIELDS_SCRIPT)
+        finally:
+            spawn_background_task(_disposed_soon(found))
+
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
         return {
             "url": self.manager._shown_url(session.page),
@@ -742,7 +1402,7 @@ class BrowserActionService:
             await page.wait_for_load_state("networkidle", timeout=min(self.manager.settings.action_timeout_ms, 5000))
         except Exception as exc:
             # Busy pages legitimately never reach networkidle; proceed anyway.
-            logger.debug("settle: networkidle not reached: %s", exc)
+            logger.debug("settle: networkidle not reached: %s", error_text_for_log(exc))
         await page.wait_for_timeout(250)
 
     async def run_action(
@@ -792,24 +1452,19 @@ class BrowserActionService:
 
     @staticmethod
     def withhold_text_preview(payload: dict[str, Any]) -> None:
-        """For a field found secret once typing starts: its preview goes, and the mark that the preview was cut."""
-        payload.pop("text_preview", None)
-        payload.pop("text_truncated", None)
+        """For a field not yet known not to be secret: its preview goes, and the mark that the preview was cut."""
+        for key in _TEXT_PREVIEW_KEYS:
+            payload.pop(key, None)
         payload["text_redacted"] = True
 
-    async def locator_is_sensitive_input(self, locator: Any) -> bool:
-        try:
-            attributes = {
-                "type": await locator.get_attribute("type"),
-                "name": await locator.get_attribute("name"),
-                "id": await locator.get_attribute("id"),
-                "autocomplete": await locator.get_attribute("autocomplete"),
-                "placeholder": await locator.get_attribute("placeholder"),
-                "aria_label": await locator.get_attribute("aria-label"),
-            }
-        except Exception:
-            return False
-        return self.is_sensitive_field(attributes)
+    @staticmethod
+    def give_back_text_preview(payload: dict[str, Any], preview: dict[str, Any]) -> None:
+        """For a field read and found not secret: the preview withheld until then comes back. A text the caller
+        marked sensitive has none to give back, and stays redacted."""
+        if not preview:
+            return
+        payload.pop("text_redacted", None)
+        payload.update(preview)
 
     @staticmethod
     def is_sensitive_field(attributes: Mapping[str, Any]) -> bool:
@@ -825,9 +1480,9 @@ class BrowserActionService:
         haystack = " ".join(str(value or "") for value in attributes.values()).lower()
         return bool(re.search(r"password|passcode|otp|one[- ]time|verification|token|secret|2fa|mfa", haystack))
 
-    async def locator_center(self, locator: Any) -> tuple[float, float] | None:
+    async def locator_center(self, locator: Any, *, timeout_ms: float | None = None) -> tuple[float, float] | None:
         try:
-            box = await locator.bounding_box()
+            box = await locator.bounding_box(timeout=timeout_ms)
         except Exception:
             return None
         if not box:
@@ -871,10 +1526,21 @@ class BrowserActionService:
         session.mouse_position = (x, y)
 
     async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
+        """Click at (x, y), a little off it as a hand is, but never on another element than the one at (x, y).
+
+        The press used to land up to JITTER_PX from the point each way, on whatever was there: a click aimed at a
+        small control pressed its neighbour, which nothing had read (the fast profile's classifier reads the
+        element at the point the click names, click_target.py). The comparison runs once the pointer has arrived
+        and the pause before the press is over; when the elements differ, or cannot be compared, the pointer
+        goes to the point itself.
+        """
         jitter_x = x + random.uniform(-JITTER_PX, JITTER_PX)
         jitter_y = y + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, jitter_x, jitter_y)
         await self.pause_before_press()
+        if not await same_element_at(self.manager.element_ids, session.page, (x, y), (jitter_x, jitter_y)):
+            jitter_x, jitter_y = x, y
+            await session.page.mouse.move(x, y)
         await self.press_mouse(session, jitter_x, jitter_y)
 
     @staticmethod
@@ -883,6 +1549,11 @@ class BrowserActionService:
         await asyncio.sleep(random.uniform(0.03, 0.12))
 
     async def press_mouse(self, session: "BrowserSession", x: float, y: float) -> None:
+        """Press and release at (x, y), where the pointer is. For an action whose target is read, what is under
+        the pointer is read first, and a button nobody was asked about is not pressed.
+        """
+        if press_is_read():
+            await refuse_press_not_asked_about(self.manager.element_ids, session.page, x, y, session_id=session.id)
         await session.page.mouse.down()
         await asyncio.sleep(random.uniform(0.02, 0.08))
         await session.page.mouse.up()
@@ -895,6 +1566,7 @@ class BrowserActionService:
         coords: tuple[float, float],
         *,
         timeout_ms: float | None = None,
+        budget: _Budget | None = None,
     ) -> None:
         """Click `locator` along a human-like path, but only if it is what the pointer hits.
 
@@ -902,33 +1574,325 @@ class BrowserActionService:
         on top there: a transparent element over a "Save draft" button took the
         click, while the approval and the audit trail named the button. Playwright's
         own checks run first (visible, stable, enabled, receiving events at its
-        click point, frames included), and the point is checked again once the
+        click point, frames included, but a frame CSS transforms, which Playwright
+        does not look through), and the point is checked again once the
         pointer has arrived and the pause before the press is over, so a cover
-        put up during the move or the pause is caught as well. When that last
-        check fails the click goes to Playwright's `click()`, which clicks the
-        element if it can and otherwise refuses — it never clicks what covers it.
+        put up during the move or the pause is caught as well. Enabled is asked
+        again with it: the move and the pause take about half a second, and a
+        button the page turned off in that time got a mouse down that the browser
+        gives to nobody, under an action that ended as done. When that last
+        check fails the click is one Playwright places (click_as_playwright_places_it):
+        its own `click()`, or for an action whose target is read its hover and the
+        controller's press where that put the pointer. Either clicks the element if
+        it can and otherwise refuses, and both wait for a target that is not
+        enabled. The controller's press does not click what covers the element;
+        Playwright's own `click()` does where the cover is over a frame CSS
+        transforms (docs/production-hardening.md has that limit).
+
+        The click has one budget for all its waits, as Playwright's own click has
+        one timeout: ``budget`` where the caller began it (a step of the same
+        click came first), else one of ``timeout_ms``. The placed click is given
+        what is left of it. It had a whole budget of its own, so a target that
+        kept the checks waiting and then the placing held its session for two.
         """
-        await locator.click(trial=True, timeout=timeout_ms)
+        budget = budget or self._budget(timeout_ms)
+        await self._checks_of_a_click(locator, budget)
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
         await self.pause_before_press()
-        if await self._receives_pointer_at(locator, x, y):
+        if await self._receives_pointer_at(
+            locator, x, y, timeout_ms=budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+        ) and await self._is_enabled_now(locator, budget.left_ms(POINTER_CHECK_TIMEOUT_MS)):
             await self.press_mouse(session, x, y)
         else:
-            await locator.click(timeout=timeout_ms)
+            await self.click_as_playwright_places_it(session, locator, budget=budget)
 
     @staticmethod
-    async def _receives_pointer_at(locator: Any, x: float, y: float) -> bool:
+    async def _is_enabled_now(locator: Any, timeout_ms: float) -> bool:
+        """Whether the target is enabled as its press is about to be made. What cannot be told is a no."""
         try:
-            return bool(await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y]))
+            return bool(await locator.is_enabled(timeout=timeout_ms))
         except Exception:
             return False
+
+    def _budget(self, timeout_ms: float | None) -> _Budget:
+        """A click's budget: the caller's, or the one Playwright gives an action of this session (ACTION_TIMEOUT_MS)."""
+        return _Budget(self.manager.settings.action_timeout_ms if timeout_ms is None else timeout_ms)
+
+    @staticmethod
+    async def _scroll_into_view(locator: Any, budget: _Budget) -> None:
+        """Scroll a click's target into view, within the click's budget.
+
+        Playwright's scroll finds one element and waits for it to stand still. When the page replaces that
+        element meanwhile it ends at once ("Element is not attached to the DOM"), where Playwright's click
+        looks the element up again. A disabled button that a form draws again many times a second ended the
+        click there, one step before the checks that wait for such a button (_checks_of_a_click). The scroll
+        is made again while the budget lasts. Any other failure is the click's.
+        """
+        while True:
+            try:
+                await locator.scroll_into_view_if_needed(timeout=budget.left_ms())
+                return
+            except PlaywrightTimeoutError:
+                raise
+            except PlaywrightError as error:
+                if budget.spent or _NOT_ATTACHED not in error_text(error):
+                    raise
+            await asyncio.sleep(ENABLED_POLL_SECONDS)
+
+    @staticmethod
+    async def _checks_of_a_click(locator: Any, budget: _Budget) -> None:
+        """Playwright's checks of a click on ``locator``, with nothing pressed.
+
+        Visible, enabled, stable, and the element is what the pointer finds at its click point, frames
+        included. These were a trial click, and a trial click presses: Playwright sends the mouse down and up
+        for real and cancels the events with a listener in the target's own frame. Over a frame that the target
+        holds they go to the frame's document, which that listener never sees: a click that named a frame or
+        its wrapper pressed the frame's button once before its own press (a "Pay" pressed twice), and for an
+        action whose target is read, before the read. A click listener a site keeps on window, in the capture
+        phase, saw them as well.
+
+        A trial hover makes the same checks but one, and sends the pointer's move alone. That one, enabled, is
+        waited for first, as a click waits for it: by looking again, and each look finds the element the
+        selector names then. A wait on the one element found first ended at once when a page drew its disabled
+        button again ("Element is not attached to the DOM"), where a click had waited for the new one. The two
+        share the click's budget.
+        """
+        while not await locator.is_enabled(timeout=budget.left_ms()):
+            await asyncio.sleep(ENABLED_POLL_SECONDS)
+            if budget.spent:
+                raise PlaywrightTimeoutError(
+                    f"Timeout {budget.timeout_ms:g}ms exceeded: the click's target is there and is not enabled."
+                )
+        await locator.hover(trial=True, timeout=budget.left_ms())
+
+    async def click_as_playwright_places_it(
+        self,
+        session: "BrowserSession",
+        locator: Any,
+        *,
+        budget: _Budget | None = None,
+    ) -> None:
+        """Playwright's own click on ``locator``, for a target the human-like press could not take.
+
+        Playwright picks the point of its click itself, the middle of the first piece of the element that the
+        viewport shows, and presses in the same step: there is no moment between for the read a press takes
+        (press_mouse), and no way to ask it for the point. Read at the middle of the element's box instead, a
+        wrapper wider than the viewport, or one in two pieces over two lines, was read at a point the click never
+        touched, and the button under Playwright's point was pressed unread.
+
+        So for an action whose target is read the step is taken apart, and only the placing is Playwright's. Its
+        checks run (_checks_of_a_click), its hover puts the pointer at the point its click would have picked, given to
+        it as a position so that the controller knows where that is, and the press is the controller's own: read
+        where it goes down, as every other press is. Whether the target takes the pointer at that point is
+        Playwright's check, made by its hover, and then the controller's own (_receives_pointer_at), asked with
+        the pointer there. Playwright's is not enough: it does not look through a frame that stands in
+        anything CSS transforms (it puts the pointer where it is told and watches for the event in the target's
+        own document, so one that goes to the page over the frame, or into a frame that lies over the target,
+        never comes, and it calls that done), and between its hover and the press a page can take the target
+        away. An element made invisible keeps its box, which was all that was asked for then, and the press
+        went to what was behind it. The steps share the click's budget (_Budget), as the steps of Playwright's
+        own click share its timeout: ``budget`` where the click began before this (a human-like try, the scroll
+        into view), else the session's own (ACTION_TIMEOUT_MS). Playwright's own click is given what is left of it.
+        """
+        budget = budget or self._budget(None)
+        if not press_is_read():
+            await locator.click(timeout=budget.left_ms())
+            return
+        await self._checks_of_a_click(locator, budget)
+        seen, place = await self._place_of(locator, budget)
+        if place["framed"] and seen and not place["boxless"]:
+            # What the frame shows of the target is not what the screen shows of it: asked again with its size.
+            size = await session.page.locator(":root").evaluate(
+                "() => [innerWidth, innerHeight]", timeout=budget.left_ms()
+            )
+            place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, size], timeout=budget.left_ms())
+        if place["boxless"]:
+            # Shown when the checks passed a moment ago, or they had not: one with no box now, and not for its
+            # children's sake, was hidden since. It has nothing inside it to name.
+            raise _target_has_no_box() if place["contents"] else _target_left_the_pointer()
+        position = {"x": float(place["x"]), "y": float(place["y"])}
+        await locator.hover(position=position, timeout=budget.left_ms())
+        # In a frame the target's document is asked where it sees the pointer's move below arrive, and the
+        # question is asked at that point (_POINTER_WATCH_SCRIPT). (x, y) is counted from Playwright's box, which in
+        # a frame of another process with a border or padding is up and left of the element by that much: the
+        # pointer went there, and the question, carried into the frame by that same box, was asked beside the
+        # pointer. The target is looked for once, for its box and for the watch, and both handles are given back
+        # once the click has pressed or ended: a handle is the page's to keep until then. The watch is set up once
+        # the target has a box: set up for a click that ends here, it listened on until the frame's next move.
+        target = watch = None
+        try:
+            if place["framed"]:
+                target = await locator.element_handle(timeout=budget.left_ms())
+                box = await target.bounding_box()
+                if box:
+                    watch = await target.evaluate_handle(_POINTER_WATCH_SCRIPT)
+            else:
+                box = await locator.bounding_box(timeout=budget.left_ms())
+            if not box:
+                raise _target_left_the_pointer()
+            # Where Playwright puts a position: the corner of the element's box, its border, the offset.
+            x = float(box["x"] + place["border"][0] + position["x"])
+            y = float(box["y"] + place["border"][1] + position["y"])
+            await session.page.mouse.move(x, y)
+            asked_within = budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+            # A question the page does not answer within its bound raises its timeout (_receives_pointer_at), and
+            # the click ends as that timeout, as at any step before this one: a no is the page's answer.
+            if not await self._receives_pointer_at(
+                locator, x, y, placed=True, watch=watch, placed_by=box, timeout_ms=asked_within
+            ):
+                raise _target_not_under_the_pointer()
+            await self.press_mouse(session, x, y)
+        finally:
+            await self._give_back(watch, target)
+
+    @staticmethod
+    async def _give_back(watch: Any, target: Any) -> None:
+        """End a placed click's watch, where its record was not read, and give the watch and the target back.
+
+        Each on its own: a cancellation at one (it is no Exception) skipped the next, which the page then kept for
+        good. It is raised once all are done. Without the stop, a click whose record was never read (no move came
+        to the target's document, and the question ended before it read the record) left the watch's listeners on
+        the frame's window until its next move.
+        """
+        steps: list[Any] = []
+        if watch is not None:
+            steps += [lambda: watch.evaluate(_POINTER_WATCH_STOP_SCRIPT), watch.dispose]
+        if target is not None:
+            steps.append(target.dispose)
+        await _each_on_its_own(steps)
+
+    @staticmethod
+    async def _place_of(locator: Any, budget: _Budget) -> tuple[Any, dict[str, Any]]:
+        """The box Playwright finds for the target, and the place to hover at, counted as Playwright counts one.
+
+        The box is read a round trip before the script that picks the place. A place counted from it
+        (``counted``: an element of several boxes in something turned, whose box is not the script's size) is
+        right only where that box still stood when the script ran. A target the page moved and resized in that
+        round trip has boxes of two sizes as well, and was aimed at off itself: Playwright's hover kept the offset
+        through every retry and waited the click's time out, where its own click pressed it. So the box is read
+        again, and the place counted again where it changed, PLACE_RECOUNTS times at most: a target that changes
+        at every read is hovered at the last place counted.
+        """
+        seen = await locator.bounding_box(timeout=budget.left_ms())
+        place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, None], timeout=budget.left_ms())
+        for _ in range(PLACE_RECOUNTS):
+            if not place["counted"]:
+                break
+            again = await locator.bounding_box(timeout=budget.left_ms())
+            if again == seen:
+                break
+            seen = again
+            place = await locator.evaluate(_PRESS_PLACE_SCRIPT, [seen, None], timeout=budget.left_ms())
+        return seen, place
+
+    @staticmethod
+    async def _receives_pointer_at(
+        locator: Any,
+        x: float,
+        y: float,
+        *,
+        placed: bool = False,
+        watch: Any = None,
+        placed_by: dict[str, float] | None = None,
+        timeout_ms: float = POINTER_CHECK_TIMEOUT_MS,
+    ) -> bool:
+        """Whether the pointer at (x, y) finds the element ``locator`` names, through the frames it is in.
+
+        A target in the main frame is asked in one message, as before. One inside a frame is asked in its own
+        document, and then each frame element on the way up is asked in the document that holds it: the frame
+        must be what the pointer finds there. A press at the middle of a link's box, where the link was wider
+        than its frame, landed on the page beside the frame, and the click ended as done. Anything that cannot
+        be told is a no, and the click is then one Playwright places.
+
+        ``placed``: (x, y) is where Playwright's hover has put the pointer, and a no ends the click. There a
+        target POINTER_CHECK_FRAMES frames down or deeper is a yes: the documents asked said so, the ones above
+        them are Playwright's hover's to check, and a no would end a click that Playwright's own makes.
+
+        ``watch``: the target is in a frame, and this is the record of where its document saw the pointer arrive
+        (_POINTER_WATCH_SCRIPT), read here in the target's own document, and the caller's to give back. The target
+        is then asked at that point, a point of its own document, and not at (x, y) carried by its two boxes.
+        Playwright's box of an element in a frame of another process leaves out the frame's border and padding,
+        so with either the carried point was that far down and right of the pointer: a button whose part on the
+        screen ended within that much of the pointer ended the click as target_moved, where Playwright's own click
+        pressed it, and what the page put under the pointer once Playwright's hover had passed (a row's "Delete")
+        was pressed where it did not reach that far. No move seen is a no, the pointer being over another
+        document (or the page stopped both moves on the window before the watch heard them), unless what lies at
+        the carried point is a frame inside the target (a video in a card), which Playwright's own check takes for
+        its target. A document that runs no script can say nothing, and its target is asked by the two boxes. The
+        frames on the way up are asked as before.
+
+        ``placed_by``: the target's box the click was placed by, with the watch. The record is of a point of the
+        target's document, and a page that moves the frame once the pointer has arrived (on that move) leaves the
+        pointer, which does not move, over another point of it: asked at the record, the question found the card,
+        and the press went down on what the move had put under the pointer, where nothing reads it in a frame of
+        another origin. So the record is taken only where the target's box is still that one, its corner and its
+        size, to PLACED_BOX_MOVED_PX each way; else no (target_moved). A frame of the page's own process scaled
+        about the target's corner keeps the corner, and the press went down where the scale had put the pointer.
+        The box read again is the one the two boxes carry the point by where there is no record, and they carry
+        it as the frame is now. Not seen: Playwright counts a box in a frame of another process as if the frame
+        were not turned or scaled and had no border or padding, so a page that turns such a frame (a half turn),
+        scales it about its top-left corner or grows its padding inside the same border box as the pointer arrives
+        keeps the box, and the press goes down where the change put the pointer. That is a page that changes what
+        is under the pointer, which click_target.py's "Not caught" lists; a guard of every frame's geometry read in
+        the page's own world, which such a page can answer for itself, would not stop it.
+
+        ``timeout_ms`` bounds the wait for the element it asks about: POINTER_CHECK_TIMEOUT_MS, or what the
+        click has left where that is less. The first message had no bound given, so it waited by Playwright's
+        default, a whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed. Where
+        the click was placed, a wait that runs past it raises its timeout: the page did not answer, which is no
+        no. Taken for one, it ended a click as target_moved where the page was busy, with the click's time not
+        spent, and every step before the question ends a click as the timeout it is.
+        """
+        handles: list[Any] = []
+        try:
+            if watch is None:
+                found = await locator.evaluate(
+                    _RECEIVES_POINTER_SCRIPT, [x, y, None, False, placed], timeout=timeout_ms
+                )
+                if found != "framed":
+                    return found is True
+            # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
+            # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
+            node = await locator.element_handle(timeout=timeout_ms)
+            handles.append(node)
+            # Where the target's document saw the pointer arrive: a point there, None for no move, False for a
+            # document that runs no script, and for no watch (the two boxes carry the point, as before).
+            at = await node.evaluate(_POINTER_SEEN_SCRIPT, watch) if watch is not None else False
+            only_frames = at is None
+            # The element itself, before a human-like press, is asked as well that the pointer is over it, and
+            # where the click was placed, as the button or the link it is in. Neither is asked of a frame.
+            arrived, wide = not placed, placed
+            for _ in range(POINTER_CHECK_FRAMES):
+                box = await node.bounding_box()
+                if at and not _box_kept(box, placed_by):
+                    return False
+                asked = [*(at or (x, y)), True if at else box, arrived, wide]
+                if only_frames:
+                    asked.append(True)
+                if not box or await node.evaluate(_RECEIVES_POINTER_SCRIPT, asked) is not True:
+                    return False
+                at = only_frames = arrived = wide = False
+                frame = await node.owner_frame()
+                if frame is None or frame.parent_frame is None:
+                    return True
+                node = await frame.frame_element()
+                handles.append(node)
+            return placed
+        except PlaywrightTimeoutError:
+            if placed:
+                raise
+            return False
+        except Exception:
+            return False
+        finally:
+            await _each_on_its_own([handle.dispose for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         coords = await self.locator_center(locator)
         if coords is None:
-            await locator.click()
+            await self.click_as_playwright_places_it(session, locator)
         else:
             await self.click_locator_human_like(session, locator, coords, timeout_ms=FOCUS_CLICK_TIMEOUT_MS)
         await asyncio.sleep(0.05 + random.random() * 0.1)
@@ -945,6 +1909,10 @@ class BrowserActionService:
         except PlaywrightError:
             # Covered or not clickable: focus it without clicking anything.
             pass
+        except BrowserActionError as exc:
+            # So too where the controller's own press refused the click Playwright placed: nothing was pressed.
+            if exc.code != TARGET_MOVED:
+                raise
         if await self._has_focus(locator):
             return
         await locator.focus()
@@ -976,8 +1944,8 @@ class BrowserActionService:
             delays_ms.append(delay_ms)
         # Scale every delay down together when the pauses alone would overrun the budget. Each keystroke is a round
         # trip to a browser node, outside the pauses, so the deadline is what bounds the total: once it passes, the
-        # rest is inserted as plain text, with each newline, carriage return or tab in it still pressed as Enter or
-        # Tab (_insert_rest), all within one shared cutoff.
+        # rest is inserted as plain text, with each newline or carriage return in it still pressed as Enter
+        # (_insert_rest), all within one shared cutoff.
         scale = min(1.0, HUMAN_TYPING_BUDGET_SECONDS * 1000 / max(sum(delays_ms), 1))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
@@ -990,10 +1958,13 @@ class BrowserActionService:
             await asyncio.sleep(min(delay_ms * scale / 1000, max(deadline - loop.time(), 0)))
 
     async def _insert_rest(self, page: "Page", rest: str, deadline: float) -> None:
-        """The text past the deadline: inserted as plain text, but newline and tab are still pressed as keys.
+        """The text past the deadline: inserted as plain text, but a newline or a carriage return is still pressed
+        as Enter.
 
         insert_text of a newline into an <input> drops it, so a long text ending in one would not submit the form
-        as the same text typed in time does (keyboard.type presses Enter and Tab for them).
+        as the same text typed in time does (keyboard.type presses Enter for them). A tab stays in the text that is
+        inserted, as keyboard.type puts it in: it has no key for a tab. Pressed as Tab, it moved focus on, and the
+        rest of a text that took long went to the next field, where the same text typed in time stayed in its own.
         """
         # One cutoff for every remaining step: a floor per step would let a text with many newlines run far past it.
         loop = asyncio.get_running_loop()
@@ -1073,11 +2044,17 @@ class BrowserActionService:
             return None
         code = pyotp.TOTP(session.totp_secret).now()
         await self.focus_verified(session, locator, action="totp_fill")
+        # So did the focus click: the pointer's moves, the pause and the press, whose navigation a click waits for.
+        if not self._may_fill_totp(session):
+            return None
         try:
             await locator.fill("")
         except Exception:
             await session.page.keyboard.press("Control+a")
             await session.page.keyboard.press("Delete")
+        # And so did the clear: a field whose page an input or a key handler sends elsewhere as it is emptied.
+        if not self._may_fill_totp(session):
+            return None
         await self.type_text_human_like(session.page, code)
         # Enter submits the form the code went into. This used to click the
         # first submit button anywhere on the page — on a checkout page that
@@ -1121,17 +2098,7 @@ class BrowserActionService:
 
     @staticmethod
     def action_class(action_name: str) -> str:
-        if action_name in {
-            "navigate",
-            "hover",
-            "scroll",
-            "wait",
-            "reload",
-            "go_back",
-            "go_forward",
-        }:
-            return "read"
-        return "write"
+        return "read" if action_name in READ_ONLY_ACTIONS else "write"
 
     @staticmethod
     def action_verification(
@@ -1183,9 +2150,7 @@ class BrowserActionService:
             signals.append(f"upload_{delivery['outcome']}")
 
         verified: bool | None = bool(signals)
-        if action_name == "navigate":
-            verified = "url_changed" in signals or "title_changed" in signals
-        elif action_name in {"go_back", "go_forward"}:
+        if action_name in {"navigate", "go_back", "go_forward"}:
             verified = "url_changed" in signals or "title_changed" in signals
         elif action_name in {
             "click",

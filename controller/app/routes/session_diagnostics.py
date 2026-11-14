@@ -13,8 +13,18 @@ from starlette.responses import StreamingResponse
 
 from .. import events as _events
 from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..browser.page_read import SESSION_BUSY_DETAIL, SessionBusyError
 from ..playwright_export import export_session_script
-from ._utils import OFF_LIST_PAGE_DETAIL, require_safe_segment, typed_route_errors
+from ..utils import error_text
+from ._utils import (
+    OFF_LIST_PAGE_DETAIL,
+    REFUSED_PAGE,
+    bounded_limit,
+    is_http_link,
+    log_hidden_cause,
+    require_safe_segment,
+    typed_route_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +75,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.post("/sessions/{session_id}/screenshot/compare")
     async def screenshot_compare(session_id: str) -> dict[str, Any]:
-        with typed_route_errors(logger, "screenshot diff failed for session %s", session_id):
-            try:
-                return await manager.screenshot_diff(session_id)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
+        with typed_route_errors(logger, "screenshot diff failed for session %s", session_id, refusal=REFUSED_PAGE):
+            return await manager.screenshot_diff(session_id)
 
     @router.get("/sessions/{session_id}/replay", response_class=HTMLResponse)
     async def session_replay(session_id: str) -> HTMLResponse:
@@ -131,9 +138,16 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         )
 
         status = esc(session_info.get("status", "unknown"))
-        current_url = esc(session_info.get("url", ""))
+        current_url = esc(session_info.get("current_url", ""))
         title = esc(session_info.get("title", session_id))
         created = esc(str(session_info.get("created_at", ""))[:19])
+
+        url_line = ""
+        if current_url:
+            # A page sets its own URL: only http(s) becomes a link, or a javascript: one runs on this origin if clicked.
+            link = f'<a href="{current_url}" target="_blank" rel="noopener noreferrer">{current_url}</a>'
+            shown = link if is_http_link(session_info.get("current_url")) else current_url
+            url_line = f"<span>URL: {shown}</span>"
 
         body = f"""<!DOCTYPE html>
 <html lang="en">
@@ -167,7 +181,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
   <span>Status: <strong>{status}</strong></span>
   <span>Created: {created}</span>
   <span>Title: {title}</span>
-  {f'<span>URL: <a href="{current_url}" target="_blank">{current_url}</a></span>' if current_url else ""}
+  {url_line}
 </div>
 <h2>Screenshots ({len(screenshots)})</h2>
 <div class="gallery">{screenshots_html}</div>
@@ -187,7 +201,11 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         method: str | None = None,
         url_contains: str | None = None,
     ) -> dict[str, Any]:
-        return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
+        with typed_route_errors(logger, "network log failed for session %s", session_id, refusal=REFUSED_PAGE):
+            try:
+                return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
+            except SessionBusyError:
+                raise HTTPException(status_code=409, detail=SESSION_BUSY_DETAIL) from None
 
     @router.post("/sessions/{session_id}/shadow-browse")
     async def enable_shadow_browse(session_id: str) -> dict[str, Any]:
@@ -196,15 +214,17 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                 return await manager.enable_shadow_browse(session_id)
             except ErrorPageSourceError as exc:
                 # Its fixed text says what to do instead, and names no host or path.
-                raise HTTPException(status_code=400, detail=str(exc)) from None
+                raise HTTPException(status_code=400, detail=error_text(exc)) from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes and fork answer it. Every other PermissionError
                 # (a data: or blob: page, a page another tab refused) is typed_route_errors' generic 403: a 500
                 # with a traceback, before.
                 raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
             except RuntimeError as exc:
-                # The caller gets the generic answer; why (disabled, a root controller, no sandbox) is logged.
-                logger.warning("shadow browse refused for session %s: %s", session_id, exc)
+                # The caller gets the generic answer; why (disabled, a root controller, no sandbox) is logged, as
+                # a hidden cause is: with shadow browsing off the refusal comes before the session is looked up,
+                # so the id is whatever the caller wrote, and it is quoted and cut.
+                log_hidden_cause(logger, 400, exc, "shadow browse refused for session %s", session_id)
                 raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/sessions/{session_id}/audit")
@@ -216,7 +236,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         with typed_route_errors(logger, "audit listing failed for session %s", session_id):
             events = await manager.audit.list(
                 session_id=session_id,
-                limit=min(limit, 5000),
+                limit=bounded_limit(limit, 5000),
                 event_type=event_type or None,
             )
         return {
@@ -228,7 +248,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
     @router.get("/sessions/{session_id}/witness")
     async def get_session_witness(session_id: str, limit: int = 100) -> dict[str, Any]:
         with typed_route_errors(logger, "witness listing failed for session %s", session_id):
-            receipts = await manager.list_witness_receipts(session_id, limit=min(limit, 5000))
+            receipts = await manager.list_witness_receipts(session_id, limit=bounded_limit(limit, 5000))
         return {
             "session_id": session_id,
             "count": len(receipts),
@@ -279,7 +299,6 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         if trace_path and trace_path.exists():
             return {
                 "session_id": session_id,
-                "trace_path": str(trace_path),
                 "trace_url": f"/artifacts/{session_id}/{trace_path.name}",
                 "trace_size_bytes": trace_path.stat().st_size,
                 # The hosted viewer cannot fetch the trace itself: this used to
@@ -292,7 +311,6 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
             }
         return {
             "session_id": session_id,
-            "trace_path": None,
             "trace_url": None,
             "viewer_url": None,
             "viewer_command": None,

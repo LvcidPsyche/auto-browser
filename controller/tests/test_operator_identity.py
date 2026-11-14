@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.audit import get_current_operator
-from app.auth_policy import credentials_for, parse_operator_tokens
+from app.auth_policy import credentials_for, normalize_authorization, parse_operator_tokens
 from app.config import Settings
 from app.middleware.http import install_controller_http_middleware
 from app.runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH, validate_runtime_policy
@@ -112,6 +112,63 @@ class VerifiedIdentityTests(unittest.TestCase):
             "/whoami", headers={"Authorization": "Bearer not-a-real-token", "X-Operator-Id": "alice"}
         )
         self.assertEqual(response.status_code, 401)
+
+
+class BearerSchemeCaseTests(unittest.TestCase):
+    """The scheme is case-insensitive (RFC 7235 section 2.1); the token is an exact comparison."""
+
+    def test_any_case_of_the_scheme_authenticates(self) -> None:
+        for scheme in ("bearer", "BEARER", "bEaReR"):
+            with self.subTest(scheme=scheme):
+                response = client_for(API_BEARER_TOKENS=NAMED).get(
+                    "/whoami", headers={"Authorization": f"{scheme} {ALICE_TOKEN}"}
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["id"], "alice")
+
+    def test_the_token_stays_case_sensitive(self) -> None:
+        response = client_for(API_BEARER_TOKENS=NAMED).get(
+            "/whoami", headers={"Authorization": f"Bearer {ALICE_TOKEN.upper()}"}
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_another_scheme_or_no_token_is_still_no_credential(self) -> None:
+        for authorization in (f"Basic {ALICE_TOKEN}", ALICE_TOKEN, "Bearer", "bearer "):
+            with self.subTest(authorization=authorization):
+                response = client_for(API_BEARER_TOKENS=NAMED).get("/whoami", headers={"Authorization": authorization})
+                self.assertEqual(response.status_code, 401, response.text)
+
+    def test_the_one_helper_normalizes_the_scheme_only(self) -> None:
+        self.assertEqual(normalize_authorization("  BEARER \t Tok  "), "bearer Tok")
+        self.assertEqual(normalize_authorization("Bearer Tok"), normalize_authorization("bearer Tok"))
+        self.assertNotEqual(normalize_authorization("Bearer tok"), normalize_authorization("Bearer TOK"))
+
+
+class OperatorHeaderAfterTheTokenTests(unittest.TestCase):
+    """A caller without a credential learns it is missing one (401), not which header the API also wants (400)."""
+
+    def test_neither_token_nor_header_is_the_tokens_401(self) -> None:
+        response = client_for(API_BEARER_TOKENS=NAMED, REQUIRE_OPERATOR_ID="true").get("/whoami")
+        self.assertEqual(response.status_code, 401, response.text)
+
+    def test_a_wrong_token_without_a_header_is_the_tokens_401(self) -> None:
+        response = client_for(API_BEARER_TOKENS=NAMED, REQUIRE_OPERATOR_ID="true").get(
+            "/whoami", headers={"Authorization": "Bearer not-a-real-token"}
+        )
+        self.assertEqual(response.status_code, 401, response.text)
+
+    def test_a_valid_shared_token_without_a_header_still_needs_the_header(self) -> None:
+        response = client_for(API_BEARER_TOKEN=SHARED_TOKEN, REQUIRE_OPERATOR_ID="true").get(
+            "/whoami", headers={"Authorization": f"Bearer {SHARED_TOKEN}"}
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("Missing required operator header", response.text)
+
+    def test_a_tokenless_controller_still_asks_for_the_header(self) -> None:
+        response = client_for(
+            API_BIND_SCOPE="loopback", API_ALLOW_TOKENLESS_LOOPBACK="true", REQUIRE_OPERATOR_ID="true"
+        ).get("/whoami")
+        self.assertEqual(response.status_code, 400, response.text)
 
 
 class UnverifiedIdentityTests(unittest.TestCase):

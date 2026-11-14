@@ -42,6 +42,6 @@ services:
       # yet observed in a Codespace), which the base file's loopback-only list would refuse with "Invalid host
       # header". A CONTROLLER_ALLOWED_HOSTS in .env replaces this default; .devcontainer/setup.sh adds the exact
       # forwarded name to one that is already there, and anyone setting it by hand should keep *.app.github.dev.
-      CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver,*.app.github.dev}
+      CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,*.app.github.dev}
     ports: !override
       - "0.0.0.0:${API_PORT:-8000}:8000"

@@ -8,10 +8,10 @@ maintainer routinely opens, and it was found only by listing advisories through
 the API while publishing an unrelated one. Meanwhile SECURITY.md promises to
 "acknowledge reports quickly".
 
-The fix has to attach to a process that is guaranteed to happen. Cutting a
-release is the only one, so the check lives in the release audit: a report still
-in `triage` means nobody has accepted it, and shipping past that is how seven
-weeks happen.
+So the check lives in the release audit, run by hand before a release PR. CI
+does not run it: listing the repository's private advisories needs a token
+secret the workflows do not have. A report still in `triage` means nobody has
+accepted it, and shipping past that is how seven weeks happen.
 
 `draft` advisories are reported but do not block — accepted-and-being-fixed is a
 legitimate place to be mid-release.
@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +42,10 @@ def main() -> int:
         help="Read the advisory list from a file instead of the API (tests).",
     )
     args = parser.parse_args()
+    # A summary is a reporter's text. Where stdout's encoding has no such character (Windows' ANSI code page on a pipe,
+    # as when the release audit's output is captured), it is printed escaped, as Python's stderr does, rather than
+    # ending the check at that summary.
+    sys.stdout.reconfigure(errors="backslashreplace")
 
     if args.from_json is not None:
         advisories = json.loads(args.from_json.read_text(encoding="utf-8"))
@@ -54,6 +60,9 @@ def resolve_repo() -> str:
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         cwd=ROOT,
+        # Without the shell's GIT_* settings: a GIT_DIR there names another repository, whose origin this would read.
+        # Windows upper-cases every name, so the prefix catches each spelling.
+        env={name: value for name, value in os.environ.items() if not name.startswith("GIT_")},
         text=True,
         capture_output=True,
     )
@@ -79,15 +88,21 @@ def fetch_advisories(repo: str) -> list[dict]:
             "GitHub CLI; pass --skip-advisory-check to the release audit only if you "
             "have just checked the advisory list by hand."
         )
+    # Without --slurp, how the pages are printed depends on the gh version: one array per page, which is not one JSON
+    # document, or one merged array. With it, gh prints one array of the pages, each an array of advisories.
     result = subprocess.run(
-        ["gh", "api", f"repos/{repo}/security-advisories", "--paginate"],
+        ["gh", "api", f"repos/{repo}/security-advisories", "--paginate", "--slurp"],
         cwd=ROOT,
         text=True,
+        encoding="utf-8",  # gh prints UTF-8, which Windows' ANSI code page (cp1252) cannot always decode: ” ends in 0x9D
         capture_output=True,
     )
     if result.returncode != 0:
         raise SystemExit(f"Could not list security advisories for {repo}:\n{result.stderr.strip()}")
-    return json.loads(result.stdout)
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        raise SystemExit(f"The security advisories gh listed for {repo} are not a list of pages.")
+    return [entry for page in pages for entry in page]
 
 
 def age_days(timestamp: str | None, now: datetime) -> int | None:

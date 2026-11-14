@@ -15,7 +15,7 @@ import weakref
 from typing import Any, Callable
 
 from ..action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
-from ..utils import spawn_background_task
+from ..utils import error_text_for_log, quoted_for_log, spawn_background_task
 from .prefetch import PREFETCH_OFF, turn_prefetch_off
 from .request_gate import GateBlock, RequestGate, RequestGateUnavailable
 
@@ -159,7 +159,7 @@ class RequestGates:
         try:
             await self.require(browser)
         except RequestGateUnavailable as exc:
-            logger.warning("%s", exc.message)
+            logger.warning("%s", error_text_for_log(exc))
         if not attach_mode:
             # The browser's preference, not the gate's: set even when this attach failed and a later one succeeds.
             await self._prefetch_off(browser)
@@ -171,8 +171,8 @@ class RequestGates:
         if value != PREFETCH_OFF:
             logger.warning(
                 "pre-request gate: speculation-rules prefetch could not be turned off in a launched browser (read "
-                "back %r): a prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused.",
-                value,
+                "back %s): a prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused.",
+                quoted_for_log(value),
             )
 
     async def bypass_service_workers(self, page: Any) -> None:
@@ -197,7 +197,9 @@ class RequestGates:
                 # A page that closed first needed no bypass: not a failure readiness should warn about.
                 self.bypass_failures += 1
                 logger.warning(
-                    "pre-request gate: could not bypass service workers on a page: %s", f"{type(exc).__name__}: {exc}"
+                    "pre-request gate: could not bypass service workers on a page: %s: %s",
+                    type(exc).__name__,
+                    error_text_for_log(exc),
                 )
             return
         finally:
@@ -348,7 +350,7 @@ class RequestGates:
             target_id, session = await asyncio.wait_for(_read_target_id(page), timeout=TARGET_ID_TIMEOUT_SECONDS)
         except Exception as exc:
             # Nothing is attributed to the page then, and the caller's own error stands.
-            logger.debug("could not read a page's targetId: %s", f"{type(exc).__name__}: {exc}"[:200])
+            logger.debug("could not read a page's targetId: %s: %s", type(exc).__name__, error_text_for_log(exc))
             return None
         with contextlib.suppress(TypeError):
             self._target_ids[page] = target_id

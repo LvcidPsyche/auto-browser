@@ -12,8 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from app.harness import TaskContract
-from app.harness.verifier.uv import _STDERR_KEEP_BYTES, UniversalVerifierAdapter, _read_capped
-from app.process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
+from app.harness.verifier.uv import _STDERR_KEEP_BYTES, UniversalVerifierAdapter
+from app.process_tree import GROUP_SPAWN_KWARGS, kill_and_drain, read_capped
 
 CONTRACT = TaskContract(
     id="uv-cap",
@@ -67,7 +67,7 @@ class UvOutputCapTests(unittest.IsolatedAsyncioTestCase):
         stream.feed_data(data)
         stream.feed_eof()
 
-        kept = await _read_capped(stream, _STDERR_KEEP_BYTES, strict=False)
+        kept = await read_capped(stream, _STDERR_KEEP_BYTES, strict=False)
 
         self.assertEqual(kept, data[:4096])
 

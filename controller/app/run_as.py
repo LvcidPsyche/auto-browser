@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .utils import error_text, error_text_for_log
+
 logger = logging.getLogger(__name__)
 
 CONTROLLER_UID = 10002
@@ -152,6 +154,7 @@ def controller_owned_paths(settings: Any, data_root: Path = DATA_ROOT) -> list[P
         parent(settings.remote_access_info_path),
         parent(settings.mcp_session_store_path),
         parent(settings.cron_store_path),
+        parent(settings.share_revocation_store_path),
         data_root / "browser-sessions",
         data_root / "db",
     ]
@@ -274,7 +277,7 @@ def fix_ownership(
                 report.changed += 1
                 report.changed_paths.append(relative)
             except OSError as exc:
-                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
 
     def skip(relative: str, st: os.stat_result, root_dev: int) -> bool:
         if st.st_dev != root_dev:
@@ -306,7 +309,7 @@ def fix_ownership(
         except FileNotFoundError:
             return
         except OSError as exc:
-            report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+            report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
             return
         report.examined += 1
         if report.examined % WALK_PROGRESS_EVERY == 0:
@@ -320,7 +323,7 @@ def fix_ownership(
                     report.changed += 1
                     report.changed_paths.append(relative)
                 except OSError as exc:
-                    report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                    report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
             return
         if before_open is not None:
             before_open(relative)
@@ -336,7 +339,7 @@ def fix_ownership(
                 # contents were not looked at, which main() logs once per pass as a WARNING.
                 report.unchecked.append(relative)
             else:
-                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
             return
         try:
             opened = os.fstat(fd)
@@ -354,7 +357,7 @@ def fix_ownership(
                         children.append(entry.name)
                 children.sort()
             except OSError as exc:
-                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                report.errors.append(f"{data_root / relative}: {exc.strerror or error_text(exc)}")
                 return
             errors_before = len(report.errors)
             for child in children:
@@ -374,7 +377,7 @@ def fix_ownership(
     try:
         root_fd = os.open(str(data_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
-        report.errors.append(f"{data_root}: {exc.strerror or exc}")
+        report.errors.append(f"{data_root}: {exc.strerror or error_text(exc)}")
         report.seconds = time.monotonic() - started
         return report
     try:
@@ -425,7 +428,7 @@ def fix_ownership(
                 finally:
                     os.close(parent_fd)
             except OSError as exc:
-                report.errors.append(f"{top}: {exc.strerror or exc}")
+                report.errors.append(f"{top}: {exc.strerror or error_text(exc)}")
         # /data itself last, after everything under it, on the same rule: a stuck entry must not keep the controller
         # from writing into /data unless handing /data over would lock root out of it.
         if not report.errors or root_st.st_mode & ROOT_REOPENS == ROOT_REOPENS:
@@ -531,7 +534,7 @@ def remove_marker(data_root: Path) -> None:
         os.unlink(MARKER_NAME, dir_fd=root_fd)  # unlink never follows a symlink
     except OSError as exc:
         if exc.errno not in (errno.ENOENT,):
-            logger.warning("Could not remove %s: %s", data_root / MARKER_NAME, exc)
+            logger.warning("Could not remove %s: %s", data_root / MARKER_NAME, error_text_for_log(exc))
     finally:
         os.close(root_fd)
 
@@ -556,7 +559,7 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
             st = os.stat(data_root, follow_symlinks=False)
             decision = decide_user(run_as, data_root=data_root, owner_uid=st.st_uid, owner_gid=st.st_gid)
     except ValueError as exc:
-        logger.error("%s", exc)
+        logger.error("%s", error_text_for_log(exc))
         return 64
     if run_as != "root" and st.st_uid == NOBODY_UID:
         # Root-squashed NFS shows root's files as nobody's, and root's chown cannot work there: running as 65534 is
@@ -602,7 +605,9 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
                 write_marker(data_root, decision.uid, decision.gid)
             except OSError as exc:
                 logger.warning(
-                    "Could not write %s (%s): the next start scans /data again", data_root / MARKER_NAME, exc
+                    "Could not write %s (%s): the next start scans /data again",
+                    data_root / MARKER_NAME,
+                    error_text_for_log(exc),
                 )
         logger.info(
             "controller runs as uid %s (%s); %d of %d entries under %s handed to it (from uids %s) in %.2fs",

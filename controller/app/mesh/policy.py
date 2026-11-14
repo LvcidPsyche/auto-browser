@@ -16,6 +16,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from ..url_safety import browser_equivalent_url
+from ..utils import quoted_for_log
 from .models import CapabilityGrant, DelegationRequest, PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -103,21 +104,30 @@ def _url_matches(url: str, pattern: str) -> bool:
     (`*.example.com`) matches the host alone. A URL carrying userinfo never
     matches — `https://example.com@evil.com/` is how a host is disguised.
     """
-    try:
-        parts = urlsplit(browser_equivalent_url(url))
-        port = parts.port
-    except ValueError:
-        return False
-    host = (parts.hostname or "").lower()
-    if not host or parts.username is not None or parts.password is not None:
+    read = _url_parts(url)
+    if read is None:
         return False
 
     pattern = pattern.strip()
     if "://" not in pattern:
-        return fnmatch.fnmatchcase(host, pattern.lower())
+        return fnmatch.fnmatchcase(read[1], pattern.lower())
 
-    pattern_scheme, _, pattern_rest = pattern.partition("://")
-    pattern_authority, slash, pattern_path = pattern_rest.partition("/")
+    allows = _pattern_allows(read, pattern)
+    return allows["scheme"] and allows["authority"] and allows["path"]
+
+
+def _url_parts(url: str) -> tuple[str, str, str, str] | None:
+    """A URL as the allowlist reads it: scheme, host, authority (the host with its port as written; an IPv6 literal
+    keeps its brackets) and path (with its query and fragment). None for one no pattern matches: no host,
+    userinfo, or a port that cannot be read."""
+    try:
+        parts = urlsplit(browser_equivalent_url(url))
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host or parts.username is not None or parts.password is not None:
+        return None
     authority = f"[{host}]" if ":" in host else host  # IPv6 literals keep their brackets
     if port is not None:
         authority = f"{authority}:{port}"
@@ -126,12 +136,30 @@ def _url_matches(url: str, pattern: str) -> bool:
         path += f"?{parts.query}"
     if parts.fragment:
         path += f"#{parts.fragment}"
-    return (
-        fnmatch.fnmatchcase(parts.scheme.lower(), pattern_scheme.lower())
-        # Brackets in an authority are IPv6 delimiters, not fnmatch classes.
-        and fnmatch.fnmatchcase(authority, pattern_authority.lower().translate(_LITERAL_BRACKETS))
-        and fnmatch.fnmatchcase(path, f"/{pattern_path}" if slash else "/")
+    return parts.scheme.lower(), host, authority, path
+
+
+def _pattern_allows(read: tuple[str, str, str, str], pattern: str) -> dict[str, bool]:
+    """Which parts of a URL (_url_parts) a pattern with a scheme allows: scheme, authority and path, each matched
+    alone (_url_matches), and the host with any port, for what a refusal says of the URL (_refused_url_shown)."""
+    scheme, host, authority, path = read
+    pattern_scheme, _, pattern_rest = pattern.partition("://")
+    pattern_authority, slash, pattern_path = pattern_rest.partition("/")
+    pattern_authority = pattern_authority.lower()
+    # The pattern's host: its authority without a port after it.
+    bracket = pattern_authority.find("]") if pattern_authority.startswith("[") else -1
+    pattern_host = pattern_authority[: bracket + 1] if bracket >= 0 else pattern_authority.rpartition(":")[0]
+    # Brackets in an authority are IPv6 delimiters, not fnmatch classes.
+    authority_allowed = fnmatch.fnmatchcase(authority, pattern_authority.translate(_LITERAL_BRACKETS))
+    host_allowed = fnmatch.fnmatchcase(
+        f"[{host}]" if ":" in host else host, (pattern_host or pattern_authority).translate(_LITERAL_BRACKETS)
     )
+    return {
+        "scheme": fnmatch.fnmatchcase(scheme, pattern_scheme.lower()),
+        "authority": authority_allowed,
+        "host": authority_allowed or host_allowed,
+        "path": fnmatch.fnmatchcase(path, f"/{pattern_path}" if slash else "/"),
+    }
 
 
 def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> None:
@@ -148,9 +176,65 @@ def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> 
     for url in _url_arguments(request.arguments):
         if not any(_url_matches(url, pattern) for pattern in grant.url_allowlist):
             raise PolicyDenied(
-                f"URL {url!r} not in allowlist for capability {grant.capability!r}. "
-                f"Allowed patterns: {grant.url_allowlist}"
+                f"{_refused_url_shown(url, grant.url_allowlist)} is not in the allowlist for capability "
+                f"{grant.capability!r}. Allowed patterns: {grant.url_allowlist}"
             )
+
+
+# The parts of a URL a refusal names (_refused_url_shown), by the key _pattern_allows gives each.
+_PARTS_NAMED = (("scheme", "scheme"), ("port", "authority"), ("path", "path"))
+
+
+def _refused_url_shown(url: str, patterns: list[str]) -> str:
+    """What a refusal says of the URL it refuses: its host name, and what no pattern allows in it. Never the URL.
+
+    The reason is logged (mesh.policy.denied), and the URL is the peer's text as it sent it: the userinfo, the path
+    and the query in it are not for a log. A URL with userinfo is refused for having it (_url_matches), and so is
+    one whose port cannot be read (99999, abc), so the reason says so: its host alone may be one a pattern allows.
+    So may the host of a URL whose scheme, port or path no pattern of that host allows: the reason names that part,
+    or says that each such pattern refuses another. The host is the peer's text too, as long as a request may be:
+    it is quoted, and cut as a log line's text is.
+    """
+    try:
+        parts = urlsplit(browser_equivalent_url(url))
+    except ValueError:
+        return "A URL that cannot be read"
+    if not parts.hostname:
+        return "A URL with no host name"
+    shown = f"A URL of host {quoted_for_log(parts.hostname)}"
+    if parts.username is not None or parts.password is not None:
+        return f"{shown} that carries userinfo, which no pattern allows,"
+    try:
+        parts.port  # read for the ValueError it raises on such a port, where _url_matches refuses the URL
+    except ValueError:
+        return f"{shown} and a port that cannot be read, which no pattern allows,"
+    read = _url_parts(url)
+    if read is None:
+        return shown
+    # What each pattern that allows the host refuses. A pattern with no scheme matches the host alone: one that
+    # allows it would have allowed the URL.
+    refused_by_each = [
+        [name for name, key in _PARTS_NAMED if not allows[key]]
+        for allows in (_pattern_allows(read, pattern.strip()) for pattern in patterns if "://" in pattern)
+        if allows["host"]
+    ]
+    if not refused_by_each or [] in refused_by_each:  # no pattern allows the host; one allows the URL
+        return shown
+    named = [name for name, _ in _PARTS_NAMED if all(name in refused for refused in refused_by_each)]
+    if not named:
+        return f"{shown} with a scheme, port and path no one pattern allows together,"
+    # The port of a URL that writes none is refused only by patterns that each name one ("a port no pattern allows"
+    # named a port the URL does not write, and with :443 the one such a pattern allows).
+    no_port = ""
+    if "port" in named and parts.port is None:
+        named.remove("port")
+        no_port = "and no port written, where each pattern of that host names one,"
+        if not named:
+            return f"{shown} {no_port}"
+    if "path" in named and ("?" in read[3] or "#" in read[3]):
+        named[-1] = "path (with its query or fragment)"
+    listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
+    return f"{shown} and a {listed} no pattern allows with that host,{' ' + no_port if no_port else ''}"
 
 
 def _check_expires_at(grant: CapabilityGrant) -> None:
@@ -210,7 +294,8 @@ class PolicyEvaluator:
 
         if matching_grant is None:
             raise PolicyDenied(
-                f"No grant for capability {request.capability!r} from peer {peer.node_id!r}. Default-deny."
+                f"No grant for capability {quoted_for_log(request.capability)} from peer {peer.node_id!r}. "
+                "Default-deny."
             )
 
         # Run all constraint evaluators
@@ -221,10 +306,12 @@ class PolicyEvaluator:
         # Record the invocation for rate limiting (after all checks pass)
         _record_invocation_for_grant(matching_grant, peer.node_id)
 
+        # Quoted and cut: under a wildcard grant the capability is the peer's own text past the prefix, as long as its
+        # body, and a line break in it must not start a log line.
         logger.info(
             "mesh.policy: PERMIT peer=%s capability=%s require_approval=%s",
             peer.node_id,
-            request.capability,
+            quoted_for_log(request.capability),
             matching_grant.require_approval,
         )
         return matching_grant

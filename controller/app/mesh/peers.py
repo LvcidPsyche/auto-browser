@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from ..utils import error_text_for_log, quoted_for_log
 from .models import PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ class PeerRegistryFile:
                 self._fail_closed("the peers file is gone", None)
             return
         except OSError as exc:
-            self._fail_closed(f"the peers file cannot be checked ({exc})", None)
+            self._fail_closed(f"the peers file cannot be checked ({error_text_for_log(exc)})", None)
             return
         signature = _signature_of(stat)
         if signature == self._signature:
@@ -98,12 +99,12 @@ class PeerRegistryFile:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except OSError as exc:
-            self._fail_closed(f"the peers file cannot be read ({exc})", None)
+            self._fail_closed(f"the peers file cannot be read ({error_text_for_log(exc)})", None)
             return
         except (ValueError, RecursionError) as exc:
             # RecursionError: json.loads on a deeply nested file; /mesh/receive needs no credential,
             # so that must be a refusal logged once for this version, not a traceback per request.
-            self._fail_closed(f"the peers file is not valid JSON ({exc})", signature)
+            self._fail_closed(f"the peers file is not valid JSON ({error_text_for_log(exc)})", signature)
             return
         try:
             if not isinstance(raw, dict):
@@ -112,7 +113,7 @@ class PeerRegistryFile:
             for key, peer in peers.items():
                 _check_entry(key, peer)
         except (TypeError, ValueError) as exc:
-            self._fail_closed(f"the peers file has an invalid entry ({exc})", signature)
+            self._fail_closed(f"the peers file has an invalid entry ({error_text_for_log(exc)})", signature)
             return
         for peer in peers.values():
             for grant in peer.grants:
@@ -152,7 +153,7 @@ class PeerRegistryFile:
         """Return a peer by node_id; raise KeyError if unknown."""
         self._reload_if_changed()
         if node_id not in self._peers:
-            raise KeyError(f"Unknown peer node_id={node_id!r}")
+            raise KeyError(f"Unknown peer node_id={quoted_for_log(node_id)}")
         return self._with_last_seen(node_id, self._peers[node_id])
 
     def get_optional(self, node_id: str) -> Optional[PeerRecord]:

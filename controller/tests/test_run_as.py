@@ -148,6 +148,7 @@ def _settings(data: Path, **overrides) -> Settings:
         "MCP_SESSION_STORE_PATH": "mcp/sessions.json",
         "CLI_HOME": "cli-home",
         "CRON_STORE_PATH": "crons/crons.json",
+        "SHARE_REVOCATION_STORE_PATH": "share/revocations.json",
         "BROWSER_WS_ENDPOINT_FILE": "browser-profile/browser-ws-endpoint.txt",
     }
     values = {key: str(data / value) for key, value in names.items()}
@@ -178,6 +179,7 @@ class OwnedPathsTests(unittest.TestCase):
                 "mcp",
                 "memory",
                 "sessions",
+                "share",
                 "ssh",
                 "tunnels",
                 "uploads",

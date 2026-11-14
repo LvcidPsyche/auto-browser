@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -50,6 +51,7 @@ class _FakeJobQueue:
         self.callbacks: dict[str, object] = {}
         self.enqueued: list[str] = []
         self.fail_enqueue = False
+        self.store = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(status="completed")))
 
     async def enqueue_run(self, session_id: str, payload, *, on_finish=None) -> dict:
         if self.fail_enqueue:
@@ -60,7 +62,7 @@ class _FakeJobQueue:
         return {"id": job_id}
 
     async def finish(self, job_id: str) -> None:
-        await self.callbacks[job_id]()
+        await self.callbacks[job_id](job_id)
 
 
 def _cron(tmp_path: Path) -> tuple[CronService, _FakeManager, _FakeJobQueue]:

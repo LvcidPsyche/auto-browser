@@ -16,7 +16,14 @@ from typing import Any, Callable, Iterable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
-from ..utils import run_to_completion
+from ..utils import (
+    error_text_for_log,
+    holds_lone_surrogate,
+    quoted_for_log,
+    record_json,
+    run_to_completion,
+    without_lone_surrogates,
+)
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -164,7 +171,7 @@ class HarnessRunStore:
             try:
                 record = _read_record(path)
             except Exception as exc:
-                logger.debug("skipping unreadable harness run record %s: %s", path, exc)
+                logger.debug("skipping unreadable harness run record %s: %s", path, error_text_for_log(exc))
                 continue
             if record.status != "running" or record.id in self._active or record.generation == self.generation:
                 continue
@@ -173,7 +180,11 @@ class HarnessRunStore:
             try:
                 self.save(record)
             except (OSError, ValueError) as exc:
-                logger.warning("could not mark harness run %s interrupted; it still reads running: %s", record.id, exc)
+                logger.warning(
+                    "could not mark harness run %s interrupted; it still reads running: %s",
+                    record.id,
+                    error_text_for_log(exc),
+                )
                 continue
             flipped += 1
         return flipped
@@ -197,7 +208,7 @@ class HarnessRunStore:
         try:
             entries = [entry for entry in self.staging_root.iterdir() if entry.name.startswith(".tmp-")]
         except OSError as exc:
-            logger.warning("harness staging recovery could not list %s: %s", self.staging_root, exc)
+            logger.warning("harness staging recovery could not list %s: %s", self.staging_root, error_text_for_log(exc))
             entries = []
         for aside in [entry for entry in entries if entry.name.endswith(".old") and entry.is_dir()]:
             skill_id = self._aside_skill_id(aside)
@@ -214,7 +225,9 @@ class HarnessRunStore:
                         shutil.rmtree(aside)
                         changed += 1
                     except OSError as exc:
-                        logger.warning("harness staging recovery could not remove %s: %s", aside, exc)
+                        logger.warning(
+                            "harness staging recovery could not remove %s: %s", aside, error_text_for_log(exc)
+                        )
                     continue
                 if has_candidate:
                     logger.warning(
@@ -236,18 +249,18 @@ class HarnessRunStore:
                     logger.warning("harness staging recovery restored candidate %s from %s", skill_id, aside.name)
                 changed += 1
             except OSError as exc:
-                logger.warning("harness staging recovery could not settle %s: %s", aside, exc)
+                logger.warning("harness staging recovery could not settle %s: %s", aside, error_text_for_log(exc))
         for build in [entry for entry in entries if not entry.name.endswith(".old")]:
             try:
                 shutil.rmtree(build) if build.is_dir() else build.unlink()
                 changed += 1
             except OSError as exc:
-                logger.warning("harness staging recovery could not remove %s: %s", build, exc)
+                logger.warning("harness staging recovery could not remove %s: %s", build, error_text_for_log(exc))
         for path in self.runs_root.glob("*/run.json"):
             try:
                 record = _read_record(path)
             except Exception as exc:
-                logger.debug("skipping unreadable harness run record %s: %s", path, exc)
+                logger.debug("skipping unreadable harness run record %s: %s", path, error_text_for_log(exc))
                 continue
             if record.status != "converged" or record.candidate is not None or record.id in self._active:
                 continue
@@ -259,7 +272,9 @@ class HarnessRunStore:
                 try:
                     self.save(record)
                 except (OSError, ValueError) as exc:
-                    logger.warning("could not record harness run %s's staged candidate: %s", record.id, exc)
+                    logger.warning(
+                        "could not record harness run %s's staged candidate: %s", record.id, error_text_for_log(exc)
+                    )
                     continue
                 logger.warning("harness staging recovery recorded run %s's staged candidate", record.id)
                 changed += 1
@@ -280,7 +295,11 @@ class HarnessRunStore:
             try:
                 self.save(record)
             except (OSError, ValueError) as exc:
-                logger.warning("could not mark harness run %s failed after interrupted staging: %s", record.id, exc)
+                logger.warning(
+                    "could not mark harness run %s failed after interrupted staging: %s",
+                    record.id,
+                    error_text_for_log(exc),
+                )
                 continue
             changed += 1
         return changed
@@ -380,7 +399,7 @@ class HarnessRunStore:
             try:
                 candidates += [(path, marker, staged) for path in root.iterdir()]
             except OSError as exc:
-                logger.warning("harness prune could not list %s: %s", root, exc)
+                logger.warning("harness prune could not list %s: %s", root, error_text_for_log(exc))
         for directory, marker, staged in candidates:
             if directory.name in self._active:
                 continue
@@ -407,12 +426,12 @@ class HarnessRunStore:
                 shutil.rmtree(doomed)
                 removed += 1
             except OSError as exc:
-                logger.warning("harness prune could not remove %s: %s", doomed, exc)
+                logger.warning("harness prune could not remove %s: %s", doomed, error_text_for_log(exc))
         return removed
 
     def run_dir(self, run_id: str) -> Path:
         if not _RUN_ID_RE.fullmatch(run_id):
-            raise ValueError(f"invalid harness run id: {run_id!r}")
+            raise ValueError(f"invalid harness run id: {quoted_for_log(run_id)}")
         return self.runs_root / run_id
 
     def save(self, record: HarnessRunRecord) -> None:
@@ -420,7 +439,9 @@ class HarnessRunStore:
         target = self.run_dir(record.id) / "run.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        # record_json, as the other stores write a record: a verifier's result keeps untyped details, and a lone
+        # surrogate in them raised here, after the run's state was set, so run.json went on reading "running".
+        tmp.write_text(record_json(record, indent=2), encoding="utf-8")
         tmp.replace(target)
 
     def get(self, run_id: str) -> HarnessRunRecord:
@@ -443,7 +464,7 @@ class HarnessRunStore:
             try:
                 record = _read_record(path)
             except Exception as exc:
-                logger.debug("skipping unreadable harness run record %s: %s", path, exc)
+                logger.debug("skipping unreadable harness run record %s: %s", path, error_text_for_log(exc))
                 continue
             if status and record.status != status:
                 continue
@@ -465,7 +486,9 @@ def _with_mtimes(paths: Iterable[Path]) -> list[tuple[float, Path]]:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            logger.warning("skipping harness run record %s: cannot read its modification time: %s", path, exc)
+            logger.warning(
+                "skipping harness run record %s: cannot read its modification time: %s", path, error_text_for_log(exc)
+            )
             continue
     return stamped
 
@@ -506,6 +529,13 @@ class HarnessService:
         provider: str = "openai",
         max_attempts: int | None = None,
     ) -> HarnessRunRecord:
+        # The metadata's values and a mock observation are the caller's own (Any). A lone surrogate in one, which
+        # UTF-8 cannot encode, could be neither hashed nor written: the contract's write raised and left the run's
+        # empty directory, and the attempt failed. Replaced with U+FFFD before either, as the stores replace it
+        # (what a live attempt observed: TraceEnvelope.from_agent_result).
+        if holds_lone_surrogate(contract.metadata):
+            contract = contract.model_copy(update={"metadata": without_lone_surrogates(contract.metadata)})
+        mock_final_observation = without_lone_surrogates(mock_final_observation)
         owner = verified_operator()
         run_id = uuid.uuid4().hex[:12]
         # Admissions run one at a time (W5-5). With a cap set, the stored runs are read in a worker thread holding no

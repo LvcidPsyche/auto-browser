@@ -5,8 +5,10 @@ The budget bounds the whole typing time, keystrokes included, not only the pause
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import unittest
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -18,6 +20,23 @@ MIN_DELAY_MS = 40
 MAX_DELAY_MS = 130
 
 
+@contextlib.contextmanager
+def _on_a_stand_in_clock(sleeps: list[float]) -> Iterator[list[float]]:
+    """The running loop's clock, which the budget's deadline reads, as a stand-in that moves only by each pause
+    (recorded in ``sleeps``) and by what the caller adds to the clock it is handed: the deadline is then reached by
+    the text, and not by how fast the host runs it. On the loop's own clock, 5,000 keystrokes of an AsyncMock took
+    past the 20 s budget on a slow host, and the rest was rightly inserted."""
+    loop = asyncio.get_running_loop()
+    clock = [loop.time()]
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    with patch.object(actions_module.asyncio, "sleep", sleep), patch.object(loop, "time", lambda: clock[0]):
+        yield clock
+
+
 class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def _type(self, text: str) -> list[float]:
         settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
@@ -25,10 +44,7 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         page = SimpleNamespace(keyboard=SimpleNamespace(type=AsyncMock(), insert_text=AsyncMock()))
         sleeps: list[float] = []
 
-        async def record(seconds: float) -> None:
-            sleeps.append(seconds)
-
-        with patch.object(actions_module.asyncio, "sleep", record):
+        with _on_a_stand_in_clock(sleeps):
             await service.type_text_human_like(page, text)
 
         self.assertEqual(page.keyboard.type.await_count, len(text))
@@ -96,20 +112,46 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         keyboard.type.assert_not_awaited()
         return calls
 
-    async def test_past_the_deadline_a_newline_or_tab_is_still_pressed_as_a_key(self) -> None:
-        # insert_text of a newline into an <input> drops it, so a trailing newline that should submit would not.
+    async def test_past_the_deadline_a_newline_is_still_pressed_as_enter_and_a_tab_goes_in_as_text(self) -> None:
+        # insert_text of a newline into an <input> drops it, so a trailing newline that should submit would not. A
+        # tab was pressed as Tab too, which moves focus on: typed in time it is a character of the text
+        # (keyboard.type has no key for it), so the same text went to other fields by how long it took.
         calls = await self._type_past_the_deadline("ab\ncd\te\r")
 
+        self.assertEqual(calls, [("insert", "ab"), ("press", "Enter"), ("insert", "cd\te"), ("press", "Enter")])
+
+    async def test_a_deadline_passed_partway_inserts_the_rest_with_its_newline_pressed_and_its_tab_as_text(
+        self,
+    ) -> None:
+        # Each keystroke a round trip of 10 ms on the stand-in clock: 4,000 of them outlast the 20 s budget, so the
+        # deadline passes partway, as on a slow host, and the rest, a newline and a tab among it, is inserted.
+        calls: list[tuple[str, str]] = []
+        settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
+        service = BrowserActionService(SimpleNamespace(settings=settings))
+        text = "x" * 4000 + "ab\ncd\te"
+
+        with _on_a_stand_in_clock([]) as clock:
+
+            async def type_(char: str) -> None:
+                calls.append(("type", char))
+                clock[0] += 0.01
+
+            async def insert(value: str) -> None:
+                calls.append(("insert", value))
+
+            async def press(value: str) -> None:
+                calls.append(("press", value))
+
+            keyboard = SimpleNamespace(type=type_, insert_text=insert, press=press)
+            await service.type_text_human_like(SimpleNamespace(keyboard=keyboard), text)
+
+        typed = len([call for call in calls if call[0] == "type"])
+        # 20 s of keystrokes at 10 ms each, less the pauses between them.
+        self.assertTrue(0 < typed < 2000, typed)
+        self.assertEqual(calls[:typed], [("type", "x")] * typed)
         self.assertEqual(
-            calls,
-            [
-                ("insert", "ab"),
-                ("press", "Enter"),
-                ("insert", "cd"),
-                ("press", "Tab"),
-                ("insert", "e"),
-                ("press", "Enter"),
-            ],
+            calls[typed:],
+            [("insert", "x" * (4000 - typed) + "ab"), ("press", "Enter"), ("insert", "cd\te")],
         )
 
     async def test_past_the_deadline_plain_text_is_one_insert_and_consecutive_control_keys_are_each_pressed(

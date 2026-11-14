@@ -30,6 +30,15 @@ MOVED_DETAIL = (
     "The page moved while it was read: onto a host ALLOWED_HOSTS does not allow, or to another tab. "
     "What it showed is not returned."
 )
+REFUSED_NETWORK_LOG_DETAIL = (
+    "The page is on a host ALLOWED_HOSTS does not allow, or came from one, so the network log, which holds its "
+    "requests' URLs, is not returned until the page is navigated to an allowed URL."
+)
+SESSION_BUSY_DETAIL = "The session is busy with another call. Try again."
+
+
+class SessionBusyError(RuntimeError):
+    """locked_read waited its bound for a session another call holds."""
 
 
 class PageRead:
@@ -102,7 +111,7 @@ async def locked_read(manager: Any, session: Any) -> AsyncIterator[PageRead]:
     try:
         await asyncio.wait_for(session.lock.acquire(), timeout=READ_LOCK_TIMEOUT_SECONDS)
     except TimeoutError:
-        raise RuntimeError("The session is busy with another call. Try again.") from None
+        raise SessionBusyError(SESSION_BUSY_DETAIL) from None
     try:
         read = start_read(manager, session)
         try:

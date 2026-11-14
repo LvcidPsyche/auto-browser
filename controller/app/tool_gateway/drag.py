@@ -26,6 +26,7 @@ from ..browser import page_read
 from ..browser.element_ids import target_element_id
 from ..browser.element_target import ElementTarget, centre
 from ..browser.page_read import bounded, locked_read
+from ..utils import error_text_for_log
 
 if TYPE_CHECKING:
     from ..tool_inputs import DragDropInput
@@ -122,6 +123,10 @@ MOUSE_UP_TIMEOUT_SECONDS = 5.0
 # after the deadline, which waits for it, and the watch goes with the page anyway. So a drag holds the
 # session at most its deadline, this, and the release's bound.
 UNWATCH_TIMEOUT_SECONDS = 2.0
+# The setup budget of that removal (the world's session, frame tree and creation), below its bound: a setup
+# that hangs ends by its own deadline, its session dropped and detached, not cancelled with the session cached.
+UNWATCH_SETUP_MARGIN_SECONDS = 0.5
+UNWATCH_SETUP_TIMEOUT_MS = int((UNWATCH_TIMEOUT_SECONDS - UNWATCH_SETUP_MARGIN_SECONDS) * 1000)
 _WAY_OUT = (
     "Make the viewport tall enough for both ends (browser.set_viewport), or scroll so both are in view, "
     "then drag again."
@@ -193,7 +198,7 @@ async def _release_after_failure(page: Any) -> None:
     try:
         await _release_through_a_cancel(page)
     except (PlaywrightError, RuntimeError) as exc:
-        logger.warning("could not release the mouse button after a drag that failed: %s", exc)
+        logger.warning("could not release the mouse button after a drag that failed: %s", error_text_for_log(exc))
 
 
 async def _release_through_a_cancel(page: Any) -> None:
@@ -213,7 +218,10 @@ async def _release_through_a_cancel(page: Any) -> None:
         release.result()
         return
     if not release.cancelled() and release.exception() is not None:
-        logger.warning("could not release the mouse button after a drag that was cancelled: %s", release.exception())
+        logger.warning(
+            "could not release the mouse button after a drag that was cancelled: %s",
+            error_text_for_log(release.exception()),
+        )
     raise cancel
 
 
@@ -271,11 +279,14 @@ async def _bring_element_ends_into_view(
 async def _stop_watching_quietly(manager: Any, session: Any, nonce: str) -> None:
     try:
         await asyncio.wait_for(
-            manager.element_ids.evaluate(session.page, _UNWATCH_SCRIPT, nonce), timeout=UNWATCH_TIMEOUT_SECONDS
+            manager.element_ids.evaluate(
+                session.page, _UNWATCH_SCRIPT, nonce, setup_timeout_ms=UNWATCH_SETUP_TIMEOUT_MS
+            ),
+            timeout=UNWATCH_TIMEOUT_SECONDS,
         )
     except (PlaywrightError, BrowserActionError, TimeoutError) as exc:
         # The wait's own error is the one to report; the listener goes with the page.
-        logger.debug("drag: the scroll watch could not be removed: %s", exc)
+        logger.debug("drag: the scroll watch could not be removed: %s", error_text_for_log(exc))
 
 
 async def _point(manager: Any, session: Any, end: DragEnd, *, checked: bool) -> tuple[float, float]:

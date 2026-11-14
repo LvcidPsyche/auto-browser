@@ -48,6 +48,8 @@ PENDING = [
         "updated_at": "2026-09-24T12:01:00Z",
         "reason": "Change the account email\u202e to new@example.com",
         "action": {"action": "type", "selector": "#email", "text": "new@example.com"},
+        # Its field read plain when it was asked for: only then does the queue show a type's text.
+        "field_read": "plain",
     },
     {
         # How the gateway asks to approve a governed tool call (see _governed_call_decision).

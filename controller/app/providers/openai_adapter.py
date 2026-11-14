@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import os
+import stat
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -10,14 +13,63 @@ from typing import Any
 import httpx
 
 from ..codex_sandbox import codex_sandbox_flags
-from ..models import BrowserActionDecision
-from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderAPIError, ProviderDecision
+from ..models import BrowserActionDecision, ResumeCheckpoint
+from ..utils import error_text_for_log, quoted_for_log
+from .base import (
+    CLI_STDOUT_LIMIT_BYTES,
+    PAGE_DATA_NOTICE,
+    PRIVATE_CLI_HOME_ERROR,
+    BaseProviderAdapter,
+    ProviderAPIError,
+    ProviderDecision,
+)
 
 logger = logging.getLogger(__name__)
 
 # A codex config can name a /home/<user>/.codex home from another machine or container; that one place outside the CLI
 # home is worth linking to the real one. Anything else is skipped.
 _HOME_ROOT_PARTS = 4  # ("/", "home", "<user>", ".codex")
+# How the controller opens what a Codex call left at its decision file's name: on POSIX never through a link at that
+# name, never waiting for a writer, and as bytes on Windows too. One code path everywhere: a flag the platform lacks
+# is 0.
+_DECISION_FILE_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+)
+
+
+def _decision_file_bytes(path: Path) -> tuple[bytes | None, str]:
+    """What is at ``path`` and "", where it is a regular file of at most CLI_STDOUT_LIMIT_BYTES that is itself there;
+    (None, "") where nothing is there; otherwise (None, what is there instead), for the log.
+
+    The call's directory is the CLI's to write, and the controller is not under the CLI sandbox: a link there could
+    name a file the CLI cannot open, and a FIFO would hold the event loop until something writes to it.
+    """
+    try:
+        fd = os.open(path, _DECISION_FILE_FLAGS)
+    except FileNotFoundError:
+        return None, ""
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "a link"
+        return None, "something that cannot be opened (%s)" % errno.errorcode.get(exc.errno or 0, exc.errno)
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISFIFO(mode):
+            return None, "a FIFO"
+        if stat.S_ISDIR(mode):
+            return None, "a directory"
+        if not stat.S_ISREG(mode):
+            return None, "no regular file"
+        chunks: list[bytes] = []
+        size = 0
+        while size <= CLI_STDOUT_LIMIT_BYTES and (chunk := os.read(fd, CLI_STDOUT_LIMIT_BYTES + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    if size > CLI_STDOUT_LIMIT_BYTES:
+        return None, "larger than %d bytes" % CLI_STDOUT_LIMIT_BYTES
+    return b"".join(chunks), ""
 
 
 def _codex_root_allowed(expected: PurePosixPath, cli_home: PurePosixPath) -> bool:
@@ -97,6 +149,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         if self.auth_mode == "host_bridge":
             return await self._decide_via_host_bridge(
@@ -104,6 +157,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 observation=observation,
                 context_hints=context_hints,
                 previous_steps=previous_steps,
+                resume_checkpoints=resume_checkpoints,
                 model_override=model_override,
             )
         if self.auth_mode == "cli":
@@ -112,6 +166,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 observation=observation,
                 context_hints=context_hints,
                 previous_steps=previous_steps,
+                resume_checkpoints=resume_checkpoints,
                 model_override=model_override,
             )
 
@@ -139,6 +194,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                                 observation=observation,
                                 context_hints=context_hints,
                                 previous_steps=previous_steps,
+                                resume_checkpoints=resume_checkpoints,
                             ),
                         },
                         *(
@@ -194,6 +250,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         model = model_override or self.settings.openai_cli_model
         prompt = self.build_cli_prompt(
@@ -201,14 +258,21 @@ class OpenAIAdapter(BaseProviderAdapter):
             observation=observation,
             context_hints=context_hints,
             previous_steps=previous_steps,
+            resume_checkpoints=resume_checkpoints,
             include_schema=False,
         )
-        # Under the CLI home, not the shared system temp dir, whose other users could plant config in a parent.
-        with tempfile.TemporaryDirectory(dir=self.effective_cli_home()) as tempdir:
+        with self._call_directory() as tempdir:
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
-            schema_path.write_text(json.dumps(self.strict_action_schema, ensure_ascii=False), encoding="utf-8")
+            try:
+                # Made, never written through: the CLI of a call that runs at the same time can write in this
+                # directory, and what it put at this name could be a link to a file of its choosing.
+                with schema_path.open("x", encoding="utf-8") as schema:
+                    schema.write(json.dumps(self.strict_action_schema, ensure_ascii=False))
+            except FileExistsError:
+                logger.warning("something was at the schema file's name in a new Codex call's directory: no call made")
+                raise RuntimeError("the Codex call's working directory was changed before the call") from None
             self._ensure_codex_config_path_compatibility()
             config_overrides = [
                 "project_doc_fallback_filenames=[]",
@@ -240,8 +304,15 @@ class OpenAIAdapter(BaseProviderAdapter):
                 ]
             )
 
-            result = await self.run_cli(command=command, input_text=prompt, cwd=tempdir)
-            raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else result.stdout
+            result = await self.run_cli(
+                command=command, input_text=prompt, cwd=tempdir, image_path=observation.get("screenshot_path")
+            )
+            written, instead = _decision_file_bytes(output_path)
+            if instead:
+                logger.warning("the Codex call's decision file is %s, and is not read", instead)
+                # As a reply that cannot be parsed fails, naming no path and nothing of what is there.
+                raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object")
+            raw_text = result.stdout if written is None else written.decode("utf-8")
             decision = self.parse_decision_text(raw_text)
             return ProviderDecision(
                 provider=self.provider,
@@ -251,6 +322,26 @@ class OpenAIAdapter(BaseProviderAdapter):
                 raw_text=raw_text,
             )
 
+    def _call_directory(self) -> tempfile.TemporaryDirectory[str]:
+        """The directory one Codex call works in, under the CLI home and not the shared system temp dir, whose other
+        users could plant config in a parent.
+
+        One error that names no path when it cannot be made, the one the CLI home's own failures raise. A step that
+        fails on it says only orchestrator.STEP_FAILED_ERROR: what this changes is the log, where the path and the
+        cause get a line of their own.
+        """
+        home = self.effective_cli_home()
+        try:
+            return tempfile.TemporaryDirectory(dir=home)
+        except OSError as exc:
+            logger.error(
+                "could not make a working directory under the CLI home %s: %s: %s",
+                quoted_for_log(home),
+                type(exc).__name__,
+                error_text_for_log(exc),
+            )
+            raise RuntimeError(PRIVATE_CLI_HOME_ERROR) from None
+
     async def _decide_via_host_bridge(
         self,
         *,
@@ -259,6 +350,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         context_hints: str | None,
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> ProviderDecision:
         model = model_override or self.settings.openai_cli_model
         prompt = self.build_cli_prompt(
@@ -266,6 +358,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             observation=observation,
             context_hints=context_hints,
             previous_steps=previous_steps,
+            resume_checkpoints=resume_checkpoints,
             include_schema=False,
         )
         image = self.encode_screenshot(observation)

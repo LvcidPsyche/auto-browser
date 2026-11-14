@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+import logging
 import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -7,6 +9,8 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .url_safety import refuse_another_navigation_host
+
+logger = logging.getLogger(__name__)
 
 ProtectionMode = Literal["normal", "confidential"]
 WitnessRemoteStatus = Literal["disabled", "idle", "healthy", "delivered", "failed"]
@@ -17,7 +21,10 @@ CDP_URL_SCHEMES = ("http", "https", "ws", "wss")
 
 
 class StrictInputModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # allow_inf_nan: Python's JSON reader takes NaN, Infinity and a number too large for a float (1e999) as floats. A
+    # coordinate or a scroll distance took one, Playwright refused it, and the caller was told the action had failed
+    # and could be retried. Refused here, as an integer field refuses one ("Input should be a finite number").
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
 
 def validate_url(
@@ -365,6 +372,9 @@ ActionName = Literal[
     "request_human_takeover",
     "done",
 ]
+# The actions that cannot change anything a site keeps (a navigation is a GET): risk "read" unless labelled
+# otherwise, and class "read" in an action's result and in its receipt.
+READ_ONLY_ACTIONS = frozenset({"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward"})
 ProviderName = Literal[
     "openai",
     "claude",
@@ -396,6 +406,8 @@ ApprovalDecider = Literal["operator", "agent"]
 # What an approval may be spent on: a browser action, or a governed tool call
 # the MCP gateway approves through a stand-in action it builds itself.
 ApprovalOrigin = Literal["action", "tool_call"]
+# How the field of the type an approval is asked for read (ApprovalRecord.field_read).
+ApprovalFieldRead = Literal["plain", "secret", "unread"]
 SessionStatus = Literal["active", "closed", "interrupted", "failed"]
 AgentJobKind = Literal["agent_step", "agent_run"]
 AgentJobStatus = Literal[
@@ -442,7 +454,7 @@ class BrowserActionDecision(StrictInputModel):
     def validate_action_requirements(self) -> "BrowserActionDecision":
         validate_coordinate_pair(self.x, self.y, field_name=f"{self.action} coordinates")
         if self.risk_category is None:
-            if self.action in {"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward", "done"}:
+            if self.action in READ_ONLY_ACTIONS or self.action == "done":
                 self.risk_category = "read"
             elif self.action == "upload":
                 self.risk_category = "upload"
@@ -485,6 +497,15 @@ class BrowserActionDecision(StrictInputModel):
 CONTEXT_HINTS_MAX_CHARS = 4000
 
 
+@functools.cache
+def warn_upload_approved_is_ignored() -> None:
+    """Log once per process that a request set `upload_approved`, which nothing reads."""
+    logger.warning(
+        "a request set upload_approved, which is deprecated and ignored: an upload that needs an approval "
+        "gets one through the approval queue (approval_id)"
+    )
+
+
 class AgentStepRequest(StrictInputModel):
     provider: ProviderName
     goal: str = Field(min_length=1, max_length=4000)
@@ -498,7 +519,14 @@ class AgentStepRequest(StrictInputModel):
     )
     observation_limit: int = Field(default=40, ge=1, le=100)
     context_hints: str | None = Field(default=None, max_length=CONTEXT_HINTS_MAX_CHARS)
-    upload_approved: bool = False
+    upload_approved: bool = Field(
+        default=False,
+        deprecated=True,
+        description=(
+            "Deprecated and ignored. An upload that needs an approval gets one through the approval queue: "
+            "pass its approval_id."
+        ),
+    )
     approval_id: str | None = Field(default=None, min_length=1, max_length=120)
 
     @field_validator("provider_model")
@@ -506,12 +534,43 @@ class AgentStepRequest(StrictInputModel):
     def _provider_model_is_a_model_name(cls, value: str | None) -> str | None:
         return check_model_name(value)
 
+    @field_validator("upload_approved")
+    @classmethod
+    def _upload_approved_is_ignored(cls, value: bool) -> bool:
+        if value:
+            warn_upload_approved_is_ignored()
+        return value
+
 
 AGENT_RUN_MAX_STEPS = 20
+# The checkpoints a resume hands on: the last six, as much of the run as a planner's prompt shows of its own.
+RESUME_CHECKPOINTS_MAX = 6
+
+
+class ResumeCheckpoint(StrictInputModel):
+    """One completed step of the run a resumed run continues.
+
+    Its url and title came from a page, so a planner's prompt shows it as page data (inside the observation's JSON), and
+    never as operator text. Bounded as `context_hints` is.
+    """
+
+    step_index: int = Field(ge=1)
+    status: AgentStepStatus
+    action: str | None = Field(default=None, max_length=120)
+    url: str | None = Field(default=None, max_length=500)
+    title: str | None = Field(default=None, max_length=200)
 
 
 class AgentRunRequest(AgentStepRequest):
     max_steps: int = Field(default=6, ge=1, le=AGENT_RUN_MAX_STEPS)
+    resume_checkpoints: list[ResumeCheckpoint] | None = Field(
+        default=None,
+        max_length=RESUME_CHECKPOINTS_MAX,
+        description=(
+            "Set by a resume: the completed steps of the run it continues, which the planner is shown as page data. "
+            "An empty list marks a resume of a run that completed none. Omit it for a new run."
+        ),
+    )
 
 
 class AgentResumeRequest(StrictInputModel):
@@ -570,6 +629,9 @@ class ApprovalRecord(BaseModel):
     decision_comment: str | None = None
     decided_at: str | None = None
     decided_via: ApprovalDecider | None = None
+    # The token-verified operator who decided (verified_operator()), an agent's too: the one it acts for. None when
+    # no named credential proved one, and for a record stored before the field existed.
+    decided_by: str | None = None
     approved_expires_at: str | None = None
     executed_at: str | None = None
     # The token-verified operator who asked (None when unowned). A session
@@ -587,6 +649,18 @@ class ApprovalRecord(BaseModel):
     # all). None for an action approval, whose record is the whole action.
     arguments_size: int | None = None
     arguments_sha256: str | None = None
+    # Recorded by the server, for a type the caller did not mark sensitive: how its field's attributes read when the
+    # approval was asked for, and at each later request for the same action that reused the record while it was
+    # pending (ApprovalStore.create_or_reuse_pending). Only "plain" shows the type's text in what the approval
+    # shows (app.approval_display); the text is kept here whatever this says, where the action retried with the
+    # approval is matched.
+    # - "plain": they did not say secret.
+    # - "secret": they did, at any read. It stays: a field once read as secret is hidden though a later read finds
+    #   it plain (a password field whose "show password" is on).
+    # - "unread": no read has answered yet (the field not on the page, the page busy), or the record was stored
+    #   before 1.18.0 and does not say. The next read that answers settles it.
+    # Any other approval leaves it "unread", and nothing of it is hidden for that.
+    field_read: ApprovalFieldRead = "unread"
 
 
 class ApprovalDecisionRequest(StrictInputModel):

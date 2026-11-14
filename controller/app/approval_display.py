@@ -1,8 +1,9 @@
 """What an operator, an auditor and a notification are shown of an approval: written by the server.
 
-The reason of an action approval is the agent's own words; what is here comes
-from the record itself, with the characters that could make it read as
-something else written as their code points.
+The reason of an action approval is the agent's own words, after the controller's
+sentence when the controller chose the kind (click_target.classified_reason); what
+is here comes from the record itself, with the characters that could make it read
+as something else written as their code points.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import unicodedata
 from decimal import Decimal
 from typing import Any
 
-from .models import ApprovalRecord, BrowserActionDecision
+from .models import ApprovalFieldRead, ApprovalRecord, BrowserActionDecision
 from .url_safety import host_as_sent
 
 # Characters of one string field a short account of an approval shows before it says how many it
@@ -81,6 +82,14 @@ UNBOUND_FIELDS = frozenset({"reason", "confidence"})
 NOT_USED_BY = "(not used by {action})"
 NOT_USED_FOR = "(not used: {field} runs)"
 SENSITIVE_TEXT_HIDDEN = "text hidden at the agent's request (sensitive)"
+# Written for the text of a type the agent did not mark sensitive whose field did not read plain, by how it read
+# (ApprovalRecord.field_read), and answered as its text (shown_approval). "unread" is also what stands for a record
+# that does not say (stored before 1.18.0), and for a read that failed or found no field the text could go to: asked
+# for again, the approval reads the field.
+FIELD_TEXT_HIDDEN: dict[str, str] = {
+    "secret": "text hidden: its field reads as secret",
+    "unread": "text hidden: its field has not been read",
+}
 # Written after a select_option value that runs: it goes to Playwright as valueOrLabel (element_target
 # matches the same way), so it picks the first option whose value or whose label it is.
 VALUE_OR_LABEL = "(matches an option's value or label)"
@@ -93,6 +102,7 @@ APPROVAL_DISPLAY = {
     "notUsedBy": NOT_USED_BY,
     "notUsedFor": NOT_USED_FOR,
     "sensitiveTextHidden": SENSITIVE_TEXT_HIDDEN,
+    "fieldTextHidden": FIELD_TEXT_HIDDEN,
     "valueOrLabel": VALUE_OR_LABEL,
 }
 
@@ -180,10 +190,14 @@ def shown_code_points(text: str) -> str:
 
 
 def approval_tool(approval: ApprovalRecord) -> str | None:
-    """The governed tool a tool-call approval is for, as its stand-in names it; None for an action approval."""
+    """The governed tool a tool-call approval is for, as its stand-in names it; None for an action approval.
+
+    The stand-in's digest is keyed ("<tool> hmac-sha256:<key id>:<digest>", ApprovalStore._keyed), or plain
+    ("<tool> sha256:<digest>") in a record stored before 1.18.0 that no start has rewritten yet.
+    """
     if approval.origin != "tool_call":
         return None
-    return (approval.action.text or "").split(" sha256:", 1)[0] or None
+    return re.split(" (?:hmac-)?sha256:", approval.action.text or "", maxsplit=1)[0] or None
 
 
 def approval_provenance(approval: ApprovalRecord) -> dict[str, str]:
@@ -200,21 +214,43 @@ def approval_provenance(approval: ApprovalRecord) -> dict[str, str]:
 def approval_summary(approval: ApprovalRecord) -> str:
     """What an approval is for, written by the server: the tool for a tool call, else the action and its fields.
 
-    The reason is the agent's own words for an action approval, and a
-    notification that carried only the reason read the same for a coordinate
-    click as for the tool call whose reason it copied.
+    The reason of an action approval is the agent's own words (a sentence of the
+    controller's may open it), and a notification that carried only the reason
+    read the same for a coordinate click as for the tool call whose reason it
+    copied.
     """
     tool = approval_tool(approval)
     if tool is not None:
         return shown_code_points(f"tool call {tool}")
-    return describe_action(approval.action, cut=APPROVAL_SUMMARY_CUT)
+    return describe_action(approval.action, cut=APPROVAL_SUMMARY_CUT, field_read=approval.field_read)
 
 
-def describe_action(action: BrowserActionDecision, *, cut: int | None) -> str:
+def _hidden_text(action: BrowserActionDecision, field_read: ApprovalFieldRead) -> str | None:
+    """What stands for the text of the action an approval is for, by how its field read (ApprovalRecord.field_read);
+    None where the text shows as it is: the field read plain, the action is no type (nothing types its text), or the
+    caller marked it sensitive (hidden as the caller's, and stored as a digest)."""
+    if action.action != "type" or action.sensitive or field_read == "plain":
+        return None
+    return FIELD_TEXT_HIDDEN[field_read]
+
+
+def shown_approval(approval: ApprovalRecord) -> dict[str, Any]:
+    """An approval as an answer hands it out (GET /approvals, the approval tools, a decision's and an execution's
+    answer, the approval_required error): its record, with a type's text written as FIELD_TEXT_HIDDEN says
+    unless its field read plain (_hidden_text). The record keeps the text."""
+    shown = approval.model_dump()
+    hidden = _hidden_text(approval.action, approval.field_read)
+    if hidden is not None and shown["action"]["text"] is not None:
+        shown["action"]["text"] = hidden
+    return shown
+
+
+def describe_action(action: BrowserActionDecision, *, cut: int | None, field_read: ApprovalFieldRead = "unread") -> str:
     """The action, field by field from APPROVAL_FIELDS, as the dashboard's describeAction writes it.
 
     Each value as JSON, so a string shows its quotes and a newline in it shows
     as an escape; a string longer than ``cut`` characters says how many it leaves out.
+    ``field_read`` is the approval's (ApprovalRecord.field_read).
     """
     fields = action.model_dump()
     parts = [action.action]
@@ -223,7 +259,12 @@ def describe_action(action: BrowserActionDecision, *, cut: int | None) -> str:
         # An empty string is set: only a value and a label can be one, and either runs (select_option).
         if (actions is not None and action.action not in actions) or value is None:
             continue
-        part = SENSITIVE_TEXT_HIDDEN if name == "text" and action.sensitive else _shown_field(name, value, cut)
+        if name == "text" and action.sensitive:
+            part = SENSITIVE_TEXT_HIDDEN
+        elif name == "text" and (hidden := _hidden_text(action, field_read)) is not None:
+            part = hidden
+        else:
+            part = _shown_field(name, value, cut)
         note = unused_note(action.action, name, fields)
         if note is None and action.action == "select_option" and name == "value":
             note = VALUE_OR_LABEL

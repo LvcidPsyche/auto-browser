@@ -17,7 +17,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from .agent_jobs import AgentJobQueue
-from .auth_policy import has_named_credentials
+from .auth_policy import credential_names_operator, has_named_credentials
 from .browser_manager import BrowserManager
 from .config import Settings
 from .cron_service import CronService
@@ -31,21 +31,16 @@ from .proxy_personas import ProxyPersonaStore
 from .rate_limits import SlidingWindowRateLimiter
 from .routes._utils import require_session_access
 from .routes.system import create_system_router
+from .safe_json_response import SafeJSONResponse
 from .session_ownership import may_use
 from .session_share import SessionShareManager
 from .tool_gateway import McpToolGateway
+from .utils import error_text_for_log, quoted_for_log
 from .vision_target import VisionTargeter
 
 logger = logging.getLogger(__name__)
 
 LifespanFactory = Callable[[FastAPI], AbstractAsyncContextManager[None] | AsyncIterator[None]]
-
-# The most characters of a client-supplied path (or of an error that quotes it) one log line carries.
-MAX_LOGGED_PATH_CHARS = 200
-
-
-def _capped(text: str) -> str:
-    return text if len(text) <= MAX_LOGGED_PATH_CHARS else text[:MAX_LOGGED_PATH_CHARS] + "..."
 
 
 @dataclass(slots=True)
@@ -77,16 +72,19 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
         session_accessible=manager.session_accessible,
         worker_count=settings.agent_job_worker_count,
         audit_store=manager.audit,
+        operator_configured=lambda operator_id: credential_names_operator(settings, operator_id),
     )
     cron_service = CronService(
         store_path=settings.cron_store_path,
         max_jobs=settings.cron_max_jobs,
         job_queue=job_queue,
         manager=manager,
+        timezone=settings.cron_timezone,
     )
     share_manager = SessionShareManager(
         secret=settings.share_token_secret,
         ttl_minutes=settings.share_token_ttl_minutes,
+        revocations_path=settings.share_revocation_store_path,
     )
     vision_targeter = VisionTargeter.from_settings(settings)
     metrics = MetricsRecorder(enabled=settings.metrics_enabled)
@@ -111,7 +109,9 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
         if settings.request_rate_limit_enabled
         else None
     )
-    maintenance = MaintenanceService(settings, session_provider=lambda: manager.sessions.values())
+    maintenance = MaintenanceService(
+        settings, session_provider=lambda: manager.sessions.values(), approval_store=manager.approvals
+    )
     mcp_transport = McpHttpTransport(
         tool_gateway=tool_gateway,
         server_name="auto-browser",
@@ -167,9 +167,10 @@ class SessionArtifactFiles(StaticFiles):
         except OSError as exc:
             if exc.errno != errno.ENAMETOOLONG:  # a name that long is the client's doing, not worth a log line
                 # The path is the client's, and Windows says EINVAL (not ENAMETOOLONG) for a name it
-                # cannot parse and puts that name in the error too: cap both, or one request writes a
-                # log line as long as the request line allows.
-                logger.warning("artifact lookup failed for %r: %s", _capped(path), _capped(str(exc)))
+                # cannot parse and puts that name in the error too, in quotes: quote and cut both, or one
+                # request writes a log line as long as the request line allows (cut unquoted, the error's
+                # own quote was cut with it, and the cut mark read as the name's last characters).
+                logger.warning("artifact lookup failed for %s: %s", quoted_for_log(path), error_text_for_log(exc))
             raise HTTPException(status_code=404) from None
         # A path that resolves to nothing is the parent's 404, so nothing is leaked.
         if session_id is not None and not await self._may_serve(session_id):
@@ -235,6 +236,10 @@ def create_controller_app(
         version=version,
         lifespan=lifespan,
         summary="Visual Auto Browser control plane for LLM workflows.",
+        # Page text reaches every route's answer: a lone surrogate must not turn one into a 500 (safe_json_response).
+        # Naming a class also takes typed routes off FastAPI's direct JSON path, which raises on one too. That path
+        # wrote a model's NaN or infinity as null, where json.dumps raises on one: the class answers null for it too.
+        default_response_class=SafeJSONResponse,
         dependencies=[Depends(require_session_access)],
         # Served by install_docs_pages, with pinned, integrity-checked assets.
         docs_url=None,

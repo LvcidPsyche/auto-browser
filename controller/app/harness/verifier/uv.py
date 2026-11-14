@@ -5,8 +5,9 @@ import json
 from shutil import which
 from typing import Any
 
-from ...process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
+from ...process_tree import GROUP_SPAWN_KWARGS, OutputTooLarge, exchange, kill_and_drain
 from ...providers.base import allowlisted_environment
+from ...utils import error_text, without_lone_surrogates
 from ..contracts import TaskContract
 from .base import VerificationResult
 
@@ -14,59 +15,6 @@ from .base import VerificationResult
 _STDOUT_LIMIT_BYTES = 1024 * 1024
 # Only the start of stderr is kept (it feeds a 1 KiB failure detail); the rest is drained so the child never blocks.
 _STDERR_KEEP_BYTES = 4096
-_READ_CHUNK_BYTES = 65536
-
-
-class _OutputTooLarge(Exception):
-    pass
-
-
-async def _read_capped(stream: asyncio.StreamReader, limit: int, *, strict: bool) -> bytes:
-    """Read the stream to its end, keeping at most `limit` bytes; past it, `strict` raises and otherwise discards.
-
-    Not strict, the part of the chunk that crosses the limit that still fits is kept, so the start always is.
-    """
-    chunks: list[bytes] = []
-    total = 0
-    while chunk := await stream.read(_READ_CHUNK_BYTES):
-        room = limit - total
-        total += len(chunk)
-        if total > limit:
-            if strict:
-                raise _OutputTooLarge
-            if room > 0:
-                chunks.append(chunk[:room])
-            continue
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:
-    try:
-        process.stdin.write(data)
-        await process.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
-        pass  # the command answered without reading all of its input
-    finally:
-        process.stdin.close()
-
-
-async def _exchange(process: asyncio.subprocess.Process, data: bytes) -> tuple[bytes, bytes]:
-    """Send `data`, then return (stdout, stderr), raising _OutputTooLarge when stdout passes its cap."""
-    tasks = [
-        asyncio.ensure_future(_feed(process, data)),
-        asyncio.ensure_future(_read_capped(process.stdout, _STDOUT_LIMIT_BYTES, strict=True)),
-        asyncio.ensure_future(_read_capped(process.stderr, _STDERR_KEEP_BYTES, strict=False)),
-    ]
-    try:
-        _, stdout, stderr = await asyncio.gather(*tasks)
-        await process.wait()
-        return stdout, stderr
-    finally:
-        # No reader may outlive the call: the reaping that follows reads the pipes itself.
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class UniversalVerifierAdapter:
@@ -111,13 +59,18 @@ class UniversalVerifierAdapter:
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                _exchange(process, json.dumps(payload).encode("utf-8")),
+                exchange(
+                    process,
+                    json.dumps(payload).encode("utf-8"),
+                    stdout_limit=_STDOUT_LIMIT_BYTES,
+                    stderr_keep=_STDERR_KEEP_BYTES,
+                ),
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:
             await self._kill_and_reap(process)
             return self._unavailable("Universal Verifier command timed out.")
-        except _OutputTooLarge:
+        except OutputTooLarge:
             await self._kill_and_reap(process)
             return self._unavailable(f"Universal Verifier output exceeded {_STDOUT_LIMIT_BYTES} bytes.")
         except BaseException:
@@ -142,6 +95,10 @@ class UniversalVerifierAdapter:
             return self._unavailable("Universal Verifier output shape is invalid.")
 
         try:
+            # json.loads decodes a "\ud800" escape to a lone surrogate, which nothing that keeps the result can be
+            # written with (run.json, drift.json, a candidate) and no string the result types takes. Replaced here,
+            # where the reply is taken in, in its keys too.
+            result = without_lone_surrogates(result)
             return VerificationResult(
                 passed=result.get("passed"),
                 confidence=float(result.get("confidence") or 0.0),
@@ -157,7 +114,7 @@ class UniversalVerifierAdapter:
                 },
             )
         except Exception as exc:
-            return self._unavailable(f"Universal Verifier output schema is invalid: {exc}")
+            return self._unavailable(f"Universal Verifier output schema is invalid: {error_text(exc)}")
 
     @staticmethod
     async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:

@@ -20,8 +20,8 @@ from ..action_errors import (
 from ..action_records import wait_for_pending_record, write_record
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
-from ..utils import spawn_background_task, utc_now
-from ..witness import WitnessApproval
+from ..utils import error_text, error_text_for_log, quoted_for_log, spawn_background_task, utc_now
+from ..witness import WITNESS_POLICY_BLOCKED, WitnessApproval
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,8 @@ MARKS_OWN_EFFECT = frozenset({"upload"})
 def _withheld_observation(manager: Any, session: Any, exc: PermissionError) -> dict[str, Any]:
     """A post-action observation refused with ``exc``: the URL as shown, and the refusal, or for an
     OS-level error (it has an errno, and its text can name a server path) a fixed text, the OS text logged."""
-    logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
-    error = OS_OBSERVATION_ERROR if exc.errno is not None else str(exc)[:300]
+    logger.warning("post-action observation withheld for session %s: %s", session.id, error_text_for_log(exc))
+    error = OS_OBSERVATION_ERROR if exc.errno is not None else error_text(exc)[:300]
     return {"url": manager._shown_url(session.page), "observation_error": error}
 
 
@@ -166,11 +166,11 @@ class BrowserActionPipeline:
             # The approval guard says what became of the approval; anything else is a policy block.
             url = context.manager._shown_url(context.session.page)
             if isinstance(exc, ApprovalRefusal):
-                message, code, status_code = str(exc), exc.code, 409
+                message, code, status_code = error_text(exc), exc.code, 409
             elif isinstance(exc, NavigationStoppedError):
                 # Stopped before it was sent (the pre-request gate): its text and url name only the refused
                 # origin, as for a start URL or a new tab; not the page the action went back to.
-                message, code, status_code, url = str(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
+                message, code, status_code, url = error_text(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
             else:
                 message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
             # On the holds now, not once the block's snapshot and trail are written: an operator's
@@ -319,7 +319,7 @@ class BrowserActionPipeline:
         if witness_state.action_class != "read":
             await manager._ensure_witness_remote_ready(session, action=context.action_name)
         if witness_state.outcome.should_block:
-            raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
+            raise PermissionError(witness_state.outcome.block_reason or WITNESS_POLICY_BLOCKED)
         gates = getattr(manager, "request_gates", None)
         if gates is not None:
             # Again before the effect and the operation: the gate can be lost while the action prepares.
@@ -350,7 +350,7 @@ class BrowserActionPipeline:
         except PermissionError as exc:
             # Still the policy block it is, but after the change: say so in the record.
             context.target[AFTER_CHANGE] = (
-                f"The change was made, then the page it led to was blocked: {str(exc)[:300]}. Observe the page "
+                f"The change was made, then the page it led to was blocked: {error_text(exc)[:300]}. Observe the page "
                 "before acting again, and do not repeat the action: that would make the change twice."
             )
             await self._note_blocks(context, page, blocked_before)
@@ -415,7 +415,9 @@ class BrowserActionPipeline:
                 await context.manager._settle(session.page)
                 spawn_background_task(context.manager.window_births.close_unreported(session))
         except Exception as exc:
-            logger.debug("failed to roll back blocked action navigation for session %s: %s", session.id, exc)
+            logger.debug(
+                "failed to roll back blocked action navigation for session %s: %s", session.id, error_text_for_log(exc)
+            )
         await self._leave_disallowed_page(context)
         failed = await self._failure_snapshot(context, label=f"blocked-{context.action_name}")
         await self._record_terminal_event(
@@ -449,7 +451,7 @@ class BrowserActionPipeline:
             await session.page.goto("about:blank")
         except Exception as exc:
             manager.page_provenance.blank_failed(session.page)
-            logger.warning("could not move session %s off a disallowed page: %s", session.id, exc)
+            logger.warning("could not move session %s off a disallowed page: %s", session.id, error_text_for_log(exc))
         except BaseException:
             # Cancelled: a blank still counted would exempt the page's own next about:blank commit.
             manager.page_provenance.blank_failed(session.page)
@@ -529,7 +531,7 @@ class BrowserActionPipeline:
                 action_class=witness_state.action_class,
                 risk_category=witness_state.witness_context.get("risk_category"),
                 target=context.target,
-                outcome=witness_state.outcome,
+                outcome=self._receipt_outcome(context, witness_state),
                 before=witness_state.before,
                 after=after,
                 approval=approval,
@@ -537,6 +539,23 @@ class BrowserActionPipeline:
             )
 
         await self._write_record(session, witness_state, writes)
+
+    @staticmethod
+    def _receipt_outcome(context: ActionRunContext, witness_state: ActionWitnessState) -> Any:
+        """The policy outcome a receipt is written with: that of the action as it ran, the policy asked again of the
+        target the run left. A type's text is withheld (text_redacted: BrowserActionService.withhold_text_preview)
+        from before the run until a read of its field says it is not secret: withheld, it is sensitive input and
+        restricts the receipt as the caller's sensitive flag does; given back, it does not, though _prepare saw it
+        withheld. What the run was decided by (_prepare's outcome) stays."""
+        manager = context.manager
+        return manager.witness_policy.evaluate_action(
+            session=manager._witness_session_context(context.session),
+            action=manager._build_witness_action_context(
+                action_name=context.action_name,
+                target=context.target,
+                witness_context=witness_state.witness_context,
+            ),
+        )
 
     @staticmethod
     async def _write_record(
@@ -563,7 +582,10 @@ class BrowserActionPipeline:
         retry (or the approval, executed again) uploaded the file twice.
         """
         logger.warning(
-            "%s in session %s: a step after the change failed: %s", context.action_name, context.session.id, error
+            "%s in session %s: a step after the change failed: %s",
+            context.action_name,
+            context.session.id,
+            quoted_for_log(error),
         )
         context.target[AFTER_CHANGE] = (
             f"The change was made, then a step after it failed: {error.splitlines()[0][:300]}. Observe the page "
@@ -613,7 +635,7 @@ class BrowserActionPipeline:
                 action_class=witness_state.action_class,
                 risk_category=witness_state.witness_context.get("risk_category"),
                 target=context.target,
-                outcome=witness_state.outcome,
+                outcome=self._receipt_outcome(context, witness_state),
                 before=witness_state.before,
                 after=after,
                 verification=verification,
@@ -658,8 +680,10 @@ class BrowserActionPipeline:
         try:
             return await context.manager._light_snapshot(context.session, label=label)
         except PlaywrightError as exc:
-            logger.warning("failure snapshot unavailable for session %s: %s", context.session.id, exc)
-            return {"url": context.manager._shown_url(context.session.page), "snapshot_error": str(exc)[:300]}
+            logger.warning(
+                "failure snapshot unavailable for session %s: %s", context.session.id, error_text_for_log(exc)
+            )
+            return {"url": context.manager._shown_url(context.session.page), "snapshot_error": error_text(exc)[:300]}
         except PermissionError:
             # The page moved off ALLOWED_HOSTS while the snapshot read it.
             return _withheld_snapshot(context.manager, context.session)
@@ -687,7 +711,9 @@ class BrowserActionPipeline:
         try:
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
         except PlaywrightError as exc:
-            logger.info("post-action observation failed for session %s, retrying: %s", session.id, exc)
+            logger.info(
+                "post-action observation failed for session %s, retrying: %s", session.id, error_text_for_log(exc)
+            )
         except PermissionError as exc:
             # The page moved itself off ALLOWED_HOSTS after the action's own check.
             # The action ran, so report it with the URL and nothing the page showed.
@@ -698,23 +724,29 @@ class BrowserActionPipeline:
             # ran, so it is reported and recorded the same way, without the image.
             if exc.code not in _UNOBSERVED:
                 raise
-            logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
+            logger.warning(
+                "post-action observation unavailable for session %s: %s", session.id, error_text_for_log(exc)
+            )
             return {"url": manager._shown_url(session.page), "observation_error": exc.message[:300]}
         try:
             await manager._settle(session.page)
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
         except PlaywrightError as exc:
-            logger.warning("post-action observation failed for session %s: %s", session.id, exc)
+            logger.warning("post-action observation failed for session %s: %s", session.id, error_text_for_log(exc))
             return {
                 "url": manager._shown_url(session.page),
-                "observation_error": f"Page changed while it was being observed; observe again. ({exc})"[:300],
+                "observation_error": f"Page changed while it was being observed; observe again. ({error_text(exc)})"[
+                    :300
+                ],
             }
         except PermissionError as exc:
             return _withheld_observation(manager, session, exc)
         except BrowserActionError as exc:
             if exc.code not in _UNOBSERVED:
                 raise
-            logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
+            logger.warning(
+                "post-action observation unavailable for session %s: %s", session.id, error_text_for_log(exc)
+            )
             return {"url": manager._shown_url(session.page), "observation_error": exc.message[:300]}
 
     def _approval(

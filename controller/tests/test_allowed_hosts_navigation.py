@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -40,7 +41,7 @@ from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
 from app.browser.services.diagnostics import BrowserDiagnosticsService
 from app.browser_manager import BrowserManager
-from app.mcp_transport import McpHttpTransport
+from app.mcp_transport import McpHttpTransport, McpSession
 from app.models import BrowserActionDecision
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import (
@@ -505,15 +506,19 @@ async def test_reads_refuse_while_the_page_is_on_a_disallowed_host(tmp_path: Pat
             await READS[read](env, session_id)
 
 
-async def test_mcp_dom_and_screenshot_resources_return_nothing_for_a_disallowed_page(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_mcp_dom_and_screenshot_resources_refuse_a_disallowed_page(tmp_path: Path, monkeypatch) -> None:
     async with browser_env(tmp_path, {}) as env:
         session_id, _ = await off_list_session(env, monkeypatch)
         transport = McpHttpTransport(tool_gateway=None, server_name="t", server_version="1", manager=env.manager)
+        mcp_session = McpSession(id="m", protocol_version="2025-11-25", client_info="{}", client_capabilities="{}")
 
-        assert await transport._read_resource(f"browser://{session_id}/dom") is None
-        assert await transport._read_resource(f"browser://{session_id}/screenshot") is None
+        for resource in ("dom", "screenshot"):
+            response = await transport._handle_resource_read(
+                1, mcp_session, {"uri": f"browser://{session_id}/{resource}"}
+            )
+
+            assert json.loads(response.body)["error"]["code"] == -32603, response.body
+            assert SECRET.encode() not in response.body
 
 
 async def test_titles_of_a_disallowed_page_are_not_reported_in_summaries(tmp_path: Path, monkeypatch) -> None:

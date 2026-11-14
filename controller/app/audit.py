@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .models import AuditEvent, OperatorIdentity
 from .sqlite_utils import connect_sqlite
-from .utils import atomic_write_text, utc_now
+from .utils import atomic_write_text, error_text_for_log, utc_now, without_lone_surrogates
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,9 @@ class SQLiteAuditStore:
         event_type: str | None,
         operator_id: str | None,
     ) -> list[AuditEvent]:
+        # SQLite reads a negative LIMIT as no limit: a bad limit returned every row, whichever route asked.
+        if limit <= 0:
+            return []
         query = "SELECT payload FROM audit_events WHERE 1=1"
         params: list[object] = []
         if session_id:
@@ -325,7 +328,7 @@ class AuditStore:
         try:
             await self.sqlite_store.startup()
         except Exception as exc:
-            logger.warning("sqlite audit store unavailable, using file store fallback: %s", exc)
+            logger.warning("sqlite audit store unavailable, using file store fallback: %s", error_text_for_log(exc))
             self._primary = self.file_store
             return
         self._primary = self.sqlite_store
@@ -355,6 +358,9 @@ class AuditStore:
                 operator=operator or get_current_operator(),
                 details=details or {},
             )
+            # Its strings come from callers and pages (a cookie's name, an error's text), and UTF-8 cannot encode a
+            # lone surrogate: the append raised after the change it records had been made, which then left no record.
+            event = AuditEvent.model_validate(without_lone_surrogates(event.model_dump()))
             await self.file_store.append_event(event)
             if self.sqlite_store is not None and self._primary is self.sqlite_store:
                 await self.sqlite_store.append_event(event)

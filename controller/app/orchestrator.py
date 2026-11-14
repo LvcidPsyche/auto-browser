@@ -11,9 +11,10 @@ from playwright.async_api import Error as PlaywrightError
 
 from .approvals import ApprovalRequiredError, given_back_notes, held_for_execution
 from .browser_manager import BrowserManager
-from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
+from .models import AgentRunResult, AgentStepResult, ProviderName, ResumeCheckpoint, WorkflowProfile
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
+from .utils import error_lines_for_log, error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,24 @@ logger = logging.getLogger(__name__)
 OBSERVE_RETRY_DELAY_SECONDS = 0.5
 # The decision comment on an approval the agent gave itself.
 AUTONOMOUS_APPROVAL_COMMENT = "Approved by the agent (AUTONOMOUS_APPROVALS=true)"
+# What a failed step's error says, whatever went wrong: the provider's status, its text and a path in an OS error stay
+# in the log (the step's ERROR line), and reach neither the caller nor a job's record.
+PROVIDER_FAILED_ERROR = "Provider request failed"
+STEP_FAILED_ERROR = "Agent step failed"
+# What a provider's failure is answered with: its status is the provider's, so it is fixed here.
+PROVIDER_RETRYABLE_STATUS = 503
+PROVIDER_REFUSED_STATUS = 502
+
+
+def _provider_failure_status(exc: Exception) -> int | None:
+    """503 where trying again may help and 502 where it will not, for a failure on the provider's side; None for any
+    other failure. Never the status the provider answered with."""
+    if isinstance(exc, ProviderAPIError):
+        return PROVIDER_RETRYABLE_STATUS if exc.retryable else PROVIDER_REFUSED_STATUS
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return PROVIDER_RETRYABLE_STATUS if status == 429 or status >= 500 else PROVIDER_REFUSED_STATUS
+    return None
 
 
 class BrowserOrchestrator:
@@ -39,11 +58,11 @@ class BrowserOrchestrator:
         goal: str,
         observation_limit: int = 40,
         context_hints: str | None = None,
-        upload_approved: bool = False,
         approval_id: str | None = None,
         provider_model: str | None = None,
         workflow_profile: WorkflowProfile = "fast",
         previous_steps: list[AgentStepResult] | None = None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> AgentStepResult:
         workflow_profile = self._effective_profile(workflow_profile)
         adapter = self.registry.get(provider_name)
@@ -58,7 +77,7 @@ class BrowserOrchestrator:
             # A page still navigating from the last step's click (or crashed)
             # made observe raise, which escaped run(): /agent/run returned a
             # 500 and every completed step was lost with it.
-            logger.warning("agent step could not observe session %s: %s", session_id, exc)
+            logger.warning("agent step could not observe session %s: %s", session_id, error_text_for_log(exc))
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,
@@ -70,7 +89,7 @@ class BrowserOrchestrator:
                 execution=None,
                 usage=None,
                 raw_text=None,
-                error=f"Could not observe the page: {exc}"[:300],
+                error=f"Could not observe the page: {error_text(exc)}"[:300],
                 error_code=None,
             )
             await self._append_agent_log(session_id, "agent_steps.jsonl", result.model_dump())
@@ -84,6 +103,7 @@ class BrowserOrchestrator:
                 context_hints=effective_context_hints,
                 previous_steps=prompt_history,
                 model_override=provider_model,
+                resume_checkpoints=resume_checkpoints,
             )
             execute = functools.partial(
                 self._execute_decision,
@@ -91,7 +111,6 @@ class BrowserOrchestrator:
                 goal=goal,
                 observation=observation,
                 provider_decision=provider_decision,
-                upload_approved=upload_approved,
                 workflow_profile=workflow_profile,
             )
             try:
@@ -136,17 +155,18 @@ class BrowserOrchestrator:
             # This module logged nothing at all, so a crashing provider adapter,
             # a Playwright error and a JSON parse failure were indistinguishable
             # — the caller got the constant string "Agent step failed" and there
-            # was no server-side traceback anywhere to diagnose from.
-            logger.exception("agent step failed for session %s (provider=%s)", session_id, provider_name)
-            if isinstance(exc, ProviderAPIError):
-                error_code: int | None = exc.status_code or (503 if exc.retryable else 502)
-            elif isinstance(exc, httpx.HTTPStatusError):
-                error_code = exc.response.status_code
-            else:
-                error_code = None
-            error_message = (
-                "Provider request failed" if error_code else f"Agent step failed: {type(exc).__name__}: {exc}"[:300]
+            # was no server-side traceback anywhere to diagnose from. Its frames, and not by exc_info, which prints
+            # the error's text as it is: a page's, in a Playwright error, or a provider's answer.
+            logger.error(
+                "agent step failed for session %s (provider=%s): %s: %s\n%s",
+                session_id,
+                provider_name,
+                type(exc).__name__,
+                error_text_for_log(exc),
+                error_lines_for_log(exc),
             )
+            error_code = _provider_failure_status(exc)
+            error_message = PROVIDER_FAILED_ERROR if error_code else STEP_FAILED_ERROR
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,
@@ -176,11 +196,11 @@ class BrowserOrchestrator:
         max_steps: int,
         observation_limit: int = 40,
         context_hints: str | None = None,
-        upload_approved: bool = False,
         approval_id: str | None = None,
         provider_model: str | None = None,
         workflow_profile: WorkflowProfile = "fast",
         on_step: Callable[[int, AgentStepResult], Awaitable[None]] | None = None,
+        resume_checkpoints: list[ResumeCheckpoint] | None = None,
     ) -> AgentRunResult:
         workflow_profile = self._effective_profile(workflow_profile)
         steps: list[AgentStepResult] = []
@@ -195,11 +215,11 @@ class BrowserOrchestrator:
                 goal=goal,
                 observation_limit=observation_limit,
                 context_hints=context_hints,
-                upload_approved=upload_approved,
                 approval_id=approval_id,
                 provider_model=provider_model,
                 workflow_profile=workflow_profile,
                 previous_steps=steps,
+                resume_checkpoints=resume_checkpoints,
             )
             steps.append(step_result)
             if on_step is not None:
@@ -272,7 +292,6 @@ class BrowserOrchestrator:
         goal: str,
         observation: dict[str, Any],
         provider_decision: ProviderDecision,
-        upload_approved: bool,
         approval_id: str | None,
         workflow_profile: WorkflowProfile,
     ) -> AgentStepResult:

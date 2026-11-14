@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,6 +98,57 @@ class AgentJobErrorStatusTests(unittest.IsolatedAsyncioTestCase):
                 stored = await self._finished(status, kind)
                 self.assertEqual(stored["status"], "completed")
                 self.assertIsNone(stored["error"])
+
+
+class _RaisingOrchestrator:
+    """An orchestrator whose step and run raise, as a fault outside the provider call does (a log file that cannot
+    be written)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def step(self, **kwargs):
+        raise self.exc
+
+    async def run(self, **kwargs):
+        raise self.exc
+
+
+class AgentJobEscapedErrorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_an_error_that_escapes_the_run_puts_no_path_in_the_jobs_record(self) -> None:
+        # STORE-27 (D1-7): the record said "PermissionError: [Errno 13] Permission denied: '/data/artifacts/..'", to
+        # anyone who lists the jobs.
+        path = "/data/artifacts/s1/agent_runs.jsonl"
+        for kind in ("run", "step"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                queue = AgentJobQueue(
+                    orchestrator=_RaisingOrchestrator(PermissionError(13, "Permission denied", path)),
+                    store_root=Path(root),
+                    session_accessible=every_session_usable,
+                    worker_count=1,
+                )
+                await queue.startup()
+                try:
+                    with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
+                        if kind == "run":
+                            job = await queue.enqueue_run("s1", AgentRunRequest(provider="openai", goal="g"))
+                        else:
+                            job = await queue.enqueue_step("s1", AgentStepRequest(provider="openai", goal="g"))
+                        for _ in range(200):
+                            stored = await queue.get_job(job["id"])
+                            if stored["status"] == "failed":
+                                break
+                            await asyncio.sleep(0.02)
+                        else:
+                            raise AssertionError("the job did not fail")
+                finally:
+                    await queue.shutdown()
+
+                self.assertEqual(stored["error"], "Agent job failed")
+                self.assertNotIn(path, json.dumps(stored))
+                # The detail stays in the log, with the traceback.
+                self.assertIn(path, " ".join(logged.output))
+                self.assertIsNotNone(logged.records[0].exc_info)
 
 
 if __name__ == "__main__":
