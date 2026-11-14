@@ -1424,8 +1424,8 @@ All notable changes to auto-browser are documented here.
   reject and execute routes of an approval and `POST /proxy-personas` answered `409` `Conflict`, and observe,
   screenshot, screenshot compare and tab activation answered that the page or tab is on a host `ALLOWED_HOSTS` does
   not allow, for every `PermissionError`: one the operating system raised too (an approval or artifact directory the
-  process may not write), with nothing logged. Such an error now answers the generic `403` `Not permitted` there, as
-  on every other route, and is logged; at `GET /share/{token}/observe` it answers a logged `500`. The network log
+  process may not write), with nothing logged. Such an error now answers the generic `403` `Not permitted` there,
+  and is logged; at `GET /share/{token}/observe` it answers a logged `500`. The network log
   now answers it with that generic `403` too, where it was a bare `500` (its refused-page `403` is new in this
   release). The controller's own refusals are answered as before. `POST /approvals/{id}/approve` and
   `.../reject` and `POST /proxy-personas` now answer every other error as the rest of the routes do, where they
@@ -1623,7 +1623,8 @@ All notable changes to auto-browser are documented here.
   deleted it (where the retention is on), and to repeat the call that needed the approval without that id to ask
   for a new one. It does not say the approval never existed, which the controller cannot know. An id sent to one
   of the three approval tools with white space round it (a pasted id with a line break after it) is told the same.
-  It is an error as before (`isError`), nothing runs and nothing is recorded, an approval the caller may not use
+  It is an error as before (`isError`), the call does not run and nothing of it is recorded (a call that names no
+  session, with none live, can have opened one by then), an approval the caller may not use
   and a record that no longer validates read the same as one that does not exist, and the REST routes answer `404`
   as they did. Another operator's approval reads so where a call presents its id in a session of the caller's own
   as well: that call was told `approval <id> does not belong to session <session>` (a REST action `403`), which
@@ -1682,7 +1683,7 @@ All notable changes to auto-browser are documented here.
   they were read, some 30 million lists for that shape at the cap, and the collections that followed the read went
   through them all: 23 to 26 s more on 3.11 and 3.12 alike, up to the first full collection (4.7 to 5.2 s with 100
   sessions). A float is now counted at the length it is written
-  at, so a value of floats past the bound is refused without being written out to be measured.
+  at, so a value of floats that this count puts past the bound is refused without being written out to be measured.
   A session an older version stored past either bound is dropped when the file is read, with one WARNING that counts
   them and quotes none, and the file is then written once without them, so that the next start does not read and
   measure them again; a write that fails is a WARNING of its own, and the start goes on with the file as it was.
@@ -1711,7 +1712,8 @@ All notable changes to auto-browser are documented here.
   reader's `400`.
 - **An MCP request whose JSON-RPC `id` is no string, finite number or `null` is refused, where one that held `NaN` or
   a lone surrogate answered `500`.** An answer of `POST /mcp` repeats the request's `id` whole (all but the refusals
-  of an `Origin`, of a body that is no JSON, of a batch and of a body that is no object, which answer `"id": null`).
+  of an `Origin`, of a body that is no JSON, of a batch, of a body that is no object and of an `id` refused below,
+  which answer `"id": null`).
   In 1.17.0 an `id` that held `NaN`, an infinity, `1e999` or a lone surrogate, bare or nested in lists, was an
   unhandled `500` whatever the request was (a `tools/call`, a `ping`, and the refusals of a body that is not JSON-RPC
   2.0 or names no method), and the walks this release adds to an answer go down an `id` by recursion. JSON-RPC 2.0
@@ -1765,8 +1767,8 @@ All notable changes to auto-browser are documented here.
   (where there are none, as on Windows, only the CLI itself is killed), and a timeout, a cancel or too much output
   kills the group. The call then waits for the pipes at most 5 seconds before it gives up on them, with a warning.
   Stdout past 1 MiB fails the step as a provider's failure a retry will not mend (`502`, `Provider request failed`;
-  the step's line in the log says `CLI output exceeded 1048576 bytes`). Of stderr only the first 16 KiB is read and
-  kept: a CLI that exits with an error fails the step the same way, and its line in the log carries the start of
+  the step's line in the log says `CLI output exceeded 1048576 bytes`). Of stderr only the first 16 KiB is kept: a
+  CLI that exits with an error fails the step the same way, and its line in the log carries the start of
   that stderr (the error's text is cut at 200 characters there). A prompt that cannot be encoded (a
   page's lone surrogate) now fails before the CLI is started: it was started first, and then given up on without
   being stopped or reaped. One cancel is still the old one: a cancel that lands in the few milliseconds while the
@@ -1800,7 +1802,8 @@ All notable changes to auto-browser are documented here.
   `POST /sessions/{id}/actions/execute` and `/actions/upload` give such an id, so another operator's id and an
   unknown one read alike. Those two routes refuse it only for an action that needs an approval; these refuse it
   whatever their steps would do. A session the controller does not know is still `404` `Unknown session`, with an
-  id the store holds or with none: with an unknown id too, the id's `404` comes first. A job queued with such an id
+  id the store holds or with none: with an unknown id too, the id's `404` comes first, but under `API_BEARER_TOKENS`,
+  where the app-wide session check answers first. A job queued with such an id
   is not looked up: a step of it that needs the approval fails when it runs, as before, and one that needs none
   runs. See the upgrade note.
 - **A resume whose own audit event cannot be written answers `queued`, where it failed while its job ran.**
@@ -1976,8 +1979,9 @@ All notable changes to auto-browser are documented here.
   file's key, and is kept. So the pass removes decided approvals only, and the
   stores still grow with approvals nobody decides. Nothing is deleted while SQLite is configured and unavailable; an
   approval whose record or arguments cannot be removed is logged and stays in both stores for the next pass, and a
-  pass that fails is logged and leaves the rest for the next. See the upgrade note. (AUTH-33)
-- **`upload_approved` on the agent step and run requests is deprecated, and nothing reads it.** The orchestrator
+  pass that fails is logged and leaves the rest for the next: one whose SQLite delete fails has removed those
+  approvals' files already, and the next pass removes their SQLite records. See the upgrade note. (AUTH-33)
+- **`upload_approved` on the agent step and run requests is deprecated and ignored.** The orchestrator
   took the field and handed it down to a function that never looked at it. The request models still accept it, so a
   client that sends it is not refused, and the schema (the OpenAPI document and the `request` of
   `browser.queue_agent_step` and `browser.queue_agent_run`) marks it deprecated and says it is ignored. A request that
