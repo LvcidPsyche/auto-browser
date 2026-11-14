@@ -128,8 +128,8 @@ def main() -> int:
             print(f"{_secret_place(line)}: secret-shaped token (value withheld)", file=sys.stderr)
         raise SystemExit("Release audit failed: potential secret-shaped token found.")
 
-    # Early, because it is the cheapest possible failure and the one most likely
-    # to mean "do not ship yet".
+    # Right after the scan, which has to come first, and before the rest: the cheapest failure left, and the one most
+    # likely to mean "do not ship yet".
     if args.skip_advisory_check:
         print("Skipping the security-advisory triage check by request.")
     else:
