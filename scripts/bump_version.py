@@ -3,9 +3,9 @@
 
 Usage: python scripts/bump_version.py 1.9.0
 
-The locations are the ones ``check_version_parity.py`` enforces (four pyprojects, two
+The locations are the ones ``check_version_parity.py`` enforces: four pyprojects, two
 ``__version__`` strings, browser-node's package.json and both version fields in its
-package-lock.json), plus the auto-browser-mcp metapackage's ``auto-browser-client>=`` floor,
+package-lock.json, and the auto-browser-mcp metapackage's ``auto-browser-client>=`` floor,
 which moves in lockstep (as 1.8.1 did): the metapackage only re-exports the client, so a
 release of it must pull that release's client. Edits are in place and textual, so formatting
 and key order survive; the parity check runs last.
@@ -29,7 +29,6 @@ DUNDER = re.compile(r'(?m)^(__version__\s*=\s*")[^"]+(")')
 JSON_VERSION = re.compile(r'("version"\s*:\s*")[^"]+(")')
 NPM_FILES = (("browser-node/package.json", 1), ("browser-node/package-lock.json", 2))
 CLIENT_FLOOR = re.compile(r'("auto-browser-client>=)[^"]+(")')
-METAPACKAGE = "packaging/auto-browser-mcp/pyproject.toml"
 
 
 def replace(path: Path, pattern: re.Pattern, version: str, count: int) -> None:
@@ -49,7 +48,7 @@ def bump(version: str, root: Path = parity.REPO_ROOT) -> None:
         replace(root / rel, DUNDER, version, 1)
     for rel, count in NPM_FILES:  # lockfile: top-level version, then packages."".version
         replace(root / rel, JSON_VERSION, version, count)
-    replace(root / METAPACKAGE, CLIENT_FLOOR, version, 1)
+    replace(root / parity.METAPACKAGE, CLIENT_FLOOR, version, 1)
 
 
 def main(argv: list[str]) -> int:

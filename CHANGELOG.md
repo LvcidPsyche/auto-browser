@@ -1720,6 +1720,11 @@ All notable changes to auto-browser are documented here.
   read the section as the GitHub release's notes only after the three packages were on PyPI, so a tag with no section
   of its own, or an empty one, published them and then failed. Its build job now checks for the section before it
   builds. The image workflow, which publishes on the same tag, does not check it. (HARN-34)
+- **The version parity check holds the MCP metapackage's client floor to the version.** `bump_version.py` moved the
+  `auto-browser-client>=` floor in `packaging/auto-browser-mcp/pyproject.toml` with the nine version strings, but
+  `scripts/check_version_parity.py` did not read it, so a hand edit or a missed bump could leave the metapackage
+  requiring an older client unnoticed. It is now the tenth location: one that differs fails the check, which names the
+  file with the floor and the version the others agree on. (HARN-35)
 
 ### Changed
 
