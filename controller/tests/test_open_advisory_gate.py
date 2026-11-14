@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -158,6 +159,24 @@ class FetchAdvisoriesTests(unittest.TestCase):
                 mock.patch.object(check_open_advisories.subprocess, "run", gh),
             ):
                 self.assertEqual(check_open_advisories.fetch_advisories("o/r")[0]["summary"], summary)
+
+
+@unittest.skipIf(shutil.which("git") is None, "git is not installed")
+class ResolveRepoTests(unittest.TestCase):
+    def test_the_origin_is_this_checkouts_whatever_git_settings_the_shell_holds(self) -> None:
+        # A GIT_DIR in the maintainer's shell pointed git at another repository, whose advisories were then checked.
+        git = shutil.which("git")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            here, elsewhere = Path(temp_dir) / "here", Path(temp_dir) / "elsewhere"
+            for repo in (here, elsewhere):
+                subprocess.run([git, "init", "-q", str(repo)], check=True)
+                origin = f"https://github.com/made-up-owner/{repo.name}.git"
+                subprocess.run([git, "-C", str(repo), "remote", "add", "origin", origin], check=True)
+            with (
+                mock.patch.object(check_open_advisories, "ROOT", here),
+                mock.patch.dict(os.environ, {"GIT_DIR": str(elsewhere / ".git")}),
+            ):
+                self.assertEqual(check_open_advisories.resolve_repo(), "made-up-owner/here")
 
 
 SECURITY = _REPO / "SECURITY.md"

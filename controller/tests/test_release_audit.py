@@ -356,10 +356,11 @@ def _scan(
     files: dict[str, bytes],
     run: Callable[..., subprocess.CompletedProcess] | None = None,
     untracked: dict[str, bytes] | None = None,
+    environ: dict[str, str] | None = None,
 ) -> tuple[object, str, str]:
     """main()'s exit (what it returns, or the code it exits with) and what it printed, with every step but the
     secret scan stubbed (_stub_steps), on a repository that tracks ``files`` and holds ``untracked`` beside them;
-    ``run`` stands in for git."""
+    ``run`` stands in for git, and ``environ`` is set in this process's environment once the repository is made."""
     repo = tmp_path / "repo"
     (repo / "controller").mkdir(parents=True)
     (repo / "controller" / "constraints.txt").write_text("idna==3.10\n", encoding="utf-8")
@@ -374,6 +375,8 @@ def _scan(
     _stub_steps(monkeypatch, tmp_path, [])
     if run is not None:
         _stand_in_for_git_grep(monkeypatch, run)
+    for name, value in (environ or {}).items():
+        monkeypatch.setenv(name, value)
     try:
         code = release_audit.main()
     except SystemExit as exited:
@@ -445,8 +448,9 @@ def test_a_failed_scan_prints_not_what_git_said_but_its_status(
     token = SECRET_SHAPES["a GitHub classic token"]
 
     def failed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
-        # What git says of a GIT_DIR that is no repository: it names the directory, which a setting gave.
-        return subprocess.CompletedProcess(command, 128, b"", f"fatal: not a git repository: '/src/{token}'\n".encode())
+        # What git says of a work tree the repository's core.worktree names and that is not there: it names the
+        # directory, which a setting gave.
+        return subprocess.CompletedProcess(command, 128, b"", f"fatal: Invalid path '/src/{token}'\n".encode())
 
     code, out, err = _scan(monkeypatch, tmp_path, capsys, {}, run=failed)
 
@@ -530,6 +534,37 @@ def test_the_secret_scan_reads_the_untracked_files_ruff_and_pytest_read(
 
     failed = "potential secret-shaped token found" in str(code)
     named = err.splitlines() == ["scratch.py:1: secret-shaped token (value withheld)"]
+    assert (failed, token in out or token in err, named) == (True, False, True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("setting", ["GIT_DIR", "GIT_CONFIG_COUNT"])
+def test_the_secret_scan_reads_this_tree_whatever_git_settings_the_shell_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], setting: str
+) -> None:
+    # A shell's GIT_* names point git at another repository, or add to its config: here an empty one, and a setting,
+    # whose exclude rules leave out every file. Each value is made up.
+    token = SECRET_SHAPES["a GitHub classic token"]
+    elsewhere = tmp_path / "elsewhere"
+    subprocess.run([shutil.which("git"), "init", "-q", str(elsewhere)], check=True)
+    (elsewhere / ".git" / "info").mkdir(exist_ok=True)
+    (elsewhere / ".git" / "info" / "exclude").write_text("*\n", encoding="utf-8")
+    environ = {
+        "GIT_DIR": {"GIT_DIR": str(elsewhere / ".git")},
+        "GIT_CONFIG_COUNT": {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.excludesFile",
+            "GIT_CONFIG_VALUE_0": str(elsewhere / ".git" / "info" / "exclude"),
+        },
+    }[setting]
+    files, untracked = {"settings.py": f'key = "{token}"\n'.encode()}, {"scratch.py": f'k = "{token}"\n'.encode()}
+
+    code, out, err = _scan(monkeypatch, tmp_path, capsys, files, untracked=untracked, environ=environ)
+
+    failed = "potential secret-shaped token found" in str(code)
+    named = sorted(err.splitlines()) == [
+        f"{name}:1: secret-shaped token (value withheld)" for name in sorted(untracked | files)
+    ]
     assert (failed, token in out or token in err, named) == (True, False, True)
 
 

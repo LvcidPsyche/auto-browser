@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,9 @@ def resolve_repo() -> str:
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         cwd=ROOT,
+        # Without the shell's GIT_* settings: a GIT_DIR there names another repository, whose origin this would read.
+        # Windows upper-cases every name, so the prefix catches each spelling.
+        env={name: value for name, value in os.environ.items() if not name.startswith("GIT_")},
         text=True,
         capture_output=True,
     )

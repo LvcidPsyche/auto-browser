@@ -1857,7 +1857,9 @@ All notable changes to auto-browser are documented here.
   where such a file read as one with no match. The scan now runs before the advisory check and the steps after it,
   where it ran last, so that a token is found before ruff's diagnostics, pytest's tracebacks or compileall's syntax
   errors can print its line; and it reads untracked files too, except those git ignores, where it read tracked files
-  only. (HARN-32)
+  only. The scan, and the advisory check's reading of the origin remote, run git without the shell's `GIT_*`
+  settings, which could point it at another repository or add exclude rules, so that a token passed the scan or
+  another repository's advisories were checked. (HARN-32)
 - **The release audit's advisory check reads the advisory list in one shape, whatever the gh version.**
   `scripts/check_open_advisories.py` read the output of `gh api --paginate` as one JSON document, which it is not
   from a gh that prints each page as an array of its own, once the list runs past one page. It now passes `--slurp`
