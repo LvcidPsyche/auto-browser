@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
+from unittest import mock
 
 from auto_browser_client.mcp_bridge import (
     MCP_PROTOCOL_HEADER,
@@ -133,7 +135,10 @@ class McpBridgeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], -32700)
 
     def test_arg_parser_defaults_target_local_controller(self) -> None:
-        args = build_arg_parser().parse_args([])
+        # The built-in defaults, as the controller's copy of this test reads them: a developer's AUTO_BROWSER_BASE_URL
+        # failed this test, which printed its value (the release audit runs this suite in the host's environment).
+        with mock.patch.dict(os.environ, {}, clear=True):
+            args = build_arg_parser().parse_args([])
         self.assertEqual(args.base_url, "http://127.0.0.1:8000/mcp")
         self.assertEqual(args.timeout_seconds, 60.0)
 

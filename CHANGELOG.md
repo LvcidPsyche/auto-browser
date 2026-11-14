@@ -1715,8 +1715,10 @@ All notable changes to auto-browser are documented here.
   ran only the controller's suite, so a release could pass it with either package's tests failing or under their
   coverage gate. Each suite now runs from its package's directory with CI's gate (85% for the client, 90% for the
   integration), in a fresh environment the audit makes for it, where `uv` installs the package editable with CI's
-  extras, taking no release from the last 72 hours; so the audit now needs `uv`. A step that fails now ends the audit
-  with its command, its directory and its exit status, where it ended in a traceback. (HARN-31)
+  extras, taking no release from the last 72 hours; so the audit now needs `uv`. Like CI's jobs, a suite is given no
+  `PYTHONPATH` of the host's (the client's is `.`, as there) and no `AUTO_BROWSER_*` setting, which the client reads
+  as its defaults. A step that fails now ends the audit with its command, its directory and its exit status, where it
+  ended in a traceback. (HARN-31)
 - **The release audit's secret scan knows more token shapes.** It found OpenAI and Google API keys, GitHub personal
   access tokens and Slack tokens only; it now also finds Anthropic keys (`sk-ant-`), OpenAI project keys
   (`sk-proj-`), AWS access key IDs (`AKIA`, `ASIA`), GitLab tokens (`glpat-`) and GitHub's other tokens (`gho_`,

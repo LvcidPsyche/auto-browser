@@ -7,6 +7,7 @@ metapackage first failed at tag time.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -119,16 +120,23 @@ class InspectMcpWheelTests(unittest.TestCase):
             self._inspect(files)
 
 
-def _audit_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[list[str], Path | None, str | None]]:
+def _audit_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> list[tuple[list[str], Path | None, str | None, bool]]:
     """The commands main() runs, in order, with every step stubbed: `_run` records instead of running.
 
-    Each is kept with its directory and the PYTHONPATH it sets (None: it sets none), never its whole environment, so
-    a failing assertion cannot print the environment's values.
+    Each is kept with its directory, the PYTHONPATH it runs with (None: none) and whether any AUTO_BROWSER_* name
+    reaches it, never its whole environment, so a failing assertion cannot print the environment's values. This
+    process's environment holds a made-up PYTHONPATH and AUTO_BROWSER_BASE_URL meanwhile, as a developer's can.
     """
-    calls: list[tuple[list[str], Path | None, str | None]] = []
+    calls: list[tuple[list[str], Path | None, str | None, bool]] = []
+    monkeypatch.setenv("PYTHONPATH", "made-up-host-pythonpath")
+    monkeypatch.setenv("AUTO_BROWSER_BASE_URL", "http://made-up-remote.invalid:9000/mcp")
 
     def record(command: list[object], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-        calls.append(([str(part) for part in command], cwd, None if env is None else env.get("PYTHONPATH")))
+        seen = os.environ if env is None else env
+        reached = any(name.startswith("AUTO_BROWSER_") for name in seen)
+        calls.append(([str(part) for part in command], cwd, seen.get("PYTHONPATH"), reached))
 
     monkeypatch.setattr(release_audit, "_run", record)
     monkeypatch.setattr(release_audit, "_check_launch_files", lambda: None)
@@ -177,17 +185,19 @@ def test_the_audit_runs_each_package_suite_as_ci_does(
         "--cov-report=term-missing",
         f"--cov-fail-under={gate}",
     ]
-    suites = [i for i, (command, cwd, _) in enumerate(calls) if cwd == release_audit.ROOT / directory]
+    suites = [i for i, (command, cwd, *_) in enumerate(calls) if cwd == release_audit.ROOT / directory]
     assert len(suites) == 1, f"the audit runs no single suite in {directory}: {calls}"
-    suite_command, _, suite_pythonpath = calls[suites[0]]
+    suite_command, _, suite_pythonpath, auto_browser_setting = calls[suites[0]]
     assert suite_command[1:-2] == expected
     assert suite_command[-2] == "--basetemp" and Path(suite_command[-1]).is_relative_to(tmp_path)
-    assert suite_pythonpath == pythonpath
+    # Neither the host's PYTHONPATH nor an AUTO_BROWSER_* setting, which the client reads as its defaults: CI's job
+    # sets neither, and a client test that failed on a developer's printed its value.
+    assert (suite_pythonpath, auto_browser_setting) == (pythonpath, False)
     interpreter = Path(suite_command[0])
 
     # The suite's interpreter is a fresh environment the audit made, with the package installed in it as CI installs
     # it: editable, with its extras, and nothing newer than the hold.
-    installs = [i for i, (command, _, _) in enumerate(calls) if f"./{directory}[{extras}]" in command]
+    installs = [i for i, (command, *_) in enumerate(calls) if f"./{directory}[{extras}]" in command]
     assert len(installs) == 1 and installs[0] < suites[0], calls
     install_command = calls[installs[0]][0]
     assert install_command[:3] == ["uv", "pip", "install"]
@@ -198,7 +208,7 @@ def test_the_audit_runs_each_package_suite_as_ci_does(
     assert abs(cutoff - expected_cutoff) < timedelta(minutes=5)
     venvs = [
         i
-        for i, (command, _, _) in enumerate(calls)
+        for i, (command, *_) in enumerate(calls)
         if command[1:3] == ["-m", "venv"] and interpreter.is_relative_to(Path(command[-1]))
     ]
     assert len(venvs) == 1 and venvs[0] < installs[0], calls

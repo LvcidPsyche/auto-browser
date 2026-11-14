@@ -318,9 +318,13 @@ def _run_package_suite(directory: str, extras: str, module: str, gate: int, pyth
         python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         _run([PYTHON, "-m", "venv", "--without-pip", venv])
         _run(["uv", "pip", "install", "--python", python, "--exclude-newer", cutoff, "-e", f"./{directory}[{extras}]"])
-        env = None
+        # CI's job has neither the host's PYTHONPATH nor an AUTO_BROWSER_* setting, which the client reads as defaults.
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name != "PYTHONPATH" and not name.startswith("AUTO_BROWSER_")
+        }
         if pythonpath is not None:
-            env = os.environ.copy()
             env["PYTHONPATH"] = pythonpath
         _run(
             [
