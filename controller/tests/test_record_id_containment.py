@@ -15,7 +15,7 @@ from pathlib import Path
 
 from app.agent_jobs import AgentJobStore
 from app.approval_backends import FileApprovalStore
-from app.models import SessionRecord
+from app.models import ApprovalRecord, BrowserActionDecision, SessionRecord
 from app.session_store import FileSessionStore
 from app.witness import WitnessRecorder
 
@@ -28,6 +28,19 @@ RECEIPT = {
     "operator": {"id": "alice", "source": "header"},
 }
 ESCAPES = ("../planted", "nested/../../planted", "/tmp/planted", "..", ".hidden", "")
+
+
+def _approval(record_id: str) -> ApprovalRecord:
+    return ApprovalRecord(
+        id=record_id,
+        session_id="planted",
+        kind="payment",
+        status="pending",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        reason="planted",
+        action=BrowserActionDecision(action="click", reason="planted", selector="#pay"),
+    )
 
 
 def _session_record(record_id: str) -> SessionRecord:
@@ -84,7 +97,9 @@ class StoreContainmentTests(unittest.IsolatedAsyncioTestCase):
             await store.get("../planted")
 
     async def test_approval_store(self) -> None:
-        (self.base / "planted.json").write_text("{}", encoding="utf-8")
+        (self.base / "planted.json").write_text(_approval("planted").model_dump_json(), encoding="utf-8")
+        # It reads where it lies: from the root below it, only containment refuses it, not a record that will not parse.
+        self.assertEqual((await FileApprovalStore(self.base).get("planted")).id, "planted")
         store = FileApprovalStore(self.root)
 
         with self.assertRaises(KeyError):
