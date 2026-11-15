@@ -54,7 +54,7 @@ TODO-INTRO
   `ttl_minutes: 60`.
 - **`browser.get_local_storage` reads what the browser holds, and cuts an answer past 1,000,000 characters.** A page's
   own replacement of its storage functions (`Storage.prototype.getItem`, `window.localStorage`) no longer changes what
-  the read returns (see Security). Where the keys and values read, with six characters more for each entry, would
+  the read returns (see Security). Where the keys and values read, with eight characters more for each entry, would
   pass 1,000,000 characters, the entry that reaches the bound keeps the start of its value, or is left out when its
   key does not fit, the entries after it are left out, and `truncated` is `true`; a one-key read cuts its value the
   same way. Every answer now carries `truncated`. Read a store that large one key at a time.
@@ -146,7 +146,7 @@ TODO-INTRO
   The read now runs in the controller's isolated world, as `browser.get_html` with `text_only` and
   `browser.find_elements` do, where the page's own JavaScript does not answer for its storage. A store can hold
   megabytes by itself all the same, and a key as long as a value, so the answer is bounded too: its keys and values,
-  with six characters more for each entry, come to at most 1,000,000 characters, the most any tool's `max_chars`
+  with eight characters more for each entry, come to at most 1,000,000 characters, the most any tool's `max_chars`
   accepts, and an answer cut there says `truncated: true`. The tool is in the `storage` pack, which the default
   profile leaves out.
 

@@ -145,8 +145,9 @@ PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN
 # page not answering, not a pattern that backtracks.
 FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS = int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
 
-# What one entry of a storage read costs beyond its key and value: the quotes, colon and comma JSON writes around them.
-STORAGE_ENTRY_OVERHEAD_CHARS = 6
+# What one entry of a storage read costs beyond its key and value in a tool's answer, which json.dumps writes with its
+# default separators: the four quotes, ": " and ", ".
+STORAGE_ENTRY_OVERHEAD_CHARS = 8
 
 # How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
 # answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.

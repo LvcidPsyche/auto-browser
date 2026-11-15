@@ -10,6 +10,7 @@ BrowserManager opened.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,7 +19,6 @@ import pytest
 
 from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway
-from app.tool_gateway.gateway import STORAGE_ENTRY_OVERHEAD_CHARS
 from app.tool_inputs import MAX_TOOL_RESULT_CHARS, GetStorageInput
 from tests._chromium import requires_chromium
 from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromium is the module's Chromium fixture
@@ -69,8 +69,9 @@ def _gateway(manager) -> McpToolGateway:
 
 
 def _answer_chars(entries: dict[str, str | None]) -> int:
-    """What the bound counts: each entry's key, value and overhead."""
-    return sum(len(key) + len(value or "") + STORAGE_ENTRY_OVERHEAD_CHARS for key, value in entries.items())
+    """What the agent is sent for the entries: their JSON as the gateway writes a tool's answer, which the bound
+    counts as each entry's key and value and STORAGE_ENTRY_OVERHEAD_CHARS."""
+    return len(json.dumps(entries, ensure_ascii=False))
 
 
 async def _read(tmp_path: Path, page: str, storage_type: str, key: str | None = None) -> dict:
