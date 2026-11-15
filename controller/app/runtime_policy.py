@@ -17,7 +17,7 @@ from .auth_policy import (
 )
 from .config import Settings
 from .host_patterns import is_wildcard_pattern
-from .providers.base import BaseProviderAdapter, auth_mode_shown
+from .providers.base import BaseProviderAdapter, auth_mode_shown, call_directory_refused
 from .url_safety import refuse_ambiguous_host
 from .utils import error_text
 
@@ -59,6 +59,8 @@ CLI_PROVIDER_CHECKS = (
         "cli_label": "codex",
         "auth_markers": (".codex",),
         "host_bridge_socket_attr": "OPENAI_HOST_BRIDGE_SOCKET",
+        # Each Codex call makes its working directory in CLI_HOME (OpenAIAdapter._call_directory).
+        "makes_call_directory": True,
     },
     {
         "provider": "claude",
@@ -147,6 +149,13 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
             expected = ", ".join(str(cli_home_path / marker) for marker in auth_markers)
             report.errors.append(
                 f"{provider_name} uses CLI auth but no auth state was found; expected one of: {expected}"
+            )
+            continue
+
+        if check.get("makes_call_directory") and (refused := call_directory_refused(cli_home)):
+            report.errors.append(
+                f"{auth_mode_attr}=cli: {cli_label} cannot make its call directory under CLI_HOME {cli_home_path} "
+                f"({refused}); see docs/deployment.md, 'Option B — subscription-backed CLIs'"
             )
             continue
 

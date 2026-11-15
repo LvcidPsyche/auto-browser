@@ -709,6 +709,8 @@ docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up
 
 That override builds the controller with the provider CLIs, mounts `~/.codex`, `~/.claude`, `~/.claude.json`, and `~/.gemini` read-only at the same home-path inside the container, and sets `CLI_HOME` to that host-style home. If your login home is different, change `CLI_HOST_HOME`. Do not use `bootstrap_cli_auth.sh` in that mode; sign in on the host first and then start the override.
 
+The home itself is an empty 64 MiB tmpfs that the override mounts there, with the four inside it (mode 1777, `noexec`, emptied at every start). The controller does not run as root there (it runs as the owner of `./data`), and Codex makes each call's working directory in that home; without the tmpfs the container runtime makes the home root-owned and closed to the controller, and every Codex call fails. If you keep a copy of the override outside this repository, add the tmpfs entry to it (since 1.18.1; until then Codex's readiness says it cannot make its call directory, and with `OPENAI_AUTH_MODE=cli` a production start refuses). Never set `CLI_HOST_HOME` to `/root`: the tmpfs would make root's home in the container writable by every user in it.
+
 If Codex subscription auth still fails inside Docker, switch only OpenAI to the host bridge:
 
 ```bash
@@ -759,6 +761,8 @@ In `APP_ENV=production`, startup now fails fast if:
 - a provider is set to `cli` mode but its CLI binary is missing
 - OpenAI is set to `host_bridge` mode but the bridge socket is missing, stale, not a real Unix socket, or failing `/healthz`
 - `CLI_HOME` is set but the expected auth-state files are missing for that CLI
+- OpenAI is set to `cli` mode and the controller cannot make a directory in `CLI_HOME`, where Codex makes each call's
+  working directory (in any `APP_ENV`, Codex's readiness then says not ready, with the reason)
 
 #### Closing the checkout's secrets to the bridge
 

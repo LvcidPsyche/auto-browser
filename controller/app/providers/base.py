@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import stat
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -134,6 +135,26 @@ PRIVATE_CLI_HOME_ERROR = (
 # its parents, then the user's home: these hold nothing and stop that search before a parent's (the user's home
 # is now an ancestor).
 _ENV_SENTINELS = (".env", ".gemini/.env")
+
+
+def call_directory_refused(home: str) -> str:
+    """Why this user cannot make a directory in ``home``, as Codex makes each call's (OpenAIAdapter._call_directory);
+    "" where it can. The one it makes is removed at once. The reason is the error's text alone, naming no path.
+
+    A CLI working in the home meanwhile may fill or remove that directory before it is removed: it was made, so the
+    answer is still "", and the removal's failure is a warning with its reason alone."""
+    try:
+        made = tempfile.mkdtemp(dir=home)
+    except OSError as exc:
+        return exc.strerror or type(exc).__name__
+    try:
+        os.rmdir(made)
+    except OSError as exc:
+        logger.warning(
+            "the directory made in CLI_HOME to check that it can be written was not removed (%s)",
+            exc.strerror or type(exc).__name__,
+        )
+    return ""
 
 
 class _Refused(Exception):
