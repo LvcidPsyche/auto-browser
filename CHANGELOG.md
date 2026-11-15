@@ -51,7 +51,8 @@ TODO-INTRO
 - **A share link minted without a lifetime now lives `SHARE_TOKEN_TTL_MINUTES`, where that is set to other than
   60.** Such a link lived 60 minutes whatever the setting said (see Fixed); it now lives as long as the setting says,
   and one set above 1440 is read as 1440, with a warning at startup. A client that wants 60 minutes there asks for
-  `ttl_minutes: 60`.
+  `ttl_minutes: 60`. `ttl_minutes` may now be `null`, which means the same as leaving it out, and its default in the
+  request's and the tool's schema is `null`, not 60.
 - **`browser.get_local_storage` reads what the browser holds, and cuts an answer past 1,000,000 characters.** A page's
   own replacement of its storage functions (`Storage.prototype.getItem`, `window.localStorage`) no longer changes what
   the read returns (see Security). Where the keys and values read, with eight characters more for each entry, would
@@ -85,8 +86,9 @@ TODO-INTRO
   controller now makes the directory from a descriptor of `CLI_HOME` and keeps one of the directory itself: the
   schema file is made, and `decision.json` read, in the directory it made, wherever that has been moved, and the
   directory is removed without following a link. Where a link has been left at its name the directory stays, a
-  warning says so, and the call's outcome stands. On Windows, which cannot open a directory this way, all of it is
-  done by path as before.
+  warning says so, and the call's outcome stands; so does one that holds a directory the CLI made read-only, which
+  1.18.0 opened up by path to remove. On Windows, which cannot open a directory this way, all of it is done by path
+  as before.
 - **The CLI sandbox now checks where the controller keeps its stores, as it checks its secrets.** It warned where
   `API_TOKEN_FILE`, `AUTH_ROOT` or another secret's setting named a place outside `/data`, or one a CLI may write,
   and said nothing of the stores: with `APPROVAL_ROOT` or `STATE_DB_PATH` kept outside `/data`, a sandboxed CLI could
@@ -174,8 +176,8 @@ TODO-INTRO
   keys (`sk-svcacct-`, `sk-admin-`, `sk-None-`), nor Slack's `xoxc-` and `xoxe-` tokens, nor an AWS secret access
   key, so a key of these kinds left in a file the audit reads passed it. It finds them now. An AWS secret access key
   has no prefix of its own, so the scan finds one where it follows its setting's name (`aws_secret_access_key` or
-  `AWS_SECRET_ACCESS_KEY`, then `=` or `:`); AWS's documented example secret key, which the PII scrubber's tests use,
-  is let through as itself, as its example key ID already was.
+  `AWS_SECRET_ACCESS_KEY`, then `=` or `:`); AWS's documented example secret key is let through only as the PII
+  scrubber's tests write it (`aws_secret_access_key=` and the key), as its example key ID already was.
 - **The release workflow no longer publishes to PyPI on a count of green CI runs it could not read.** Its gate counts
   the successful `ci.yml` push runs on main for the tagged commit and stops at none. A count that came back as no
   number (`null`, or nothing) failed the gate's comparison as a test, which the `if` around it read as false, so the
@@ -206,8 +208,8 @@ TODO-INTRO
   `ttl_minutes` (`POST /sessions/{id}/share` with no body or without it, `browser.share_session` without it) made a
   link for 60 minutes whatever the setting said: the route and the tool each put 60 in place of the lifetime not
   given, so a deployment's own default, a shorter one included, never applied. They now leave it to the setting (60
-  unless set). A setting longer than a link may live, 1440 minutes, is read as 1440, with a warning at startup: a
-  longer one would mint links that outlive the record of their revocation.
+  unless set). A setting longer than a caller may ask for, 1440 minutes, is read as 1440, with a warning at startup:
+  a link minted without a lifetime lives no longer than one minted with one.
 
 ### Tests
 
