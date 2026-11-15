@@ -140,6 +140,13 @@ TODO-INTRO
   removes it at once; where a CLI working in the home has filled or removed it meanwhile, the home still counts as
   writable and the log has a warning that names no path. The Claude and Gemini CLIs make no such directory and are
   not checked.
+- **The release audit's secret scan finds more of OpenAI's and Slack's key shapes, and AWS secret access keys.** It
+  found an OpenAI key written `sk-` or `sk-proj-` and then the key, but not OpenAI's service account, admin and user
+  keys (`sk-svcacct-`, `sk-admin-`, `sk-None-`), nor Slack's `xoxc-` and `xoxe-` tokens, nor an AWS secret access
+  key, so a key of these kinds left in a file the audit reads passed it. It finds them now. An AWS secret access key
+  has no prefix of its own, so the scan finds one where it follows its setting's name (`aws_secret_access_key` or
+  `AWS_SECRET_ACCESS_KEY`, then `=` or `:`); AWS's documented example secret key, which the PII scrubber's tests use,
+  is let through as itself, as its example key ID already was.
 
 ## [1.18.0] — 2026-11-14
 

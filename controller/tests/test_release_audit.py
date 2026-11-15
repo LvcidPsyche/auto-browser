@@ -295,6 +295,13 @@ SECRET_SHAPES = {
     "a GitHub refresh token": "ghr_" + "a1" * 18,
     "an OpenAI key": "sk-" + "a1" * 12,
     "a GitHub classic token": "ghp_" + "a1" * 18,
+    "an OpenAI service account key": "sk-svcacct-" + "Ab1_-" * 8,
+    "an OpenAI admin key": "sk-admin-" + "Ab1_-" * 8,
+    "an OpenAI user key": "sk-None-" + "Ab1_-" * 8,
+    "a Slack client token": "xoxc-" + "12ab-" * 4,
+    "a Slack refresh token": "xoxe-" + "1-ab2" * 4,
+    "an AWS secret access key in an env file": "AWS_SECRET_ACCESS_KEY=" + "Ab1+/" * 8,
+    "an AWS secret access key in JSON": '{"aws_secret_access_key": "' + "Ab1+/" * 8 + '"}',
 }
 PROSE = [
     "ask-anthropic-about-it is a branch name",
@@ -302,7 +309,24 @@ PROSE = [
     "AKIA is how an AWS access key ID begins",
     "glpat- and gho_ are token prefixes",
     "AKIAlowercase0123456789",
+    "sk-svcacct-, sk-admin- and sk-None- begin OpenAI keys",
+    # Not every sk-x- word: a kebab-case name holds one.
+    "task-runner-configuration-options",
+    "xoxc- and xoxe- are Slack token prefixes",
+    "aws_secret_access_key = <your secret access key>",
+    "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}",
+    "the aws_secret_access_key setting holds 40 characters",
 ]
+
+
+def _aws_example_key_id() -> str:
+    """AWS's documented example access key ID as the PII scrubber's tests hold it: of the two examples the scan lets
+    through, the one a file's name can hold. Not written out in this file, which would then hold a token for the scan
+    to find."""
+    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
+    matches = re.finditer(release_audit.SECRET_PATTERN, fixture)
+    (example,) = {match.group(0) for match in matches if match.group(0).startswith(("AKIA", "ASIA"))}
+    return example
 
 
 @pytest.mark.parametrize("name", sorted(SECRET_SHAPES))
@@ -331,22 +355,24 @@ def test_git_grep_reads_the_secret_pattern_as_an_extended_expression(tmp_path: P
     assert found == list(range(1, len(SECRET_SHAPES) + 1))
 
 
-def test_aws_documented_example_key_is_the_one_token_the_scan_lets_through() -> None:
-    # The fixture as the PII scrubber's tests hold it, so a change to it shows here. Not written out in this file,
+def test_aws_documented_examples_are_the_only_tokens_the_scan_lets_through() -> None:
+    # The fixtures as the PII scrubber's tests hold them, so a change to them shows here. Not written out in this file,
     # which would then hold a token for the scan to find.
     fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
     examples = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
-    assert len(examples) == 1, "the PII scrubber's tests hold one secret-shaped token, AWS's example key ID"
-    example = examples.pop()
+    assert len(examples) == 2, (
+        "the PII scrubber's tests hold two secret-shaped tokens, AWS's example key ID and its example secret key"
+    )
     real = "AKIA" + "Q7" * 8
-    assert release_audit._secret_lines(f"CHANGELOG.md:1:  `{example}` passed\n") == []
+    for example in sorted(examples):
+        assert release_audit._secret_lines(f"CHANGELOG.md:1:  `{example}` passed\n") == []
+        assert release_audit._secret_lines(f"a.py:3:{example} {real}\n") == [f"a.py:3:{example} {real}"]
+        # git shows none of a binary file it found a match in, so the example in its path lets nothing through.
+        banner = f"Binary file assets/{example}.bin matches"
+        assert release_audit._secret_lines(banner + "\n") == [banner]
     assert release_audit._secret_lines(f"a.py:2:key={real}\n") == [f"a.py:2:key={real}"]
-    assert release_audit._secret_lines(f"a.py:3:{example} {real}\n") == [f"a.py:3:{example} {real}"]
     # A line git found and Python's reading of the pattern does not is kept: the two engines must not disagree quietly.
     assert release_audit._secret_lines("a.py:4:nothing Python finds\n") == ["a.py:4:nothing Python finds"]
-    # git shows none of a binary file it found a match in, so the example in its path lets nothing through.
-    banner = f"Binary file assets/{example}.bin matches"
-    assert release_audit._secret_lines(banner + "\n") == [banner]
 
 
 def _scan(
@@ -471,8 +497,7 @@ def test_a_scan_git_wrote_an_error_in_fails_and_prints_not_what_git_said(
 ) -> None:
     # git reads a tracked file it cannot open as one with no match, says so on its error stream alone, and exits as
     # its matches elsewhere say: the audit passed. Here the file's name holds a token.
-    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
-    (example,) = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    example = _aws_example_key_id()
     token = SECRET_SHAPES["a GitHub classic token"]
     found = f"CHANGELOG.md:1:  `{example}` is AWS's example\n".encode() if status == 0 else b""
 
@@ -515,10 +540,9 @@ def test_the_secret_scan_reads_what_git_prints_as_utf_8_whatever_the_code_page(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], encoding: str
 ) -> None:
     # Read in Windows' ANSI code page (cp1252), the 0x9D that ends a UTF-8 ” stopped the read, and in UTF-8 mode a
-    # byte that is not UTF-8 did: a tree that held the one token let through, beside such a byte, failed the audit
+    # byte that is not UTF-8 did: a tree that held a token let through, beside such a byte, failed the audit
     # with a traceback.
-    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
-    (example,) = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    example = _aws_example_key_id()
     text = {"utf-8": "AWS’s “example” key ID", "latin-1": "la clé d'exemple d'AWS"}[encoding]
     changelog = f"  `{example}` is {text}\n".encode(encoding)
 
@@ -599,9 +623,8 @@ def test_the_secret_scan_reads_this_tree_whatever_git_settings_the_shell_holds(
 def test_a_binary_match_fails_the_audit_whatever_its_path_holds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # git names a binary file's match by the file's path alone, which here holds the one token let through as itself.
-    fixture = (Path(__file__).resolve().parent / "test_pii_scrub.py").read_text(encoding="utf-8")
-    (example,) = {match.group(0) for match in re.finditer(release_audit.SECRET_PATTERN, fixture)}
+    # git names a binary file's match by the file's path alone, which here holds a token let through as itself.
+    example = _aws_example_key_id()
     token = SECRET_SHAPES["a GitHub classic token"]
 
     code, out, err = _scan(monkeypatch, tmp_path, capsys, {f"{example}.bin": b"\0key = " + token.encode()})
