@@ -580,6 +580,11 @@ test("redactEndpoints drops a token in the userinfo, the query or the fragment a
     [`ws://u:${SECRET_PATH}@h.example:port/x`, "ws://<redacted>"],
     [`ws://[::1/${SECRET_PATH}`, "ws://<redacted>"],
     [`ws://h.example:1:${SECRET_PATH}`, "ws://<redacted>"],
+    [`wss://o'brien:${SECRET_PATH}@h.example/x`, "wss://h.example/<redacted>"],
+    [`wss://h.example/?label=o'brien&token=${SECRET_PATH}`, "wss://h.example/<redacted>"],
+    [`wss://h.example/?a=1\x85&token=${SECRET_PATH}`, "wss://h.example/<redacted>"],
+    [`wss://h.example/?a=1﻿&token=${SECRET_PATH}`, "wss://h.example/<redacted>"],
+    [`ws://h.example%2F${SECRET_PATH}`, "ws://<redacted>"],
   ];
   for (const [endpoint, expected] of shapes) {
     const out = redactEndpoints(`connect ${endpoint} failed`);

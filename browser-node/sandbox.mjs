@@ -437,8 +437,8 @@ export async function writeState(path, state) {
 // port, so the line still says where it pointed, and drops the rest (a token in the userinfo, the query or the
 // fragment too). The twin of redact_endpoints in controller/app/browser_sandbox.py, which says why it is written this
 // way and not with URL.
-const ENDPOINT = /(wss?:\/\/)([^/\\?#\s"'<>]*)([^\s"'<>]*)/gi;
-const HOST_PORT = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::[0-9]+)?$/;
+const ENDPOINT = /(wss?:\/\/)([^/\\?#\x00-\x20\x7f"<>]*)([^\x00-\x20\x7f"<>]*)/gi;
+const HOST_PORT = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~-]+)(?::[0-9]+)?$/;
 
 export function redactEndpoints(text) {
   return String(text).replace(ENDPOINT, (_url, scheme, authority, rest) => {
