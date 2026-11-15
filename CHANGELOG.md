@@ -43,6 +43,11 @@ TODO-INTRO
   `CLI_SANDBOX_WRITABLE` (see Security), the CLIs ran, and a CLI could change the code the controller runs. Now the
   sandbox's warning names the place, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs. Move the checkout
   and its virtualenv out of those directories.
+- **A `CLI_SANDBOX_WRITABLE` entry or a `CLI_HOME` whose way to its target passes through `/tmp`, or another
+  directory a CLI may write, is no longer given.** Such an entry, a link to a link in `/tmp` say, is now passed over
+  with a warning that says where it resolves, and such a `CLI_HOME` is said to be refused, as one that is a link in
+  `/tmp` was already; with `CLI_SANDBOX_REQUIRED=true` the refused home stops provider CLIs (see Security). Set the
+  entry or the home to its real path, or keep the links on its way out of the directories a CLI may write.
 
 ### Security
 
@@ -92,6 +97,14 @@ TODO-INTRO
   in its own code: its package with the launcher, its interpreter as it was started and once resolved, `sys.prefix`,
   `sys.base_prefix` and where its packages are installed. Where a CLI may write one of them the warning names it,
   and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. The image keeps all of these out of what a CLI may write.
+- **A `CLI_SANDBOX_WRITABLE` entry that leads through a place a CLI may write is no longer given where it leads.**
+  The sandbox gives each entry as its resolved path. It looked at the entry as written, at where it resolves and at
+  each leading part of it resolved, but not at the links on the way: an operator's link outside every directory a
+  CLI may write, to a link in `/tmp` (`/opt/x` to `/tmp/sub/inner`), was given at wherever `/tmp/sub/inner`
+  pointed, and a CLI could point it at any directory the controller's user may write, the controller's own code
+  among them, and be given that to write at the next call. Each place Linux looks up on the way now counts too, for
+  the entries, the CLI home and the secrets' and stores' paths alike: such an entry is passed over with a warning
+  that says where it resolves, and a secret reached that way is reported as open.
 
 ### Fixed
 

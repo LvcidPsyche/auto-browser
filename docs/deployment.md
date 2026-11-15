@@ -546,7 +546,10 @@ absolute paths. `/data`, a directory that holds it and a path with a `..` part a
 read. An entry under `/data` is yours to choose (a secret kept in it is reported, below), and one that is not a
 directory when a call is made is passed over with one warning. So is one that, once resolved, lies in no directory
 given to the CLI: one in `/tmp` linked to `/opt/toolcache`, say, since `/tmp`'s rule covers where the entry is
-written and not where it leads, which a CLI may swap. A CLI that cannot run under the ruleset (it needs
+written and not where it leads, which a CLI may swap. The same goes for an entry whose way to where it leads
+passes through a directory a CLI may write: `/opt/x` linked to `/tmp/sub/inner`, which a CLI can make a link to
+wherever it likes, is not given, and neither is `/opt/x` linked to `/tmp/sub/../../target`, where a CLI can swap
+`/tmp/sub`. Each place Linux looks up on the way counts. A CLI that cannot run under the ruleset (it needs
 something under `/data` that cannot move into `CLI_HOME`, or it fails there) can be started without it:
 `CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI without the launcher, and a CLI then reads
 and writes what the controller's user can, as before 1.18.0.
@@ -599,7 +602,8 @@ setting until Landlock is there):
   `ISOLATED_TUNNEL_INFO_ROOT` and `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT`. Each is resolved
   first, so a `/data` that is a symbolic link to another place holds none of them. "In a directory a CLI may write" (`CLI_HOME`,
   or an entry of `CLI_SANDBOX_WRITABLE` under `/data`) is as written or once resolved: a path written there counts
-  wherever it resolves, since the CLI can replace a link there with a file of its own. A secret's directory that
+  wherever it resolves, since the CLI can replace a link there with a file of its own, and so does a path whose way
+  to where it resolves passes through such a directory (a link to a link in `CLI_HOME`). A secret's directory that
   holds one counts too (`AUTH_ROOT=/data/auth` with `CLI_SANDBOX_WRITABLE=/data/auth/sub`), and so does a path with
   a `..` part, wherever it resolves: Linux reads the `..` after any link before it, which a CLI may have made
   (`AUTH_ROOT=/data/cli-home/slot/../../auth` is the `auth` in the directory two levels above wherever `slot` points,
