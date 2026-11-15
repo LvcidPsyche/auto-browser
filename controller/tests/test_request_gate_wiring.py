@@ -734,6 +734,11 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         )
         method, _ = await cdp.wait_for_reply("r1")
         self.assertEqual(method, "Fetch.failRequest")
+        # The failed close undid its "ending" mark: a later loss of the gate is one.
+        cdp.emit("close", cdp)
+        await self._settled()
+        events = [c.kwargs.get("event_type") for c in self.manager.audit.append.await_args_list]
+        self.assertIn("request_gate_lost", events)
 
     async def test_f1_an_owned_browser_whose_close_takes_its_gate_down_reports_no_loss(self) -> None:
         self._isolated()
@@ -1212,6 +1217,11 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         )
         method, _ = await replacement.wait_for_reply("r1")
         self.assertEqual(method, "Fetch.failRequest")
+        # The failed disconnect undid its "ending" mark: a later loss of the replacement gate is one too.
+        replacement.emit("close", replacement)
+        await self._settled()
+        events = [c.kwargs.get("event_type") for c in self.manager.audit.append.await_args_list]
+        self.assertEqual(events.count("request_gate_lost"), 2, events)
 
     async def test_s2_a_shadow_rollback_whose_context_close_never_settles_still_returns_and_closes(self) -> None:
         from app.browser.services import sessions as sessions_module

@@ -467,6 +467,15 @@ async def test_a_gate_session_that_detaches_on_its_own_is_reported_lost(harness:
     assert harness.lost == [harness.gate]
 
 
+async def test_an_ending_undone_after_a_failed_close_leaves_a_later_detach_a_loss(harness: Harness) -> None:
+    harness.gate.ending()
+    harness.gate.ending(False)  # the close failed: the browser, and the gate's session, are still there
+
+    harness.cdp.emit("close", harness.cdp)
+
+    assert harness.lost == [harness.gate]
+
+
 async def test_a_deliberate_detach_is_not_a_loss(harness: Harness) -> None:
     await harness.gate.detach()
 
