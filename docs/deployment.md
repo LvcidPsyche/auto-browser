@@ -634,8 +634,8 @@ What the sandbox does not stop, and what does not work under it:
 - **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the
   next CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller
   takes only as a regular file of at most 1 MiB and never through a link at its own name, and Codex's `config.toml`,
-  which the controller reads for the paths it names. The temp directories are shared with the controller's own
-  children: the OCR's input image is there while it runs.
+  which the controller reads the same way for the paths it names. The temp directories are shared with the
+  controller's own children: the OCR's input image is there while it runs.
 - **What the controller's user can read outside `/data`, and the sockets it can connect to.** With the isolation
   overlay that includes the Docker socket.
 - **Truncation, on a kernel older than 6.2.** Landlock could not deny `truncate` before its third ABI. There a CLI
