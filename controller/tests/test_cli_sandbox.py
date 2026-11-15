@@ -779,6 +779,18 @@ def test_cli_sandbox_writable_takes_absolute_paths_in_the_data_directory_and_out
     assert Settings(_env_file=None).cli_sandbox_writable_paths == []
 
 
+def _readlink_from(links: dict[str, str]):
+    """os.readlink over ``links``, each a link's path to its target: any other path is no link, and Linux answers
+    EINVAL."""
+
+    def readlink(path: str) -> str:
+        if path not in links:
+            raise OSError(errno.EINVAL, os.strerror(errno.EINVAL), path)
+        return links[path]
+
+    return readlink
+
+
 @pytest.fixture
 def linux_paths(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """app.cli_sandbox's paths as Linux has them, on any host: posixpath and PurePosixPath, /data the root and /tmp
@@ -801,7 +813,7 @@ def linux_paths(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         join=posixpath.join,
         expanduser=lambda path: "/home/controller",
     )
-    monkeypatch.setattr(cli_sandbox, "os", SimpleNamespace(path=paths))
+    monkeypatch.setattr(cli_sandbox, "os", SimpleNamespace(path=paths, readlink=_readlink_from(links)))
     monkeypatch.setattr(cli_sandbox, "Path", PurePosixPath)
     monkeypatch.setattr(cli_sandbox, "PROTECTED_ROOT", "/data")
     monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ("/tmp",))
@@ -911,7 +923,7 @@ def linux_links(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         join=posixpath.join,
         expanduser=lambda path: disk.home,
     )
-    monkeypatch.setattr(cli_sandbox, "os", SimpleNamespace(path=paths))
+    monkeypatch.setattr(cli_sandbox, "os", SimpleNamespace(path=paths, readlink=_readlink_from(disk.links)))
     monkeypatch.setattr(cli_sandbox, "Path", PurePosixPath)
     monkeypatch.setattr(cli_sandbox, "PROTECTED_ROOT", "/data")
     monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ("/tmp", "/var/tmp", "/dev"))
@@ -1112,6 +1124,91 @@ async def test_an_entry_of_cli_sandbox_writable_in_tmp_that_is_a_link_elsewhere_
     (line,) = lines
     assert "CLI_SANDBOX_WRITABLE names /tmp/out, which resolves to /opt/toolcache" in line
     assert "not given it to write" in line
+
+
+@pytest.mark.parametrize(
+    "links, given",
+    [
+        ({"/opt/x": "/tmp/sub/inner", "/tmp/sub/inner": "/target"}, False),
+        ({"/opt/x": "../tmp/sub/inner", "/tmp/sub/inner": "/target"}, False),
+        ({"/opt/x": "/data/cli-home/slot", "/data/cli-home/slot": "/target"}, False),
+        ({"/opt/x": "/tmp/sub/../../target"}, False),
+        ({"/opt/x": "/srv/inner", "/srv/inner": "/target"}, True),
+    ],
+    ids=[
+        "to a link in /tmp",
+        "to a link in /tmp, written relative",
+        "to a link in the CLI home",
+        "through a directory in /tmp, with a '..' after it",
+        "through no directory a CLI may write",
+    ],
+)
+async def test_an_entry_of_cli_sandbox_writable_that_resolves_through_a_place_a_cli_may_write_is_not_given(
+    linux_links, caplog, links: dict[str, str], given: bool
+) -> None:
+    # An operator's link, outside every directory a CLI may write, to a place a CLI may change on the way to its
+    # target: the CLI chooses where the entry leads, and so which directory the next call is given to write
+    # (/tmp/sub/inner made a link to the controller's code, say). Neither the entry as written nor where it leads now
+    # lies in /tmp; each place Linux looks up on the way does.
+    linux_links.dirs |= {"/target", "/tmp/sub", "/srv"}
+    linux_links.links.update(links)
+    env = {"HOME": "/data/cli-home"}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(CLI_SANDBOX_WRITABLE="/opt/x"), "/data/cli-home", env)
+        required = await _launch_on_linux(
+            _linux_settings(CLI_SANDBOX_WRITABLE="/opt/x", CLI_SANDBOX_REQUIRED="true"), "/data/cli-home", env
+        )
+
+    expected = ["/data/cli-home", "/tmp", "/var/tmp", "/dev", *(["/target"] if given else [])]
+    assert _given_to_write(command) == _given_to_write(required) == expected
+    lines = _written(caplog)
+    if given:
+        assert lines == []
+        return
+    (line,) = lines
+    assert "CLI_SANDBOX_WRITABLE names /opt/x, which resolves to /target, which no directory given" in line
+
+
+async def test_a_cli_home_that_resolves_through_a_link_in_tmp_is_refused_and_required_refuses(
+    linux_links, caplog
+) -> None:
+    # /tmp takes the home's place, as it does a home written in /tmp that is a link elsewhere.
+    linux_links.dirs |= {"/srv/h", "/tmp/sub"}
+    linux_links.links.update({"/opt/cli-home": "/tmp/sub/h", "/tmp/sub/h": "/srv/h"})
+    env = {"HOME": "/opt/cli-home"}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(), "/opt/cli-home", env)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), "/opt/cli-home", env)
+
+    assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
+    (line,) = _written(caplog)
+    assert "CLI_HOME /opt/cli-home resolves to /srv/h, which no directory given" in line
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a symbolic link takes a privilege on Windows, and Landlock is Linux's")
+async def test_an_entry_that_resolves_through_a_link_in_a_temp_directory_is_not_given_where_the_link_leads(
+    data, monkeypatch, caplog
+) -> None:
+    # The same on this host's file system: an operator's link outside the temp directory to a link in it.
+    _probe_says(monkeypatch, None)
+    (temp,) = _directories(data.outside / "tmp")
+    monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", (temp,))
+    target = Path(_directories(data.outside / "target")[0])
+    Path(temp, "sub").mkdir()
+    Path(temp, "sub", "inner").symlink_to(target, target_is_directory=True)
+    entry = data.outside / "opt" / "x"
+    entry.parent.mkdir()
+    entry.symlink_to(Path(temp, "sub", "inner"), target_is_directory=True)
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, CLI_SANDBOX_WRITABLE=str(entry)), data)
+
+    assert _given_to_write(command) == [str(data.home), temp]
+    (line,) = _written(caplog)
+    assert f"CLI_SANDBOX_WRITABLE names {entry}, which resolves to {target}, which no directory given" in line
 
 
 @pytest.mark.parametrize(

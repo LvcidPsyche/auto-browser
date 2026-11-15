@@ -73,6 +73,8 @@ LAUNCHER = str(Path(__file__).with_name("cli_sandbox_launcher.py"))
 SHARED_WRITABLE = ("/tmp", "/var/tmp", "/dev")  # noqa: S108 - directories a CLI may write, no file made in them
 # The variables of the CLI's environment that name its temp directories.
 TEMP_VARIABLES = ("TMPDIR", "TEMP", "TMP")
+# The links Linux follows in one path before it answers ELOOP (its MAXSYMLINKS).
+_LINKS_FOLLOWED = 40
 # The settings that say where a secret of the controller's is kept, by the name each has in the environment.
 SECRET_PATH_SETTINGS = {
     "api_token_file": "API_TOKEN_FILE",
@@ -216,15 +218,42 @@ def _ways(path: str) -> tuple[str, str]:
     return _as_written(path), os.path.realpath(path)
 
 
+def _steps(path: str) -> list[str]:
+    """Each place Linux looks up on its way to where ``path`` leads: each part of it after where the parts before it
+    led, and so each part of a link's target in turn, a link there among them. A CLI that may write where one of them
+    lies chooses what is there, and so where ``path`` leads, though neither ``path`` nor where it leads lies there
+    (an operator's link to a link in /tmp)."""
+    resolved, *parts = Path(path).parts
+    pending, steps, followed = parts[::-1], [], 0
+    while pending and followed <= _LINKS_FOLLOWED:
+        part = pending.pop()
+        if part == "..":
+            resolved = str(Path(resolved).parent)
+            continue
+        step = _as_written(os.path.join(resolved, part))
+        steps.append(step)
+        try:
+            target = Path(os.readlink(step))
+        except OSError:  # no link there: Linux looks the next part up in it
+            resolved = step
+            continue
+        followed += 1
+        if target.is_absolute():
+            resolved = target.anchor
+        pending += target.parts[1 if target.is_absolute() else 0 :][::-1]
+    return steps
+
+
 def _lies_in(place: tuple[str, str], directory: tuple[str, str]) -> bool:
     """Whether ``place`` is ``directory`` or lies in it, each as written or once resolved, and ``place`` also with
-    each leading part of it resolved and the rest as written: a link part-way along it (an alias such as /var/tmp
-    linked to /tmp, which _writable keeps only resolved, or an operator's) can lead into ``directory``, where what
-    lies past the link is the CLI's to swap."""
+    each leading part of it resolved and the rest as written, or at any of its _steps: a link part-way along it (an
+    alias such as /var/tmp linked to /tmp, which _writable keeps only resolved, or an operator's), or along a link's
+    target, can lead into ``directory``, where what lies past the link is the CLI's to swap."""
     written, real = place
     parts = Path(written).parts
     leads = [os.path.join(os.path.realpath(Path(*parts[:end])), *parts[end:]) for end in range(2, len(parts))]
-    return any(Path(mine).is_relative_to(theirs) for mine in (written, real, *leads) for theirs in directory)
+    places = (written, real, *leads, *_steps(written))
+    return any(Path(mine).is_relative_to(theirs) for mine in places for theirs in directory)
 
 
 def _not_given(kind: str, written: str, real: str) -> str:
