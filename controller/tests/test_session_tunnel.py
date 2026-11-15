@@ -591,6 +591,8 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             broker = await self._started_broker(Path(tempdir))
             tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
             tunnel.process = FakeProcess()
+            broker._tunnels["session-1"] = tunnel  # as provision() leaves it: release() tears down only what it tracks
+            broker._allocated_ports.add(16181)
             heartbeat = asyncio.create_task(slow_to_die())
             await asyncio.sleep(0)
             tunnel.heartbeat_task = heartbeat
@@ -920,6 +922,67 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(processes), 2)
                 finally:
                     await broker.release(newer)  # its log is open, which a Windows temp dir cannot remove
+
+    async def test_a_tunnel_whose_teardown_raised_is_torn_down_by_a_later_release(self) -> None:
+        """A teardown that raised before its bookkeeping leaves the tunnel tracked and its port reserved: shutdown, or
+        the next close, tries again, as before X3-2's guard, which ended a second release however the first went."""
+        processes: list[FakeProcess] = []
+
+        async def fake_exec(*args, **kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec):
+                tunnel = await broker.provision("session-1", local_port=6080)
+            with patch.object(processes[0], "terminate", side_effect=[PermissionError("denied"), None]):
+                with self.assertRaises(PermissionError):
+                    await broker.release(tunnel)
+                self.assertIs(broker._tunnels["session-1"], tunnel)
+
+                await asyncio.wait_for(broker.shutdown(), timeout=10)
+
+            self.assertEqual(broker._tunnels, {})
+            self.assertEqual(broker._allocated_ports, set())
+            self.assertEqual(tunnel.status, "inactive")
+
+    async def test_a_release_of_a_tunnel_given_up_while_it_started_leaves_a_newer_tunnel_reserved(self) -> None:
+        """shutdown() lists the tunnels it releases before it releases them: one given up meanwhile (its provision
+        cancelled in the grace period) is released from that list after a newer tunnel took its port, as X3-2's second
+        release was."""
+        real_sleep = asyncio.sleep
+        in_grace = asyncio.Event()
+
+        async def gated_sleep(delay, *args):
+            if delay != _GRACE:
+                return await real_sleep(delay, *args)
+            in_grace.set()
+            await asyncio.Event().wait()  # until cancelled
+
+        async def fake_exec(*args, **kwargs):
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir), ports=1)
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec):
+                with patch("app.session_tunnel.asyncio.sleep", new=gated_sleep):
+                    provision = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                    await asyncio.wait_for(in_grace.wait(), timeout=10)
+                    given_up = broker._tunnels["session-1"]
+                    provision.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await provision
+                newer = await broker.provision("session-2", local_port=6080)
+                try:
+                    self.assertEqual(newer.remote_port, given_up.remote_port)
+
+                    await asyncio.wait_for(broker.release(given_up), timeout=10)
+
+                    self.assertEqual(broker._allocated_ports, {newer.remote_port})
+                    self.assertIs(broker._tunnels["session-2"], newer)
+                finally:
+                    await broker.release(newer)
 
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
