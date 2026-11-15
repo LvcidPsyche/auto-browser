@@ -262,6 +262,11 @@ taken out; nothing they cover changes.
   close of a session's own browser, or the disconnect of a shared one, fails, the mark is undone, and a later loss of
   the gate closes the browser's sessions as any loss does. No test took a failed close on to a later loss; without
   the undo the loss went unreported, and what the browser's pages then loaded by themselves was no longer gated.
+- **A governed tool call's approval counts only while the call holds it.** A change the gateway makes itself under
+  such an approval, `browser.set_cookies` say, names the approval in its witness receipt, and a click run under it
+  skips the read of its target that the fast profile makes. A task that outlives the call keeps the released hold in
+  its copy of the context, and runs under no approval. A test held this for an action's approval, and none for a
+  tool call's: one that went on counting there passed.
 
 ## [1.18.0] — 2026-11-14
 
