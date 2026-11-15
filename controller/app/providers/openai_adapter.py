@@ -5,8 +5,11 @@ import errno
 import json
 import logging
 import os
+import secrets
+import shutil
 import stat
 import tempfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -38,16 +41,18 @@ _DECISION_FILE_FLAGS = (
 )
 
 
-def _decision_file_bytes(path: Path) -> tuple[bytes | None, str]:
-    """What is at ``path`` and "", where it is a regular file of at most CLI_STDOUT_LIMIT_BYTES that is itself there;
-    (None, "") where nothing is there; otherwise (None, what is there instead), for the log.
+def _decision_file_bytes(
+    path: Path | str, opener: Callable[[Path | str, int], int] = os.open
+) -> tuple[bytes | None, str]:
+    """What is at ``path`` (opened by ``opener``) and "", where it is a regular file of at most CLI_STDOUT_LIMIT_BYTES
+    that is itself there; (None, "") where nothing is there; otherwise (None, what is there instead), for the log.
 
     The call's directory and the CLI home are the CLI's to write, and the controller is not under the CLI sandbox: a
     link there could name a file the CLI cannot open, and a FIFO would hold the event loop until something writes to
     it.
     """
     try:
-        fd = os.open(path, _DECISION_FILE_FLAGS)
+        fd = opener(path, _DECISION_FILE_FLAGS)
     except FileNotFoundError:
         return None, ""
     except OSError as exc:
@@ -82,9 +87,13 @@ def _codex_root_allowed(expected: PurePosixPath, cli_home: PurePosixPath) -> boo
     return len(expected.parts) == _HOME_ROOT_PARTS and expected.parts[:2] == ("/", "home")
 
 
-# Where the OS opens, makes and links relative to an open directory (not Windows), a root in the CLI home is made part
-# by part from the home's descriptor; elsewhere by its path, as before.
-_LINKS_BY_DESCRIPTOR = {os.open, os.mkdir, os.symlink} <= os.supports_dir_fd
+# Where the OS opens, makes and links relative to an open directory, and removes a tree that way (not Windows), what
+# the controller makes in the CLI home (a Codex call's directory, a root the codex config names) is made from the
+# descriptor of the directory it goes in; elsewhere by its path, as before.
+_BY_DESCRIPTOR = {os.open, os.mkdir, os.symlink} <= os.supports_dir_fd and shutil.rmtree.avoids_symlink_attacks
+# The home is only made in and opened from, which O_PATH (Linux) allows without the right to list it: a home the
+# controller may write and enter but not list takes a call's directory, as it did when that was made by path.
+_HOME_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0)
 _PART_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -95,7 +104,7 @@ def _link_in_cli_home(cli_home: str, parts: tuple[str, ...], target: Path) -> st
     The CLI writes its home, and the controller is not under the CLI sandbox: a part the CLI made a link, or put back
     as one after the controller made it, would have the controller make directories where the CLI cannot. Each part is
     opened from the one before it and never through a link, and what is made is made in the directory opened."""
-    fd = os.open(cli_home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(cli_home, _HOME_FLAGS)
     try:
         for name in parts[:-1]:
             try:
@@ -118,6 +127,58 @@ def _link_in_cli_home(cli_home: str, parts: tuple[str, ...], target: Path) -> st
         return ""
     finally:
         os.close(fd)
+
+
+class _CallDirectory:
+    """A Codex call's working directory in the CLI home, made at once as tempfile.TemporaryDirectory makes one:
+    ``name`` is its path, which the CLI is given, and ``with`` gives the name and removes the directory after. What
+    the controller makes and reads in it, it opens with ``open``.
+
+    A CLI working in the home meanwhile (another call's) can move this directory aside and leave a link at its name,
+    to a place the CLI sandbox keeps it out of, and the controller is not under the sandbox. So on POSIX the directory
+    is made from a descriptor of the home, ``open`` opens from a descriptor of the directory made (wherever it has been
+    moved to, never through what is at its name), and it is removed without following a link. Windows has no such
+    descriptors: there it is made, opened and removed by its path, as before.
+    """
+
+    def __init__(self, home: str) -> None:
+        if not _BY_DESCRIPTOR:
+            self._by_path: tempfile.TemporaryDirectory[str] | None = tempfile.TemporaryDirectory(dir=home)
+            self.name = self._by_path.name
+            return
+        self._by_path = None
+        self._home = os.open(home, _HOME_FLAGS)
+        try:
+            self._entry = f"tmp{secrets.token_hex(8)}"
+            os.mkdir(self._entry, 0o700, dir_fd=self._home)
+            self._fd = os.open(self._entry, _PART_FLAGS, dir_fd=self._home)
+        except BaseException:
+            os.close(self._home)
+            raise
+        self.name = os.path.join(home, self._entry)
+
+    def open(self, name: Path | str, flags: int, mode: int = 0o777) -> int:
+        """os.open of ``name`` in this directory."""
+        if self._by_path is not None:
+            return os.open(os.path.join(self.name, name), flags, mode)
+        return os.open(name, flags, mode, dir_fd=self._fd)
+
+    def __enter__(self) -> str:
+        return self.name
+
+    def __exit__(self, *_: object) -> None:
+        if self._by_path is not None:
+            self._by_path.cleanup()
+            return
+        os.close(self._fd)
+        try:
+            shutil.rmtree(self._entry, dir_fd=self._home)
+        except OSError as exc:
+            # A link left at its name, which rmtree refuses, or what a CLI left there that cannot be removed: the call's
+            # outcome stands.
+            logger.warning("a Codex call's directory in the CLI home was not removed: %s", error_text_for_log(exc))
+        finally:
+            os.close(self._home)
 
 
 try:
@@ -308,14 +369,20 @@ class OpenAIAdapter(BaseProviderAdapter):
             resume_checkpoints=resume_checkpoints,
             include_schema=False,
         )
-        with self._call_directory() as tempdir:
+        directory = self._call_directory()
+        with directory as tempdir:
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
             try:
                 # Made, never written through: the CLI of a call that runs at the same time can write in this
                 # directory, and what it put at this name could be a link to a file of its choosing.
-                with schema_path.open("x", encoding="utf-8") as schema:
+                with open(
+                    schema_path.name,
+                    "x",
+                    encoding="utf-8",
+                    opener=lambda name, flags: directory.open(name, flags, 0o666),
+                ) as schema:
                     schema.write(json.dumps(self.strict_action_schema, ensure_ascii=False))
             except FileExistsError:
                 logger.warning("something was at the schema file's name in a new Codex call's directory: no call made")
@@ -354,7 +421,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             result = await self.run_cli(
                 command=command, input_text=prompt, cwd=tempdir, image_path=observation.get("screenshot_path")
             )
-            written, instead = _decision_file_bytes(output_path)
+            written, instead = _decision_file_bytes(output_path.name, directory.open)
             if instead:
                 logger.warning("the Codex call's decision file is %s, and is not read", instead)
                 # As a reply that cannot be parsed fails, naming no path and nothing of what is there.
@@ -369,7 +436,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 raw_text=raw_text,
             )
 
-    def _call_directory(self) -> tempfile.TemporaryDirectory[str]:
+    def _call_directory(self) -> _CallDirectory:
         """The directory one Codex call works in, under the CLI home and not the shared system temp dir, whose other
         users could plant config in a parent.
 
@@ -379,7 +446,7 @@ class OpenAIAdapter(BaseProviderAdapter):
         """
         home = self.effective_cli_home()
         try:
-            return tempfile.TemporaryDirectory(dir=home)
+            return _CallDirectory(home)
         except OSError as exc:
             logger.error(
                 "could not make a working directory under the CLI home %s: %s: %s",
@@ -528,7 +595,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                     expected_codex_home.as_posix(),
                 )
                 continue
-            if _LINKS_BY_DESCRIPTOR and cli_home_posix in expected.parents:
+            if _BY_DESCRIPTOR and cli_home_posix in expected.parents:
                 try:
                     refused = _link_in_cli_home(cli_home, expected.relative_to(cli_home_posix).parts, actual_codex_home)
                 except (OSError, ValueError) as exc:

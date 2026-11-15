@@ -370,7 +370,7 @@ async def test_a_per_call_directory_that_cannot_be_made_raises_one_error_that_na
         adapter.run_cli = AsyncMock()
 
         with (
-            patch("app.providers.openai_adapter.tempfile.TemporaryDirectory", side_effect=failure),
+            patch("app.providers.openai_adapter._CallDirectory", side_effect=failure),
             caplog.at_level(logging.ERROR, "app.providers.openai_adapter"),
             pytest.raises(RuntimeError) as caught,
         ):
