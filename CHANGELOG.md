@@ -6,7 +6,27 @@ All notable changes to auto-browser are documented here.
 
 ## [1.18.1]
 
-TODO-INTRO
+A security patch over 1.18.0, from the findings the reviews of 1.18.0 left open. Codex works again under
+`docker-compose.host-subscriptions.yml`, where every call had failed since 1.15.0, and its readiness now checks that it
+can make its call directory. The controller no longer follows what a provider CLI leaves in its own home: a FIFO or a
+link at Codex's `config.toml`, a link in a path the config names, a call directory moved aside. The CLI sandbox now
+checks where the controller keeps its stores, and its own code, as it checks its secrets, follows the links on the
+way to each path, and quotes the paths it logs. A token in `BROWSER_WS_ENDPOINT`'s query, userinfo or fragment no
+longer reaches the log. `browser.get_local_storage` reads in the controller's isolated world and bounds its answer;
+the TOTP autofill presses no Enter on a page that left its host while the code was typed; a share link minted without
+a lifetime lives `SHARE_TOKEN_TTL_MINUTES`; and a tunnel released twice no longer frees a newer tunnel's port. The
+release workflow and audit refuse a CI count they cannot read, a lock that pins nothing, an advisory they cannot read
+and more secret shapes.
+
+Read the upgrade notes first: a copy of the host-subscription override kept outside this repository needs the new
+tmpfs entry; with `CLI_SANDBOX_REQUIRED=true`, a store outside `/data`, a host run from a checkout or virtualenv a CLI
+may write, or a writable entry or `CLI_HOME` reached through such a place now stops provider CLIs; a Codex
+`config.toml` that is a link or larger than 1 MiB is not read; a share link minted without a lifetime follows
+`SHARE_TOKEN_TTL_MINUTES` where that is not 60; and every `browser.get_local_storage` answer carries `truncated`.
+
+The controller image changes, and the browser-node image in how it redacts an endpoint it prints; the LangChain
+package changes in its error redaction; the client and MCP bridge packages change only in version. Advisories:
+GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
 
 ### Upgrade notes
 
