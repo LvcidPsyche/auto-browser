@@ -592,8 +592,9 @@ class Settings(BaseSettings):
     @field_validator("share_token_ttl_minutes")
     @classmethod
     def _share_link_default_at_most_a_links_life(cls, value: int) -> int:
-        # A longer default would mint links that outlive their revocations (SHARE_TOKEN_MAX_TTL_SECONDS). Read as the
-        # longest, not refused: a start with a longer value worked before 1.18.1, when the setting was never applied.
+        # A link minted without a lifetime lives no longer than a caller may ask for (SHARE_TOKEN_MAX_TTL_SECONDS). Read
+        # as the longest, not refused: a start with a longer value worked before 1.18.1, when the setting was never
+        # applied.
         longest = SHARE_TOKEN_MAX_TTL_SECONDS // 60
         if value > longest:
             logger.warning(
