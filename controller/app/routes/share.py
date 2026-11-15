@@ -78,9 +78,11 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
 
-        ttl_minutes = payload.ttl_minutes if payload is not None else 60
+        # None, with no body or no ttl_minutes in it: the deployment's default (SHARE_TOKEN_TTL_MINUTES).
+        ttl_minutes = payload.ttl_minutes if payload is not None else None
+        ttl_seconds = None if ttl_minutes is None else ttl_minutes * 60
         try:
-            return await mint_share_token(share_manager, manager.audit, session_id, ttl_seconds=ttl_minutes * 60)
+            return await mint_share_token(share_manager, manager.audit, session_id, ttl_seconds=ttl_seconds)
         except ShareRevocationStoreError as cause:
             raise HTTPException(status_code=503, detail=error_text(cause)) from None
         except ShareAuditError:

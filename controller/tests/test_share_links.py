@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app import session_share
+from app.config import Settings
 from app.models import McpToolCallRequest
 from app.rate_limits import SlidingWindowRateLimiter
 from app.routes import share as share_routes
@@ -29,7 +30,13 @@ from app.routes.share import (
     SHARE_POLL_WINDOW_SECONDS,
     create_share_router,
 )
-from app.session_share import SHARE_MINTED_EVENT, SHARE_VIEWED_EVENT, SessionShareManager, token_digest
+from app.session_share import (
+    SHARE_MINTED_EVENT,
+    SHARE_TOKEN_MAX_TTL_SECONDS,
+    SHARE_VIEWED_EVENT,
+    SessionShareManager,
+    token_digest,
+)
 from app.tool_gateway import McpToolGateway
 
 SESSION_ID = "session-1"
@@ -224,6 +231,61 @@ class McpMintAuditTests(unittest.IsolatedAsyncioTestCase):
         answered = json.dumps(response.model_dump(), default=str)
         self.assertIn("Tool execution failed", answered)
         self.assertNotIn("utf-8", answered)
+
+
+class DefaultLifetimeTests(_Links):
+    """A mint that names no lifetime gets the deployment's (SHARE_TOKEN_TTL_MINUTES): the manager's, 10 minutes here.
+    Before 1.18.1 the route and the tool's input each put 60 in its place, and the setting never applied."""
+
+    def test_a_mint_over_rest_that_names_no_lifetime_has_the_deployments(self) -> None:
+        for name, body in (
+            ("no body", {}),
+            ("an empty body", {"json": {}}),
+            ("a null", {"json": {"ttl_minutes": None}}),
+        ):
+            with self.subTest(name):
+                response = self.client.post(f"/sessions/{SESSION_ID}/share", **body)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["expires_in_seconds"], 10 * 60)
+
+    def test_a_mint_over_rest_that_names_one_has_it(self) -> None:
+        response = self.client.post(f"/sessions/{SESSION_ID}/share", json={"ttl_minutes": 5})
+
+        self.assertEqual(response.json()["expires_in_seconds"], 5 * 60)
+
+    def test_a_mint_over_mcp_that_names_no_lifetime_has_the_deployments(self) -> None:
+        manager = _manager(Path("unused.png"))
+        gateway = McpToolGateway(
+            manager=manager,
+            orchestrator=SimpleNamespace(),
+            job_queue=SimpleNamespace(),
+            tool_profile="full",
+            share_manager=SessionShareManager(secret=SECRET, ttl_minutes=10),
+        )
+
+        response = asyncio.run(
+            gateway.call_tool(McpToolCallRequest(name="browser.share_session", arguments={"session_id": SESSION_ID}))
+        )
+
+        self.assertFalse(response.isError, response.content)
+        self.assertEqual(response.structuredContent["expires_in_seconds"], 10 * 60)
+
+    def test_a_setting_longer_than_a_link_may_live_is_read_as_the_longest_with_a_warning(self) -> None:
+        longest = SHARE_TOKEN_MAX_TTL_SECONDS // 60
+        with patch.dict(os.environ, {"SHARE_TOKEN_TTL_MINUTES": str(longest)}):
+            self.assertEqual(Settings(_env_file=None).share_token_ttl_minutes, longest)
+
+        with (
+            patch.dict(os.environ, {"SHARE_TOKEN_TTL_MINUTES": str(longest + 1)}),
+            self.assertLogs("app.config", level="WARNING") as logs,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.share_token_ttl_minutes, longest)
+        (warning,) = logs.output
+        self.assertIn(f"SHARE_TOKEN_TTL_MINUTES={longest + 1}", warning)
+        self.assertIn(f"{longest} minutes", warning)
 
 
 class FirstViewAuditTests(_Links):

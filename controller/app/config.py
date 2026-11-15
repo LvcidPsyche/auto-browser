@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 import posixpath
@@ -12,7 +13,10 @@ from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .browser_sandbox import SECCOMP_PROFILE_PATH
+from .session_share import SHARE_TOKEN_MAX_TTL_SECONDS
 from .stealth.fingerprint import CHROME_UA_POOL
+
+logger = logging.getLogger(__name__)
 
 # The one place the Anthropic API base is written. It ends in /v1: every caller appends "/messages".
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
@@ -500,6 +504,7 @@ class Settings(BaseSettings):
 
     # Shared session links
     share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET", repr=False)
+    # The life of a link whose mint names none. One longer than a link may live is read as that, with a warning.
     share_token_ttl_minutes: int = Field(60, alias="SHARE_TOKEN_TTL_MINUTES")
     # Which sessions' links were revoked, and up to which stamp (DELETE /sessions/{id}/share): kept so a restart does
     # not bring a revoked link back.
@@ -582,6 +587,22 @@ class Settings(BaseSettings):
                 f"MESH_TIMESTAMP_WINDOW must be more than 0 and at most {MESH_TIMESTAMP_WINDOW_MAX_SECONDS:g} seconds, "
                 f"got {value!r}"
             )
+        return value
+
+    @field_validator("share_token_ttl_minutes")
+    @classmethod
+    def _share_link_default_at_most_a_links_life(cls, value: int) -> int:
+        # A longer default would mint links that outlive their revocations (SHARE_TOKEN_MAX_TTL_SECONDS). Read as the
+        # longest, not refused: a start with a longer value worked before 1.18.1, when the setting was never applied.
+        longest = SHARE_TOKEN_MAX_TTL_SECONDS // 60
+        if value > longest:
+            logger.warning(
+                "SHARE_TOKEN_TTL_MINUTES=%d is longer than a share link may live: a link minted without a lifetime "
+                "lives %d minutes",
+                value,
+                longest,
+            )
+            return longest
         return value
 
     @field_validator("ocr_timeout_seconds")

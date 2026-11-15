@@ -47,8 +47,9 @@ SHARE_MINTED_EVENT = "share_minted"
 SHARE_VIEWED_EVENT = "share_viewed"
 SHARE_REVOKED_EVENT = "share_revoked"
 # The longest life a link is minted with, whoever asks: the request models stop ttl_minutes at it (ShareSessionRequest,
-# ShareSessionInput), and a manager refuses a longer one unless the deployment's own default is longer
-# (SHARE_TOKEN_TTL_MINUTES). A revocation is kept until no link it ended could still be good (max_ttl_seconds).
+# ShareSessionInput), the settings read a longer SHARE_TOKEN_TTL_MINUTES as it (Settings), and a manager refuses a
+# longer one unless its own default is longer. A revocation is kept until no link it ended could still be good
+# (max_ttl_seconds).
 SHARE_TOKEN_MAX_TTL_SECONDS = 24 * 60 * 60
 
 SHARE_REVOCATIONS_UNAVAILABLE = (
@@ -465,9 +466,11 @@ class SessionShareManager:
         return hmac.new(self._secret, data.encode(), hashlib.sha256).hexdigest()[:32]
 
 
-async def mint_share_token(share_manager: Any, audit: Any, session_id: str, *, ttl_seconds: int) -> dict[str, Any]:
+async def mint_share_token(
+    share_manager: Any, audit: Any, session_id: str, *, ttl_seconds: int | None
+) -> dict[str, Any]:
     """Mint a share token and audit it: the one mint behind POST /sessions/{id}/share and browser.share_session,
-    each of which has first checked that its caller may use the session.
+    each of which has first checked that its caller may use the session. ttl_seconds None is the manager's default.
 
     The token is returned only once its stamp is in the store (create_token, in a worker thread: it reads and writes
     the store) and its event is written: a mint whose audit fails raises ShareAuditError, and the token made for it

@@ -306,7 +306,8 @@ class ScreenshotRequest(StrictInputModel):
 
 
 class ShareSessionRequest(StrictInputModel):
-    ttl_minutes: int = Field(default=60, ge=1, le=1440)
+    # None: the deployment's default (SHARE_TOKEN_TTL_MINUTES).
+    ttl_minutes: int | None = Field(default=None, ge=1, le=1440)
 
 
 class ExecuteActionRequest(StrictInputModel):

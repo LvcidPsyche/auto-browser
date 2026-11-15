@@ -1539,7 +1539,8 @@ or to wait for an approval or a takeover, reads `completed` too, and the agent j
 ## Share links
 
 `POST /sessions/{id}/share` (over MCP, `browser.share_session`) mints a link to a live session for someone who holds no
-API token: a signed token that expires after `ttl_minutes` (60 by default, 1440 at most). Whoever holds it can open
+API token: a signed token that expires after `ttl_minutes`, 1440 at most, or `SHARE_TOKEN_TTL_MINUTES` where the request
+names none (60 unless set; a longer setting is read as 1440, with a warning at startup). Whoever holds it can open
 `/share/{token}`, a page that shows the session's screen, URL and title and asks for a new frame every five seconds.
 The link reads nothing else of the session and cannot act on it, and the token is the whole credential: anyone the
 link reaches can watch until it expires or is revoked. Set `SHARE_TOKEN_SECRET`, or links stop working at each restart
@@ -1558,8 +1559,7 @@ does not.
   A link minted before 1.18.0 carries none: it works until it expires, as before, unless its session's links are
   revoked, which ends it too.
 - Revocations are kept in `SHARE_REVOCATION_STORE_PATH` (`/data/share/revocations.json`, written whole, mode `0600`),
-  so a restart does not bring a revoked link back. One is kept at least 24 hours, the longest a link lives, or
-  `SHARE_TOKEN_TTL_MINUTES` where that is longer (no link is minted for longer than 24 hours, whatever it says), and
+  so a restart does not bring a revoked link back. One is kept at least 24 hours, the longest a link lives, and
   dropped by the first revoke after that. The age is read from the controller's clock: a revoke made while the
   clock runs ahead drops revocations that much too soon, and their links work again once it is set right. A restart
   without the file brings back the revoked links that have not expired, and ends every link minted since the file

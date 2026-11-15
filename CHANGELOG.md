@@ -48,6 +48,10 @@ TODO-INTRO
   with a warning that says where it resolves, and such a `CLI_HOME` is said to be refused, as one that is a link in
   `/tmp` was already; with `CLI_SANDBOX_REQUIRED=true` the refused home stops provider CLIs (see Security). Set the
   entry or the home to its real path, or keep the links on its way out of the directories a CLI may write.
+- **A share link minted without a lifetime now lives `SHARE_TOKEN_TTL_MINUTES`, where that is set to other than
+  60.** Such a link lived 60 minutes whatever the setting said (see Fixed); it now lives as long as the setting says,
+  and one set above 1440 is read as 1440, with a warning at startup. A client that wants 60 minutes there asks for
+  `ttl_minutes: 60`.
 
 ### Security
 
@@ -173,6 +177,12 @@ TODO-INTRO
   so nothing was shown; the copy now reads it as the bridges do. The test that holds the copy to the bridges needs the
   client, which the integration's CI job did not install, so it ran in no CI job and missed this; the job now
   installs the client.
+- **A share link minted without a lifetime lives as long as `SHARE_TOKEN_TTL_MINUTES` says.** A mint that named no
+  `ttl_minutes` (`POST /sessions/{id}/share` with no body or without it, `browser.share_session` without it) made a
+  link for 60 minutes whatever the setting said: the route and the tool each put 60 in place of the lifetime not
+  given, so a deployment's own default, a shorter one included, never applied. They now leave it to the setting (60
+  unless set). A setting longer than a link may live, 1440 minutes, is read as 1440, with a warning at startup: a
+  longer one would mint links that outlive the record of their revocation.
 
 ## [1.18.0] — 2026-11-14
 
