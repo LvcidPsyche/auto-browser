@@ -152,6 +152,10 @@ TODO-INTRO
   number (`null`, or nothing) failed the gate's comparison as a test, which the `if` around it read as false, so the
   gate passed and the packages went on to PyPI with no green run read. Such a count now stops the release, as it
   already stopped the image workflow.
+- **The release audit's Python dependency audit fails on a lock that pins nothing for the image.** It hands
+  pip-audit the pins of `controller/constraints.txt` that hold for the image, and pip-audit given none audits
+  nothing and passes: an emptied lock, or one whose every line is for another platform, passed the audit. The audit
+  now stops there and says so.
 
 ## [1.18.0] — 2026-11-14
 

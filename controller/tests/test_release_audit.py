@@ -778,6 +778,28 @@ def test_the_audit_hands_pip_audit_the_image_pins_without_markers(
     ]
 
 
+@pytest.mark.parametrize(
+    "lock",
+    ["", "# via nothing\n", "pywin32==312 ; sys_platform == 'win32'\n"],
+    ids=["empty", "comments-only", "windows-only"],
+)
+def test_the_audit_refuses_a_lock_that_pins_nothing_for_the_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lock: str
+) -> None:
+    # pip-audit given no requirement audits nothing and passes: a lock emptied by mistake, or one whose every line is
+    # for another platform, passed the dependency audit.
+    (tmp_path / "controller").mkdir()
+    (tmp_path / "controller" / "constraints.txt").write_text(lock, encoding="utf-8")
+    calls: list[Call] = []
+    _stub_steps(monkeypatch, tmp_path, calls)
+    _stand_in_for_git_grep(monkeypatch, lambda command, **kwargs: subprocess.CompletedProcess(command, 1, b"", b""))
+    monkeypatch.setattr(release_audit, "ROOT", tmp_path)
+
+    with pytest.raises(SystemExit, match="controller/constraints.txt pins nothing the image installs"):
+        release_audit.main()
+    assert [command for command, *_ in calls if command[1:3] == ["-m", "pip_audit"]] == []
+
+
 def test_the_audit_rejects_a_missing_wheel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     licenses = {name: LICENSE_TEXT for name in LICENSED_WHEELS if name != "auto_browser_client"}
     with pytest.raises(SystemExit, match="auto_browser_client wheel was not built"):
