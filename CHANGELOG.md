@@ -228,6 +228,10 @@ taken out; nothing they cover changes.
   (`POST /approvals/{id}/execute`, `browser.execute_approval`), of a reject that waits on an action that has claimed
   the approval, and of the approve that then withdraws that reject each show a type's text only where its field reads
   as not secret, as the approval's other answers do.
+- **The selector in the log line of a CDP element read that fails.** `GET /sessions/{id}/cdp/element` writes the
+  caller's selector into its warning quoted and cut, so a line break in it starts no line of its own. The test
+  failed the read before the read began; a read that began and then failed, as one with an invalid selector does,
+  writes a line of its own, which no test read.
 
 ## [1.18.0] — 2026-11-14
 
