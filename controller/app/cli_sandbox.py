@@ -26,8 +26,9 @@ Each of these is reported:
   resolves. Closed, not open.
 - the controller's own home, as HOME or its passwd entry names it, is, holds or lies in a directory the CLI may
   write, but for a CLI home in it clear of what the controller reads at its start; or what it reads there (each
-  home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere) is, holds or lies in such a
-  directory, wherever it is. The CLI is started under the launcher.
+  home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere) or its own code (its
+  package with the launcher, its interpreter, its prefixes and its packages) is, holds or lies in such a directory,
+  wherever it is. The CLI is started under the launcher.
 - a setting of SECRET_PATH_SETTINGS or STORE_PATH_SETTINGS names a place that is, once resolved, outside
   PROTECTED_ROOT, or a path that lies in a directory the CLI may write, as written or once resolved (the CLI can
   replace a link written there), or a directory that holds one, or a path with a '..' part (Linux reads it after any
@@ -50,6 +51,7 @@ import os
 import site
 import subprocess
 import sys
+import sysconfig
 import threading
 from pathlib import Path
 
@@ -314,18 +316,29 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
     next start may have another HOME. A directory given that is, holds or lies in either is reported, but for the CLI
     home lying in it away from the places the controller reads at its start: a host run whose CLI_HOME cannot be made
     falls back to a private directory in the user's home (_private_cli_home), and a CLI_HOME set there is the CLI's
-    own. Those places are each home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere:
-    a directory given that is, holds or lies in one of them is reported wherever it is.
+    own. Those places are each home's .ssh and .local, Python's user base, which PYTHONUSERBASE can put anywhere, and
+    the controller's own code: a directory given that is, holds or lies in one of them is reported wherever it is.
     """
     homes = [_ways(home) for home in dict.fromkeys((os.path.expanduser("~"), _passwd_home())) if os.path.isabs(home)]
     read_at_start = [_ways(os.path.join(home[0], name)) for home in homes for name in (".ssh", ".local")]
     read_at_start.append(_ways(site.getuserbase()))
+    # And the code it runs, wherever it is: its package, with the launcher it runs at each call, the interpreter (as
+    # it starts the launcher, and once resolved), its prefixes and its packages. A host run from a checkout or a venv
+    # in /tmp, say.
+    installed = sysconfig.get_paths()
+    code = [str(Path(LAUNCHER).parent), LAUNCHER, sys.executable, sys.prefix, sys.base_prefix]
+    read_at_start += [
+        _ways(path)
+        for path in dict.fromkeys([*code, installed["purelib"], installed["platlib"]])
+        if os.path.isabs(path)
+    ]
     own = _ways(cli_home)
     found = (
         "provider CLIs may write %s under the Landlock sandbox, %s, the controller, which is not under the sandbox, "
-        "may run at its next start, where it is a Python user site or an ssh config. Keep the controller's home, and "
-        "what it reads at its start, out of what CLIs may write: CLI_HOME, CLI_SANDBOX_WRITABLE, the CLI's TMPDIR, "
-        "TEMP and TMP, its HOME where CLI_HOME is blank, and the shared temp directories"
+        "may run at its next start or CLI call, where it is a Python user site, an ssh config or its own code. Keep "
+        "the controller's home, its code and what it reads at its start out of what CLIs may write: CLI_HOME, "
+        "CLI_SANDBOX_WRITABLE, the CLI's TMPDIR, TEMP and TMP, its HOME where CLI_HOME is blank, and the shared temp "
+        "directories"
     )
     for entry, home in ((entry, home) for entry in given for home in homes):
         if _lies_in(home, entry):
@@ -342,7 +355,7 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
         if _lies_in(entry, place) or _lies_in(place, entry):
             return found % (
                 _named(entry),
-                "and the controller reads %s at its start: what a CLI leaves there" % place[0],
+                "and the controller reads %s at its start: what a CLI leaves there" % _named(place),
             )
     return ""
 

@@ -38,6 +38,11 @@ TODO-INTRO
   a directory a CLI may write, ran its CLIs with that store open to them and said nothing. It now gets the sandbox's
   warning, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs (`Provider request failed`). Keep the stores
   under `/data`, as the image does.
+- **With `CLI_SANDBOX_REQUIRED=true`, a host run from a checkout or a venv a CLI may write now stops provider CLIs.**
+  Where the checkout, the virtualenv or the interpreter lies in `/tmp`, `/var/tmp`, `CLI_HOME` or an entry of
+  `CLI_SANDBOX_WRITABLE` (see Security), the CLIs ran, and a CLI could change the code the controller runs. Now the
+  sandbox's warning names the place, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs. Move the checkout
+  and its virtualenv out of those directories.
 
 ### Security
 
@@ -77,6 +82,16 @@ TODO-INTRO
   `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT` are now checked the same way: the warning names each
   one that is left open, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. Kept in their default places under
   `/data`, as in the image, nothing changes.
+- **A CLI can no longer change the controller's own code on a host run from a checkout or a venv it may write.** The
+  launcher that starts each provider CLI under the sandbox is a file of the controller's package, and the
+  controller's interpreter runs it before any ruleset. On a Linux host run whose checkout or virtualenv lies in a
+  directory a CLI may write (`/tmp`, `/var/tmp`, `CLI_HOME`, an entry of `CLI_SANDBOX_WRITABLE`), a sandboxed CLI
+  could add to the launcher, and the next call ran what it added outside the sandbox, with no warning, under
+  `CLI_SANDBOX_REQUIRED=true` too; the same held for the rest of the package, the interpreter and the installed
+  packages at the controller's next start. The sandbox's check of what the controller reads at its start now takes
+  in its own code: its package with the launcher, its interpreter as it was started and once resolved, `sys.prefix`,
+  `sys.base_prefix` and where its packages are installed. Where a CLI may write one of them the warning names it,
+  and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. The image keeps all of these out of what a CLI may write.
 
 ### Fixed
 
