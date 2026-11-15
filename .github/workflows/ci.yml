@@ -107,11 +107,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install langchain integration test dependencies
         # The newest release of each package, as the integration's users get, but only one at least 72 hours old
-        # (R5C-14): uv's --exclude-newer is the hold.
+        # (R5C-14): uv's --exclude-newer is the hold. The client too, which the integration does not need but its
+        # test of the redaction copy against the bridges' does: without it that test skips (R2-4).
         run: |
           python -m pip install uv==0.13.7
           uv pip install --system --exclude-newer "$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
-            -e './integrations/langchain[langchain,dev]'
+            -e './integrations/langchain[langchain,dev]' -e ./client
       - name: Run langchain integration tests
         run: |
           cd integrations/langchain

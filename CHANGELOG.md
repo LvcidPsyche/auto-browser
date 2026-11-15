@@ -166,6 +166,13 @@ TODO-INTRO
   as clear; an entry that was not an object ended the check with a traceback, and a `--from-json` file holding an
   object, not a list, passed. Each of these now blocks the release and says to check the advisories by hand. The
   states it knows are GitHub's five: `triage`, `draft`, `published`, `closed` and `withdrawn`.
+- **The LangChain integration's errors read a wrapped controller URL as the MCP bridges do.** The integration keeps a
+  copy of the bridges' redaction, as it depends on httpx alone. The bridges read the URL as urllib does, without a
+  `<URL:...>` or `<...>` wrapper around it; the copy kept the wrapper, so for such a base URL it left the query's and
+  the fragment's secrets in a text the bridges redact. httpx refuses such a URL, with an error that holds no secret,
+  so nothing was shown; the copy now reads it as the bridges do. The test that holds the copy to the bridges needs the
+  client, which the integration's CI job did not install, so it ran in no CI job and missed this; the job now
+  installs the client.
 
 ## [1.18.0] — 2026-11-14
 
