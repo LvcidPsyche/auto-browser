@@ -18,7 +18,13 @@ import httpx
 from fastapi import FastAPI
 
 from app.action_errors import BrowserActionError
-from app.approvals import ApprovalRequiredError, held_action_approval, held_for_execution, refused_before_effect
+from app.approvals import (
+    ApprovalRequiredError,
+    held_action_approval,
+    held_for_execution,
+    held_tool_call_approval,
+    refused_before_effect,
+)
 from app.models import BrowserActionDecision
 from app.orchestrator import BrowserOrchestrator
 from app.providers.base import ProviderDecision
@@ -788,3 +794,32 @@ class ReceiptStatusTests(SpendBase):
         go.set()
 
         self.assertEqual((inside, await child, under_a_tool_call), (approval_id, None, None))
+
+    async def test_only_a_live_tool_call_hold_names_its_approval_for_the_receipt(self) -> None:
+        # As above, for the gateway's own writes: a task that outlives the call keeps the released hold in its copy of
+        # the context, and runs under no approval.
+        decision, approval_id = await self.approved_click()
+        tool_call = await self.manager.approvals.create_or_reuse_pending(
+            session_id=SESSION,
+            kind="write",
+            reason="Approve browser.set_cookies with {}",
+            action=decision.model_copy(
+                update={"action": "request_human_takeover", "text": "browser.set_cookies sha256:0"}
+            ),
+            origin="tool_call",
+        )
+        await self.manager.approve(tool_call.id)
+        go = asyncio.Event()
+
+        async def once_released() -> str | None:
+            await go.wait()
+            return held_tool_call_approval()
+
+        async with held_for_execution(self.manager.approvals, tool_call.id):
+            inside = held_tool_call_approval()
+            child = asyncio.create_task(once_released())
+        async with held_for_execution(self.manager.approvals, approval_id):
+            under_an_action = held_tool_call_approval()
+        go.set()
+
+        self.assertEqual((inside, await child, under_an_action), (tool_call.id, None, None))
