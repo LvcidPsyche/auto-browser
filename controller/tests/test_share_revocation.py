@@ -25,7 +25,9 @@ from pydantic import ValidationError
 
 import app.main as main_module
 from app import session_share
+from app.app_factory import build_controller_services
 from app.browser_manager import BrowserSession
+from app.config import Settings
 from app.models import McpToolCallRequest, ShareSessionRequest
 from app.routes.share import create_share_router
 from app.session_share import (
@@ -211,6 +213,21 @@ class RevocationStoreTests(_Stores):
         restarted = self.manager(self.path)
         self.assertFalse(restarted.token_info(old)["valid"])
         self.assertTrue(restarted.token_info(kept)["valid"])
+
+    def test_the_controllers_revocations_outlive_its_restart(self) -> None:
+        # The tests above build the manager with a store; the controller's own is built with the services, whose
+        # SHARE_REVOCATION_STORE_PATH alone keeps a revocation past the restart.
+        settings = Settings(SHARE_TOKEN_SECRET=SECRET, SHARE_REVOCATION_STORE_PATH=str(self.path))
+        first = build_controller_services(settings, version="test").share_manager
+        revoked = first.create_token(SESSION_ID)["token"]
+        other = first.create_token("session-2")["token"]
+        first.revoke(SESSION_ID)
+
+        restarted = build_controller_services(settings, version="test").share_manager
+
+        self.assertFalse(restarted.token_info(revoked)["valid"])
+        self.assertTrue(restarted.token_info(other)["valid"])
+        self.assertEqual(set(self.stored()["sessions"]), {SESSION_ID})
 
     def test_after_a_restart_with_the_clock_set_back_a_new_link_is_not_one_a_stored_revocation_ends(self) -> None:
         clock = self.clock()
