@@ -224,6 +224,10 @@ taken out; nothing they cover changes.
   and named "Send code" is cleared by its fuller name only because that name reads as harmless. A fuller name too
   long for the table to read, such as "Delete this repository and all of its contents", is not harmless for that, and
   the click still asks for approval; every test's fuller name was one the table read by itself.
+- **Three more answers that hide a secret field's text.** The answer of an approval executed by its id
+  (`POST /approvals/{id}/execute`, `browser.execute_approval`), of a reject that waits on an action that has claimed
+  the approval, and of the approve that then withdraws that reject each show a type's text only where its field reads
+  as not secret, as the approval's other answers do.
 
 ## [1.18.0] — 2026-11-14
 

@@ -132,6 +132,43 @@ async def test_the_type_retried_with_the_approval_runs_and_its_answers_keep_the_
     assert (await manager.get_approval(asked.approval_id))["status"] == "executed"
 
 
+async def test_an_approval_executed_by_its_id_answers_with_its_text_hidden(tmp_path: Path) -> None:
+    # POST /approvals/{id}/execute and browser.execute_approval answer with the approval they ran, which goes to the
+    # client that executed it: an agent's transcript.
+    asked = await _ask(tmp_path, by="selector", secret=True, kind="account_change")
+    manager, page = asked.manager, asked.manager.sessions["s1"].page
+    await manager.approve(asked.approval_id)
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        result = await manager.execute_approval(asked.approval_id)
+
+    assert "".join(call.args[0] for call in page.keyboard.type.await_args_list) == TEXT
+    assert result["approval"]["action"]["text"] == SECRET
+    assert TEXT not in json.dumps(result, default=str)
+
+
+async def test_a_reject_an_action_holds_and_the_approve_that_withdraws_it_answer_with_its_text_hidden(
+    tmp_path: Path,
+) -> None:
+    # An approval an action has claimed but not begun: a reject waits on the action, and an approve made then
+    # withdraws the reject. Each answers with the approval, through a path of its own.
+    asked = await _ask(tmp_path, by="selector", secret=True, kind="account_change")
+    manager = asked.manager
+    await manager.approve(asked.approval_id)
+    # Claimed in a task of its own, as an action's call claims it; may_give_back as held_for_execution sets it.
+    hold = await asyncio.create_task(manager.approvals.claim_execution(asked.approval_id))
+    assert hold is not None
+    hold.may_give_back = True
+
+    rejected = await manager.reject(asked.approval_id, comment="hold on")
+    withdrawn = await manager.approve(asked.approval_id, comment="go")
+
+    assert "claimed by an action" in rejected["message"]
+    assert "withdrawn" in withdrawn["message"]
+    assert [rejected["action"]["text"], withdrawn["action"]["text"]] == [SECRET, SECRET]
+    assert TEXT not in json.dumps([rejected, withdrawn], default=str)
+
+
 def _post(by: str) -> BrowserActionDecision:
     named = {"selector": "#f"} if by == "selector" else {"element_id": ELEMENT_ID}
     return BrowserActionDecision(action="type", reason="r", text=TEXT, risk_category="post", **named)
