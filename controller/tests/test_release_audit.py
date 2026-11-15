@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from collections.abc import Callable
@@ -20,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+from tests._bash import BASH, NO_BASH_REASON
 
 _REPO = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO / "scripts"
@@ -77,6 +80,32 @@ class ReleaseWorkflowCoverageTests(unittest.TestCase):
         self.assertNotEqual(notes, -1, "the build job does not check for the tag's CHANGELOG section")
         self.assertLess(notes, build.index("python -m build"))
         self.assertIn("    needs: build\n", job("publish-pypi"))
+
+
+def _gate_run(green: str) -> subprocess.CompletedProcess:
+    """The release workflow's gate step, run as GitHub runs a bash step, with a stand-in for gh: the tagged commit is
+    on main, and the count of green ci.yml push runs for it is ``green``."""
+    text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    step = re.search(r"(?m)^  gate:\n(?:.*\n)*?        run: \|\n((?:(?: {10}.*)?\n)+)", text)
+    assert step, "no run block in release.yml's gate job"
+    gh = 'gh() { case "$2" in */compare/*) echo identical ;; *) printf "%s\\n" "$GREEN" ;; esac; }\n'
+    return subprocess.run(
+        [BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", gh + textwrap.dedent(step.group(1))],
+        env={**os.environ, "GREEN": green, "REPO": "o/r", "SHA": "0" * 40, "TAG": "v0.0.0"},
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(not RELEASE_WORKFLOW.is_file(), reason="release workflow is not in this tree")
+@pytest.mark.skipif(BASH is None, reason=NO_BASH_REASON)
+@pytest.mark.parametrize(("green", "passes"), [("1", True), ("0", False), ("null", False), ("", False)])
+def test_the_gate_publishes_only_on_a_count_of_green_runs_it_can_read(green: str, passes: bool) -> None:
+    # `[ "$green" -lt 1 ]` on a count that is not a number (gh's null, or nothing) fails as a test, which an `if` reads
+    # as false: the gate passed, and the packages were published with no green CI run read.
+    result = _gate_run(green)
+    published = "is on main with a successful ci.yml push run" in result.stdout
+    assert (result.returncode == 0, published) == (passes, passes), result.stdout + result.stderr
 
 
 class InspectMcpWheelTests(unittest.TestCase):
