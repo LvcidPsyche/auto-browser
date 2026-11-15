@@ -144,7 +144,9 @@ class InspectMcpWheelTests(unittest.TestCase):
                 self._inspect(self._with_metadata(metadata))
 
     def test_accepts_the_client_by_any_spelling_of_its_name(self) -> None:
-        for requirement in ("auto_browser_client>=1.0.0", "Auto.Browser-Client >= 1.0.0", "auto-browser-client"):
+        # The last a header folded onto a second line, which a metadata header may be.
+        spellings = ("auto_browser_client>=1.0.0", "Auto.Browser-Client >= 1.0.0", "auto-browser-client")
+        for requirement in (*spellings, "auto-browser-client\n >=1.0.0"):
             with self.subTest(requirement):
                 self._inspect(self._with_metadata(GOOD_METADATA.replace("auto-browser-client>=1.0.0", requirement)))
 
