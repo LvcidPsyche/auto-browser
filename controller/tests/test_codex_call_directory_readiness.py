@@ -153,4 +153,4 @@ def test_the_overlay_mounts_a_tmpfs_at_the_cli_home_it_sets() -> None:
     tmpfs = re.search(r"-\s+type:\s*tmpfs\s*\n\s+target:\s*(\S+)", text)
     assert tmpfs and tmpfs.group(1) == cli_home.group(1), "a tmpfs is mounted at exactly CLI_HOME"
     # The host's sign-ins stay read-only inside it.
-    assert text.count("read_only: true") == 4
+    assert text.count("read_only: true") == text.count("- type: bind")

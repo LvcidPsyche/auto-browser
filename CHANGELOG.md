@@ -55,10 +55,8 @@ TODO-INTRO
   request's and the tool's schema is `null`, not 60.
 - **`browser.get_local_storage` reads what the browser holds, and cuts an answer past 1,000,000 characters.** A page's
   own replacement of its storage functions (`Storage.prototype.getItem`, `window.localStorage`) no longer changes what
-  the read returns (see Security). Where the keys and values read, with eight characters more for each entry, would
-  pass 1,000,000 characters, the entry that reaches the bound keeps the start of its value, or is left out when its
-  key does not fit, the entries after it are left out, and `truncated` is `true`; a one-key read cuts its value the
-  same way. Every answer now carries `truncated`. Read a store that large one key at a time.
+  the read returns, and an answer is cut at 1,000,000 characters (see Security). Every answer now carries
+  `truncated`, `true` where something was cut or left out. Read a store that large one key at a time.
 
 ### Security
 
@@ -213,62 +211,15 @@ TODO-INTRO
 
 ### Tests
 
-Guards that held, but that no test would have missed had they been removed. Each test below fails when its guard is
-taken out; nothing they cover changes.
-
-- **The cut of a cookie's name and destination in a write's record.** The audit entry of `browser.set_cookies` names
-  each cookie by its name and its domain or its URL's origin, each cut to 200 characters, as the input model bounds
-  none of them; without the cut a caller's text went whole into the entry.
-- **The kill of a provider CLI whose output passes the cap.** A CLI that writes past `CLI_STDOUT_LIMIT_BYTES` is
-  stopped, and the call refused at once. The test's CLI stopped writing by itself, so it was reaped even with the
-  kill gone; one that writes forever would have outlived its refused call.
-- **A fast-profile click's short label still asks when the button's fuller name is long.** A button drawn as "Send"
-  and named "Send code" is cleared by its fuller name only because that name reads as harmless. A fuller name too
-  long for the table to read, such as "Delete this repository and all of its contents", is not harmless for that, and
-  the click still asks for approval; every test's fuller name was one the table read by itself.
-- **Three more answers that hide a secret field's text.** The answer of an approval executed by its id
-  (`POST /approvals/{id}/execute`, `browser.execute_approval`), of a reject that waits on an action that has claimed
-  the approval, and of the approve that then withdraws that reject each show a type's text only where its field reads
-  as not secret, as the approval's other answers do.
-- **The selector in the log line of a CDP element read that fails.** `GET /sessions/{id}/cdp/element` writes the
-  caller's selector into its warning quoted and cut, so a line break in it starts no line of its own. The test
-  failed the read before the read began; a read that began and then failed, as one with an invalid selector does,
-  writes a line of its own, which no test read.
-- **The TOTP autofill's check after its focus click.** A page that leaves the hosts in `totp_hosts` during the
-  click that focuses the code field gets nothing more: no code, no Enter, and its field is not cleared. The later
-  checks keep the code and Enter off such a page as well, so the test now also asserts that nothing clears the
-  field, which only the check after the click prevents.
-- **The origin check before the dashboard sends its token for a replay's screenshot.** "Open replay" reads each
-  screenshot the replay page names with the API token, and only one under `/artifacts/` on the dashboard's own
-  origin. The test's page named no `/artifacts/` path on another origin, so a dashboard that checked the path alone
-  passed it, and would have sent the token to any origin a page named.
-- **The store of revoked share links the controller is built with.** The controller keeps its share links'
-  revocations in `SHARE_REVOCATION_STORE_PATH`, so that a revoked link stays revoked after a restart. The tests built
-  the share manager with a store themselves; had the controller built its own without one, every revoked link that
-  had not expired would have worked again after the next restart, and no test would have said so.
-- **The bound on the read of a Codex call's `decision.json`.** The controller reads the file on its event loop, and
-  stops one byte past `CLI_STDOUT_LIMIT_BYTES`, which refuses it. The test's file was one byte past the limit, so a
-  read that went on to the end refused it all the same; it now writes eight times the limit and checks that no more
-  than that byte past it is read.
-- **The sandbox flags on each Codex path's `codex exec`.** The tests held the flags that the provider adapter and
-  the host bridge each work out from `CODEX_SANDBOX_MODE` and `CODEX_BRIDGE_ALLOW_HOST_EXEC`, but not that either
-  path puts them on the command line it runs: one that left them off, or ran Codex unsandboxed whatever the settings
-  said, passed every test. Each path's command line is now read for the default, for `workspace-write` and for the
-  opt-in bypass.
-- **The approval store's refusal of an id that leads out of `APPROVAL_ROOT`.** An agent names an approval by its id
-  in `browser.execute_approval` and `browser.reject_approval`, and an id such as `../planted` is refused before any
-  file is read. The test's file outside the root held no valid approval, so the read refused it either way; it now
-  holds one that reads back where it lies, which only that check keeps the store from reading.
-- **A pre-request gate whose browser did not close reports its later loss.** Before the controller closes a browser,
-  its gate is marked as ending, so the close taking the gate's session down is not reported as a loss. Where the
-  close of a session's own browser, or the disconnect of a shared one, fails, the mark is undone, and a later loss of
-  the gate closes the browser's sessions as any loss does. No test took a failed close on to a later loss; without
-  the undo the loss went unreported, and what the browser's pages then loaded by themselves was no longer gated.
-- **A governed tool call's approval counts only while the call holds it.** A change the gateway makes itself under
-  such an approval, `browser.set_cookies` say, names the approval in its witness receipt, and a click run under it
-  skips the read of its target that the fast profile makes. A task that outlives the call keeps the released hold in
-  its copy of the context, and runs under no approval. A test held this for an action's approval, and none for a
-  tool call's: one that went on counting there passed.
+Thirteen guards that held, but that no test would have missed had they been removed, now each have a test that fails
+without them: the cut of a cookie's name and destination in a write's record; the kill of a provider CLI whose output
+passes its cap; the approval a fast-profile click still asks for where the button's fuller name is too long to read;
+a secret field's text hidden in three more approval answers; the selector quoted in the log line of a CDP element read
+that fails; the TOTP autofill's check after its focus click; the dashboard's origin check before it sends its token
+for a replay's screenshot; the store of revoked share links the controller is built with; the bound on the read of a
+Codex call's `decision.json`; the sandbox flags on each Codex path's `codex exec`; the approval store's refusal of an
+id that leads out of `APPROVAL_ROOT`; the loss a pre-request gate reports after its browser failed to close; and a
+governed tool call's approval counting only while the call holds it. Nothing they cover changes.
 
 ## [1.18.0] — 2026-11-14
 
