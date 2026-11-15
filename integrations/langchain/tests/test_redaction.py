@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib.util
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ from auto_browser_langchain import AutoBrowserNode, AutoBrowserTool
 from auto_browser_langchain.auth import resolve_bearer_token
 from auto_browser_langchain.errors import _redacted, raise_for_status
 
+CI_WORKFLOW = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci.yml"
 SECRET_URL = "http://alice:sentinel-pass@auto-browser.test:8000/?key=sentinel-key#sentinel-fragment"
 SHOWN = "Client error '401 Unauthorized' for url 'http://auto-browser.test:8000/"
 OK = {"content": [{"text": "ok"}]}
@@ -244,11 +246,24 @@ class RedactionCopyTests(unittest.TestCase):
                 "POST /mcp?key=sentinel%20value HTTP/1.1",
                 ("http://h/mcp?key=sentinel value", "http://h/mcp?key=sentinel%20value"),
             ),
+            # The URL read as urllib reads it, a <URL:...> or <...> wrapper taken off (R2-4).
+            ("at <URL:http://h/mcp?key=sentinel-key> key sentinel-key", "<URL:http://h/mcp?key=sentinel-key>"),
+            ("at <http://h/mcp#sentinel-frag> sentinel-frag", "<http://h/mcp#sentinel-frag>"),
         )
         for text, url in cases:
             with self.subTest(text=text, url=url):
                 self.assertEqual(_redacted(text, url, token), the_bridges(text, url, token))
                 self.assertNotIn("sentinel", _redacted(text, url, token))
+
+
+@unittest.skipUnless(CI_WORKFLOW.is_file(), "the repository's CI workflow is not in this tree")
+class RedactionCopyRunsInCiTests(unittest.TestCase):
+    def test_the_langchain_job_installs_the_client_the_copy_is_held_to(self) -> None:
+        # RedactionCopyTests skips without the client, which this package does not depend on: the job installed this
+        # package alone, so the test ran in no CI job, and the copy drifted from the bridges unseen (R2-4).
+        job = re.search(r"(?ms)^  langchain-tests:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", CI_WORKFLOW.read_text("utf-8"))
+        self.assertIsNotNone(job, "no langchain-tests job in ci.yml")
+        self.assertRegex(job.group(1), r"-e '?\./client'?\s")
 
 
 class ShortestRedactedQueryValueTests(unittest.TestCase):

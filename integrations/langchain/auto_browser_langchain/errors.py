@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
-from urllib.parse import unquote, unquote_plus
+from urllib.parse import unquote, unquote_plus, unwrap
 
 import httpx
 
@@ -66,10 +66,11 @@ def _secrets_of(url: str | tuple[str, ...], token: str | None) -> set[str]:
     """``url``'s userinfo, password, query, fragment and each query value of _SHORTEST_REDACTED_QUERY_VALUE or more
     characters, as written and percent-decoded (a query's ``+`` as a space too), and ``token``, each also as
     ``repr()`` and ``json.dumps()`` write it, and the Basic credentials httpx sends for the userinfo; for each form of
-    the URL when given several. Cut as a string, so a malformed URL is handled too."""
+    the URL when given several. Cut as a string, so a malformed URL is handled too, once read as urllib reads it
+    (surrounding whitespace and a ``<URL:...>`` wrapper taken off), as the bridges read it."""
     if not isinstance(url, str):
         return set().union(*(_secrets_of(form, token) for form in url))
-    url = url.strip()
+    url = unwrap(url)
     _, slashes, rest = url.partition("//")
     if not slashes:
         rest = url
