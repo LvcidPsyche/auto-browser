@@ -82,6 +82,44 @@ def _codex_root_allowed(expected: PurePosixPath, cli_home: PurePosixPath) -> boo
     return len(expected.parts) == _HOME_ROOT_PARTS and expected.parts[:2] == ("/", "home")
 
 
+# Where the OS opens, makes and links relative to an open directory (not Windows), a root in the CLI home is made part
+# by part from the home's descriptor; elsewhere by its path, as before.
+_LINKS_BY_DESCRIPTOR = {os.open, os.mkdir, os.symlink} <= os.supports_dir_fd
+_PART_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _link_in_cli_home(cli_home: str, parts: tuple[str, ...], target: Path) -> str:
+    """Make the directories ``parts[:-1]`` in ``cli_home`` and, in the last of them, the link ``parts[-1]`` to
+    ``target``; "" when it is made or something is already at its name, else why not (OSError and ValueError raise).
+
+    The CLI writes its home, and the controller is not under the CLI sandbox: a part the CLI made a link, or put back
+    as one after the controller made it, would have the controller make directories where the CLI cannot. Each part is
+    opened from the one before it and never through a link, and what is made is made in the directory opened."""
+    fd = os.open(cli_home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for name in parts[:-1]:
+            try:
+                os.mkdir(name, dir_fd=fd)
+            except FileExistsError:
+                pass
+            try:
+                inner = os.open(name, _PART_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                # Linux answers a link opened O_DIRECTORY | O_NOFOLLOW with ENOTDIR, as it does a file.
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    return f"its part {quoted_for_log(name)} is a link or not a directory"
+                raise
+            os.close(fd)
+            fd = inner
+        try:
+            os.symlink(target, parts[-1], target_is_directory=True, dir_fd=fd)
+        except FileExistsError:
+            pass
+        return ""
+    finally:
+        os.close(fd)
+
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
@@ -480,14 +518,27 @@ class OpenAIAdapter(BaseProviderAdapter):
         for expected_codex_home in sorted(self._extract_codex_roots(config)):
             if expected_codex_home == actual_codex_home:
                 continue
+            expected = PurePosixPath(expected_codex_home.as_posix())
             # The place is checked before anything touches the path: stat() on /root/.codex raises PermissionError
             # for a non-root controller on Python 3.11 and 3.12, and that used to end the loop for every later root.
-            if not _codex_root_allowed(PurePosixPath(expected_codex_home.as_posix()), cli_home_posix):
+            if not _codex_root_allowed(expected, cli_home_posix):
                 logger.warning(
                     "codex config names %s; not linking it to the CLI home (only the CLI home and /home/<user>/.codex "
                     "are linked)",
                     expected_codex_home.as_posix(),
                 )
+                continue
+            if _LINKS_BY_DESCRIPTOR and cli_home_posix in expected.parents:
+                try:
+                    refused = _link_in_cli_home(cli_home, expected.relative_to(cli_home_posix).parts, actual_codex_home)
+                except (OSError, ValueError) as exc:
+                    refused = f"the link could not be made ({type(exc).__name__})"
+                if refused:
+                    logger.warning(
+                        "codex config names %s; not linking it to the CLI home: %s",
+                        quoted_for_log(expected.as_posix()),
+                        refused,
+                    )
                 continue
             try:
                 if expected_codex_home.exists():
