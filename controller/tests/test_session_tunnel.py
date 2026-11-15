@@ -891,6 +891,36 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                 any("session-1" in line and "no space left on device" in line for line in logs.output), logs.output
             )
 
+    async def test_x3_2_a_second_release_leaves_a_newer_tunnel_on_the_same_port_reserved(self) -> None:
+        """A second release of one tunnel (two closes of its session) tore it down again, and the teardown dropped its
+        remote port from the reservations, whichever tunnel held that port by then: the next provision took it."""
+        processes: list[FakeProcess] = []
+
+        async def fake_exec(*args, **kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir), ports=1)
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec):
+                first = await broker.provision("session-1", local_port=6080)
+                await broker.release(first)
+                newer = await broker.provision("session-2", local_port=6080)
+                try:
+                    self.assertEqual(newer.remote_port, first.remote_port)
+
+                    await asyncio.wait_for(broker.release(first), timeout=10)
+
+                    self.assertEqual(broker._allocated_ports, {newer.remote_port})
+                    self.assertIs(broker._tunnels["session-2"], newer)
+                    self.assertTrue(newer.active)
+                    self.assertTrue(newer.info_path.exists())
+                    with self.assertRaisesRegex(RuntimeError, "No isolated tunnel ports were available"):
+                        await broker.provision("session-3", local_port=6080)
+                    self.assertEqual(len(processes), 2)
+                finally:
+                    await broker.release(newer)  # its log is open, which a Windows temp dir cannot remove
+
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))

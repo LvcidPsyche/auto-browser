@@ -124,6 +124,11 @@ TODO-INTRO
   now keeps only its scheme, host and port, with `/<redacted>` where it had anything more; one whose host and port
   cannot be read plainly is printed as its scheme alone (`ws://<redacted>`). The browser-node's log and sandbox
   report and the CI sandbox scripts redact the same way.
+- **A session's tunnel released a second time no longer frees a port another session's tunnel holds.** With
+  `ISOLATED_TUNNEL_ENABLED=true`, each session's takeover tunnel reserves a remote port on the bastion, and its
+  release frees the port. A tunnel released again, as two closes of one session made together could do, freed its
+  port again, whichever tunnel held it by then: the next session's tunnel was then started on a port a newer session's
+  tunnel still held. A release of a tunnel already released now does nothing.
 
 ### Fixed
 
