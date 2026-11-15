@@ -236,6 +236,10 @@ taken out; nothing they cover changes.
   click that focuses the code field gets nothing more: no code, no Enter, and its field is not cleared. The later
   checks keep the code and Enter off such a page as well, so the test now also asserts that nothing clears the
   field, which only the check after the click prevents.
+- **The origin check before the dashboard sends its token for a replay's screenshot.** "Open replay" reads each
+  screenshot the replay page names with the API token, and only one under `/artifacts/` on the dashboard's own
+  origin. The test's page named no `/artifacts/` path on another origin, so a dashboard that checked the path alone
+  passed it, and would have sent the token to any origin a page named.
 
 ## [1.18.0] — 2026-11-14
 

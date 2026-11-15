@@ -29,6 +29,8 @@ BUTTON = "#sessions-tbody button"
 NOTE = "document.getElementById('takeover-note').textContent"
 ELSEWHERE_ORIGIN = "http://elsewhere.test"
 ELSEWHERE = f"{ELSEWHERE_ORIGIN}/shot.png"
+# A screenshot's path on another origin, which answers a fetch from the dashboard, the token in it included.
+FOREIGN_ARTIFACT = f"{ELSEWHERE_ORIGIN}/artifacts/{SESSION}/step-1.png"
 REPLAY_COPY_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"
 PNG_DATA_URL = "data:image/png;base64,"
 
@@ -59,13 +61,16 @@ class ReplayStub(Stub):
         request = route.request
         path = request.url[len(ORIGIN) :] if request.url.startswith(ORIGIN) else request.url
         self.asked.append(path)
-        if not (path.endswith("/replay") or path.startswith("/artifacts/") or path == ELSEWHERE):
+        if not (path.endswith("/replay") or path.startswith("/artifacts/") or path in (ELSEWHERE, FOREIGN_ARTIFACT)):
             await super().handle(route)
             return
         token = request.headers.get("authorization")
         self.tokens.setdefault(path, []).append(token)
         if path == ELSEWHERE:
             await route.fulfill(status=200, content_type="image/png", body=PIXEL_PNG)
+        elif path == FOREIGN_ARTIFACT:
+            cors = {"Access-Control-Allow-Origin": ORIGIN, "Access-Control-Allow-Headers": "authorization"}
+            await route.fulfill(status=200, content_type="image/png", body=PIXEL_PNG, headers=cors)
         elif token != BEARER:
             await route.fulfill(status=401, content_type="application/json", body='{"detail": "unauthorized"}')
         elif path.startswith("/artifacts/"):
@@ -157,6 +162,7 @@ HOSTILE_PAGE = f"""<!DOCTYPE html>
 <img id="same-origin" src="{ORIGIN}/audit/events?limit=1&amp;name=y.png">
 <img id="climbs" src="/artifacts/../sessions/{SESSION}/replay">
 <img id="elsewhere" src="{ELSEWHERE}">
+<img id="foreign-artifact" src="{FOREIGN_ARTIFACT}">
 <img id="handler" src="/artifacts/{SESSION}/step-2.png" onload="window.ran = 'an image handler'">
 <svg id="drawing"><title>a drawing</title></svg><math><mi>x</mi></math>
 <script>window.ran = 'a script in the body';</script>
@@ -197,9 +203,11 @@ def test_the_copy_runs_no_script_and_the_token_goes_only_to_this_controllers_art
         "same-origin": 0,
         "climbs": 0,
         "elsewhere": 0,
+        "foreign-artifact": 0,
         "handler": 1,
     }
-    # Nothing but the page and the two screenshots was asked for, by the dashboard or by the copy.
+    # Nothing but the page and the two screenshots was asked for, by the dashboard or by the copy: not the screenshot
+    # path of another origin, which would have answered the dashboard's request and been sent the token with it.
     assert stub.tokens == {
         f"/sessions/{SESSION}/replay": [BEARER],
         f"/artifacts/{SESSION}/step-1.png": [BEARER],
