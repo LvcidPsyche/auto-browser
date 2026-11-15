@@ -248,6 +248,11 @@ taken out; nothing they cover changes.
   stops one byte past `CLI_STDOUT_LIMIT_BYTES`, which refuses it. The test's file was one byte past the limit, so a
   read that went on to the end refused it all the same; it now writes eight times the limit and checks that no more
   than that byte past it is read.
+- **The sandbox flags on each Codex path's `codex exec`.** The tests held the flags that the provider adapter and
+  the host bridge each work out from `CODEX_SANDBOX_MODE` and `CODEX_BRIDGE_ALLOW_HOST_EXEC`, but not that either
+  path puts them on the command line it runs: one that left them off, or ran Codex unsandboxed whatever the settings
+  said, passed every test. Each path's command line is now read for the default, for `workspace-write` and for the
+  opt-in bypass.
 
 ## [1.18.0] — 2026-11-14
 
