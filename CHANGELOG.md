@@ -161,6 +161,11 @@ TODO-INTRO
   begins so (`auto-browser-client-typo`) passed, as did one whose README held such a line. It now reads the wheel's
   dependencies from its metadata's headers and compares each one's name as pip does, so `auto_browser_client` still
   counts and `auto-browser-client-typo` does not.
+- **The release audit's advisory check blocks on an advisory it cannot read.** It blocked only on an advisory whose
+  state was `triage`, so one with no state, with its state under another key, or with a state GitHub might add read
+  as clear; an entry that was not an object ended the check with a traceback, and a `--from-json` file holding an
+  object, not a list, passed. Each of these now blocks the release and says to check the advisories by hand. The
+  states it knows are GitHub's five: `triage`, `draft`, `published`, `closed` and `withdrawn`.
 
 ## [1.18.0] — 2026-11-14
 

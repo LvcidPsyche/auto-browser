@@ -30,6 +30,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPO = "LvcidPsyche/auto-browser"
+# The states GitHub gives a repository security advisory. Only `triage` blocks, so an entry with none of them (no
+# state, a renamed key, a state added since) would read as clear: it blocks the release instead, as does an entry that
+# is not an object. A tuple, compared by ==, so a state of any JSON type is only not one of them.
+STATES = ("triage", "draft", "published", "closed", "withdrawn")
 
 
 def main() -> int:
@@ -113,6 +117,15 @@ def age_days(timestamp: str | None, now: datetime) -> int | None:
 
 
 def report(advisories: list[dict], *, now: datetime) -> int:
+    # From the API or from --from-json, which reads whatever the file holds.
+    if not isinstance(advisories, list):
+        raise SystemExit("Release blocked: the advisories read are not a list of advisories; check them by hand.")
+    unread = [entry for entry in advisories if not isinstance(entry, dict) or entry.get("state") not in STATES]
+    if unread:
+        raise SystemExit(
+            f"Release blocked: {len(unread)} advisory entry/entries have no state the check knows "
+            f"({', '.join(STATES)}); check the advisories by hand."
+        )
     unacknowledged = [entry for entry in advisories if entry.get("state") == "triage"]
     drafts = [entry for entry in advisories if entry.get("state") == "draft"]
 
