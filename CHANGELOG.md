@@ -147,6 +147,11 @@ TODO-INTRO
   has no prefix of its own, so the scan finds one where it follows its setting's name (`aws_secret_access_key` or
   `AWS_SECRET_ACCESS_KEY`, then `=` or `:`); AWS's documented example secret key, which the PII scrubber's tests use,
   is let through as itself, as its example key ID already was.
+- **The release workflow no longer publishes to PyPI on a count of green CI runs it could not read.** Its gate counts
+  the successful `ci.yml` push runs on main for the tagged commit and stops at none. A count that came back as no
+  number (`null`, or nothing) failed the gate's comparison as a test, which the `if` around it read as false, so the
+  gate passed and the packages went on to PyPI with no green run read. Such a count now stops the release, as it
+  already stopped the image workflow.
 
 ## [1.18.0] — 2026-11-14
 

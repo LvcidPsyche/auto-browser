@@ -50,6 +50,14 @@ jobs:
             exit 1
           fi
           green=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&status=success&per_page=1" --jq .total_count)
+          # A count that is not a number (null, or nothing) fails the test below, which the `if` reads as false: refuse
+          # it here, as docker-publish.yml does.
+          case "$green" in
+            ''|*[!0-9]*)
+              echo "::error::could not read the ci.yml runs for $SHA (got '$green'); refusing to publish"
+              exit 1
+              ;;
+          esac
           if [ "$green" -lt 1 ]; then
             echo "::error::$TAG points at $SHA, but ci.yml has no successful push run on main for that commit (still running, failed, or never ran)"
             exit 1
