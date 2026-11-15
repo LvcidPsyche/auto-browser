@@ -556,7 +556,7 @@ and writes what the controller's user can, as before 1.18.0.
 
 Where the sandbox would leave a secret or a store open, or would not hold, the controller writes a warning, once in
 the life of the process for each distinct line, which names the condition (a setting by its name and never its value,
-a directory by its path), and runs the CLI: without the sandbox, or under it with something left open, or under it
+a directory by its path, quoted, with a line break in it escaped), and runs the CLI: without the sandbox, or under it with something left open, or under it
 without its home. Where several conditions hold, only the first in this list is named (no Landlock hides an open
 setting until Landlock is there):
 
