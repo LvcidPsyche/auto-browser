@@ -366,6 +366,26 @@ class GatewayWriteRecordTests(SpendBase):
         )
         self.assertEqual([item["status"] for item in receipts], ["ok"])
 
+    async def test_a_cookies_name_and_where_it_goes_are_recorded_cut_to_200_characters(self) -> None:
+        # The input model bounds neither a cookie's name nor its domain or URL: without the cut, a caller's own text
+        # went whole into the audit entry, as long as its request.
+        host = ".".join(["a" * 60] * 4) + ".example.com"
+        cookies = [
+            {"name": "n" * 500, "value": CANARY, "domain": "example.com", "path": "/"},
+            {"name": "sid", "value": CANARY, "domain": host, "path": "/"},
+            {"name": "lang", "value": CANARY, "url": f"https://{host}/account"},
+        ]
+
+        await self.call("browser.set_cookies", session_id=SESSION, cookies=cookies)
+
+        events, _receipts = await self.records("browser.set_cookies")
+        cut = [
+            {"name": "n" * 200, "domain": "example.com"},
+            {"name": "sid", "domain": host[:200]},
+            {"name": "lang", "url": f"https://{host}"[:200]},
+        ]
+        self.assertEqual([event.details["digest"] for event in events], [{"cookies": cut}])
+
     async def test_a_write_whose_record_cannot_be_written_is_logged_by_tool_and_session(self) -> None:
         # The gateway answers a store's ValueError with its text and logs nothing itself: without this line a cookie
         # write whose record failed left no evidence on the controller that the cookies were set.

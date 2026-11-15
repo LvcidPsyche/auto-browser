@@ -209,6 +209,15 @@ TODO-INTRO
   unless set). A setting longer than a link may live, 1440 minutes, is read as 1440, with a warning at startup: a
   longer one would mint links that outlive the record of their revocation.
 
+### Tests
+
+Guards that held, but that no test would have missed had they been removed. Each test below fails when its guard is
+taken out; nothing they cover changes.
+
+- **The cut of a cookie's name and destination in a write's record.** The audit entry of `browser.set_cookies` names
+  each cookie by its name and its domain or its URL's origin, each cut to 200 characters, as the input model bounds
+  none of them; without the cut a caller's text went whole into the entry.
+
 ## [1.18.0] — 2026-11-14
 
 A security and correctness release over 1.17.0, from the findings the reviews of 1.17.0 left open and from reviews of
