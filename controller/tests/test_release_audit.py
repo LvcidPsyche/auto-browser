@@ -133,6 +133,27 @@ class InspectMcpWheelTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "Requires-Dist: auto-browser-client"):
             self._inspect(files)
 
+    def _with_metadata(self, metadata: str) -> dict[str, str]:
+        return _good_files() | {"auto_browser_mcp-1.0.0.dist-info/METADATA": metadata}
+
+    def test_rejects_a_dependency_whose_name_only_begins_as_the_clients(self) -> None:
+        # Read as a prefix of the line, another package's name (auto-browser-client-typo) passed for the client's.
+        for requirement in ("auto-browser-client-typo>=1.0.0", "auto-browser-clients"):
+            metadata = GOOD_METADATA.replace("auto-browser-client>=1.0.0", requirement)
+            with self.subTest(requirement), self.assertRaisesRegex(SystemExit, "Requires-Dist: auto-browser-client"):
+                self._inspect(self._with_metadata(metadata))
+
+    def test_accepts_the_client_by_any_spelling_of_its_name(self) -> None:
+        for requirement in ("auto_browser_client>=1.0.0", "Auto.Browser-Client >= 1.0.0", "auto-browser-client"):
+            with self.subTest(requirement):
+                self._inspect(self._with_metadata(GOOD_METADATA.replace("auto-browser-client>=1.0.0", requirement)))
+
+    def test_reads_the_dependencies_from_the_headers_alone(self) -> None:
+        # The description after the headers is the package's README, whose text can hold such a line.
+        metadata = GOOD_METADATA.replace("auto-browser-client>=1.0.0", "auto-browser-client-typo")
+        with self.assertRaisesRegex(SystemExit, "Requires-Dist: auto-browser-client"):
+            self._inspect(self._with_metadata(metadata + "\nRequires-Dist: auto-browser-client\n"))
+
     def test_rejects_wrong_console_script(self) -> None:
         files = _good_files() | {
             "auto_browser_mcp-1.0.0.dist-info/entry_points.txt": (

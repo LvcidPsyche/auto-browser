@@ -12,9 +12,11 @@ import sys
 import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
+from email.parser import HeaderParser
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
@@ -314,7 +316,10 @@ def _inspect_mcp_wheel(wheelhouse: Path) -> None:
             raise SystemExit("MCP metapackage wheel must not contain Python modules: " + ", ".join(modules[:5]))
         metadata = _read_dist_info(archive, names, "METADATA")
         entry_points = _read_dist_info(archive, names, "entry_points.txt")
-    if not any(line.startswith("Requires-Dist: auto-browser-client") for line in metadata.splitlines()):
+    # By its name, as pip reads it: a line that only begins with the client's (auto-browser-client-typo) names another
+    # package. From the headers alone, as the description after them is the README's text.
+    requirements = HeaderParser().parsestr(metadata).get_all("Requires-Dist", [])
+    if not any(canonicalize_name(Requirement(value).name) == "auto-browser-client" for value in requirements):
         raise SystemExit("MCP metapackage wheel is missing Requires-Dist: auto-browser-client")
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str  # script names are case-sensitive
