@@ -2056,6 +2056,9 @@ class BrowserActionService:
         if not self._may_fill_totp(session):
             return None
         await self.type_text_human_like(session.page, code)
+        # And so did the typing, a keystroke at a time: no Enter for a page a key handler sent elsewhere meanwhile.
+        if not self._may_fill_totp(session):
+            return None
         # Enter submits the form the code went into. This used to click the
         # first submit button anywhere on the page — on a checkout page that
         # was "Place order", clicked with no approval anywhere in this path.

@@ -129,6 +129,11 @@ TODO-INTRO
   release frees the port. A tunnel released again, as two closes of one session made together could do, freed its
   port again, whichever tunnel held it by then: the next session's tunnel was then started on a port a newer session's
   tunnel still held. A release of a tunnel already released now does nothing.
+- **The TOTP autofill no longer presses Enter on a page that left the named host while the code was typed.** After
+  each step that waits on the page (the search for the field, its focus click, its clearing), the autofill checks
+  again that the page is on a host in `totp_hosts` and not refused. After the typing it did not, so a page that a
+  key handler sent to another host as the code was typed had Enter pressed into it, which submits whatever form has
+  the focus there. It checks there too now, and such a page gets no Enter.
 
 ### Fixed
 

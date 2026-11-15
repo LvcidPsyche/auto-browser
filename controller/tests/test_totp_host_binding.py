@@ -74,9 +74,9 @@ class TotpAutofillTests(unittest.TestCase):
         fill_fails: bool = False,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
-        fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it)
-        during which the page goes to another host."""
-        typed = AsyncMock()
+        fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
+        "typing" for the code's keystrokes) during which the page goes to another host."""
+        typed = AsyncMock(side_effect=lambda *_args: leave_during("typing"))
 
         async def clear(_value: str) -> None:
             leave_during("clear")
@@ -177,6 +177,16 @@ class TotpAutofillTests(unittest.TestCase):
                 self.assertIsNone(result)
                 typed.assert_not_awaited()
                 self.pressed.assert_not_awaited()
+
+    def test_a_page_that_leaves_the_named_host_as_the_code_is_typed_gets_no_enter(self) -> None:
+        # Typing the code awaits the page at each keystroke, after the last check: a page a key handler sent to
+        # another host meanwhile had Enter pressed into it, which submits whatever form has the focus there.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="typing"
+        )
+        self.pressed.assert_not_awaited()
+        self.assertIsNone(result)
+        typed.assert_awaited_once()
 
     def test_a_field_emptied_by_keys_on_the_named_host_gets_the_code(self) -> None:
         # Where its fill fails the field is emptied by keys, and on the named host the code is typed as before.
