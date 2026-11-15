@@ -240,6 +240,10 @@ taken out; nothing they cover changes.
   screenshot the replay page names with the API token, and only one under `/artifacts/` on the dashboard's own
   origin. The test's page named no `/artifacts/` path on another origin, so a dashboard that checked the path alone
   passed it, and would have sent the token to any origin a page named.
+- **The store of revoked share links the controller is built with.** The controller keeps its share links'
+  revocations in `SHARE_REVOCATION_STORE_PATH`, so that a revoked link stays revoked after a restart. The tests built
+  the share manager with a store themselves; had the controller built its own without one, every revoked link that
+  had not expired would have worked again after the next restart, and no test would have said so.
 
 ## [1.18.0] — 2026-11-14
 
