@@ -637,7 +637,12 @@ class VisionFindInput(SessionIdInput):
 
 
 class ShareSessionInput(SessionIdInput):
-    ttl_minutes: int = Field(default=60, ge=1, le=1440, description="How long the share link works.")
+    ttl_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=1440,
+        description="How long the share link works, in minutes: the deployment's default when not given.",
+    )
 
 
 class RevokeSessionShareInput(SessionIdInput):

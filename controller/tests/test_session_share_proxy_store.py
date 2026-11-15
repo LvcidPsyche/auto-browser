@@ -182,7 +182,9 @@ class ShareHttpTests(unittest.TestCase):
             response = self.client.post("/sessions/session-1/share")
 
         self.assertEqual(response.status_code, 200)
-        create_token.assert_called_once_with("session-1", ttl_seconds=3600)
+        # None: the manager's default, SHARE_TOKEN_TTL_MINUTES (60 unless set), and not a 60 the route put in its place.
+        create_token.assert_called_once_with("session-1", ttl_seconds=None)
+        self.assertEqual(response.json()["expires_in_seconds"], main_module.settings.share_token_ttl_minutes * 60)
 
     def test_share_session_returns_404_for_missing_session(self) -> None:
         get_session = AsyncMock(side_effect=KeyError("missing"))

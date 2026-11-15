@@ -1385,8 +1385,10 @@ class McpToolGateway:
         if self.share_manager is None:
             raise RuntimeError("Session sharing is not configured")
         await self.manager.get_session(payload.session_id)  # verify session exists
+        # None: the deployment's default (SHARE_TOKEN_TTL_MINUTES).
+        ttl_seconds = None if payload.ttl_minutes is None else payload.ttl_minutes * 60
         return await mint_share_token(
-            self.share_manager, self.manager.audit, payload.session_id, ttl_seconds=payload.ttl_minutes * 60
+            self.share_manager, self.manager.audit, payload.session_id, ttl_seconds=ttl_seconds
         )
 
     async def _revoke_session_share(self, payload: RevokeSessionShareInput) -> dict[str, Any]:
