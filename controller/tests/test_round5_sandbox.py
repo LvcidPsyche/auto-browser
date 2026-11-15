@@ -34,6 +34,7 @@ from app.browser_sandbox import (
     load_seccomp_profile,
     read_sandbox_state,
 )
+from tests.test_endpoint_redaction import SECRET, TOKEN_SHAPES
 
 REPO = Path(__file__).resolve().parents[2]
 SECRET_PATH = "0123456789abcdef0123456789abcdef"
@@ -438,6 +439,14 @@ class EndpointRedactionTests(unittest.TestCase):
         self.assertEqual(redact(failure), "browserType.connect: WebSocket error: wss://h.example:443/<redacted> 502")
         self.assertEqual(redact("no endpoint here"), "no endpoint here")
         self.assertEqual(redact(None), "None")
+
+    def test_redact_endpoints_drops_a_token_in_any_part_as_the_controllers_twin_does(self) -> None:
+        for endpoint, expected in TOKEN_SHAPES:
+            with self.subTest(endpoint=endpoint):
+                redacted = self.module.redact_endpoints(f"connect {endpoint} failed")
+
+                self.assertNotIn(SECRET, redacted)
+                self.assertEqual(redacted, f"connect {expected} failed")
 
     def test_the_assertion_prints_the_state_and_its_failures_without_the_connect_path(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

@@ -31,13 +31,26 @@ from typing import Any
 from .utils import error_text
 
 # The twin of redact_endpoints in scripts/assert_browser_sandbox.py and redactEndpoints in browser-node/sandbox.mjs:
-# the path of a Playwright websocket endpoint is that server's only secret, and controller logs end up in CI output.
-_ENDPOINT_PATH = re.compile(r"""(wss?://[^/\s"'<>]+)/[^\s"'<>]*""")
+# the path of a Playwright websocket endpoint is that server's only secret, a hosted browser's endpoint
+# (BROWSER_WS_ENDPOINT) can carry its token in the userinfo, the query or the fragment, and controller logs end up in
+# CI output. An endpoint keeps its scheme://host[:port] only. Its authority ends at the first / \ ? or # (Node and
+# Chromium end a ws:// one at a backslash too), its userinfo at the last @; one whose host and port are not plainly
+# that is redacted whole. The three are written alike, not with a URL parser: Node's drops a default port.
+_ENDPOINT = re.compile(r"""(wss?://)([^/\\?#\s"'<>]*)([^\s"'<>]*)""", re.IGNORECASE)
+_HOST_PORT = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::[0-9]+)?")
+
+
+def _origin_only(match: re.Match[str]) -> str:
+    scheme, authority, rest = match.groups()
+    _userinfo, at, host_port = authority.rpartition("@")
+    if not _HOST_PORT.fullmatch(host_port):
+        return f"{scheme}<redacted>"
+    return f"{scheme}{host_port}/<redacted>" if at or rest else f"{scheme}{host_port}"
 
 
 def redact_endpoints(text: object) -> str:
-    """The text with every ws:// or wss:// endpoint reduced to scheme://host:port/<redacted>."""
-    return _ENDPOINT_PATH.sub(r"\1/<redacted>", str(text))
+    """The text with every ws:// or wss:// endpoint reduced to scheme://host[:port], and /<redacted> where it had more."""
+    return _ENDPOINT.sub(_origin_only, str(text))
 
 
 BROWSER_SANDBOX_STATE_FILENAME = "browser-sandbox.json"

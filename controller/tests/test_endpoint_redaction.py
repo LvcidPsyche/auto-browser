@@ -1,7 +1,8 @@
 """The path of a browser-node's ws endpoint is that Playwright server's only secret, and CI dumps controller logs.
 
-scripts/assert_browser_sandbox.py redacts it where the scripts print; this is the controller's own twin, used in
-the connect log line, the connect failure message and the readiness details.
+A hosted browser's endpoint (BROWSER_WS_ENDPOINT) can carry its token in the userinfo, the query or the fragment
+instead. scripts/assert_browser_sandbox.py redacts endpoints where the scripts print; this is the controller's own
+twin, used in the connect log line, the connect failure message and the readiness details.
 """
 
 from __future__ import annotations
@@ -18,6 +19,21 @@ from app.browser_sandbox import browser_sandbox_check, redact_endpoints
 
 SECRET = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
 ENDPOINT = f"ws://browser-node:9223/{SECRET}"
+# A hosted browser's endpoint carries its token where the URL lets it, not only in the path; the same table is in
+# test_round5_sandbox.py (the script's twin) and browser-node/sandbox.test.mjs (the node's).
+TOKEN_SHAPES = [
+    (f"ws://u:{SECRET}@h.example:1/x", "ws://h.example:1/<redacted>"),
+    (f"ws://u:{SECRET}@h.example:1", "ws://h.example:1/<redacted>"),
+    (f"wss://h.example?token={SECRET}", "wss://h.example/<redacted>"),
+    (f"ws://h.example:1?token={SECRET}", "ws://h.example:1/<redacted>"),
+    (f"ws://h.example:1#{SECRET}", "ws://h.example:1/<redacted>"),
+    (f"ws://h.example:1\\{SECRET}", "ws://h.example:1/<redacted>"),
+    (f"WSS://h.example?token={SECRET}", "WSS://h.example/<redacted>"),
+    (f"ws://[::1]:9223/{SECRET}", "ws://[::1]:9223/<redacted>"),
+    (f"ws://u:{SECRET}@h.example:port/x", "ws://<redacted>"),
+    (f"ws://[::1/{SECRET}", "ws://<redacted>"),
+    (f"ws://h.example:1:{SECRET}", "ws://<redacted>"),
+]
 
 
 class RedactEndpointsTests(unittest.TestCase):
@@ -36,6 +52,14 @@ class RedactEndpointsTests(unittest.TestCase):
     def test_text_without_an_endpoint_and_an_endpoint_without_a_path_are_unchanged(self) -> None:
         self.assertEqual(redact_endpoints("no endpoint here"), "no endpoint here")
         self.assertEqual(redact_endpoints("ws://browser-node:9223"), "ws://browser-node:9223")
+
+    def test_a_token_in_the_userinfo_the_query_or_the_fragment_goes_too(self) -> None:
+        for endpoint, expected in TOKEN_SHAPES:
+            with self.subTest(endpoint=endpoint):
+                redacted = redact_endpoints(f"connect {endpoint} failed")
+
+                self.assertNotIn(SECRET, redacted)
+                self.assertEqual(redacted, f"connect {expected} failed")
 
 
 class FakeChromium:
@@ -118,6 +142,39 @@ class ControllerOutputRedactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(SECRET, output)
         self.assertIn("browser node unreachable", formatted)
         self.assertIn("ws://browser-node:9223/<redacted>", output)  # what failed is still logged, minus the path
+
+    async def test_a_token_in_a_configured_direct_endpoint_stays_out_of_the_log_and_the_error(self) -> None:
+        for endpoint, expected in TOKEN_SHAPES[:5]:
+            with self.subTest(endpoint=endpoint):
+                manager = _manager(direct_endpoint=endpoint)
+                manager._browser_lock = asyncio.Lock()
+                manager.browser = None
+                manager.settings.cdp_connect_url = None
+                manager.playwright.chromium = NamingChromium()
+
+                with self.assertLogs("app", level=logging.DEBUG) as logs:
+                    with self.assertRaises(BrowserUnreachableError) as raised:
+                        await BrowserRuntimeService(manager).ensure_browser()
+
+                formatted = "".join(traceback.format_exception(raised.exception))
+                output = "\n".join(logs.output)
+                self.assertNotIn(SECRET, formatted)
+                self.assertNotIn(SECRET, output)
+                self.assertIn(f"direct endpoint {expected}.", str(raised.exception))
+                self.assertIn(expected, output)
+
+    async def test_the_connect_log_line_does_not_carry_a_token(self) -> None:
+        runtime = BrowserRuntimeService(_manager())
+
+        async def factory() -> str:
+            return f"wss://h.example?token={SECRET}"
+
+        with self.assertLogs("app", level=logging.DEBUG) as logs:
+            await runtime.connect_browser(factory, failure_context="unused")
+
+        output = "\n".join(logs.output)
+        self.assertIn("via playwright endpoint wss://h.example/<redacted>", output)
+        self.assertNotIn(SECRET, output)
 
     def test_readiness_details_do_not_carry_the_endpoint(self) -> None:
         state = {"sandbox": "on", "endpoint": ENDPOINT}

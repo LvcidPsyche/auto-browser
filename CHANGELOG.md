@@ -111,6 +111,15 @@ TODO-INTRO
   `CLI_SANDBOX_WRITABLE` entry resolves through, say); the next call's warning then carried the name as it was, and
   what followed the line break read as a log line of its own. The warnings now quote each path they name, its line
   breaks escaped.
+- **A token in `BROWSER_WS_ENDPOINT`'s query, userinfo or fragment no longer reaches the controller's log.** The
+  controller names the endpoint it connects to in three places: the log line at every connect, the connect failure
+  message (which names a configured `BROWSER_WS_ENDPOINT`, and which readiness, deep health and the startup log
+  write to the log) and the line that logs Playwright's own connect error. Each replaced only the endpoint's path
+  with `<redacted>`, so a hosted browser's endpoint with its token anywhere else (`wss://host?token=...`,
+  `wss://user:token@host/...`, a `#` fragment) was logged whole, token and all. Every endpoint the controller prints
+  now keeps only its scheme, host and port, with `/<redacted>` where it had anything more; one whose host and port
+  cannot be read plainly is printed as its scheme alone (`ws://<redacted>`). The browser-node's log and sandbox
+  report and the CI sandbox scripts redact the same way.
 
 ### Fixed
 
