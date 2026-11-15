@@ -556,9 +556,9 @@ and writes what the controller's user can, as before 1.18.0.
 
 Where the sandbox would leave a secret or a store open, or would not hold, the controller writes a warning, once in
 the life of the process for each distinct line, which names the condition (a setting by its name and never its value,
-a directory by its path, quoted, with a line break in it escaped), and runs the CLI: without the sandbox, or under it with something left open, or under it
-without its home. Where several conditions hold, only the first in this list is named (no Landlock hides an open
-setting until Landlock is there):
+a directory by its path, quoted, with a line break in it escaped), and runs the CLI: without the sandbox, or under it
+with something left open, or under it without its home. Where several conditions hold, only the first in this list
+is named (no Landlock hides an open setting until Landlock is there):
 
 - **`CLI_SANDBOX_ENABLED=false`.** The CLI starts without the launcher, and no probe runs.
 - **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
@@ -600,15 +600,16 @@ setting until Landlock is there):
   `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `MEMORY_ROOT`, `HARNESS_ROOT`, `MESH_PEERS_PATH`, `MCP_SESSION_STORE_PATH`,
   `CRON_STORE_PATH`, `SHARE_REVOCATION_STORE_PATH`, the tunnel's `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`,
   `ISOLATED_TUNNEL_INFO_ROOT` and `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT`. Each is resolved
-  first, so a `/data` that is a symbolic link to another place holds none of them. "In a directory a CLI may write" (`CLI_HOME`,
-  or an entry of `CLI_SANDBOX_WRITABLE` under `/data`) is as written or once resolved: a path written there counts
-  wherever it resolves, since the CLI can replace a link there with a file of its own, and so does a path whose way
-  to where it resolves passes through such a directory (a link to a link in `CLI_HOME`). A secret's directory that
-  holds one counts too (`AUTH_ROOT=/data/auth` with `CLI_SANDBOX_WRITABLE=/data/auth/sub`), and so does a path with
-  a `..` part, wherever it resolves: Linux reads the `..` after any link before it, which a CLI may have made
-  (`AUTH_ROOT=/data/cli-home/slot/../../auth` is the `auth` in the directory two levels above wherever `slot` points,
-  and a CLI can make `slot` a link). The CLI starts under the launcher, which closes `/data` and not that place. A
-  Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it sets.
+  first, so a `/data` that is a symbolic link to another place holds none of them. "In a directory a CLI may write"
+  (`CLI_HOME`, or an entry of `CLI_SANDBOX_WRITABLE` under `/data`) is as written or once resolved: a path written
+  there counts wherever it resolves, since the CLI can replace a link there with a file of its own, and so does a
+  path whose way to where it resolves passes through such a directory (a link to a link in `CLI_HOME`). A secret's
+  directory that holds one counts too (`AUTH_ROOT=/data/auth` with `CLI_SANDBOX_WRITABLE=/data/auth/sub`), and so
+  does a path with a `..` part, wherever it resolves: Linux reads the `..` after any link before it, which a CLI may
+  have made (`AUTH_ROOT=/data/cli-home/slot/../../auth` is the `auth` in the directory two levels above wherever
+  `slot` points, and a CLI can make `slot` a link). The CLI starts under the launcher, which closes `/data` and not
+  that place. A Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it
+  sets.
 
 `CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
 with `Provider request failed` (`502`), and the log names the condition in one error line. So
