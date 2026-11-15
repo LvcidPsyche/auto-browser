@@ -53,17 +53,27 @@ PACKAGE_SUITES = (
     ("integrations/langchain", "langchain,dev", "auto_browser_langchain", 90, None),
 )
 PACKAGE_HOLD_HOURS = 72
-# A POSIX extended expression, which `git grep -E` reads (no \b, no lookaround).
+# A POSIX extended expression, which `git grep -E` reads (no \b, no lookaround). OpenAI's keys by their named kinds
+# only (svcacct, admin, None): any word after sk- would find kebab-case names. An AWS secret access key has no prefix
+# of its own, so it is found only after its setting's name.
 SECRET_PATTERN = (
     r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|"
-    r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
-    r"sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|(AKIA|ASIA)[0-9A-Z]{16}|"
+    r"github_pat_[A-Za-z0-9_]{20,}|xox[abceprs]-[A-Za-z0-9-]{10,}|"
+    r"sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-(svcacct|admin|None)-[A-Za-z0-9_-]{20,}|"
+    r"(AKIA|ASIA)[0-9A-Z]{16}|"
+    r"""(aws_secret_access_key|AWS_SECRET_ACCESS_KEY)["' ]*[=:]["' ]*[A-Za-z0-9/+]{40}|"""
     r"glpat-[A-Za-z0-9_-]{20}|gh[osur]_[A-Za-z0-9]{20,}"
 )
 # Published examples, not credentials, each let through only as itself and named by its SHA-256, so this file holds no
 # token for this scan or another to find: AWS's documented example access key ID, which the PII scrubber's tests scrub
-# and the CHANGELOG quotes.
-SECRET_EXAMPLE_SHA256 = frozenset({"1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3"})
+# and the CHANGELOG quotes, and AWS's documented example secret access key, after its setting's name as those tests
+# write it.
+SECRET_EXAMPLE_SHA256 = frozenset(
+    {
+        "1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3",
+        "18d34975332dca870a6658163a395d4ac861afa700374072ebcde12a96d61e79",
+    }
+)
 # The platform the controller image runs, for which the lock's markers are read: python:3.11-slim, CPython 3.11 on
 # Linux x86_64. The image takes the newest 3.11 release, 3.11.15 when this was written.
 IMAGE_MARKER_ENVIRONMENT = {
