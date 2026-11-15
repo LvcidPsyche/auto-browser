@@ -220,6 +220,10 @@ taken out; nothing they cover changes.
 - **The kill of a provider CLI whose output passes the cap.** A CLI that writes past `CLI_STDOUT_LIMIT_BYTES` is
   stopped, and the call refused at once. The test's CLI stopped writing by itself, so it was reaped even with the
   kill gone; one that writes forever would have outlived its refused call.
+- **A fast-profile click's short label still asks when the button's fuller name is long.** A button drawn as "Send"
+  and named "Send code" is cleared by its fuller name only because that name reads as harmless. A fuller name too
+  long for the table to read, such as "Delete this repository and all of its contents", is not harmless for that, and
+  the click still asks for approval; every test's fuller name was one the table read by itself.
 
 ## [1.18.0] — 2026-11-14
 
