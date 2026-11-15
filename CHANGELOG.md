@@ -4,7 +4,7 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
-## [1.18.1]
+## [1.18.1] — 2026-11-15
 
 A security patch over 1.18.0, from the findings the reviews of 1.18.0 left open. Codex works again under
 `docker-compose.host-subscriptions.yml`, where every call had failed since 1.15.0, and its readiness now checks that it
@@ -16,13 +16,14 @@ longer reaches the log. `browser.get_local_storage` reads in the controller's is
 the TOTP autofill presses no Enter on a page that left its host while the code was typed; a share link minted without
 a lifetime lives `SHARE_TOKEN_TTL_MINUTES`; and a tunnel released twice no longer frees a newer tunnel's port. The
 release workflow and audit refuse a CI count they cannot read, a lock that pins nothing, an advisory they cannot read
-and more secret shapes.
+and more secret shapes. The controller's dependencies are updated (FastAPI 0.162.4, pydantic 2.14.3).
 
 Read the upgrade notes first: a copy of the host-subscription override kept outside this repository needs the new
 tmpfs entry; with `CLI_SANDBOX_REQUIRED=true`, a store outside `/data`, a host run from a checkout or virtualenv a CLI
 may write, or a writable entry or `CLI_HOME` reached through such a place now stops provider CLIs; a Codex
 `config.toml` that is a link or larger than 1 MiB is not read; a share link minted without a lifetime follows
-`SHARE_TOKEN_TTL_MINUTES` where that is not 60; and every `browser.get_local_storage` answer carries `truncated`.
+`SHARE_TOKEN_TTL_MINUTES` where that is not 60; and every `browser.get_local_storage` read answers with
+`truncated`.
 
 The controller image changes, and the browser-node image in how it redacts an endpoint it prints; the LangChain
 package changes in its error redaction; the client and MCP bridge packages change only in version. Advisories:
@@ -32,7 +33,8 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
 
 - **A copy of `docker-compose.host-subscriptions.yml` kept outside this repository needs the new tmpfs entry.** The
   override now mounts an empty tmpfs at `CLI_HOME` (see Fixed); the override in this repository needs nothing. A copy
-  made before 1.18.1 still leaves Codex unable to make its call directory, and the controller now says so: Codex's
+  made before 1.18.1 still leaves Codex unable to make its call directory where the controller does not run as root,
+  as by default, and the controller now says so: Codex's
   readiness is not ready, with the reason, and with `APP_ENV=production` and `OPENAI_AUTH_MODE=cli` the controller
   refuses to start, Claude and Gemini with it, where before it started and every Codex call failed. Add the entry to
   the copy's `volumes`, beside the four read-only sign-ins:
@@ -48,27 +50,31 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
 - **A Codex `config.toml` that is a link, or larger than 1 MiB, is no longer read.** The Codex path-compatibility
   shim reads `CLI_HOME/.codex/config.toml` only as a regular file of at most 1 MiB that is itself at that name (see
   Security), and logs a warning for anything else there; the `.codex` links such a file names are not made. Put the
-  file itself in `CLI_HOME/.codex`. On Windows, which cannot open a file without following a link, a link there is
-  still read.
-- **A `.codex` path in `config.toml` that passes through a link in `CLI_HOME` is no longer linked.** Where a part of
-  such a path inside `CLI_HOME` is a link (`CLI_HOME/projects` linked elsewhere), the shim now makes nothing for it
-  and logs a warning that names the path (see Security). Make that part a plain directory, or make the `.codex` link
+  file itself in `CLI_HOME/.codex`, at most 1 MiB, and restart the controller: a file it refused is not looked at
+  again before the next start. On Windows, which cannot open a file without following a link, a link there is still
+  read.
+- **A `.codex` path in `config.toml` that passes through a link in `CLI_HOME` is no longer linked.** Where a
+  directory on such a path inside `CLI_HOME`, before its `.codex`, is a link (`CLI_HOME/projects` linked elsewhere),
+  the shim now makes nothing through it and logs a warning that names the path (see Security); a `.codex` already at
+  the path's end, a link or not, is left as it is. Make that directory a plain one, or make the `.codex` link
   yourself. On Windows, which cannot open a directory this way, the shim works by path as before.
 - **With `CLI_SANDBOX_REQUIRED=true`, a store kept outside `/data` now stops provider CLIs.** A Linux host run that
-  keeps `APPROVAL_ROOT`, `STATE_DB_PATH` or another of the controller's stores (see Security) outside `/data`, or in
-  a directory a CLI may write, ran its CLIs with that store open to them and said nothing. It now gets the sandbox's
-  warning, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs (`Provider request failed`). Keep the stores
-  under `/data`, as the image does.
+  keeps `APPROVAL_ROOT`, `STATE_DB_PATH` or another of the controller's stores (see Security) outside `/data`, in a
+  directory a CLI may write, or holding one (a `CLI_SANDBOX_WRITABLE` entry inside it), ran its CLIs with that store
+  open to them and said nothing. It now gets the sandbox's warning, unless an earlier one comes first (see
+  Security), and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs (`Provider request failed`). Keep the stores
+  under `/data`, as the image does, with no writable entry inside one.
 - **With `CLI_SANDBOX_REQUIRED=true`, a host run from a checkout or a venv a CLI may write now stops provider CLIs.**
   Where the checkout, the virtualenv or the interpreter lies in `/tmp`, `/var/tmp`, `CLI_HOME` or an entry of
-  `CLI_SANDBOX_WRITABLE` (see Security), the CLIs ran, and a CLI could change the code the controller runs. Now the
-  sandbox's warning names the place, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs. Move the checkout
-  and its virtualenv out of those directories.
+  `CLI_SANDBOX_WRITABLE`, or holds such an entry (see Security), the CLIs ran, and a CLI could change the code the
+  controller runs. Now the sandbox's warning names the place, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI
+  runs. Move the checkout and its virtualenv out of those directories, and keep the entries out of them.
 - **A `CLI_SANDBOX_WRITABLE` entry or a `CLI_HOME` whose way to its target passes through `/tmp`, or another
   directory a CLI may write, is no longer given.** Such an entry, a link to a link in `/tmp` say, is now passed over
-  with a warning that says where it resolves, and such a `CLI_HOME` is said to be refused, as one that is a link in
-  `/tmp` was already; with `CLI_SANDBOX_REQUIRED=true` the refused home stops provider CLIs (see Security). Set the
-  entry or the home to its real path, or keep the links on its way out of the directories a CLI may write.
+  with a warning that says where it resolves (one that leads into a directory the CLI is given anyway, `/tmp` itself,
+  needs no warning: that directory's rule covers it), and such a `CLI_HOME` is said to be refused, as one that is a
+  link in `/tmp` was already; with `CLI_SANDBOX_REQUIRED=true` the refused home stops provider CLIs (see Security).
+  Set the entry or the home to its real path, or keep the links on its way out of the directories a CLI may write.
 - **A share link minted without a lifetime now lives `SHARE_TOKEN_TTL_MINUTES`, where that is set to other than
   60.** Such a link lived 60 minutes whatever the setting said (see Fixed); it now lives as long as the setting says,
   and one set above 1440 is read as 1440, with a warning at startup. A client that wants 60 minutes there asks for
@@ -76,8 +82,8 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   request's and the tool's schema is `null`, not 60.
 - **`browser.get_local_storage` reads what the browser holds, and cuts an answer past 1,000,000 characters.** A page's
   own replacement of its storage functions (`Storage.prototype.getItem`, `window.localStorage`) no longer changes what
-  the read returns, and an answer is cut at 1,000,000 characters (see Security). Every answer now carries
-  `truncated`, `true` where something was cut or left out. Read a store that large one key at a time.
+  the read returns, and an answer is cut at 1,000,000 characters (see Security). Every answer that reads the store
+  now carries `truncated`, `true` where something was cut or left out. Read a store that large one key at a time.
 
 ### Security
 
@@ -87,22 +93,25 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   then waited for a writer: the controller answered nothing meanwhile (on Linux, nothing ran for the 5 seconds a
   probe waited). The shim now reads the file as the controller reads a call's `decision.json`: only a regular file of
   at most 1 MiB that is itself there, opened without waiting. A FIFO, a link, a directory or a larger file is not
-  read, and a warning says which it was, once.
+  read, and a warning says which it was, once. On Windows a link there is still followed.
 - **The Codex path-compatibility shim no longer makes directories through a link in `CLI_HOME`.** For a path under
   `CLI_HOME` that `config.toml` names (`CLI_HOME/x/deep/.codex/...`), the shim makes any missing directories and a
   `.codex` link to the real one. It made them by path, and the controller is not under the CLI sandbox: a CLI writes
   that config and can put links in its home, so with `CLI_HOME/x` linked to `/data/auth` the controller made
   directories of the CLI's naming in `/data/auth`, where the sandbox keeps the CLI out. The shim now opens each part
-  from the one before it and makes the next one there, never through a link: a part that is a link, or that a CLI
-  puts back as one while the shim works, stops that path with a warning naming it. Paths through plain directories
-  are linked as before; on Windows, which cannot open a directory this way, the shim works by path as before.
+  from the one before it and makes the next one there, never through a link: a part that is a link when the shim
+  comes to it, or that a CLI puts back as one before the shim opens it, stops that path with a warning naming it (the
+  directories made before it stay), and one swapped after the shim opened it leads nowhere, as the shim goes on in
+  the directory it opened. Paths through plain directories the controller may read are linked as before; on Windows,
+  which cannot open a directory this way, the shim works by path as before.
 - **A Codex call's directory moved aside by a CLI no longer leads the controller elsewhere.** The controller makes
   each Codex call's working directory in `CLI_HOME`, makes the call's schema file in it, reads the call's
   `decision.json` from it and removes it after, all outside the CLI sandbox. It did each of these by path, so a CLI
   working in the home meanwhile (another call's, at the same time) could move the directory aside and leave a link at
   its name: the controller then made the schema file in the place the link led to, took a `decision.json` there for
   the call's decision, and failed the call when it came to remove the directory. 1.18.0 named this as a limit. The
-  controller now makes the directory from a descriptor of `CLI_HOME` and keeps one of the directory itself: the
+  controller now makes the directory from a descriptor of `CLI_HOME`, opens it at once without following a link,
+  and keeps that descriptor: the
   schema file is made, and `decision.json` read, in the directory it made, wherever that has been moved, and the
   directory is removed without following a link. Where a link has been left at its name the directory stays, a
   warning says so, and the call's outcome stands; so does one that holds a directory the CLI made read-only, which
@@ -116,7 +125,9 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   `MEMORY_ROOT`, `HARNESS_ROOT`, `MESH_PEERS_PATH`, `MCP_SESSION_STORE_PATH`, `CRON_STORE_PATH`,
   `SHARE_REVOCATION_STORE_PATH`, `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`, `ISOLATED_TUNNEL_INFO_ROOT`,
   `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT` are now checked the same way: the warning names each
-  one that is left open, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. Kept in their default places under
+  one that is left open, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. The sandbox names one condition at a
+  time, the first it finds: a refused home, then the controller's code, then the secrets and stores, so a store left
+  open is named once the two before it are put right. Kept in their default places under
   `/data`, as in the image, nothing changes.
 - **The CLI sandbox now reports a host run whose own code a CLI could change, and refuses it under
   `CLI_SANDBOX_REQUIRED=true`.** The launcher that starts each provider CLI under the sandbox is a file of the
@@ -139,11 +150,12 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   the entries, the CLI home and the secrets' and stores' paths alike: such an entry is passed over with a warning
   that says where it resolves, and a secret reached that way is reported as open.
 - **A directory name with a line break in it no longer starts lines of its own in the controller's log.** The CLI
-  sandbox's warnings name the directories they are about, as written and where each resolves. A CLI may make a
+  sandbox's warnings name the directories they are about, as written and, where it can be read, where each
+  resolves. A CLI may make a
   directory with a line break in its name in its own home and point a link it can swap at it (one an operator's
   `CLI_SANDBOX_WRITABLE` entry resolves through, say); the next call's warning then carried the name as it was, and
-  what followed the line break read as a log line of its own. The warnings now quote each path they name, its line
-  breaks escaped.
+  what followed the line break read as a log line of its own. The warnings now quote each path a setting or a
+  lookup gave them, its line breaks escaped.
 - **A token in `BROWSER_WS_ENDPOINT`'s query, userinfo or fragment no longer reaches the controller's log.** The
   controller names the endpoint it connects to in three places: the log line at every connect, the connect failure
   message (which names a configured `BROWSER_WS_ENDPOINT`, and which readiness, deep health and the startup log
@@ -157,12 +169,15 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   `ISOLATED_TUNNEL_ENABLED=true`, each session's takeover tunnel reserves a remote port on the bastion, and its
   release frees the port. A tunnel released again, as two closes of one session made together could do, freed its
   port again, whichever tunnel held it by then: the next session's tunnel was then started on a port a newer session's
-  tunnel still held. A release of a tunnel already released now does nothing.
+  tunnel still held. A release now acts only on the tunnel the broker holds for that session: one released
+  already, or given up while it started, is left alone, and one whose teardown failed is torn down again at its next
+  release or at shutdown.
 - **The TOTP autofill no longer presses Enter on a page that left the named host while the code was typed.** After
   each step that waits on the page (the search for the field, its focus click, its clearing), the autofill checks
   again that the page is on a host in `totp_hosts` and not refused. After the typing it did not, so a page that a
   key handler sent to another host as the code was typed had Enter pressed into it, which submits whatever form has
-  the focus there. It checks there too now, and such a page gets no Enter.
+  the focus there. It checks there too now, just before Enter, and such a page gets no Enter; one that leaves in
+  the moment between that check and the key is not caught.
 - **`browser.get_local_storage` no longer returns what the page chooses, nor an answer of any size.** It read the
   storage in the page's own JavaScript world, so a page that replaced `Storage.prototype.getItem` answered the read
   itself: 20 million characters in a probe, every one returned to the agent, far more than a page's storage can hold.
@@ -190,7 +205,8 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   /home/botuser (Permission denied)`, naming the setting's path and not the one the error carried), and with
   `APP_ENV=production` and `OPENAI_AUTH_MODE=cli` the controller refuses to start. The check makes one directory and
   removes it at once; where a CLI working in the home has filled or removed it meanwhile, the home still counts as
-  writable and the log has a warning that names no path. The Claude and Gemini CLIs make no such directory and are
+  writable and the log has a warning that names no path (one it replaced with another empty directory is removed
+  without one). The Claude and Gemini CLIs make no such directory and are
   not checked.
 - **The release audit's secret scan finds more of OpenAI's and Slack's key shapes, and AWS secret access keys.** It
   found an OpenAI key written `sk-` or `sk-proj-` and then the key, but not OpenAI's service account, admin and user
@@ -216,7 +232,7 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
 - **The release audit's advisory check blocks on an advisory it cannot read.** It blocked only on an advisory whose
   state was `triage`, so one with no state, with its state under another key, or with a state GitHub might add read
   as clear; an entry that was not an object ended the check with a traceback, and a `--from-json` file holding an
-  object, not a list, passed. Each of these now blocks the release and says to check the advisories by hand. The
+  empty object, not a list, passed. Each of these now blocks the release and says to check the advisories by hand. The
   states it knows are GitHub's five: `triage`, `draft`, `published`, `closed` and `withdrawn`.
 - **The LangChain integration's errors read a wrapped controller URL as the MCP bridges do.** The integration keeps a
   copy of the bridges' redaction, as it depends on httpx alone. The bridges read the URL as urllib does, without a
@@ -231,6 +247,14 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   given, so a deployment's own default, a shorter one included, never applied. They now leave it to the setting (60
   unless set). A setting longer than a caller may ask for, 1440 minutes, is read as 1440, with a warning at startup:
   a link minted without a lifetime lives no longer than one minted with one.
+
+### Changed
+
+- Controller dependencies: FastAPI 0.162.4 (`>=0.162.4,<0.163`), pydantic 2.14.3, pydantic-core 2.50.4,
+  typing-inspection 0.4.5 and click 8.5.1, which 1.16.0 held back as under 72 hours old, and annotated-doc 0.0.6,
+  filelock 4.2.10, markdown-it-py 4.3.0 and py-serializable 2.2.0 (#273); `controller/constraints.txt` resolved again
+  under a cutoff of 2026-11-12. Dev: ruff 0.17.4.
+- The image workflow's `docker/login-action` 4.8.0 (#268).
 
 ### Tests
 
