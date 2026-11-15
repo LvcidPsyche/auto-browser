@@ -113,7 +113,7 @@ class TotpAutofillTests(unittest.TestCase):
         service._find_one_time_code_field = find_the_field
         service.focus_verified = focus
         service.type_text_human_like = typed
-        self.pressed, self.focus_clicks, self.keys = locator.press, 0, keyboard.press
+        self.pressed, self.focus_clicks, self.keys, self.cleared = locator.press, 0, keyboard.press, locator.fill
         return asyncio.run(service.maybe_handle_totp(session)), typed
 
     def test_types_the_code_on_a_named_host(self) -> None:
@@ -154,13 +154,22 @@ class TotpAutofillTests(unittest.TestCase):
 
     def test_a_page_that_leaves_the_named_host_during_the_focus_click_gets_nothing(self) -> None:
         # The focus click (the pointer's moves, a pause, the press) awaits the page as well, and nothing was checked
-        # after it: a page the press sent to another host was given the live code, and Enter.
-        result, typed = self.run_autofill(
-            "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="focus"
-        )
-        self.assertIsNone(result)
-        typed.assert_not_awaited()
-        self.pressed.assert_not_awaited()
+        # after it: a page the press sent to another host was given the live code, and Enter. The checks after the
+        # clear and the typing keep the code and Enter off it too, so only the field's clear, by its fill("") or by
+        # Control+A and Delete where that fails, shows whether the check after the click held.
+        for fill_fails in (False, True):
+            with self.subTest(fill_fails=fill_fails):
+                result, typed = self.run_autofill(
+                    "https://login.example.com/2fa",
+                    hosts=("login.example.com",),
+                    leaves_during="focus",
+                    fill_fails=fill_fails,
+                )
+                self.assertIsNone(result)
+                typed.assert_not_awaited()
+                self.pressed.assert_not_awaited()
+                self.cleared.assert_not_awaited()
+                self.keys.assert_not_awaited()
 
     def test_a_page_that_leaves_the_named_host_as_its_field_is_cleared_gets_nothing(self) -> None:
         # Emptying the field (its fill(""), or where that fails Control+A and Delete) awaits the page as well, after
