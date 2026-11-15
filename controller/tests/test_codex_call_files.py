@@ -165,6 +165,24 @@ async def test_a_decision_file_larger_than_the_stdout_limit_fails_the_call(adapt
     assert str(CLI_STDOUT_LIMIT_BYTES) in line
 
 
+async def test_a_decision_file_far_past_the_stdout_limit_is_read_no_further_than_the_limit(adapter) -> None:
+    # The file is read on the event loop: one byte past the limit says it is too large, and the rest is never read.
+    read = 0
+    real_read = os.read
+
+    def counted(fd: int, size: int) -> bytes:
+        nonlocal read
+        chunk = real_read(fd, size)
+        read += len(chunk)
+        return chunk
+
+    with patch.object(os, "read", counted), pytest.raises(RuntimeError) as caught:
+        await _decide(adapter, lambda path: path.write_bytes(b" " * (8 * CLI_STDOUT_LIMIT_BYTES)))
+
+    assert str(caught.value).startswith(REFUSED)
+    assert read <= CLI_STDOUT_LIMIT_BYTES + 1, read
+
+
 async def test_a_decision_file_of_the_stdout_limit_is_read(adapter) -> None:
     whole = DECISION + " " * (CLI_STDOUT_LIMIT_BYTES - len(DECISION))
 
