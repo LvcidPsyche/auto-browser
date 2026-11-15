@@ -161,10 +161,12 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   message (which names a configured `BROWSER_WS_ENDPOINT`, and which readiness, deep health and the startup log
   write to the log) and the line that logs Playwright's own connect error. Each replaced only the endpoint's path
   with `<redacted>`, so a hosted browser's endpoint with its token anywhere else (`wss://host?token=...`,
-  `wss://user:token@host/...`, a `#` fragment) was logged whole, token and all. Every Playwright endpoint the
+  `wss://user:token@host/...`, a `#` fragment), or with its scheme in capitals (`WSS://`), was logged whole, token
+  and all. Every Playwright endpoint the
   controller prints (the browser-node's, or `BROWSER_WS_ENDPOINT`) now keeps only its scheme, host and port, with
   `/<redacted>` where it had anything more; one whose host and port cannot be read plainly is printed as its scheme
-  alone (`ws://<redacted>`). The browser-node's log and sandbox report and the CI sandbox scripts redact the same way.
+  alone (`ws://<redacted>`). So is an endpoint in the browser sandbox details of `/readiness`, which went through
+  the same redaction; the browser-node's log and sandbox report and the CI sandbox scripts redact the same way.
 - **A session's tunnel released a second time no longer frees a port another session's tunnel holds.** With
   `ISOLATED_TUNNEL_ENABLED=true`, each session's takeover tunnel reserves a remote port on the bastion, and its
   release frees the port. A tunnel released again, as two closes of one session made together could do, freed its
