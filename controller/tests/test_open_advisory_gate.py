@@ -75,6 +75,41 @@ class OpenAdvisoryGateTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(report([], now=NOW), 0)
 
+    def test_an_entry_the_check_cannot_read_blocks_the_release(self) -> None:
+        # Only an entry whose state is "triage" blocked, so one with no state, a renamed key or a state GitHub adds
+        # read as clear; an entry that is not an object ended the check with a traceback.
+        renamed = {key: value for key, value in advisory("triage").items() if key != "state"} | {"State": "triage"}
+        entries = [renamed, advisory("in_review"), advisory("Triage"), advisory("triage") | {"state": ["triage"]}]
+        for entry in [*entries, "GHSA-test-0000", None, [advisory("triage")]]:
+            with (
+                self.subTest(entry=entry),
+                redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(SystemExit, "no state the check knows"),
+            ):
+                report([advisory("published"), entry], now=NOW)
+
+    def test_a_list_that_is_not_a_list_blocks_the_release(self) -> None:
+        # --from-json reads whatever the file holds: an object read as a list of its keys, and an empty one passed.
+        for advisories in ({}, {"message": "Not Found"}, "triage"):
+            with (
+                self.subTest(advisories=advisories),
+                redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(SystemExit, "not a list of advisories"),
+            ):
+                report(advisories, now=NOW)
+
+    def test_the_file_path_blocks_on_what_it_cannot_read(self) -> None:
+        for listed in ({}, [{"ghsa_id": "GHSA-test-0000"}]):
+            with self.subTest(listed=listed), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "advisories.json"
+                path.write_text(json.dumps(listed), encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(_SCRIPTS / "check_open_advisories.py"), "--from-json", str(path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual((result.returncode, "OK:" in result.stdout), (1, False), result.stdout)
+
     def test_a_summary_the_output_cannot_hold_is_escaped_and_the_release_still_blocked(self) -> None:
         # A reporter's text, written where stdout's encoding has no such character (Windows' ANSI code page on a pipe,
         # as when the release audit's output is captured), ended the check with a UnicodeEncodeError at that summary.
@@ -123,6 +158,11 @@ class FetchAdvisoriesTests(unittest.TestCase):
         pages = [[advisory("published", ghsa_id=f"GHSA-{n:04d}") for n in range(30)], [advisory("triage")]]
         advisories, _ = self._fetch(json.dumps(pages))
         with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            report(advisories, now=NOW)
+
+    def test_an_entry_the_check_cannot_read_on_a_page_blocks_the_release(self) -> None:
+        advisories, _ = self._fetch(json.dumps([[advisory("published")], [{"ghsa_id": "GHSA-test-0000"}]]))
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "no state the check knows"):
             report(advisories, now=NOW)
 
     def test_a_reply_that_is_not_a_list_of_pages_fails(self) -> None:
