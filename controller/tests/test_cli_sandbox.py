@@ -48,6 +48,25 @@ SECRET_SETTINGS = [
     "PROXY_PERSONA_FILE",
     "BROWSER_WS_ENDPOINT_FILE",
 ]
+# The settings of the controller's stores, each checked as a secret's is (N1-C-8), by where each is kept in /data.
+STORE_SETTINGS = {
+    "APPROVAL_ROOT": "approvals",
+    "AUDIT_ROOT": "audit",
+    "STATE_DB_PATH": "state.db",
+    "SESSION_STORE_ROOT": "sessions",
+    "JOB_STORE_ROOT": "jobs",
+    "MEMORY_ROOT": "memory",
+    "HARNESS_ROOT": "harness",
+    "MESH_PEERS_PATH": "mesh/peers.json",
+    "MCP_SESSION_STORE_PATH": "mcp/sessions.json",
+    "CRON_STORE_PATH": "crons/crons.json",
+    "SHARE_REVOCATION_STORE_PATH": "share/revocations.json",
+    "ISOLATED_TUNNEL_KNOWN_HOSTS_PATH": "ssh/known_hosts",
+    "ISOLATED_TUNNEL_INFO_ROOT": "tunnels/sessions",
+    "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
+    "ARTIFACT_ROOT": "artifacts",
+    "UPLOAD_ROOT": "uploads",
+}
 COMMAND = ["cli", "--flag"]
 CLI_ENV = {"PATH": os.environ.get("PATH", ""), "PROVIDER_KEY": "value"}
 _DECISION = '{"action":"done","reason":"x","risk_category":"read"}'
@@ -93,7 +112,7 @@ def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def _settings(data: SimpleNamespace, **changed: str | None) -> Settings:
-    """Settings that keep every secret in the protected root, but for what ``changed`` says."""
+    """Settings that keep every secret and store in the protected root, but for what ``changed`` says."""
     inside = {
         "API_TOKEN_FILE": "api-token",
         "TAKEOVER_TOKEN_FILE": "takeover-token",
@@ -103,6 +122,7 @@ def _settings(data: SimpleNamespace, **changed: str | None) -> Settings:
         "ISOLATED_TUNNEL_KEY_PATH": "ssh/id_ed25519",
         "PROXY_PERSONA_FILE": "proxy-personas.json",
         "BROWSER_WS_ENDPOINT_FILE": "browser-profile/browser-ws-endpoint.txt",
+        **STORE_SETTINGS,
         "CLI_HOME": "cli-home",
     }
     values: dict[str, str | None] = {name: str(data.root.joinpath(*path.split("/"))) for name, path in inside.items()}
@@ -198,6 +218,21 @@ def test_every_secret_setting_that_has_a_default_has_it_in_the_protected_root() 
     assert settings.cli_sandbox_enabled is True
 
 
+def test_the_store_settings_are_each_a_setting_by_that_name_kept_in_the_protected_root_by_default() -> None:
+    assert sorted(cli_sandbox.STORE_PATH_SETTINGS.values()) == sorted(STORE_SETTINGS)
+    assert not set(cli_sandbox.STORE_PATH_SETTINGS) & set(cli_sandbox.SECRET_PATH_SETTINGS)
+    with patch.dict(os.environ, {}, clear=True):
+        settings = Settings(_env_file=None)
+
+    for attribute, name in cli_sandbox.STORE_PATH_SETTINGS.items():
+        assert Settings.model_fields[attribute].alias == name, f"{name} does not set Settings.{attribute}"
+        default = getattr(settings, attribute)
+        if name == "STATE_DB_PATH":
+            assert default is None, "the one that is unset by default"
+            continue
+        assert PurePosixPath(default) == PurePosixPath(cli_sandbox.PROTECTED_ROOT, STORE_SETTINGS[name]), name
+
+
 def test_the_launcher_is_the_file_beside_the_module() -> None:
     launcher = Path(cli_sandbox.LAUNCHER)
 
@@ -255,6 +290,26 @@ async def test_a_secret_in_the_cli_home_is_named_too(data, monkeypatch, caplog) 
 
     (line,) = _written(caplog)
     assert "AUTH_ROOT" in line
+
+
+@pytest.mark.parametrize("setting", list(STORE_SETTINGS))
+async def test_a_store_outside_the_root_is_named_as_a_secret_is_and_required_refuses(
+    data, monkeypatch, caplog, setting: str
+) -> None:
+    # What a store holds (the approvals' digest key, a session, a job, a peer) a CLI is not to read or change, any
+    # more than a secret: kept outside the root, the ruleset leaves it open.
+    _probe_says(monkeypatch, None)
+    outside = {setting: str(data.outside / "kept-elsewhere")}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch(_settings(data, **outside), data)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **outside), data)
+
+    assert command == _under_the_launcher(data), "it still runs, and under the launcher"
+    (line,) = _written(caplog)
+    assert [name for name in [*SECRET_SETTINGS, *STORE_SETTINGS] if name in line] == [setting]
+    assert "kept-elsewhere" not in line and str(data.outside) not in line, "a name, never a value"
 
 
 @pytest.mark.parametrize("kind", ["a directory", "a file"])
