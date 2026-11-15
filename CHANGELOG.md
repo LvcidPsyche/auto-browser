@@ -253,6 +253,10 @@ taken out; nothing they cover changes.
   path puts them on the command line it runs: one that left them off, or ran Codex unsandboxed whatever the settings
   said, passed every test. Each path's command line is now read for the default, for `workspace-write` and for the
   opt-in bypass.
+- **The approval store's refusal of an id that leads out of `APPROVAL_ROOT`.** An agent names an approval by its id
+  in `browser.execute_approval` and `browser.reject_approval`, and an id such as `../planted` is refused before any
+  file is read. The test's file outside the root held no valid approval, so the read refused it either way; it now
+  holds one that reads back where it lies, which only that check keeps the store from reading.
 
 ## [1.18.0] — 2026-11-14
 
