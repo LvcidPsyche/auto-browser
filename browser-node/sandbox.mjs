@@ -434,7 +434,17 @@ export async function writeState(path, state) {
 
 // The Playwright server's endpoint (ws://<host>:<port>/<path>) is its only secret: the path is the credential. Text that
 // is printed (a report, a log line, an error that echoes the URL) goes through this first, which keeps scheme, host and
-// port, so the line still says where it pointed.
+// port, so the line still says where it pointed, and drops the rest (a token in the userinfo, the query or the
+// fragment too). The twin of redact_endpoints in controller/app/browser_sandbox.py, which says why it is written this
+// way and not with URL.
+const ENDPOINT = /(wss?:\/\/)([^/\\?#\s"'<>]*)([^\s"'<>]*)/gi;
+const HOST_PORT = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::[0-9]+)?$/;
+
 export function redactEndpoints(text) {
-  return String(text).replace(/(wss?:\/\/[^/\s"'<>]+)\/[^\s"'<>]*/g, "$1/<redacted>");
+  return String(text).replace(ENDPOINT, (_url, scheme, authority, rest) => {
+    const at = authority.lastIndexOf("@");
+    const hostPort = authority.slice(at + 1);
+    if (!HOST_PORT.test(hostPort)) return `${scheme}<redacted>`;
+    return at !== -1 || rest ? `${scheme}${hostPort}/<redacted>` : `${scheme}${hostPort}`;
+  });
 }

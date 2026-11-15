@@ -566,6 +566,29 @@ test("redactEndpoints keeps a websocket endpoint's host and port and drops its p
   assert.equal(redactEndpoints("no endpoint here"), "no endpoint here");
 });
 
+test("redactEndpoints drops a token in the userinfo, the query or the fragment as the controller's twin does", () => {
+  // The table of TOKEN_SHAPES in controller/tests/test_endpoint_redaction.py.
+  const shapes = [
+    [`ws://u:${SECRET_PATH}@h.example:1/x`, "ws://h.example:1/<redacted>"],
+    [`ws://u:${SECRET_PATH}@h.example:1`, "ws://h.example:1/<redacted>"],
+    [`wss://h.example?token=${SECRET_PATH}`, "wss://h.example/<redacted>"],
+    [`ws://h.example:1?token=${SECRET_PATH}`, "ws://h.example:1/<redacted>"],
+    [`ws://h.example:1#${SECRET_PATH}`, "ws://h.example:1/<redacted>"],
+    [`ws://h.example:1\\${SECRET_PATH}`, "ws://h.example:1/<redacted>"],
+    [`WSS://h.example?token=${SECRET_PATH}`, "WSS://h.example/<redacted>"],
+    [`ws://[::1]:9223/${SECRET_PATH}`, "ws://[::1]:9223/<redacted>"],
+    [`ws://u:${SECRET_PATH}@h.example:port/x`, "ws://<redacted>"],
+    [`ws://[::1/${SECRET_PATH}`, "ws://<redacted>"],
+    [`ws://h.example:1:${SECRET_PATH}`, "ws://<redacted>"],
+  ];
+  for (const [endpoint, expected] of shapes) {
+    const out = redactEndpoints(`connect ${endpoint} failed`);
+    assert.ok(!out.includes(SECRET_PATH), out);
+    assert.equal(out, `connect ${expected} failed`);
+  }
+  assert.equal(redactEndpoints("ws://browser-node:9223"), "ws://browser-node:9223");
+});
+
 test("sandbox-report prints the state file and its errors without the Playwright connect path", () => {
   const dir = mkdtempSync(join(tmpdir(), "sandbox-report-"));
   try {

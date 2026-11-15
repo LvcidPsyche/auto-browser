@@ -20,11 +20,22 @@ from pathlib import Path
 
 # The twin of redactEndpoints in browser-node/sandbox.mjs: the path of a Playwright websocket endpoint is that
 # server's only secret, and CI logs are public, so whatever prints a state, a detail or a mismatch goes through this.
-ENDPOINT_PATH = re.compile(r"""(wss?://[^/\s"'<>]+)/[^\s"'<>]*""")
+# An endpoint keeps its scheme://host[:port] only, as in controller/app/browser_sandbox.py, which says why it is
+# written this way.
+ENDPOINT = re.compile(r"""(wss?://)([^/\\?#\s"'<>]*)([^\s"'<>]*)""", re.IGNORECASE)
+HOST_PORT = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::[0-9]+)?")
+
+
+def origin_only(match: re.Match[str]) -> str:
+    scheme, authority, rest = match.groups()
+    _userinfo, at, host_port = authority.rpartition("@")
+    if not HOST_PORT.fullmatch(host_port):
+        return f"{scheme}<redacted>"
+    return f"{scheme}{host_port}/<redacted>" if at or rest else f"{scheme}{host_port}"
 
 
 def redact_endpoints(text: object) -> str:
-    return ENDPOINT_PATH.sub(r"\1/<redacted>", str(text))
+    return ENDPOINT.sub(origin_only, str(text))
 
 
 def problems(state: object, *, require_proc: bool = False) -> list[str]:
