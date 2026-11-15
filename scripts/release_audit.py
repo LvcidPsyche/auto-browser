@@ -149,9 +149,13 @@ def main() -> int:
     # is given the lines the image installs (IMAGE_MARKER_ENVIRONMENT), without their markers: from any host it audits
     # what CI's dependency-audit job, on Linux and Python 3.11, audits.
     lock = (ROOT / "controller" / "constraints.txt").read_text(encoding="utf-8")
+    image_pins = _image_pins(lock)
+    if not image_pins:
+        # pip-audit given no requirement audits nothing and passes.
+        raise SystemExit("Release audit failed: controller/constraints.txt pins nothing the image installs.")
     with tempfile.TemporaryDirectory(prefix="auto-browser-pins-") as temp_dir:
         pins = Path(temp_dir) / "image-pins.txt"
-        pins.write_text("\n".join(_image_pins(lock)) + "\n", encoding="utf-8")
+        pins.write_text("\n".join(image_pins) + "\n", encoding="utf-8")
         _run([PYTHON, "-m", "pip_audit", "-r", pins, "--disable-pip", "--no-deps"])
 
     print("Running browser-node production dependency audit...")
