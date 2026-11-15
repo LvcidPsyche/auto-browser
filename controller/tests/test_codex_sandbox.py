@@ -10,17 +10,35 @@ prompt in an ephemeral temp directory and asked for a JSON decision.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from app.codex_sandbox import BYPASS_FLAG, build_sandbox_flags, codex_sandbox_flags
 from app.config import Settings
+from app.providers.base import CLIResult
+from app.providers.openai_adapter import OpenAIAdapter
+from tests.test_codex_host_bridge_hardening import bridge
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 ADAPTER_SOURCE = Path(__file__).resolve().parents[1] / "app" / "providers" / "openai_adapter.py"
+DECISION = '{"action":"done","reason":"r","risk_category":"read"}'
+# Each sandbox setting as the adapter reads it and as the bridge is given it, and the flags `codex exec` gets for it.
+EXEC_CASES = (
+    ({}, {}, ["-s", "read-only"]),
+    ({"CODEX_SANDBOX_MODE": "workspace-write"}, {"sandbox_mode": "workspace-write"}, ["-s", "workspace-write"]),
+    ({"CODEX_BRIDGE_ALLOW_HOST_EXEC": "true"}, {"allow_host_exec": True}, [BYPASS_FLAG]),
+)
+
+
+def _sandbox_words(command: list[str], flags: list[str]) -> list[str]:
+    """The words of ``command`` where ``flags`` belong: right after `exec --skip-git-repo-check`."""
+    at = command.index("--skip-git-repo-check") + 1
+    return command[at : at + len(flags)]
 
 
 class SandboxFlagTests(unittest.TestCase):
@@ -75,6 +93,62 @@ class HostBridgeTests(unittest.TestCase):
                         build_sandbox_flags(allow_host_exec=allow, sandbox_mode=mode),
                         self.module.build_sandbox_flags(allow_host_exec=allow, sandbox_mode=mode),
                     )
+
+
+class ExecCommandTests(unittest.IsolatedAsyncioTestCase):
+    """The tests above hold the flags each path works out; these, that its `codex exec` is run with them."""
+
+    async def test_the_adapters_codex_exec_carries_the_sandbox(self) -> None:
+        commands: list[list[str]] = []
+
+        async def fake_run_cli(*, command: list[str], **_kwargs) -> CLIResult:
+            commands.append(command)
+            Path(command[command.index("--output-last-message") + 1]).write_text(DECISION, encoding="utf-8")
+            return CLIResult(command=command, stdout="", stderr="", returncode=0)
+
+        for env, _options, flags in EXEC_CASES:
+            with self.subTest(**env), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / "cli-home"
+                home.mkdir()
+                settings = Settings(
+                    _env_file=None, OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex", CLI_HOME=str(home), **env
+                )
+                adapter = OpenAIAdapter(settings)
+                with patch.object(adapter, "run_cli", new=AsyncMock(side_effect=fake_run_cli)):
+                    await adapter._decide(
+                        goal="g",
+                        observation={"url": "https://example.com"},
+                        context_hints=None,
+                        previous_steps=[],
+                        model_override=None,
+                    )
+
+                command = commands[-1]
+                self.assertEqual(_sandbox_words(command, flags), flags)
+                self.assertEqual(command.count(BYPASS_FLAG), flags.count(BYPASS_FLAG))
+
+    @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
+    def test_the_bridges_codex_exec_carries_the_sandbox(self) -> None:
+        commands: list[list[str]] = []
+
+        class FakeCodex:
+            returncode = 0
+
+            def __init__(self, command: list[str], **_kwargs) -> None:
+                commands.append(command)
+                Path(command[command.index("--output-last-message") + 1]).write_text(DECISION, encoding="utf-8")
+
+            def communicate(self, _input: bytes | None = None, timeout: float | None = None) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        for _env, options, flags in EXEC_CASES:
+            with self.subTest(**options), patch.object(bridge.subprocess, "Popen", FakeCodex):
+                service = bridge.CodexBridgeService(codex_path="codex", **options)
+                service.handle_openai_decide({"prompt": "p", "schema": {"type": "object"}})
+
+                command = commands[-1]
+                self.assertEqual(_sandbox_words(command, flags), flags)
+                self.assertEqual(command.count(BYPASS_FLAG), flags.count(BYPASS_FLAG))
 
 
 if __name__ == "__main__":
