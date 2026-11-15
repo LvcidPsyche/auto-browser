@@ -298,6 +298,10 @@ class IsolatedSessionTunnelBroker:
 
     async def release(self, tunnel: IsolatedSessionTunnel) -> None:
         async with self._lock:
+            if tunnel.released:
+                # Torn down already (two closes of its session): its port may be a newer tunnel's by now, and a second
+                # teardown would drop that tunnel's reservation for the next provision to take (X3-2).
+                return
             tunnel.released = True
             # Once `released` is set nothing else stops this tunnel, so a cancel
             # aimed at release() (a close that gave up, shutdown) must not end the
