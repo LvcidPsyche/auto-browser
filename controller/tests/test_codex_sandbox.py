@@ -35,10 +35,18 @@ EXEC_CASES = (
 )
 
 
-def _sandbox_words(command: list[str], flags: list[str]) -> list[str]:
-    """The words of ``command`` where ``flags`` belong: right after `exec --skip-git-repo-check`."""
-    at = command.index("--skip-git-repo-check") + 1
-    return command[at : at + len(flags)]
+def _sandbox_words(command: list[str]) -> list[str]:
+    """Every word of ``command`` that sets Codex's sandbox, wherever it stands: each -s or --sandbox with its value,
+    a -c override of sandbox_mode, and the bypass flag. A later one overrides an earlier, so a second one anywhere on
+    the line counts."""
+    words: list[str] = []
+    for at, word in enumerate(command):
+        value = command[at + 1] if at + 1 < len(command) else ""
+        if word in ("-s", "--sandbox") or (word == "-c" and value.startswith("sandbox")):
+            words += [word, value]
+        elif word == BYPASS_FLAG or word.startswith("--sandbox="):
+            words.append(word)
+    return words
 
 
 class SandboxFlagTests(unittest.TestCase):
@@ -124,7 +132,7 @@ class ExecCommandTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 command = commands[-1]
-                self.assertEqual(_sandbox_words(command, flags), flags)
+                self.assertEqual(_sandbox_words(command), flags)
                 self.assertEqual(command.count(BYPASS_FLAG), flags.count(BYPASS_FLAG))
 
     @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
@@ -147,7 +155,7 @@ class ExecCommandTests(unittest.IsolatedAsyncioTestCase):
                 service.handle_openai_decide({"prompt": "p", "schema": {"type": "object"}})
 
                 command = commands[-1]
-                self.assertEqual(_sandbox_words(command, flags), flags)
+                self.assertEqual(_sandbox_words(command), flags)
                 self.assertEqual(command.count(BYPASS_FLAG), flags.count(BYPASS_FLAG))
 
 
