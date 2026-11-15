@@ -467,15 +467,16 @@ class SessionShareManager:
 
 
 async def mint_share_token(
-    share_manager: Any, audit: Any, session_id: str, *, ttl_seconds: int | None
+    share_manager: Any, audit: Any, session_id: str, *, ttl_minutes: int | None
 ) -> dict[str, Any]:
     """Mint a share token and audit it: the one mint behind POST /sessions/{id}/share and browser.share_session,
-    each of which has first checked that its caller may use the session. ttl_seconds None is the manager's default.
+    each of which has first checked that its caller may use the session. ttl_minutes None is the manager's default.
 
     The token is returned only once its stamp is in the store (create_token, in a worker thread: it reads and writes
     the store) and its event is written: a mint whose audit fails raises ShareAuditError, and the token made for it
     is dropped unseen. The event names the token by its digest (token_digest).
     """
+    ttl_seconds = None if ttl_minutes is None else ttl_minutes * 60
     token = await asyncio.to_thread(share_manager.create_token, session_id, ttl_seconds=ttl_seconds)
     try:
         await audit.append(

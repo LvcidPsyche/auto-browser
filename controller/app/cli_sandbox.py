@@ -371,11 +371,8 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
     # in /tmp, say.
     installed = sysconfig.get_paths()
     code = [str(Path(LAUNCHER).parent), LAUNCHER, sys.executable, sys.prefix, sys.base_prefix]
-    read_at_start += [
-        _ways(path)
-        for path in dict.fromkeys([*code, installed["purelib"], installed["platlib"]])
-        if os.path.isabs(path)
-    ]
+    code += [installed["purelib"], installed["platlib"]]
+    read_at_start += [_ways(path) for path in dict.fromkeys(code) if os.path.isabs(path)]
     own = _ways(cli_home)
     found = (
         "provider CLIs may write %s under the Landlock sandbox, %s, the controller, which is not under the sandbox, "

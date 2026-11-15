@@ -936,7 +936,7 @@ class MintOffTheLoopTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(manager, name, side_effect=slowly):
             minting = asyncio.ensure_future(
-                session_share.mint_share_token(manager, _Audit(), SESSION_ID, ttl_seconds=60)
+                session_share.mint_share_token(manager, _Audit(), SESSION_ID, ttl_minutes=1)
             )
             self.assertTrue(await asyncio.to_thread(reached.wait, 5))
             loop_ran.set()

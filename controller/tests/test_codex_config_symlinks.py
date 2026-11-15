@@ -23,9 +23,9 @@ from app.config import Settings
 from app.providers import openai_adapter
 from app.providers.base import CLI_STDOUT_LIMIT_BYTES
 from app.providers.openai_adapter import OpenAIAdapter
+from tests.test_codex_call_files import _warnings, posix_only
 
 CLI_HOME = PurePosixPath("/data/cli-home")
-posix_only = pytest.mark.skipif(os.name == "nt", reason="needs POSIX: a FIFO, a link without a privilege, O_NOFOLLOW")
 
 
 class CodexRootAllowedTests(unittest.TestCase):
@@ -183,14 +183,6 @@ def cli_home(tmp_path: Path) -> Path:
 
 def _shim(cli_home: Path) -> OpenAIAdapter:
     return OpenAIAdapter(Settings(_env_file=None, OPENAI_API_KEY="k", CLI_HOME=str(cli_home)))
-
-
-def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == "app.providers.openai_adapter" and record.levelno == logging.WARNING
-    ]
 
 
 @posix_only

@@ -56,12 +56,12 @@ PACKAGE_SUITES = (
 )
 PACKAGE_HOLD_HOURS = 72
 # A POSIX extended expression, which `git grep -E` reads (no \b, no lookaround). OpenAI's keys by their named kinds
-# only (svcacct, admin, None): any word after sk- would find kebab-case names. An AWS secret access key has no prefix
+# only (proj, svcacct, admin, None): any word after sk- would find kebab-case names. An AWS secret access key has no prefix
 # of its own, so it is found only after its setting's name.
 SECRET_PATTERN = (
     r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|xox[abceprs]-[A-Za-z0-9-]{10,}|"
-    r"sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-(svcacct|admin|None)-[A-Za-z0-9_-]{20,}|"
+    r"sk-ant-[A-Za-z0-9_-]{20,}|sk-(proj|svcacct|admin|None)-[A-Za-z0-9_-]{20,}|"
     r"(AKIA|ASIA)[0-9A-Z]{16}|"
     r"""(aws_secret_access_key|AWS_SECRET_ACCESS_KEY)["' ]*[=:]["' ]*[A-Za-z0-9/+]{40}|"""
     r"glpat-[A-Za-z0-9_-]{20}|gh[osur]_[A-Za-z0-9]{20,}"
