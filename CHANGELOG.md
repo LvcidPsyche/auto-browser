@@ -156,6 +156,11 @@ TODO-INTRO
   pip-audit the pins of `controller/constraints.txt` that hold for the image, and pip-audit given none audits
   nothing and passes: an emptied lock, or one whose every line is for another platform, passed the audit. The audit
   now stops there and says so.
+- **The release audit checks that the MCP metapackage depends on the client by the client's name.** It took any
+  `Requires-Dist` line that began with `auto-browser-client`, so a wheel that depended on another package whose name
+  begins so (`auto-browser-client-typo`) passed, as did one whose README held such a line. It now reads the wheel's
+  dependencies from its metadata's headers and compares each one's name as pip does, so `auto_browser_client` still
+  counts and `auto-browser-client-typo` does not.
 
 ## [1.18.0] — 2026-11-14
 
