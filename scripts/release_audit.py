@@ -317,8 +317,9 @@ def _inspect_mcp_wheel(wheelhouse: Path) -> None:
         metadata = _read_dist_info(archive, names, "METADATA")
         entry_points = _read_dist_info(archive, names, "entry_points.txt")
     # By its name, as pip reads it: a line that only begins with the client's (auto-browser-client-typo) names another
-    # package. From the headers alone, as the description after them is the README's text.
-    requirements = HeaderParser().parsestr(metadata).get_all("Requires-Dist", [])
+    # package. From the headers alone, as the description after them is the README's text, each unfolded (a header may
+    # go on over several lines).
+    requirements = [" ".join(value.split()) for value in HeaderParser().parsestr(metadata).get_all("Requires-Dist", [])]
     if not any(canonicalize_name(Requirement(value).name) == "auto-browser-client" for value in requirements):
         raise SystemExit("MCP metapackage wheel is missing Requires-Dist: auto-browser-client")
     parser = configparser.ConfigParser(interpolation=None)
