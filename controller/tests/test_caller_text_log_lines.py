@@ -189,6 +189,23 @@ class OneLineTests(unittest.IsolatedAsyncioTestCase):
         for written in (read, command):
             self.assert_one_line_cut(written)
 
+    async def test_a_callers_selector_in_the_line_of_a_read_that_fails_with_the_agents_on(self) -> None:
+        # Above, the agents fail to switch on and the line is the one around the read. Where they switch on and the
+        # read fails (an invalid selector is enough), the read writes a line of its own.
+        async def send(method: str, *_args: object) -> dict[str, object]:
+            if method.endswith((".enable", ".disable")):
+                return {}
+            raise PlaywrightError(FORGED)
+
+        cdp = CDPPassthrough(SimpleNamespace(send=AsyncMock(side_effect=send)))
+
+        with self.assertLogs("app.cdp.passthrough", level="WARNING") as logged:
+            self.assertEqual((await cdp.get_element_intelligence(FORGED))["error"], "cdp_element_intelligence_failed")
+
+        (read,) = [line for line in _written(logged.records) if line.startswith("cdp.")]
+        self.assertTrue(read.startswith("cdp.element_intelligence error selector='p\\n"), read[:80])
+        self.assert_one_line_cut(read)
+
     async def test_a_callers_pattern_and_a_pages_url_in_the_network_hook_line(self) -> None:
         # Both were written with %r, whole: the pattern the caller registered, and the URL of a request the page made.
         registered = {}
