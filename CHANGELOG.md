@@ -217,6 +217,9 @@ taken out; nothing they cover changes.
 - **The cut of a cookie's name and destination in a write's record.** The audit entry of `browser.set_cookies` names
   each cookie by its name and its domain or its URL's origin, each cut to 200 characters, as the input model bounds
   none of them; without the cut a caller's text went whole into the entry.
+- **The kill of a provider CLI whose output passes the cap.** A CLI that writes past `CLI_STDOUT_LIMIT_BYTES` is
+  stopped, and the call refused at once. The test's CLI stopped writing by itself, so it was reaped even with the
+  kill gone; one that writes forever would have outlived its refused call.
 
 ## [1.18.0] — 2026-11-14
 
