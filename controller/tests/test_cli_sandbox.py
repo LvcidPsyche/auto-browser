@@ -33,6 +33,7 @@ from app.providers.base import CLIResult, ProviderAPIError
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
+from app.utils import quoted_for_log
 from tests.test_cli_sandbox_launcher import LANDLOCK_ABI, STAND_IN, needs_landlock
 from tests.test_harness_uv_output_cap import _is_running
 from tests.test_run_cli import _HOLDER as HOLDS_THE_PIPES
@@ -597,7 +598,7 @@ async def test_an_entry_of_cli_sandbox_writable_that_is_no_directory_is_passed_o
 
     assert commands == [_under_the_launcher(data)] * 3
     (line,) = _written(caplog)
-    assert "CLI_SANDBOX_WRITABLE" in line and str(missing) in line
+    assert "CLI_SANDBOX_WRITABLE" in line and quoted_for_log(str(missing)) in line
 
 
 async def test_an_entry_of_cli_sandbox_writable_in_the_root_is_given_and_a_secret_in_it_is_open(
@@ -845,7 +846,7 @@ def test_a_cli_home_written_with_two_slashes_in_tmp_and_swapped_for_a_link_is_tm
 
     # The CLI writes /tmp, and not where its home leads: it runs without a home it can write, and that is said.
     assert given == [("/tmp", "/tmp")]
-    assert "CLI_HOME //tmp/cli-home resolves to /home/controller/.local/lib/python3.12/site-packages" in refused
+    assert "CLI_HOME '//tmp/cli-home' resolves to '/home/controller/.local/lib/python3.12/site-packages'" in refused
 
 
 def test_a_cli_home_written_with_two_slashes_in_the_root_is_given(linux_paths) -> None:
@@ -1015,7 +1016,7 @@ async def test_a_cli_home_whose_path_climbs_out_of_a_link_is_not_given_and_the_c
 
     assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
     (line,) = _written(caplog)
-    assert f"CLI_HOME {home} has a '..' part" in line
+    assert f"CLI_HOME {home!r} has a '..' part" in line
 
 
 @pytest.mark.parametrize(
@@ -1039,7 +1040,7 @@ async def test_a_refused_cli_home_that_another_directory_given_holds_once_resolv
 
     assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev", *([entry] if entry else [])]
     (line,) = _written(caplog)
-    assert f"CLI_HOME {home} " in line and "run under the Landlock sandbox with no rule for their home (" in line
+    assert f"CLI_HOME {home!r} " in line and "run under the Landlock sandbox with no rule for their home (" in line
 
 
 async def test_a_cli_home_with_no_dots_in_the_root_is_given(linux_links, caplog) -> None:
@@ -1094,7 +1095,7 @@ async def test_a_cli_home_in_tmp_that_is_a_link_elsewhere_is_said_to_be_refused_
 
     assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
     (line,) = _written(caplog)
-    assert "CLI_HOME /tmp/cli-home resolves to /opt/cli-state" in line
+    assert "CLI_HOME '/tmp/cli-home' resolves to '/opt/cli-state'" in line
 
 
 @pytest.mark.parametrize("linked", [True, False], ids=["a link out of /tmp", "a directory in /tmp"])
@@ -1122,7 +1123,7 @@ async def test_an_entry_of_cli_sandbox_writable_in_tmp_that_is_a_link_elsewhere_
         assert lines == []
         return
     (line,) = lines
-    assert "CLI_SANDBOX_WRITABLE names /tmp/out, which resolves to /opt/toolcache" in line
+    assert "CLI_SANDBOX_WRITABLE names '/tmp/out', which resolves to '/opt/toolcache'" in line
     assert "not given it to write" in line
 
 
@@ -1167,7 +1168,7 @@ async def test_an_entry_of_cli_sandbox_writable_that_resolves_through_a_place_a_
         assert lines == []
         return
     (line,) = lines
-    assert "CLI_SANDBOX_WRITABLE names /opt/x, which resolves to /target, which no directory given" in line
+    assert "CLI_SANDBOX_WRITABLE names '/opt/x', which resolves to '/target', which no directory given" in line
 
 
 async def test_a_cli_home_that_resolves_through_a_link_in_tmp_is_refused_and_required_refuses(
@@ -1185,7 +1186,7 @@ async def test_a_cli_home_that_resolves_through_a_link_in_tmp_is_refused_and_req
 
     assert _given_to_write(command) == ["/tmp", "/var/tmp", "/dev"]
     (line,) = _written(caplog)
-    assert "CLI_HOME /opt/cli-home resolves to /srv/h, which no directory given" in line
+    assert "CLI_HOME '/opt/cli-home' resolves to '/srv/h', which no directory given" in line
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a symbolic link takes a privilege on Windows, and Landlock is Linux's")
@@ -1208,7 +1209,59 @@ async def test_an_entry_that_resolves_through_a_link_in_a_temp_directory_is_not_
 
     assert _given_to_write(command) == [str(data.home), temp]
     (line,) = _written(caplog)
-    assert f"CLI_SANDBOX_WRITABLE names {entry}, which resolves to {target}, which no directory given" in line
+    assert (
+        f"CLI_SANDBOX_WRITABLE names {str(entry)!r}, which resolves to {str(target)!r}, which no directory given"
+        in line
+    )
+
+
+@pytest.mark.parametrize(
+    "entry, home, link, target",
+    [
+        ("/tmp/out", "/data/cli-home", "/tmp/out", "/data/cli-home/x\nFORGED line"),
+        ("/tmp/out", "/data/cli-home", "/tmp/out", "/opt/x\nFORGED line"),
+        ("", "/tmp/cli-home", "/tmp/cli-home", "/opt/x\nFORGED line"),
+        ("/srv/w", "/data/cli-home", "/srv/w", "/home/controller/x\nFORGED line"),
+    ],
+    ids=[
+        "an entry that resolves into the root",
+        "an entry that resolves where no directory given holds it",
+        "a CLI home that does",
+        "an entry that resolves into the controller's home",
+    ],
+)
+async def test_a_path_with_a_line_break_in_it_is_quoted_and_starts_no_line_of_the_log(
+    linux_links, caplog, entry: str, home: str, link: str, target: str
+) -> None:
+    # A CLI names what it makes where it may write, a line break and all, and can swap a link there for one to it:
+    # where the sandbox names that path, it is quoted, its line break escaped, and forges no line of its own.
+    linux_links.dirs.add(target)
+    linux_links.links[link] = target
+
+    with caplog.at_level(logging.WARNING):
+        await _launch_on_linux(_linux_settings(CLI_SANDBOX_WRITABLE=entry), home, {"HOME": home})
+
+    lines = [record.getMessage() for record in caplog.records if record.name == "app.cli_sandbox"]
+    assert [line for line in lines if "FORGED" in line], "the path is named"
+    assert [line for line in lines if "\n" in line] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a name with a line break in it cannot be made on Windows")
+async def test_a_name_with_a_line_break_that_an_entry_resolves_to_is_quoted_in_the_log(
+    data, monkeypatch, caplog
+) -> None:
+    _probe_says(monkeypatch, None)
+    forged = data.root / "x\nFORGED line"
+    forged.mkdir()
+    entry = data.outside / "out"
+    entry.parent.mkdir()
+    entry.symlink_to(forged, target_is_directory=True)
+
+    with caplog.at_level(logging.WARNING):
+        await _launch(_settings(data, CLI_SANDBOX_WRITABLE=str(entry)), data)
+
+    (line,) = _written(caplog)
+    assert "\n" not in line and repr(str(forged)) in line
 
 
 @pytest.mark.parametrize(
@@ -1249,8 +1302,8 @@ async def test_a_directory_written_in_the_controllers_home_that_resolves_elsewhe
         )
 
     (line,) = _written(caplog)
-    assert "write /home/controller/out-link (/opt/out once resolved) under" in line
-    assert "which lies in the controller's own home /home/controller" in line
+    assert "write '/home/controller/out-link' ('/opt/out' once resolved) under" in line
+    assert "which lies in the controller's own home '/home/controller'" in line
 
 
 @pytest.mark.parametrize(
@@ -1277,7 +1330,7 @@ async def test_the_controllers_home_that_a_directory_given_meets_once_resolved_i
         )
 
     (line,) = _written(caplog)
-    assert said % "/home/c-link (/mnt/home/controller once resolved)" in line
+    assert said % "'/home/c-link' ('/mnt/home/controller' once resolved)" in line
 
 
 @pytest.mark.parametrize(
@@ -1357,7 +1410,7 @@ async def test_where_the_controller_runs_its_code_from_is_reported_where_a_cli_m
 
     assert _given_to_write(command)[:4] == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
     (line,) = _written(caplog)
-    assert f"and the controller reads {named}" in line
+    assert f"and the controller reads {named!r}" in line
 
 
 @pytest.mark.parametrize("swap", ["a directory in the root", "what holds the root"])
@@ -1382,7 +1435,7 @@ async def test_a_home_a_cli_swapped_for_a_link_is_not_given_and_the_cli_still_st
 
     assert _given_to_write(command) == [temp], "neither the home's place nor anything holding the root"
     (line,) = _written(caplog)
-    assert "CLI_HOME" in line and str(home) in line and str(target) in line
+    assert "CLI_HOME" in line and quoted_for_log(str(home)) in line and quoted_for_log(str(target)) in line
 
 
 @pytest.mark.parametrize("how", ["CLI_HOME is blank", "CLI_HOME is the controller's home", "CLI_SANDBOX_WRITABLE"])
@@ -1409,7 +1462,7 @@ async def test_where_a_cli_may_write_the_controllers_home_one_warning_says_so_an
 
     assert commands[0] == commands[1] and commands[0][3] == cli_sandbox.LAUNCHER, "it runs, under the launcher"
     (line,) = _written(caplog)
-    assert str(data.controller_home) in line and "next start" in line
+    assert quoted_for_log(str(data.controller_home)) in line and "next start" in line
     # What it may run is what Python or ssh reads there, and the line says what to keep apart, the blank CLI_HOME's
     # HOME and a TMPDIR among it.
     assert (
@@ -1417,7 +1470,7 @@ async def test_where_a_cli_may_write_the_controllers_home_one_warning_says_so_an
     )
     assert "TMPDIR" in line and "its HOME where CLI_HOME is blank" in line
     (refusal,) = _written(caplog, logging.ERROR)
-    assert str(data.controller_home) in refusal
+    assert quoted_for_log(str(data.controller_home)) in refusal
 
 
 @pytest.mark.parametrize("entry", ["its .ssh", "its Python user site", "an ordinary directory"])
@@ -1441,7 +1494,8 @@ async def test_a_directory_a_cli_may_write_inside_the_controllers_home_is_report
 
     assert _given_to_write(command) == [str(data.home), str(place)]
     (line,) = _written(caplog)
-    assert str(place) in line and str(data.controller_home) in line and "next start" in line
+    assert quoted_for_log(str(place)) in line and quoted_for_log(str(data.controller_home)) in line
+    assert "next start" in line
 
 
 @pytest.mark.parametrize(
@@ -1473,7 +1527,8 @@ async def test_a_cli_home_in_the_controllers_home_is_its_own_unless_it_meets_wha
         assert await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data, home=home, env=env)
         return
     (line,) = _written(caplog)
-    assert str(home) in line and str(data.controller_home) in line
+    # The place it meets is named, quoted, and lies in the controller's home: its text as the quotes hold it.
+    assert quoted_for_log(str(home)) in line and quoted_for_log(str(data.controller_home))[1:-1] in line
     with pytest.raises(cli_sandbox.SandboxRequired):
         await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data, home=home, env=env)
 
@@ -1495,7 +1550,7 @@ async def test_where_home_and_the_passwd_entry_name_two_homes_a_directory_in_eit
         await _launch(_settings(data, CLI_SANDBOX_REQUIRED="true", **changed), data)
 
     (line,) = _written(caplog)
-    assert str(home / ".ssh") in line and str(home) in line
+    assert quoted_for_log(str(home / ".ssh")) in line and quoted_for_log(str(home)) in line
 
 
 def test_the_passwd_home_is_the_entrys_and_blank_where_there_is_none(monkeypatch, tmp_path: Path) -> None:
@@ -1521,7 +1576,7 @@ async def test_where_the_controllers_home_and_a_secret_are_both_open_the_home_is
         await _launch(settings, data)
 
     (line,) = _written(caplog)
-    assert str(data.controller_home) in line and "AUTH_ROOT" not in line
+    assert quoted_for_log(str(data.controller_home)) in line and "AUTH_ROOT" not in line
 
 
 # ---- the probe ----

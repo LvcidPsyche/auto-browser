@@ -105,6 +105,12 @@ TODO-INTRO
   among them, and be given that to write at the next call. Each place Linux looks up on the way now counts too, for
   the entries, the CLI home and the secrets' and stores' paths alike: such an entry is passed over with a warning
   that says where it resolves, and a secret reached that way is reported as open.
+- **A directory name with a line break in it no longer starts lines of its own in the controller's log.** The CLI
+  sandbox's warnings name the directories they are about, as written and where each resolves. A CLI may make a
+  directory with a line break in its name in its own home and point a link it can swap at it (one an operator's
+  `CLI_SANDBOX_WRITABLE` entry resolves through, say); the next call's warning then carried the name as it was, and
+  what followed the line break read as a log line of its own. The warnings now quote each path they name, its line
+  breaks escaped.
 
 ### Fixed
 

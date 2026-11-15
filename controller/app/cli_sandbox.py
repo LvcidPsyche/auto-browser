@@ -267,11 +267,11 @@ def _not_given(kind: str, written: str, real: str) -> str:
     if not os.path.isdir(real):
         return "is not a directory"
     if Path(PROTECTED_ROOT).is_relative_to(real):
-        return "resolves to %s, which is %s or holds it" % (real, PROTECTED_ROOT)
+        return "resolves to %s, which is %s or holds it" % (quoted_for_log(real), PROTECTED_ROOT)
     if Path(real).is_relative_to(PROTECTED_ROOT) and (
         kind == "shared" or not Path(written).is_relative_to(PROTECTED_ROOT)
     ):
-        return "resolves to %s, in %s" % (real, PROTECTED_ROOT)
+        return "resolves to %s, in %s" % (quoted_for_log(real), PROTECTED_ROOT)
     return ""
 
 
@@ -302,9 +302,9 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
         entry = _ways(path)
         why = "has a '..' part, read after any link before it" if _climbs(path) else _not_given(kind, *entry)
         if why and kind == "home":
-            home_refused = refused % (path, why)
+            home_refused = refused % (quoted_for_log(path), why)
         elif why and kind == "setting":
-            _warn_once(not_given % (path, why))
+            _warn_once(not_given % (quoted_for_log(path), why))
         elif kind == "setting":
             entries.append((path, entry[1]))
         if why or any(_lies_in(entry, other) for other in given):
@@ -314,17 +314,19 @@ def _writable(settings: Settings, cli_home: str, env: dict[str, str]) -> tuple[l
     # it is written and not where it leads: a link there, which a CLI may have made.
     for path, real in entries:
         if not any(Path(real).is_relative_to(other) for _, other in given):
-            _warn_once(not_given % (path, unheld % real))
+            _warn_once(not_given % (quoted_for_log(path), unheld % quoted_for_log(real)))
     home = _ways(cli_home)
     if not home_refused and not any(Path(home[1]).is_relative_to(real) for _, real in given):
-        home_refused = refused % (cli_home, unheld % home[1])
+        home_refused = refused % (quoted_for_log(cli_home), unheld % quoted_for_log(home[1]))
     return given, home_refused
 
 
 def _named(entry: tuple[str, str]) -> str:
-    """A directory for the log: as written, and once resolved where that is another path."""
+    """A directory for the log, quoted: as written, and once resolved where that is another path."""
     written, real = entry
-    return written if written == real else "%s (%s once resolved)" % (written, real)
+    if written == real:
+        return quoted_for_log(written)
+    return "%s (%s once resolved)" % (quoted_for_log(written), quoted_for_log(real))
 
 
 def _passwd_home() -> str:
