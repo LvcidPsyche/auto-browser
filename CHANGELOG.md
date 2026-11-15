@@ -51,6 +51,17 @@ TODO-INTRO
   from the one before it and makes the next one there, never through a link: a part that is a link, or that a CLI
   puts back as one while the shim works, stops that path with a warning naming it. Paths through plain directories
   are linked as before; on Windows, which cannot open a directory this way, the shim works by path as before.
+- **A Codex call's directory moved aside by a CLI no longer leads the controller elsewhere.** The controller makes
+  each Codex call's working directory in `CLI_HOME`, makes the call's schema file in it, reads the call's
+  `decision.json` from it and removes it after, all outside the CLI sandbox. It did each of these by path, so a CLI
+  working in the home meanwhile (another call's, at the same time) could move the directory aside and leave a link at
+  its name: the controller then made the schema file in the place the link led to, took a `decision.json` there for
+  the call's decision, and failed the call when it came to remove the directory. 1.18.0 named this as a limit. The
+  controller now makes the directory from a descriptor of `CLI_HOME` and keeps one of the directory itself: the
+  schema file is made, and `decision.json` read, in the directory it made, wherever that has been moved, and the
+  directory is removed without following a link. Where a link has been left at its name the directory stays, a
+  warning says so, and the call's outcome stands. On Windows, which cannot open a directory this way, all of it is
+  done by path as before.
 
 ### Fixed
 

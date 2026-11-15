@@ -72,6 +72,27 @@ async def test_with_no_decision_file_the_reply_is_what_the_cli_printed(adapter) 
     assert result.decision.reason == "from stdout" and result.raw_text == STDOUT
 
 
+async def test_a_calls_directory_is_removed_after_it(adapter) -> None:
+    await _decide(adapter, lambda path: path.write_text(DECISION, encoding="utf-8"))
+
+    assert list(Path(adapter.settings.cli_home).iterdir()) == []
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "O_PATH") or os.geteuid() == 0, reason="needs Linux's O_PATH, and a user who may not list any dir"
+)
+async def test_a_cli_home_the_controller_may_write_but_not_list_takes_a_calls_directory(adapter) -> None:
+    home = Path(adapter.settings.cli_home)
+    home.chmod(0o333)
+    try:
+        result = await _decide(adapter, lambda path: path.write_text(DECISION, encoding="utf-8"))
+    finally:
+        home.chmod(0o700)
+
+    assert result.decision.reason == "from the file"
+    assert list(home.iterdir()) == []
+
+
 @posix_only
 async def test_a_decision_file_that_is_a_link_to_a_closed_file_fails_the_call_and_nothing_of_that_file_leaves(
     adapter, tmp_path: Path, caplog
@@ -187,3 +208,61 @@ async def test_a_link_at_the_schemas_name_fails_the_call_and_its_target_is_untou
     started.assert_not_awaited()
     assert str(tmp_path) not in str(caught.value)
     assert len(_warnings(caplog)) == 1
+
+
+def _swap_for_a_link(directory: Path, to: Path) -> None:
+    """What a CLI working in the home meanwhile can do: move the call's directory aside, and leave a link at its name."""
+    directory.rename(directory.with_name(directory.name + "-aside"))
+    directory.symlink_to(to, target_is_directory=True)
+
+
+async def _outcome(adapter: OpenAIAdapter, leave) -> object:
+    """What the call returned, or the error it raised: the assertions after it say which was wrong."""
+    try:
+        return await _decide(adapter, leave)
+    except Exception as exc:
+        return exc
+
+
+@pytest.fixture
+def closed(tmp_path: Path) -> Path:
+    """A directory the CLI sandbox keeps a CLI out of, holding a decision.json of its own."""
+    place = tmp_path / "data" / "auth"
+    place.mkdir(parents=True)
+    (place / "decision.json").write_text(CLOSED, encoding="utf-8")
+    return place
+
+
+@posix_only
+async def test_a_call_directory_swapped_for_a_link_once_made_is_not_written_read_or_removed_through_it(
+    adapter, closed: Path, caplog
+) -> None:
+    made = adapter._call_directory
+
+    def call_directory():
+        directory = made()
+        _swap_for_a_link(Path(directory.name), closed)
+        return directory
+
+    with patch.object(adapter, "_call_directory", side_effect=call_directory), caplog.at_level(logging.WARNING):
+        result = await _outcome(adapter, lambda path: None)
+
+    assert sorted(path.name for path in closed.iterdir()) == ["decision.json"], "the schema was made through the link"
+    assert (closed / "decision.json").read_text(encoding="utf-8") == CLOSED
+    assert getattr(result, "raw_text", result) == STDOUT, "the decision was read through the link"
+    (line,) = _warnings(caplog)
+    assert "not removed" in line
+
+
+@posix_only
+async def test_a_call_directory_swapped_for_a_link_while_the_cli_runs_gives_no_decision_through_it(
+    adapter, closed: Path
+) -> None:
+    def swap(decision: Path) -> None:
+        _swap_for_a_link(decision.parent, closed)
+
+    with patch.object(adapter, "parse_decision_text", wraps=adapter.parse_decision_text) as parsed:
+        await _outcome(adapter, swap)
+
+    assert [entry.args[0] for entry in parsed.call_args_list] == [STDOUT], "the decision was read through the link"
+    assert (closed / "decision.json").read_text(encoding="utf-8") == CLOSED
