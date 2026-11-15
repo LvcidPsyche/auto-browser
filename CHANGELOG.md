@@ -232,6 +232,10 @@ taken out; nothing they cover changes.
   caller's selector into its warning quoted and cut, so a line break in it starts no line of its own. The test
   failed the read before the read began; a read that began and then failed, as one with an invalid selector does,
   writes a line of its own, which no test read.
+- **The TOTP autofill's check after its focus click.** A page that leaves the hosts in `totp_hosts` during the
+  click that focuses the code field gets nothing more: no code, no Enter, and its field is not cleared. The later
+  checks keep the code and Enter off such a page as well, so the test now also asserts that nothing clears the
+  field, which only the check after the click prevents.
 
 ## [1.18.0] — 2026-11-14
 
