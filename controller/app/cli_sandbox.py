@@ -249,11 +249,24 @@ def _lies_in(place: tuple[str, str], directory: tuple[str, str]) -> bool:
     each leading part of it resolved and the rest as written, or at any of its _steps: a link part-way along it (an
     alias such as /var/tmp linked to /tmp, which _writable keeps only resolved, or an operator's), or along a link's
     target, can lead into ``directory``, where what lies past the link is the CLI's to swap."""
+    return _in(_places(place), directory)
+
+
+def _places(place: tuple[str, str]) -> set[Path]:
+    """Where _lies_in looks for ``place`` (as written, once resolved, with each leading part resolved and the rest as
+    written, and at each of its _steps), each with the directories it lies in: what Path.is_relative_to compares, so
+    that a comparison is one look-up. Working them out asks the file system about each part of ``place`` at each CLI
+    call, so a place compared with several directories is worked out once for all of them."""
     written, real = place
     parts = Path(written).parts
     leads = [os.path.join(os.path.realpath(Path(*parts[:end])), *parts[end:]) for end in range(2, len(parts))]
-    places = (written, real, *leads, *_steps(written))
-    return any(Path(mine).is_relative_to(theirs) for mine in places for theirs in directory)
+    candidates = dict.fromkeys((written, real, *leads, *_steps(written)))
+    return {held for path in map(Path, candidates) for held in (path, *path.parents)}
+
+
+def _in(places: set[Path], directory: tuple[str, str]) -> bool:
+    """Whether one of ``places`` (_places) is ``directory``, as written or once resolved, or lies in it."""
+    return any(Path(theirs) in places for theirs in directory)
 
 
 def _not_given(kind: str, written: str, real: str) -> str:
@@ -371,19 +384,22 @@ def _controllers_home_open(given: list[tuple[str, str]], cli_home: str) -> str:
         "CLI_SANDBOX_WRITABLE, the CLI's TMPDIR, TEMP and TMP, its HOME where CLI_HOME is blank, and the shared temp "
         "directories"
     )
-    for entry, home in ((entry, home) for entry in given for home in homes):
-        if _lies_in(home, entry):
+    held = [(entry, _places(entry)) for entry in given]
+    homes_at = [(home, _places(home)) for home in homes]
+    for (entry, entry_at), (home, home_at) in ((one, other) for one in held for other in homes_at):
+        if _in(home_at, entry):
             return found % (
                 _named(entry),
                 "and the controller's own home %s lies there: what a CLI leaves in it" % _named(home),
             )
-        if _lies_in(entry, home) and entry != own:
+        if _in(entry_at, home) and entry != own:
             return found % (
                 _named(entry),
                 "which lies in the controller's own home %s: what a CLI leaves there" % _named(home),
             )
-    for entry, place in ((entry, place) for entry in given for place in read_at_start):
-        if _lies_in(entry, place) or _lies_in(place, entry):
+    places_at = [(place, _places(place)) for place in read_at_start]
+    for (entry, entry_at), (place, place_at) in ((one, other) for one in held for other in places_at):
+        if _in(entry_at, place) or _in(place_at, entry):
             return found % (
                 _named(entry),
                 "and the controller reads %s at its start: what a CLI leaves there" % _named(place),
@@ -397,16 +413,19 @@ def _open_settings(settings: Settings, given: list[tuple[str, str]]) -> list[str
     outside PROTECTED_ROOT as it is written (a root that is a link holds nothing itself), or whose path, as written or
     once resolved, lies in a directory the CLI may write as written or once resolved, or holds one (a secret that is
     a directory). A path written there is the CLI's to replace, wherever it resolves now."""
+    held = [(entry, _places(entry)) for entry in given]
     return [
         name
         for attribute, name in (SECRET_PATH_SETTINGS | STORE_PATH_SETTINGS).items()
         if (value := getattr(settings, attribute))
-        and (
-            _climbs(value)
-            or not _within(value, PROTECTED_ROOT)
-            or any(_lies_in(_ways(value), entry) or _lies_in(entry, _ways(value)) for entry in given)
-        )
+        and (_climbs(value) or not _within(value, PROTECTED_ROOT) or _open_to(_ways(value), held))
     ]
+
+
+def _open_to(place: tuple[str, str], held: list[tuple[tuple[str, str], set[Path]]]) -> bool:
+    """Whether ``place`` lies in, or holds, one of the directories ``held``, each with its _places."""
+    place_at = _places(place)
+    return any(_in(place_at, entry) or _in(entry_at, place) for entry, entry_at in held)
 
 
 def _report(required: bool, found: str) -> None:
