@@ -246,5 +246,65 @@ def test_a_config_larger_than_the_limit_is_not_read(cli_home: Path, caplog) -> N
     assert str(CLI_STDOUT_LIMIT_BYTES) in line
 
 
+def _naming(cli_home: Path, root: str) -> None:
+    (cli_home / ".codex" / "config.toml").write_text(
+        f'notify = ["{cli_home.as_posix()}/{root}/hook"]\n', encoding="utf-8"
+    )
+
+
+@posix_only
+def test_a_nested_root_in_the_cli_home_is_still_linked(cli_home: Path) -> None:
+    _naming(cli_home, "work/project/.codex")
+
+    _shim(cli_home)._ensure_codex_config_path_compatibility()
+
+    made = cli_home / "work" / "project" / ".codex"
+    assert made.is_symlink() and os.readlink(made) == str(cli_home / ".codex")
+
+
+@posix_only
+def test_a_root_through_a_link_in_the_cli_home_makes_nothing_where_it_leads(
+    cli_home: Path, tmp_path: Path, caplog
+) -> None:
+    # CLI_HOME/x -> /data/auth, as a CLI may plant it in its own home: the controller, not under the sandbox, made the
+    # directories and the link in the place the CLI cannot write.
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    (cli_home / "x").symlink_to(protected, target_is_directory=True)
+    _naming(cli_home, "x/planted/deep/.codex")
+
+    with caplog.at_level(logging.WARNING):
+        _shim(cli_home)._ensure_codex_config_path_compatibility()
+
+    assert list(protected.iterdir()) == []
+    (line,) = _warnings(caplog)
+    assert "x/planted/deep/.codex" in line and "'x' is a link" in line
+
+
+@posix_only
+def test_a_part_put_back_as_a_link_after_it_was_made_is_not_followed(cli_home: Path, tmp_path: Path, caplog) -> None:
+    # A CLI working in its home meanwhile can rename the directory just made aside and leave a link in its place.
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    _naming(cli_home, "sub/deep/.codex")
+    real_mkdir = os.mkdir
+    swapped: list[str] = []
+
+    def mkdir(path, *args, **kwargs) -> None:
+        real_mkdir(path, *args, **kwargs)
+        if os.path.basename(os.fspath(path)) == "sub" and not swapped:
+            swapped.append(os.fspath(path))
+            os.rename(cli_home / "sub", cli_home / "sub-aside")
+            (cli_home / "sub").symlink_to(protected, target_is_directory=True)
+
+    with patch.object(os, "mkdir", mkdir), caplog.at_level(logging.WARNING):
+        _shim(cli_home)._ensure_codex_config_path_compatibility()
+
+    assert swapped, "the directory was never made"
+    assert list(protected.iterdir()) == []
+    (line,) = _warnings(caplog)
+    assert "sub/deep/.codex" in line and "'sub' is a link" in line
+
+
 if __name__ == "__main__":
     unittest.main()

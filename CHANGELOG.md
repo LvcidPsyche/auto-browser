@@ -29,6 +29,10 @@ TODO-INTRO
   shim reads `CLI_HOME/.codex/config.toml` only as a regular file of at most 1 MiB that is itself at that name (see
   Security), and logs a warning for anything else there; the `.codex` links such a file names are not made. Put the
   file itself in `CLI_HOME/.codex`.
+- **A `.codex` path in `config.toml` that passes through a link in `CLI_HOME` is no longer linked.** Where a part of
+  such a path inside `CLI_HOME` is a link (`CLI_HOME/projects` linked elsewhere), the shim now makes nothing for it
+  and logs a warning that names the path (see Security). Make that part a plain directory, or make the `.codex` link
+  yourself.
 
 ### Security
 
@@ -39,6 +43,14 @@ TODO-INTRO
   probe waited). The shim now reads the file as the controller reads a call's `decision.json`: only a regular file of
   at most 1 MiB that is itself there, opened without waiting. A FIFO, a link, a directory or a larger file is not
   read, and a warning says which it was, once.
+- **The Codex path-compatibility shim no longer makes directories through a link in `CLI_HOME`.** For a path under
+  `CLI_HOME` that `config.toml` names (`CLI_HOME/x/deep/.codex/...`), the shim makes any missing directories and a
+  `.codex` link to the real one. It made them by path, and the controller is not under the CLI sandbox: a CLI writes
+  that config and can put links in its home, so with `CLI_HOME/x` linked to `/data/auth` the controller made
+  directories of the CLI's naming in `/data/auth`, where the sandbox keeps the CLI out. The shim now opens each part
+  from the one before it and makes the next one there, never through a link: a part that is a link, or that a CLI
+  puts back as one while the shim works, stops that path with a warning naming it. Paths through plain directories
+  are linked as before; on Windows, which cannot open a directory this way, the shim works by path as before.
 
 ### Fixed
 
