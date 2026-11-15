@@ -257,6 +257,11 @@ taken out; nothing they cover changes.
   in `browser.execute_approval` and `browser.reject_approval`, and an id such as `../planted` is refused before any
   file is read. The test's file outside the root held no valid approval, so the read refused it either way; it now
   holds one that reads back where it lies, which only that check keeps the store from reading.
+- **A pre-request gate whose browser did not close reports its later loss.** Before the controller closes a browser,
+  its gate is marked as ending, so the close taking the gate's session down is not reported as a loss. Where the
+  close of a session's own browser, or the disconnect of a shared one, fails, the mark is undone, and a later loss of
+  the gate closes the browser's sessions as any loss does. No test took a failed close on to a later loss; without
+  the undo the loss went unreported, and what the browser's pages then loaded by themselves was no longer gated.
 
 ## [1.18.0] — 2026-11-14
 
