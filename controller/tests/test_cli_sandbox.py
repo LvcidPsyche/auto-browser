@@ -17,6 +17,7 @@ import posixpath
 import site
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 from pathlib import Path, PurePosixPath
@@ -869,7 +870,8 @@ def linux_links(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     linux_paths normalises a path before it reads a link, as abspath does, so it cannot say where a '..' after a link
     leads; a junction on Windows cannot either, where a '..' is read off the text first. /data is the root, /tmp,
     /var/tmp and /dev the shared directories, /home/controller the controller's home as HOME and its passwd entry name
-    it, with Python's user base in it. A test adds ``dirs`` (each with its parents) and ``links`` (each to its target)."""
+    it, with Python's user base in it, and the controller runs from the image's places (_controller_runs_from). A test
+    adds ``dirs`` (each with its parents) and ``links`` (each to its target)."""
     disk = SimpleNamespace(
         dirs={"/data/cli-home", "/tmp", "/var/tmp", "/dev", "/home/controller/.ssh", "/home/controller/.local"},
         links={},
@@ -915,8 +917,28 @@ def linux_links(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(cli_sandbox, "SHARED_WRITABLE", ("/tmp", "/var/tmp", "/dev"))
     monkeypatch.setattr(cli_sandbox, "_passwd_home", lambda: disk.passwd_home)
     monkeypatch.setattr(site, "getuserbase", lambda: disk.user_base)
+    _controller_runs_from(monkeypatch)
     _probe_says(monkeypatch, None)
     return disk
+
+
+def _controller_runs_from(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    launcher: str = "/app/app/cli_sandbox_launcher.py",
+    executable: str = "/usr/local/bin/python3",
+    prefix: str = "/usr/local",
+    base_prefix: str = "/usr/local",
+    site_packages: str = "/usr/local/lib/python3.12/site-packages",
+) -> None:
+    """Where the controller runs its code from, as the image has it unless a test says otherwise, and not where this
+    test process does: its launcher in its package, its interpreter, its prefix and base prefix, and its packages."""
+    installed = {**sysconfig.get_paths(), "purelib": site_packages, "platlib": site_packages}
+    monkeypatch.setattr(cli_sandbox, "LAUNCHER", launcher)
+    monkeypatch.setattr(sys, "executable", executable)
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "base_prefix", base_prefix)
+    monkeypatch.setattr(sysconfig, "get_paths", lambda *args, **kwargs: installed)
 
 
 async def _launch_on_linux(settings: Settings, cli_home: str, env: dict[str, str]) -> list[str]:
@@ -1194,6 +1216,53 @@ async def test_what_the_controller_reads_at_its_start_is_reported_where_a_cli_ma
         await _launch_on_linux(_linux_settings(CLI_SANDBOX_REQUIRED="true"), home, env)
 
 
+@pytest.mark.parametrize(
+    "layout, named",
+    [
+        ("a checkout in /tmp", "/tmp/auto-browser/controller/app"),
+        ("an interpreter that resolves into the CLI home", "/usr/local/bin/python3"),
+        ("a venv in /var/tmp", "/var/tmp/venv/bin/python"),
+        ("packages in a directory an entry of CLI_SANDBOX_WRITABLE lies in", "/srv/site-packages"),
+    ],
+)
+async def test_where_the_controller_runs_its_code_from_is_reported_where_a_cli_may_write_it(
+    linux_links, monkeypatch, caplog, layout: str, named: str
+) -> None:
+    # A host run from a checkout or a venv a CLI may write: what a CLI leaves in the launcher, the controller's
+    # package, its interpreter or its packages, the controller runs outside the sandbox, at the next call or start.
+    entry = ""
+    if layout == "a checkout in /tmp":
+        _controller_runs_from(monkeypatch, launcher="/tmp/auto-browser/controller/app/cli_sandbox_launcher.py")
+    elif layout == "an interpreter that resolves into the CLI home":
+        linux_links.dirs.add("/data/cli-home/python/bin")
+        linux_links.links["/usr/local/bin/python3"] = "/data/cli-home/python/bin/python3.12"
+    elif layout == "a venv in /var/tmp":
+        linux_links.links["/var/tmp/venv/bin/python"] = "/usr/local/bin/python3.12"
+        venv = "/var/tmp/venv"
+        _controller_runs_from(
+            monkeypatch,
+            executable=venv + "/bin/python",
+            prefix=venv,
+            site_packages=venv + "/lib/python3.12/site-packages",
+        )
+    else:
+        entry = "/srv/site-packages/cache"
+        linux_links.dirs.add(entry)
+        _controller_runs_from(monkeypatch, site_packages="/srv/site-packages")
+    env = {"HOME": "/data/cli-home"}
+
+    with caplog.at_level(logging.WARNING):
+        command = await _launch_on_linux(_linux_settings(CLI_SANDBOX_WRITABLE=entry), "/data/cli-home", env)
+    with pytest.raises(cli_sandbox.SandboxRequired):
+        await _launch_on_linux(
+            _linux_settings(CLI_SANDBOX_WRITABLE=entry, CLI_SANDBOX_REQUIRED="true"), "/data/cli-home", env
+        )
+
+    assert _given_to_write(command)[:4] == ["/data/cli-home", "/tmp", "/var/tmp", "/dev"]
+    (line,) = _written(caplog)
+    assert f"and the controller reads {named}" in line
+
+
 @pytest.mark.parametrize("swap", ["a directory in the root", "what holds the root"])
 async def test_a_home_a_cli_swapped_for_a_link_is_not_given_and_the_cli_still_starts_under_the_launcher(
     data, monkeypatch, caplog, swap: str
@@ -1246,7 +1315,9 @@ async def test_where_a_cli_may_write_the_controllers_home_one_warning_says_so_an
     assert str(data.controller_home) in line and "next start" in line
     # What it may run is what Python or ssh reads there, and the line says what to keep apart, the blank CLI_HOME's
     # HOME and a TMPDIR among it.
-    assert "may run at its next start, where it is a Python user site or an ssh config" in line
+    assert (
+        "may run at its next start or CLI call, where it is a Python user site, an ssh config or its own code" in line
+    )
     assert "TMPDIR" in line and "its HOME where CLI_HOME is blank" in line
     (refusal,) = _written(caplog, logging.ERROR)
     assert str(data.controller_home) in refusal
