@@ -33,6 +33,13 @@ TOKEN_SHAPES = [
     (f"ws://u:{SECRET}@h.example:port/x", "ws://<redacted>"),
     (f"ws://[::1/{SECRET}", "ws://<redacted>"),
     (f"ws://h.example:1:{SECRET}", "ws://<redacted>"),
+    # An apostrophe is a character a URL may hold, so it ends nothing; a space, a control character, '"', '<' and
+    # '>', which it may not hold, end an endpoint alike in the three copies (\s is another set in Python and in JS).
+    (f"wss://o'brien:{SECRET}@h.example/x", "wss://h.example/<redacted>"),
+    (f"wss://h.example/?label=o'brien&token={SECRET}", "wss://h.example/<redacted>"),
+    (f"wss://h.example/?a=1\x85&token={SECRET}", "wss://h.example/<redacted>"),
+    (f"wss://h.example/?a=1﻿&token={SECRET}", "wss://h.example/<redacted>"),
+    (f"ws://h.example%2F{SECRET}", "ws://<redacted>"),
 ]
 
 

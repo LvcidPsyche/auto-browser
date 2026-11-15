@@ -35,9 +35,12 @@ from .utils import error_text
 # (BROWSER_WS_ENDPOINT) can carry its token in the userinfo, the query or the fragment, and controller logs end up in
 # CI output. An endpoint keeps its scheme://host[:port] only. Its authority ends at the first / \ ? or # (Node and
 # Chromium end a ws:// one at a backslash too), its userinfo at the last @; one whose host and port are not plainly
-# that is redacted whole. The three are written alike, not with a URL parser: Node's drops a default port.
-_ENDPOINT = re.compile(r"""(wss?://)([^/\\?#\s"'<>]*)([^\s"'<>]*)""", re.IGNORECASE)
-_HOST_PORT = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::[0-9]+)?")
+# that is redacted whole. It ends at a space, a control character, " < or >, which a URL cannot hold as written, and
+# not at an apostrophe, which it can (in a password or a query): a quote around it is redacted with it. The three are
+# written alike, not with a URL parser (Node's drops a default port), and not with \s, which is another set in
+# Python and in JavaScript.
+_ENDPOINT = re.compile(r"""(wss?://)([^/\\?#\x00-\x20\x7f"<>]*)([^\x00-\x20\x7f"<>]*)""", re.IGNORECASE | re.ASCII)
+_HOST_PORT = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~-]+)(?::[0-9]+)?")
 
 
 def _origin_only(match: re.Match[str]) -> str:
