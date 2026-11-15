@@ -444,7 +444,9 @@ async def test_control_an_mcp_page_tool_reads_a_page_that_stayed_put_under_the_s
     tmp_path: Path, tool: str
 ) -> None:
     manager = manager_for(tmp_path)
-    session = read_session(manager, "returns", tmp_path, evaluated=["kept"])
+    # The storage read's script answers its entries and whether they were cut; the others' are read as they come.
+    evaluated = {"entries": [["k", "kept"]], "truncated": False} if tool == "get_storage" else ["kept"]
+    session = read_session(manager, "returns", tmp_path, evaluated=evaluated)
     held: list[bool] = []
 
     async def moved(*_args, **_kwargs) -> None:

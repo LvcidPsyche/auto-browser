@@ -52,6 +52,12 @@ TODO-INTRO
   60.** Such a link lived 60 minutes whatever the setting said (see Fixed); it now lives as long as the setting says,
   and one set above 1440 is read as 1440, with a warning at startup. A client that wants 60 minutes there asks for
   `ttl_minutes: 60`.
+- **`browser.get_local_storage` reads what the browser holds, and cuts an answer past 1,000,000 characters.** A page's
+  own replacement of its storage functions (`Storage.prototype.getItem`, `window.localStorage`) no longer changes what
+  the read returns (see Security). Where the keys and values read, with six characters more for each entry, would
+  pass 1,000,000 characters, the entry that reaches the bound keeps the start of its value, or is left out when its
+  key does not fit, the entries after it are left out, and `truncated` is `true`; a one-key read cuts its value the
+  same way. Every answer now carries `truncated`. Read a store that large one key at a time.
 
 ### Security
 
@@ -134,6 +140,15 @@ TODO-INTRO
   again that the page is on a host in `totp_hosts` and not refused. After the typing it did not, so a page that a
   key handler sent to another host as the code was typed had Enter pressed into it, which submits whatever form has
   the focus there. It checks there too now, and such a page gets no Enter.
+- **`browser.get_local_storage` no longer returns what the page chooses, nor an answer of any size.** It read the
+  storage in the page's own JavaScript world, so a page that replaced `Storage.prototype.getItem` answered the read
+  itself: 20 million characters in a probe, every one returned to the agent, far more than a page's storage can hold.
+  The read now runs in the controller's isolated world, as `browser.get_html` with `text_only` and
+  `browser.find_elements` do, where the page's own JavaScript does not answer for its storage. A store can hold
+  megabytes by itself all the same, and a key as long as a value, so the answer is bounded too: its keys and values,
+  with six characters more for each entry, come to at most 1,000,000 characters, the most any tool's `max_chars`
+  accepts, and an answer cut there says `truncated: true`. The tool is in the `storage` pack, which the default
+  profile leaves out.
 
 ### Fixed
 

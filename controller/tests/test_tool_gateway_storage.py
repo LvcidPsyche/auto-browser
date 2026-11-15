@@ -120,16 +120,20 @@ class ToolGatewayStorageRuntimeGuardTests(unittest.IsolatedAsyncioTestCase):
 
 class GetStorageKeyTests(SpendBase):
     async def test_a_key_is_the_evaluate_argument_and_never_part_of_the_script(self) -> None:
-        # A key spliced in as a Python repr is not a JavaScript string: past the BMP, repr can write \U0010ffff.
+        # A key spliced in as a Python repr is not a JavaScript string: past the BMP, repr can write \U0010ffff. The read
+        # runs in the controller's isolated world, which a fake page has not got: the world's call is recorded instead.
+        evaluate = AsyncMock(return_value={"entries": [], "truncated": False})
+        self.manager.element_ids.evaluate = evaluate  # type: ignore[method-assign]
         for key in ("it's", 'say "hi"', "back\\slash", "new\nline", "\U0001f600", "\U0010ffff"):
             with self.subTest(key=ascii(key)):
-                self.page.evaluated.clear()
-                self.page.evaluated_args.clear()
+                evaluate.reset_mock()
 
                 await self.gateway._get_local_storage(GetStorageInput(session_id=SESSION, key=key))
 
-                self.assertEqual(self.page.evaluated_args, [key])
-                self.assertNotIn(key, self.page.evaluated[0])
+                evaluate.assert_awaited_once()
+                _page, script, arg = evaluate.await_args.args
+                self.assertEqual(arg[1], key)
+                self.assertNotIn(key, script)
 
 
 class GatewayWriteRecordTests(SpendBase):

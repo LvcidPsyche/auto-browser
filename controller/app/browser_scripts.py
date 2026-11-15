@@ -798,6 +798,42 @@ FIND_ELEMENTS_SELECTOR_SCRIPT = _with_find_fields(
 """
 )
 
+# browser.get_local_storage: one key, or every key when `key` is null. Run in the controller's isolated world
+# (element_ids.evaluate), where a page that replaced Storage.prototype.getItem, or window.localStorage itself, is not
+# what answers. What a store natively holds can be megabytes all the same, a key as long as a value, so the answer is
+# bounded: each entry's key, its value and `overhead` count against `budget`, and the entry that reaches it ends the
+# answer with truncated: true, with its value cut to what is left, or left out when its key does not fit.
+STORAGE_READ_SCRIPT = with_ab_cap(
+    r"""([kind, key, budget, overhead], _elementIds) => {
+/*__AB_CAP__*/
+    let storage;
+    try {
+        storage = kind === 'session' ? window.sessionStorage : window.localStorage;
+    } catch (e) {
+        // A document with no origin to keep storage for (about:blank): reported here, in the browser's words, as the
+        // invalid selector is, since the world reports a script that threw as a stale element.
+        return {__storage_error: String(e)};
+    }
+    const entries = [];
+    let left = budget;
+    const count = key === null ? storage.length : 1;
+    for (let i = 0; i < count; i++) {
+        const name = key === null ? storage.key(i) : key;
+        left -= name.length + overhead;
+        if (left < 0) return {entries, truncated: true};
+        const value = storage.getItem(name);
+        if (value !== null && value.length > left) {
+            entries.push([name, abSlice(value, left)]);
+            return {entries, truncated: true};
+        }
+        left -= value === null ? 0 : value.length;
+        entries.push([name, value]);
+    }
+    return {entries, truncated: false};
+}
+"""
+)
+
 # CDP element intelligence: the asset references of one element. ``__SELECTOR__`` is replaced by a JS string literal.
 ELEMENT_ASSETS_SCRIPT = with_ab_cap(
     r"""

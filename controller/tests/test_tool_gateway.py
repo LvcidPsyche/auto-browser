@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, Mock
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError, ExecutionHold
 from app.browser.page_provenance import PageProvenance
-from app.browser_scripts import FIND_ELEMENTS_SELECTOR_SCRIPT, FIND_ELEMENTS_TEXT_SCRIPT, PAGE_TEXT_SCRIPT
+from app.browser_scripts import (
+    FIND_ELEMENTS_SELECTOR_SCRIPT,
+    FIND_ELEMENTS_TEXT_SCRIPT,
+    PAGE_TEXT_SCRIPT,
+    STORAGE_READ_SCRIPT,
+)
 from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
@@ -1203,7 +1208,14 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.url = "https://example.com"
                 self.mouse = FakeMouse()
                 self.evaluate = AsyncMock(
-                    side_effect=["eval-result", "plain text", [{"tag": "button"}], "stored", {"all": "items"}, None]
+                    side_effect=[
+                        "eval-result",
+                        "plain text",
+                        [{"tag": "button"}],
+                        {"entries": [["k", "stored"]], "truncated": False},
+                        {"entries": [["all", "items"]], "truncated": False},
+                        None,
+                    ]
                 )
                 self.wait_for_selector = AsyncMock()
                 self.content = AsyncMock(return_value="<html></html>")
@@ -1545,6 +1557,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         # Review of c5 (GLM): get_html(text_only) and find_elements by selector, moved into the isolated world (NAV-12),
         # ran on its deadline (ACTION_TIMEOUT_MS, 15 s by default), so a page slower than that failed as a page not
         # answering, where they had the 30 s every page read is bounded by. The query's walk had its own pad already.
+        # get_local_storage moved there too (1.18.1).
         from app.browser.page_read import PAGE_READ_TIMEOUT_SECONDS
         from app.tool_gateway import gateway as gateway_module
 
@@ -1563,12 +1576,19 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             ) -> Any:
                 deadlines[script] = timeout_ms
                 setup_deadlines[script] = setup_timeout_ms
+                if script is STORAGE_READ_SCRIPT:
+                    return {"entries": [], "truncated": False}
                 return "text" if script is PAGE_TEXT_SCRIPT else []
 
         self.manager.element_ids = RecordingElementIds()
         self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=SimpleNamespace(), lock=asyncio.Lock()))
-        for arguments in ({"text_only": True}, {"selector": "#real"}, {"query": "real"}):
-            name = "browser.get_html" if "text_only" in arguments else "browser.find_elements"
+        calls = (
+            ("browser.get_html", {"text_only": True}),
+            ("browser.find_elements", {"selector": "#real"}),
+            ("browser.find_elements", {"query": "real"}),
+            ("browser.get_local_storage", {}),
+        )
+        for name, arguments in calls:
             response = await self.full_gateway.call_tool(
                 McpToolCallRequest(name=name, arguments={"session_id": "session-1", **arguments})
             )
@@ -1578,6 +1598,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             PAGE_TEXT_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
             FIND_ELEMENTS_SELECTOR_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
             FIND_ELEMENTS_TEXT_SCRIPT: gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS,
+            STORAGE_READ_SCRIPT: PAGE_READ_TIMEOUT_SECONDS,
         }
         self.assertEqual(set(deadlines), set(bounds))
         for script, bound in bounds.items():
@@ -1596,6 +1617,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 PAGE_TEXT_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
                 FIND_ELEMENTS_SELECTOR_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
                 FIND_ELEMENTS_TEXT_SCRIPT: gateway_module.FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS,
+                STORAGE_READ_SCRIPT: gateway_module.PAGE_READ_SETUP_TIMEOUT_MS,
             },
         )
 
