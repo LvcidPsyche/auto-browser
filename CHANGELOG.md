@@ -244,6 +244,10 @@ taken out; nothing they cover changes.
   revocations in `SHARE_REVOCATION_STORE_PATH`, so that a revoked link stays revoked after a restart. The tests built
   the share manager with a store themselves; had the controller built its own without one, every revoked link that
   had not expired would have worked again after the next restart, and no test would have said so.
+- **The bound on the read of a Codex call's `decision.json`.** The controller reads the file on its event loop, and
+  stops one byte past `CLI_STDOUT_LIMIT_BYTES`, which refuses it. The test's file was one byte past the limit, so a
+  read that went on to the end refused it all the same; it now writes eight times the limit and checks that no more
+  than that byte past it is read.
 
 ## [1.18.0] — 2026-11-14
 
