@@ -148,10 +148,14 @@ class _CallDirectory:
             return
         self._by_path = None
         self._home = os.open(home, _HOME_FLAGS)
+        self._entry = f"tmp{secrets.token_hex(8)}"
         try:
-            self._entry = f"tmp{secrets.token_hex(8)}"
             os.mkdir(self._entry, 0o700, dir_fd=self._home)
-            self._fd = os.open(self._entry, _PART_FLAGS, dir_fd=self._home)
+            try:
+                self._fd = os.open(self._entry, _PART_FLAGS, dir_fd=self._home)
+            except BaseException:
+                self._remove(os.rmdir)  # still empty: rmdir refuses a link a CLI left at its name
+                raise
         except BaseException:
             os.close(self._home)
             raise
@@ -172,13 +176,17 @@ class _CallDirectory:
             return
         os.close(self._fd)
         try:
-            shutil.rmtree(self._entry, dir_fd=self._home)
-        except OSError as exc:
-            # A link left at its name, which rmtree refuses, or what a CLI left there that cannot be removed: the call's
-            # outcome stands.
-            logger.warning("a Codex call's directory in the CLI home was not removed: %s", error_text_for_log(exc))
+            self._remove(shutil.rmtree)
         finally:
             os.close(self._home)
+
+    def _remove(self, remover: Callable[..., None]) -> None:
+        try:
+            remover(self._entry, dir_fd=self._home)
+        except OSError as exc:
+            # A link left at its name, which rmtree and rmdir refuse, or what a CLI left there that cannot be removed:
+            # the call's outcome stands.
+            logger.warning("a Codex call's directory in the CLI home was not removed: %s", error_text_for_log(exc))
 
 
 try:

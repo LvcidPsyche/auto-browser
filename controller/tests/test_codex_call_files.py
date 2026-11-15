@@ -7,6 +7,7 @@ The link and FIFO cases need POSIX: a symbolic link takes a privilege on Windows
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import tempfile
@@ -18,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.config import Settings
+from app.providers import openai_adapter
 from app.providers.base import CLI_STDOUT_LIMIT_BYTES, CLIResult
 from app.providers.openai_adapter import OpenAIAdapter
 
@@ -284,3 +286,19 @@ async def test_a_call_directory_swapped_for_a_link_while_the_cli_runs_gives_no_d
 
     assert [entry.args[0] for entry in parsed.call_args_list] == [STDOUT], "the decision was read through the link"
     assert (closed / "decision.json").read_text(encoding="utf-8") == CLOSED
+
+
+@pytest.mark.skipif(not openai_adapter._BY_DESCRIPTOR, reason="a call's directory is made by descriptor only on POSIX")
+def test_a_call_directory_that_cannot_be_opened_once_made_is_removed(adapter) -> None:
+    home = Path(adapter.settings.cli_home)
+    opened = os.open
+
+    def open_all_but_the_calls_directory(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return opened(path, flags, mode, dir_fd=dir_fd)
+
+    with patch("os.open", side_effect=open_all_but_the_calls_directory), pytest.raises(OSError):
+        openai_adapter._CallDirectory(str(home))
+
+    assert list(home.iterdir()) == []
