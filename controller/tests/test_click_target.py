@@ -106,6 +106,11 @@ class ClassifiedRiskTests(unittest.TestCase):
         self.assertEqual(classified_risk(both, "write"), "destructive")
         self.assertEqual(classified_risk(button("Send payment link", "Send"), "write"), "post")
         self.assertEqual(classified_risk(button("Send", "Send link to everyone"), "write"), "post")
+        # A fuller name the table does not classify by itself, as one past MAX_LABEL_CHARS, is not harmless for that.
+        long_name = button("Delete", "Delete this repository and all of its contents")
+        self.assertEqual(classified_risk(long_name, "read"), "destructive")
+        long_name = button("Send", "Send the payment of $500 to the new recipient now")
+        self.assertEqual(classified_risk(long_name, "write"), "post")
         self.assertEqual(classified_risk(button("Sending code", "Send"), "write"), "post")
 
     def test_role_button_and_input_buttons_count_and_a_link_does_not(self) -> None:
