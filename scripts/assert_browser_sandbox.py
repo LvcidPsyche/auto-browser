@@ -19,7 +19,8 @@ import sys
 from pathlib import Path
 
 # The twin of redactEndpoints in browser-node/sandbox.mjs: the path of a Playwright websocket endpoint is that
-# server's only secret, and CI logs are public, so whatever prints a state, a detail or a mismatch goes through this.
+# server's only secret (a hosted browser's may carry a token elsewhere in the URL), and CI logs are public, so
+# whatever prints a state, a detail or a mismatch goes through this.
 # An endpoint keeps its scheme://host[:port] only, as in controller/app/browser_sandbox.py, which says why it is
 # written this way.
 ENDPOINT = re.compile(r"""(wss?://)([^/\\?#\x00-\x20\x7f"<>]*)([^\x00-\x20\x7f"<>]*)""", re.IGNORECASE | re.ASCII)

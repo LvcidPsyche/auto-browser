@@ -67,7 +67,7 @@ def _secrets_of(url: str | tuple[str, ...], token: str | None) -> set[str]:
     characters, as written and percent-decoded (a query's ``+`` as a space too), and ``token``, each also as
     ``repr()`` and ``json.dumps()`` write it, and the Basic credentials httpx sends for the userinfo; for each form of
     the URL when given several. Cut as a string, so a malformed URL is handled too, once read as urllib reads it
-    (surrounding whitespace and a ``<URL:...>`` wrapper taken off), as the bridges read it."""
+    (surrounding whitespace and a ``<URL:...>`` or ``<...>`` wrapper taken off), as the bridges read it."""
     if not isinstance(url, str):
         return set().union(*(_secrets_of(form, token) for form in url))
     url = unwrap(url)

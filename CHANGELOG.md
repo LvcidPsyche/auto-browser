@@ -48,11 +48,12 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
 - **A Codex `config.toml` that is a link, or larger than 1 MiB, is no longer read.** The Codex path-compatibility
   shim reads `CLI_HOME/.codex/config.toml` only as a regular file of at most 1 MiB that is itself at that name (see
   Security), and logs a warning for anything else there; the `.codex` links such a file names are not made. Put the
-  file itself in `CLI_HOME/.codex`.
+  file itself in `CLI_HOME/.codex`. On Windows, which cannot open a file without following a link, a link there is
+  still read.
 - **A `.codex` path in `config.toml` that passes through a link in `CLI_HOME` is no longer linked.** Where a part of
   such a path inside `CLI_HOME` is a link (`CLI_HOME/projects` linked elsewhere), the shim now makes nothing for it
   and logs a warning that names the path (see Security). Make that part a plain directory, or make the `.codex` link
-  yourself.
+  yourself. On Windows, which cannot open a directory this way, the shim works by path as before.
 - **With `CLI_SANDBOX_REQUIRED=true`, a store kept outside `/data` now stops provider CLIs.** A Linux host run that
   keeps `APPROVAL_ROOT`, `STATE_DB_PATH` or another of the controller's stores (see Security) outside `/data`, or in
   a directory a CLI may write, ran its CLIs with that store open to them and said nothing. It now gets the sandbox's
@@ -117,16 +118,18 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT` are now checked the same way: the warning names each
   one that is left open, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. Kept in their default places under
   `/data`, as in the image, nothing changes.
-- **A CLI can no longer change the controller's own code on a host run from a checkout or a venv it may write.** The
-  launcher that starts each provider CLI under the sandbox is a file of the controller's package, and the
-  controller's interpreter runs it before any ruleset. On a Linux host run whose checkout or virtualenv lies in a
-  directory a CLI may write (`/tmp`, `/var/tmp`, `CLI_HOME`, an entry of `CLI_SANDBOX_WRITABLE`), a sandboxed CLI
-  could add to the launcher, and the next call ran what it added outside the sandbox, with no warning, under
-  `CLI_SANDBOX_REQUIRED=true` too; the same held for the rest of the package, the interpreter and the installed
-  packages at the controller's next start. The sandbox's check of what the controller reads at its start now takes
-  in its own code: its package with the launcher, its interpreter as it was started and once resolved, `sys.prefix`,
-  `sys.base_prefix` and where its packages are installed. Where a CLI may write one of them the warning names it,
-  and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. The image keeps all of these out of what a CLI may write.
+- **The CLI sandbox now reports a host run whose own code a CLI could change, and refuses it under
+  `CLI_SANDBOX_REQUIRED=true`.** The launcher that starts each provider CLI under the sandbox is a file of the
+  controller's package, and the controller's interpreter runs it before any ruleset. On a Linux host run whose
+  checkout or virtualenv lies in a directory a CLI may write (`/tmp`, `/var/tmp`, `CLI_HOME`, the CLI's `TMPDIR`, an
+  entry of `CLI_SANDBOX_WRITABLE`), a sandboxed CLI could add to the launcher, and the next call ran what it added
+  outside the sandbox, with no warning, under `CLI_SANDBOX_REQUIRED=true` too; the same held for the rest of the
+  package, the interpreter and the installed packages at the controller's next start. The sandbox's check of what
+  the controller reads at its start now takes in its own code: its package with the launcher, its interpreter as it
+  was started and once resolved, `sys.prefix`, `sys.base_prefix` and where its packages are installed. Where a CLI
+  may write one of them the warning names it, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI; without that
+  setting the CLI runs after the warning, as after the sandbox's other warnings, so set it on a host run. The image
+  keeps all of these out of what a CLI may write.
 - **A `CLI_SANDBOX_WRITABLE` entry that leads through a place a CLI may write is no longer given where it leads.**
   The sandbox gives each entry as its resolved path. It looked at the entry as written, at where it resolves and at
   each leading part of it resolved, but not at the links on the way: an operator's link outside every directory a
@@ -146,10 +149,10 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   message (which names a configured `BROWSER_WS_ENDPOINT`, and which readiness, deep health and the startup log
   write to the log) and the line that logs Playwright's own connect error. Each replaced only the endpoint's path
   with `<redacted>`, so a hosted browser's endpoint with its token anywhere else (`wss://host?token=...`,
-  `wss://user:token@host/...`, a `#` fragment) was logged whole, token and all. Every endpoint the controller prints
-  now keeps only its scheme, host and port, with `/<redacted>` where it had anything more; one whose host and port
-  cannot be read plainly is printed as its scheme alone (`ws://<redacted>`). The browser-node's log and sandbox
-  report and the CI sandbox scripts redact the same way.
+  `wss://user:token@host/...`, a `#` fragment) was logged whole, token and all. Every Playwright endpoint the
+  controller prints (the browser-node's, or `BROWSER_WS_ENDPOINT`) now keeps only its scheme, host and port, with
+  `/<redacted>` where it had anything more; one whose host and port cannot be read plainly is printed as its scheme
+  alone (`ws://<redacted>`). The browser-node's log and sandbox report and the CI sandbox scripts redact the same way.
 - **A session's tunnel released a second time no longer frees a port another session's tunnel holds.** With
   `ISOLATED_TUNNEL_ENABLED=true`, each session's takeover tunnel reserves a remote port on the bastion, and its
   release frees the port. A tunnel released again, as two closes of one session made together could do, freed its
