@@ -161,11 +161,11 @@ class _CallDirectory:
             raise
         self.name = os.path.join(home, self._entry)
 
-    def open(self, name: Path | str, flags: int, mode: int = 0o777) -> int:
-        """os.open of ``name`` in this directory."""
+    def open(self, name: Path | str, flags: int) -> int:
+        """os.open of ``name`` in this directory, with the mode open() gives a file it makes: an ``opener`` for it."""
         if self._by_path is not None:
-            return os.open(os.path.join(self.name, name), flags, mode)
-        return os.open(name, flags, mode, dir_fd=self._fd)
+            return os.open(os.path.join(self.name, name), flags, 0o666)
+        return os.open(name, flags, 0o666, dir_fd=self._fd)
 
     def __enter__(self) -> str:
         return self.name
@@ -385,12 +385,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             try:
                 # Made, never written through: the CLI of a call that runs at the same time can write in this
                 # directory, and what it put at this name could be a link to a file of its choosing.
-                with open(
-                    schema_path.name,
-                    "x",
-                    encoding="utf-8",
-                    opener=lambda name, flags: directory.open(name, flags, 0o666),
-                ) as schema:
+                with open(schema_path.name, "x", encoding="utf-8", opener=directory.open) as schema:
                     schema.write(json.dumps(self.strict_action_schema, ensure_ascii=False))
             except FileExistsError:
                 logger.warning("something was at the schema file's name in a new Codex call's directory: no call made")

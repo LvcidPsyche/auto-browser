@@ -1177,6 +1177,14 @@ class McpToolGateway:
                 return {"session_id": payload.session_id, "selector": payload.selector, "state": payload.state}
         await _refuse_moved_at(deadline + MOVED_PAD_SECONDS)
 
+    async def _read_in_world(self, page: Any, script: str, *arg: Any) -> Any:
+        """``script`` run in the controller's isolated world on ``page`` (NAV-12), within a page read's deadlines."""
+        return await bounded(
+            self.manager.element_ids.evaluate(
+                page, script, *arg, timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS, setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS
+            )
+        )
+
     async def _get_html(self, payload: GetPageHtmlInput) -> dict[str, Any]:
         # Bounded and paged: a page's serialized DOM is routinely megabytes, and
         # returned whole it overran the context of the model that asked for it.
@@ -1185,14 +1193,7 @@ class McpToolGateway:
             if payload.text_only:
                 # In the controller's isolated world, as the observation's scripts run (NAV-12): in the page's own,
                 # a page that replaced the innerText getter gave this its own text.
-                content = await bounded(
-                    self.manager.element_ids.evaluate(
-                        session.page,
-                        PAGE_TEXT_SCRIPT,
-                        timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
-                        setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
-                    )
-                )
+                content = await self._read_in_world(session.page, PAGE_TEXT_SCRIPT)
                 kind = "text"
             else:
                 content = await bounded(session.page.content())
@@ -1248,14 +1249,8 @@ class McpToolGateway:
             elements = cap_found_elements(elements, payload.context, BrowserActionService.is_sensitive_field)
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
-        elements = await bounded(
-            element_ids.evaluate(
-                session.page,
-                FIND_ELEMENTS_SELECTOR_SCRIPT,
-                [payload.selector, payload.limit],
-                timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
-                setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
-            )
+        elements = await self._read_in_world(
+            session.page, FIND_ELEMENTS_SELECTOR_SCRIPT, [payload.selector, payload.limit]
         )
         if isinstance(elements, dict) and "__invalid_selector" in elements:
             raise BrowserActionError(
@@ -1330,14 +1325,10 @@ class McpToolGateway:
             # In the controller's isolated world, as the other page reads run (NAV-12): in the page's own, a page that
             # replaced Storage.prototype.getItem answered with what it chose, 20 million characters in a probe. The
             # script bounds the answer to MAX_TOOL_RESULT_CHARS, keys and values together (STORAGE_READ_SCRIPT).
-            read = await bounded(
-                self.manager.element_ids.evaluate(
-                    session.page,
-                    STORAGE_READ_SCRIPT,
-                    [payload.storage_type, key, MAX_TOOL_RESULT_CHARS, STORAGE_ENTRY_OVERHEAD_CHARS],
-                    timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
-                    setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
-                )
+            read = await self._read_in_world(
+                session.page,
+                STORAGE_READ_SCRIPT,
+                [payload.storage_type, key, MAX_TOOL_RESULT_CHARS, STORAGE_ENTRY_OVERHEAD_CHARS],
             )
             if "__storage_error" in read:
                 # Raised as the read in the page's world raised it: the caller gets the browser's words, browser_error.
@@ -1401,9 +1392,8 @@ class McpToolGateway:
             raise RuntimeError("Session sharing is not configured")
         await self.manager.get_session(payload.session_id)  # verify session exists
         # None: the deployment's default (SHARE_TOKEN_TTL_MINUTES).
-        ttl_seconds = None if payload.ttl_minutes is None else payload.ttl_minutes * 60
         return await mint_share_token(
-            self.share_manager, self.manager.audit, payload.session_id, ttl_seconds=ttl_seconds
+            self.share_manager, self.manager.audit, payload.session_id, ttl_minutes=payload.ttl_minutes
         )
 
     async def _revoke_session_share(self, payload: RevokeSessionShareInput) -> dict[str, Any]:

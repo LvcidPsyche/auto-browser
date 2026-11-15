@@ -80,9 +80,8 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
 
         # None, with no body or no ttl_minutes in it: the deployment's default (SHARE_TOKEN_TTL_MINUTES).
         ttl_minutes = payload.ttl_minutes if payload is not None else None
-        ttl_seconds = None if ttl_minutes is None else ttl_minutes * 60
         try:
-            return await mint_share_token(share_manager, manager.audit, session_id, ttl_seconds=ttl_seconds)
+            return await mint_share_token(share_manager, manager.audit, session_id, ttl_minutes=ttl_minutes)
         except ShareRevocationStoreError as cause:
             raise HTTPException(status_code=503, detail=error_text(cause)) from None
         except ShareAuditError:
