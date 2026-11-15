@@ -263,7 +263,8 @@ class RedactionCopyRunsInCiTests(unittest.TestCase):
         # package alone, so the test ran in no CI job, and the copy drifted from the bridges unseen (R2-4).
         job = re.search(r"(?ms)^  langchain-tests:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", CI_WORKFLOW.read_text("utf-8"))
         self.assertIsNotNone(job, "no langchain-tests job in ci.yml")
-        self.assertRegex(job.group(1), r"-e '?\./client'?\s")
+        # On a line no comment comes before it on.
+        self.assertRegex(job.group(1), r"(?m)^[^#\n]*-e '?\./client'?\s")
 
 
 class ShortestRedactedQueryValueTests(unittest.TestCase):
