@@ -33,6 +33,11 @@ TODO-INTRO
   such a path inside `CLI_HOME` is a link (`CLI_HOME/projects` linked elsewhere), the shim now makes nothing for it
   and logs a warning that names the path (see Security). Make that part a plain directory, or make the `.codex` link
   yourself.
+- **With `CLI_SANDBOX_REQUIRED=true`, a store kept outside `/data` now stops provider CLIs.** A Linux host run that
+  keeps `APPROVAL_ROOT`, `STATE_DB_PATH` or another of the controller's stores (see Security) outside `/data`, or in
+  a directory a CLI may write, ran its CLIs with that store open to them and said nothing. It now gets the sandbox's
+  warning, and with `CLI_SANDBOX_REQUIRED=true` no provider CLI runs (`Provider request failed`). Keep the stores
+  under `/data`, as the image does.
 
 ### Security
 
@@ -62,6 +67,16 @@ TODO-INTRO
   directory is removed without following a link. Where a link has been left at its name the directory stays, a
   warning says so, and the call's outcome stands. On Windows, which cannot open a directory this way, all of it is
   done by path as before.
+- **The CLI sandbox now checks where the controller keeps its stores, as it checks its secrets.** It warned where
+  `API_TOKEN_FILE`, `AUTH_ROOT` or another secret's setting named a place outside `/data`, or one a CLI may write,
+  and said nothing of the stores: with `APPROVAL_ROOT` or `STATE_DB_PATH` kept outside `/data`, a sandboxed CLI could
+  read the approvals' digest key or the controller's state, under `CLI_SANDBOX_REQUIRED=true` too, and the log had
+  no line about it. `APPROVAL_ROOT`, `AUDIT_ROOT`, `STATE_DB_PATH`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`,
+  `MEMORY_ROOT`, `HARNESS_ROOT`, `MESH_PEERS_PATH`, `MCP_SESSION_STORE_PATH`, `CRON_STORE_PATH`,
+  `SHARE_REVOCATION_STORE_PATH`, `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`, `ISOLATED_TUNNEL_INFO_ROOT`,
+  `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT` are now checked the same way: the warning names each
+  one that is left open, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI. Kept in their default places under
+  `/data`, as in the image, nothing changes.
 
 ### Fixed
 

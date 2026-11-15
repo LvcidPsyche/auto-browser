@@ -28,13 +28,14 @@ Each of these is reported:
   write, but for a CLI home in it clear of what the controller reads at its start; or what it reads there (each
   home's .ssh and .local, and Python's user base, which PYTHONUSERBASE can put anywhere) is, holds or lies in such a
   directory, wherever it is. The CLI is started under the launcher.
-- a setting of SECRET_PATH_SETTINGS names a place that is, once resolved, outside PROTECTED_ROOT, or a path that lies
-  in a directory the CLI may write, as written or once resolved (the CLI can replace a link written there), or a
-  directory that holds one, or a path with a '..' part (Linux reads it after any link before it, which the CLI may
-  have made). The CLI is started under the launcher, which does not close that place.
+- a setting of SECRET_PATH_SETTINGS or STORE_PATH_SETTINGS names a place that is, once resolved, outside
+  PROTECTED_ROOT, or a path that lies in a directory the CLI may write, as written or once resolved (the CLI can
+  replace a link written there), or a directory that holds one, or a path with a '..' part (Linux reads it after any
+  link before it, which the CLI may have made). The CLI is started under the launcher, which does not close that
+  place.
 
 Each is one WARNING for the process (one for each distinct text) that names the condition, and the CLI runs: a
-secret's setting by its name and never its value, a home or a directory by its path. Where several hold, only the
+setting by its name and never its value, a home or a directory by its path. Where several hold, only the
 first in this list is named: no Landlock, for one, hides an open setting until Landlock is there. With
 CLI_SANDBOX_REQUIRED=true each is one ERROR and SandboxRequired: no CLI runs. An entry of CLI_SANDBOX_WRITABLE that
 is not given is one WARNING too, and refuses nothing.
@@ -80,6 +81,27 @@ SECRET_PATH_SETTINGS = {
     "isolated_tunnel_key_path": "ISOLATED_TUNNEL_KEY_PATH",
     "proxy_persona_file": "PROXY_PERSONA_FILE",
     "browser_ws_endpoint_file": "BROWSER_WS_ENDPOINT_FILE",
+}
+# The settings that say where the controller keeps a store of its own, checked as a secret's are: what it reads back
+# from one (the approvals' digest key, a session, a job, a mesh peer, a cron, a revoked share link) a CLI is no more to
+# read or change than a secret.
+STORE_PATH_SETTINGS = {
+    "approval_root": "APPROVAL_ROOT",
+    "audit_root": "AUDIT_ROOT",
+    "state_db_path": "STATE_DB_PATH",
+    "session_store_root": "SESSION_STORE_ROOT",
+    "job_store_root": "JOB_STORE_ROOT",
+    "memory_root": "MEMORY_ROOT",
+    "harness_root": "HARNESS_ROOT",
+    "mesh_peers_path": "MESH_PEERS_PATH",
+    "mcp_session_store_path": "MCP_SESSION_STORE_PATH",
+    "cron_store_path": "CRON_STORE_PATH",
+    "share_revocation_store_path": "SHARE_REVOCATION_STORE_PATH",
+    "isolated_tunnel_known_hosts_path": "ISOLATED_TUNNEL_KNOWN_HOSTS_PATH",
+    "isolated_tunnel_info_root": "ISOLATED_TUNNEL_INFO_ROOT",
+    "remote_access_info_path": "REMOTE_ACCESS_INFO_PATH",
+    "artifact_root": "ARTIFACT_ROOT",
+    "upload_root": "UPLOAD_ROOT",
 }
 PROBE_TIMEOUT_SECONDS = 30
 # What the caller of a refused call is told. Neither names a path: the detail is in the controller log.
@@ -333,7 +355,7 @@ def _open_settings(settings: Settings, given: list[tuple[str, str]]) -> list[str
     a directory). A path written there is the CLI's to replace, wherever it resolves now."""
     return [
         name
-        for attribute, name in SECRET_PATH_SETTINGS.items()
+        for attribute, name in (SECRET_PATH_SETTINGS | STORE_PATH_SETTINGS).items()
         if (value := getattr(settings, attribute))
         and (
             _climbs(value)
