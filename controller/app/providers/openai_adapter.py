@@ -42,8 +42,9 @@ def _decision_file_bytes(path: Path) -> tuple[bytes | None, str]:
     """What is at ``path`` and "", where it is a regular file of at most CLI_STDOUT_LIMIT_BYTES that is itself there;
     (None, "") where nothing is there; otherwise (None, what is there instead), for the log.
 
-    The call's directory is the CLI's to write, and the controller is not under the CLI sandbox: a link there could
-    name a file the CLI cannot open, and a FIFO would hold the event loop until something writes to it.
+    The call's directory and the CLI home are the CLI's to write, and the controller is not under the CLI sandbox: a
+    link there could name a file the CLI cannot open, and a FIFO would hold the event loop until something writes to
+    it.
     """
     try:
         fd = os.open(path, _DECISION_FILE_FLAGS)
@@ -458,12 +459,18 @@ class OpenAIAdapter(BaseProviderAdapter):
             return
 
         actual_codex_home = Path(cli_home) / ".codex"
-        config_path = actual_codex_home / "config.toml"
-        if not config_path.exists():
+        # The CLI writes its home: config.toml is read as a call's decision.json is (a FIFO there would hold the event
+        # loop this runs on), and what is there instead is said once.
+        written, instead = _decision_file_bytes(actual_codex_home / "config.toml")
+        if instead:
+            self._codex_config_checked = True
+            logger.warning("codex's config.toml in the CLI home is %s, and is not read", instead)
+            return
+        if written is None:
             return
 
         try:
-            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            config = tomllib.loads(written.decode("utf-8"))
         except Exception:
             return
 

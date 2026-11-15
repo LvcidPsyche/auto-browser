@@ -25,6 +25,20 @@ TODO-INTRO
   ```
 
   Never set `CLI_HOST_HOME` to `/root` with it: every user in the container could then write root's home there.
+- **A Codex `config.toml` that is a link, or larger than 1 MiB, is no longer read.** The Codex path-compatibility
+  shim reads `CLI_HOME/.codex/config.toml` only as a regular file of at most 1 MiB that is itself at that name (see
+  Security), and logs a warning for anything else there; the `.codex` links such a file names are not made. Put the
+  file itself in `CLI_HOME/.codex`.
+
+### Security
+
+- **A FIFO at Codex's `config.toml` no longer holds the controller.** The Codex path-compatibility shim reads
+  `CLI_HOME/.codex/config.toml` at the first Codex call after each start, on the controller's event loop, and it
+  opened whatever was at that name and waited for it. A CLI may make a FIFO there, in its own home, and the read
+  then waited for a writer: the controller answered nothing meanwhile (on Linux, nothing ran for the 5 seconds a
+  probe waited). The shim now reads the file as the controller reads a call's `decision.json`: only a regular file of
+  at most 1 MiB that is itself there, opened without waiting. A FIFO, a link, a directory or a larger file is not
+  read, and a warning says which it was, once.
 
 ### Fixed
 

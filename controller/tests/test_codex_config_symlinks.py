@@ -2,20 +2,30 @@
 
 A config.toml under the CLI home can name any absolute `/.../.codex/...` path; the shim used to make the parent
 directories and a symlink for every one of them, anywhere the controller could write.
+
+The CLI writes its home, and the controller is not under the CLI sandbox: the shim reads config.toml only as a regular
+file that is itself there. The FIFO and link cases need POSIX.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
+import pytest
+
 from app.config import Settings
 from app.providers import openai_adapter
+from app.providers.base import CLI_STDOUT_LIMIT_BYTES
 from app.providers.openai_adapter import OpenAIAdapter
 
 CLI_HOME = PurePosixPath("/data/cli-home")
+posix_only = pytest.mark.skipif(os.name == "nt", reason="needs POSIX: a FIFO, a link without a privilege, O_NOFOLLOW")
 
 
 class CodexRootAllowedTests(unittest.TestCase):
@@ -162,6 +172,78 @@ class EnsureCodexConfigTests(unittest.TestCase):
 
         self.assertEqual(self.linked, [Path("/home/bob/.codex")])
         self.assertIn("ValueError", "\n".join(captured.output))
+
+
+@pytest.fixture
+def cli_home(tmp_path: Path) -> Path:
+    home = tmp_path / "cli-home"
+    (home / ".codex").mkdir(parents=True)
+    return home
+
+
+def _shim(cli_home: Path) -> OpenAIAdapter:
+    return OpenAIAdapter(Settings(_env_file=None, OPENAI_API_KEY="k", CLI_HOME=str(cli_home)))
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.providers.openai_adapter" and record.levelno == logging.WARNING
+    ]
+
+
+@posix_only
+def test_a_config_that_is_a_fifo_is_not_waited_on(cli_home: Path, caplog) -> None:
+    # A Codex call runs the shim on the event loop's thread: a read waiting for a FIFO's writer held every request.
+    fifo = cli_home / ".codex" / "config.toml"
+    os.mkfifo(fifo)
+    shim = threading.Thread(target=_shim(cli_home)._ensure_codex_config_path_compatibility, daemon=True)
+    with caplog.at_level(logging.WARNING):
+        shim.start()
+        shim.join(2)
+        blocked = shim.is_alive()
+        if blocked:
+            # Open the write end, so the waiting read ends and so does the run that failed. ENXIO: it ended meanwhile.
+            try:
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+            shim.join(5)
+
+    assert not blocked, "the shim waited for a writer on the FIFO"
+    (line,) = _warnings(caplog)
+    assert "a FIFO" in line
+
+
+@posix_only
+def test_a_config_that_is_a_link_is_not_read_and_said_once(cli_home: Path, tmp_path: Path, caplog) -> None:
+    elsewhere = tmp_path / "elsewhere.toml"
+    elsewhere.write_text(f'notify = ["{cli_home.as_posix()}/sub/.codex/hook"]\n', encoding="utf-8")
+    (cli_home / ".codex" / "config.toml").symlink_to(elsewhere)
+    adapter = _shim(cli_home)
+
+    with caplog.at_level(logging.WARNING):
+        adapter._ensure_codex_config_path_compatibility()
+        adapter._ensure_codex_config_path_compatibility()
+
+    assert not (cli_home / "sub").exists()
+    (line,) = _warnings(caplog)
+    assert "a link" in line
+
+
+def test_a_config_larger_than_the_limit_is_not_read(cli_home: Path, caplog) -> None:
+    (cli_home / ".codex" / "config.toml").write_bytes(b"#" * (CLI_STDOUT_LIMIT_BYTES + 1))
+
+    with (
+        patch.object(openai_adapter.tomllib, "loads", wraps=openai_adapter.tomllib.loads) as parse,
+        caplog.at_level(logging.WARNING),
+    ):
+        _shim(cli_home)._ensure_codex_config_path_compatibility()
+
+    assert parse.call_count == 0, "the config was parsed"
+    (line,) = _warnings(caplog)
+    assert str(CLI_STDOUT_LIMIT_BYTES) in line
 
 
 if __name__ == "__main__":
