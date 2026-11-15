@@ -35,6 +35,7 @@ from ..browser_scripts import (
     FIND_ELEMENTS_SELECTOR_SCRIPT,
     FIND_ELEMENTS_TEXT_SCRIPT,
     PAGE_TEXT_SCRIPT,
+    STORAGE_READ_SCRIPT,
     cap_found_elements,
 )
 from ..cron_service import CronJobDisabledError
@@ -55,6 +56,7 @@ from ..session_ownership import verified_operator
 from ..session_share import ensure_links_revocable, mint_share_token, revoke_share_links
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
+    MAX_TOOL_RESULT_CHARS,
     AgentJobIdInput,
     ApprovalDecisionInput,
     AuthProfileNameInput,
@@ -142,6 +144,9 @@ PAGE_READ_SETUP_TIMEOUT_MS = int((PAGE_READ_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN
 # find_elements' query mode has its own, shorter timeout, and the same margin under it: a setup that hangs there is the
 # page not answering, not a pattern that backtracks.
 FIND_ELEMENTS_QUERY_SETUP_TIMEOUT_MS = int((FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS - WORLD_SETUP_MARGIN_SECONDS) * 1000)
+
+# What one entry of a storage read costs beyond its key and value: the quotes, colon and comma JSON writes around them.
+STORAGE_ENTRY_OVERHEAD_CHARS = 6
 
 # How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
 # answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.
@@ -1319,19 +1324,28 @@ class McpToolGateway:
         if payload.storage_type not in {"local", "session"}:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
-        if payload.key:
-            script = f"(k) => window.{payload.storage_type}Storage.getItem(k)"
-            async with locked_read(self.manager, session):
-                value = await bounded(session.page.evaluate(script, payload.key))
-            return {"session_id": payload.session_id, "key": payload.key, "value": value}
-        script = (
-            f"() => Object.fromEntries("
-            f"Object.keys(window.{payload.storage_type}Storage).map("
-            f"k => [k, window.{payload.storage_type}Storage.getItem(k)]))"
-        )
+        key = payload.key or None
         async with locked_read(self.manager, session):
-            data = await bounded(session.page.evaluate(script))
-        return {"session_id": payload.session_id, "storage": data}
+            # In the controller's isolated world, as the other page reads run (NAV-12): in the page's own, a page that
+            # replaced Storage.prototype.getItem answered with what it chose, 20 million characters in a probe. The
+            # script bounds the answer to MAX_TOOL_RESULT_CHARS, keys and values together (STORAGE_READ_SCRIPT).
+            read = await bounded(
+                self.manager.element_ids.evaluate(
+                    session.page,
+                    STORAGE_READ_SCRIPT,
+                    [payload.storage_type, key, MAX_TOOL_RESULT_CHARS, STORAGE_ENTRY_OVERHEAD_CHARS],
+                    timeout_ms=PAGE_READ_WORLD_TIMEOUT_MS,
+                    setup_timeout_ms=PAGE_READ_SETUP_TIMEOUT_MS,
+                )
+            )
+            if "__storage_error" in read:
+                # Raised as the read in the page's world raised it: the caller gets the browser's words, browser_error.
+                raise PlaywrightError(read["__storage_error"])
+        entries, truncated = read["entries"], read["truncated"]
+        if key is not None:
+            value = entries[0][1] if entries else None
+            return {"session_id": payload.session_id, "key": key, "value": value, "truncated": truncated}
+        return {"session_id": payload.session_id, "storage": dict(entries), "truncated": truncated}
 
     async def _set_local_storage(self, payload: SetStorageInput) -> dict[str, Any]:
         if payload.storage_type not in {"local", "session"}:
