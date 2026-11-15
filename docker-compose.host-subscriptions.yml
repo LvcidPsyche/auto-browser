@@ -7,6 +7,14 @@ services:
     environment:
       CLI_HOME: ${CLI_HOST_HOME:-/home/botuser}
     volumes:
+      # CLI_HOME itself: an empty tmpfs that any uid can write (mode 1777, noexec, emptied at every start), so the
+      # controller, which does not run as root here, can make each Codex call's directory there and the CLIs their other
+      # state. Without it the container runtime makes this home root-owned 0755, as the parent of the mounts below,
+      # and every Codex call fails. Never set CLI_HOST_HOME to /root: this would make root's home writable.
+      - type: tmpfs
+        target: ${CLI_HOST_HOME:-/home/botuser}
+        tmpfs:
+          size: 67108864  # 64 MiB
       - type: bind
         source: ${CLI_HOST_HOME:-/home/botuser}/.codex
         target: ${CLI_HOST_HOME:-/home/botuser}/.codex

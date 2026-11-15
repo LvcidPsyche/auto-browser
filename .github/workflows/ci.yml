@@ -210,6 +210,7 @@ jobs:
         run: |
           docker compose -f docker-compose.yml config >/tmp/compose-main.out
           docker compose -f docker-compose.yml -f docker-compose.isolation.yml config >/tmp/compose-isolation.out
+          docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml config >/tmp/compose-host-subscriptions.out
 
       - name: Build controller image
         # With the test tooling, which the image leaves out by default.
@@ -226,6 +227,28 @@ jobs:
         # The build above sets INSTALL_DEV_DEPS=true, so pytest is present. CI=true reaches the container, so the
         # guard in test_cli_sandbox_launcher.py fails there too where the kernel tests would skip.
         run: docker compose run --no-deps --rm -e CI=true controller python -m pytest tests/ -q
+
+      - name: Codex can make its call directory under the host-subscription overlay
+        # docker-compose.host-subscriptions.yml mounts the host's CLI sign-ins read-only under CLI_HOME. Up to 1.18.0
+        # nothing made CLI_HOME itself, so the container runtime made it root-owned 0755, and every Codex call failed
+        # (the controller never runs as root here) while readiness said ready. /bin/true stands in for codex, which
+        # this image leaves out; the run reuses the image built above. It fails where readiness is not ready or the
+        # call directory cannot be made.
+        env:
+          CLI_HOST_HOME: ${{ runner.temp }}/cli-home
+        run: |
+          mkdir -p "$CLI_HOST_HOME/.codex" "$CLI_HOST_HOME/.claude" "$CLI_HOST_HOME/.gemini"
+          touch "$CLI_HOST_HOME/.claude.json"
+          docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml run --no-deps --rm \
+            -e OPENAI_AUTH_MODE=cli -e OPENAI_CLI_PATH=/bin/true controller python -c '
+          from app.config import Settings
+          from app.providers.openai_adapter import OpenAIAdapter
+          adapter = OpenAIAdapter(Settings())
+          assert adapter.configured, adapter.readiness_detail
+          print("readiness:", adapter.readiness_detail)
+          with adapter._call_directory() as made:
+              print("call directory made:", made)
+          '
 
       - name: Run the root step's tests as root in the image
         # The suite above runs as the owner of ./data (the runner), so the tests that hand other uids' files over

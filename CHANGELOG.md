@@ -4,6 +4,48 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.18.1]
+
+TODO-INTRO
+
+### Upgrade notes
+
+- **A copy of `docker-compose.host-subscriptions.yml` kept outside this repository needs the new tmpfs entry.** The
+  override now mounts an empty tmpfs at `CLI_HOME` (see Fixed); the override in this repository needs nothing. A copy
+  made before 1.18.1 still leaves Codex unable to make its call directory, and the controller now says so: Codex's
+  readiness is not ready, with the reason, and with `APP_ENV=production` and `OPENAI_AUTH_MODE=cli` the controller
+  refuses to start, Claude and Gemini with it, where before it started and every Codex call failed. Add the entry to
+  the copy's `volumes`, beside the four read-only sign-ins:
+
+  ```yaml
+  - type: tmpfs
+    target: ${CLI_HOST_HOME:-/home/botuser}
+    tmpfs:
+      size: 67108864  # 64 MiB
+  ```
+
+  Never set `CLI_HOST_HOME` to `/root` with it: every user in the container could then write root's home there.
+
+### Fixed
+
+- **Codex works again under `docker-compose.host-subscriptions.yml`, broken since 1.15.0.** 1.15.0 moved the
+  directory each Codex call works in from the system temp dir into `CLI_HOME`. The override sets `CLI_HOME` to the
+  host-style home (`/home/botuser` by default) and mounts the host's `.codex`, `.claude`, `.claude.json` and
+  `.gemini` read-only inside it, but nothing made the home itself: the container runtime made it, as the parent of
+  those mounts, owned by root with mode 0755, and the controller, which does not run as root there, could not make
+  a directory in it. Every Codex call failed (`Agent step failed`, and in the log `could not make a working directory
+  under the CLI home`) while the provider list showed Codex ready. The override now mounts an empty 64 MiB tmpfs at
+  that home (mode 1777, `noexec`, emptied at every start), and the four sign-ins stay read-only inside it. A CI step
+  runs the override with `/bin/true` as Codex and fails where the call directory cannot be made.
+- **Codex's readiness, and a production start, now check that a directory can be made in `CLI_HOME`.** Readiness
+  asked only whether `CLI_HOME` existed and held `.codex`, so a home the controller could not write showed ready.
+  Codex is now not ready there, with the reason (`codex cannot make its call directory under CLI_HOME
+  /home/botuser (Permission denied)`, naming the setting's path and not the one the error carried), and with
+  `APP_ENV=production` and `OPENAI_AUTH_MODE=cli` the controller refuses to start. The check makes one directory and
+  removes it at once; where a CLI working in the home has filled or removed it meanwhile, the home still counts as
+  writable and the log has a warning that names no path. The Claude and Gemini CLIs make no such directory and are
+  not checked.
+
 ## [1.18.0] — 2026-11-14
 
 A security and correctness release over 1.17.0, from the findings the reviews of 1.17.0 left open and from reviews of

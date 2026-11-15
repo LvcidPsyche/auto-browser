@@ -22,6 +22,7 @@ from .base import (
     BaseProviderAdapter,
     ProviderAPIError,
     ProviderDecision,
+    call_directory_refused,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,11 +135,18 @@ class OpenAIAdapter(BaseProviderAdapter):
                 label="OpenAI host bridge",
             )
         if self.auth_mode == "cli":
-            return self.describe_cli_readiness(
+            ready, detail = self.describe_cli_readiness(
                 cli_path=self.settings.openai_cli_path,
                 cli_label="codex",
                 auth_markers=(".codex",),
             )
+            cli_home = (self.settings.cli_home or "").strip()
+            if ready and cli_home and (refused := call_directory_refused(cli_home)):
+                return False, (
+                    f"codex cannot make its call directory under CLI_HOME {cli_home} ({refused}): give the controller "
+                    "a CLI_HOME it can write (docker-compose.host-subscriptions.yml mounts a tmpfs there since 1.18.1)"
+                )
+            return ready, detail
         return self.describe_api_readiness(api_key=self.settings.openai_api_key, env_var="OPENAI_API_KEY")
 
     async def _decide(
