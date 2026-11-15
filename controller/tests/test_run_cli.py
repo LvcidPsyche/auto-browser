@@ -35,6 +35,8 @@ _LAUNCHER = (
 )
 # Records its pid, then holds the pipes it inherited open and sleeps.
 _HOLDER = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(20)"
+# Writes to its stdout until it is stopped.
+_FLOOD = "import sys\nwhile True:\n    sys.stdout.write('x' * 65536)\n    sys.stdout.flush()"
 posix_only = unittest.skipUnless(GROUPED and sys.platform != "darwin", "needs POSIX process groups")
 
 
@@ -115,6 +117,21 @@ class RunCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("exceeded 100000 bytes", caught.exception.message)
         self.assertFalse(caught.exception.retryable)
         self.assertIsNotNone(started[0].returncode)
+
+    async def test_stdout_past_the_cap_from_a_child_that_never_stops_kills_it(self) -> None:
+        # The child above exits by itself once it has written, so the drain alone reaps it, kill or no kill: one that
+        # writes forever is stopped only by the kill, and the call would end only when the drain gave up on its pipes.
+        started, spy = self._spy_on_spawns()
+        self.addCleanup(lambda: [process.kill() for process in started if process.returncode is None])
+        began = time.monotonic()
+
+        with patch("app.providers.base.CLI_STDOUT_LIMIT_BYTES", 100_000), spy:
+            with self.assertRaises(ProviderAPIError) as caught:
+                await self._run(_FLOOD)
+
+        self.assertIn("exceeded 100000 bytes", caught.exception.message)
+        self.assertIsNotNone(started[0].returncode, "the child outlived its overflow")
+        self.assertLess(time.monotonic() - began, DRAIN_TIMEOUT_SECONDS)
 
     async def test_a_noisy_stderr_blocks_nothing_and_only_its_start_is_kept(self) -> None:
         result = await self._run("import sys; sys.stderr.write('e' * 3_000_000); sys.stdout.write('ok')")
