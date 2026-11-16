@@ -195,6 +195,41 @@ async def test_an_approval_reads_plain_only_by_a_field_that_can_take_text_now(tm
     assert await _approval_read(tmp_path, page) == _read_as(read)
 
 
+# A plain field beside a frame of a kind the frame tags left out, whose document is not read.
+BESIDE_A_FRAME = {
+    "a-fenced-frame": '<div id="named"><textarea></textarea><fencedframe></fencedframe></div>',
+    "a-portal": '<div id="named"><textarea></textarea><portal></portal></div>',
+}
+
+
+@pytest.mark.parametrize("frame", list(BESIDE_A_FRAME))
+async def test_an_approval_does_not_read_plain_beside_a_fenced_frame_or_a_portal(tmp_path: Path, frame: str) -> None:
+    # The frame tags were IFRAME, FRAME, OBJECT and EMBED, so a fenced frame or a portal was no frame to the read,
+    # and a plain field beside one read plain, though the text can go into the frame's document.
+    assert await _approval_read(tmp_path, BESIDE_A_FRAME[frame]) == _read_as("unread")
+
+
+# A button the page lists, whose middle a fenced frame inside it fills.
+A_FENCED_FRAME_IN_THE_BUTTON = (
+    '<title>frame</title><div id="box" role="button" aria-label="Open" style="width: 300px; height: 150px">'
+    '<fencedframe style="display: block; width: 300px; height: 150px; border: 0"></fencedframe></div>'
+)
+
+
+async def test_a_click_by_element_id_on_a_button_a_fenced_frame_fills_is_refused(tmp_path: Path) -> None:
+    # What is in a frame is never what observe described, so a frame the pointer finds, even inside the element,
+    # covers it (_COVER_AT_JS). A fenced frame was not among the frame tags, and the click went into it.
+    async with browser_env(tmp_path, {"/frame": A_FENCED_FRAME_IN_THE_BUTTON}) as env:
+        session_id = await env.create("/frame")
+        items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+        (button,) = [item for item in items if item.get("label") == "Open"]
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.click(session_id, element_id=button["element_id"])
+
+        assert refused.value.code == "element_covered"
+
+
 # A form the page lists as a text box, focusable, with controls named for the methods a hold puts its listeners on and
 # takes them off with.
 A_FORM_WITH_CONTROLS_NAMED_FOR_THE_LISTENER_METHODS = (

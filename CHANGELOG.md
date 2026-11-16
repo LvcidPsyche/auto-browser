@@ -55,6 +55,11 @@ All notable changes to auto-browser are documented here.
   text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
   no longer makes the read `plain`; named as a secret, it still makes it `secret`, since a page can enable or show it
   as the type focuses.
+- **A fenced frame is a frame to the in-page checks, as an iframe is.** The frame tags they knew were `iframe`,
+  `frame`, `object` and `embed`, so a plain field beside a `<fencedframe>` made an approval read `plain` though the
+  text can go into the frame's document; a click by element_id on a button a fenced frame filled went into the frame,
+  where one an iframe fills is refused as covered; and by element_id focus in a fenced frame inside the target counted
+  as focus in the target. `<portal>` is on the list as well, though Chromium 156 has no such element.
 
 ### Fixed
 

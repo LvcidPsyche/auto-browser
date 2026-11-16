@@ -50,7 +50,11 @@ DOM_JS = """const dom = (() => {
   const editable = getter(HTMLElement.prototype, 'isContentEditable');
   const elementAll = method(Element.prototype, 'querySelectorAll');
   const fragmentAll = method(DocumentFragment.prototype, 'querySelectorAll');
+  // What holds a document of its own, or is a plugin, whose inside this document cannot see: keys sent to one go
+  // there. A portal is listed though the Chromium measured (156) has no such element: one so named is then the page's.
+  const FRAME_TAGS = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'FENCEDFRAME', 'PORTAL'];
   const dom = {
+    frame: (el) => FRAME_TAGS.includes(dom.tag(el)),
     // The element above: the parent element, or the host of the shadow root the element is in.
     up(el) {
       const parent = parentNode.call(el);
@@ -151,7 +155,7 @@ _COVER_AT_JS = r"""(el, x, y) => {
     hit = inner;
   }
   if (!hit) return { tag: null };
-  const frame = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(hit));
+  const frame = dom.frame(hit);
   const inside = dom.within(hit, el);
   if (!frame && inside) return null;
   const word = (text) => (text || '').trim().split(/\s+/)[0].slice(0, 40).replace(/[^\w:.-]/g, '_');
@@ -519,7 +523,7 @@ ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
     active = dom.active(root);
   }}
   if (!active) return false;
-  if (refuseFrames && active !== el && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) return false;
+  if (refuseFrames && active !== el && dom.frame(active)) return false;
   return dom.within(active, el);
 }}"""
 
@@ -560,7 +564,7 @@ const held = {{
   take(el) {{
     const hold = {{ node: null, root: null, target: el, left: false, listener: null }};
     const active = held.focused(el);
-    if (!active || !dom.within(active, el) || ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(dom.tag(active))) {{
+    if (!active || !dom.within(active, el) || dom.frame(active)) {{
       return hold;
     }}
     hold.node = active;
@@ -640,7 +644,6 @@ ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
 # it. Run in the main world too, on a selector's element (see DOM_JS).
 NAMED_FIELDS_SCRIPT = f"""(el) => {{
   {DOM_JS}
-  const frames = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'];
   const noText = ['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color'];
   const typeOf = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type').get;
   const inputType = (node) => {{
@@ -656,7 +659,7 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   const fields = new Set();
   let frame = false;
   const look = (node) => {{
-    if (frames.includes(dom.tag(node))) frame = true;
+    if (dom.frame(node)) frame = true;
     else if (takesText(node)) fields.add(node);
   }};
   const lookInside = (root) => {{
