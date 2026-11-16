@@ -1149,3 +1149,67 @@ async def test_a_cancelled_press_whose_release_fails_is_logged_as_cancelled(capl
 
     messages = [record.getMessage() for record in caplog.records]
     assert any("after a press that was cancelled" in message for message in messages), messages
+
+
+async def test_a_placed_click_gives_its_pointer_question_what_its_budget_has_left() -> None:
+    # B1-fix1 item 10 (Opus F18): the whole walk up the frames shared one POINTER_CHECK_TIMEOUT_MS, so a page that
+    # answered each call in 150 ms ended a placed click on a target two frames down as a timeout, where 1.18.1
+    # pressed. The question is given what the click has left, each of its calls a second at most.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, _watch, _done = _framed_click(True)
+        with reading_presses("click", "read", None):
+            await service.click_as_playwright_places_it(session, locator, budget=_Budget(5000))
+
+    given = service._receives_pointer_at.await_args.kwargs["timeout_ms"]
+    assert POINTER_CHECK_TIMEOUT_MS < given <= 5000, given
+
+
+def _slow_frames(depth: int, seconds: float) -> SimpleNamespace:
+    """A target ``depth`` frames down whose page answers each call in ``seconds``; the locator that finds it."""
+
+    async def slow(answer: Any) -> Any:
+        await asyncio.sleep(seconds)
+        return answer
+
+    def node(level: int) -> SimpleNamespace:
+        frame = SimpleNamespace(
+            parent_frame=object() if level < depth else None,
+            frame_element=lambda: slow(node(level + 1)),
+        )
+        return SimpleNamespace(
+            bounding_box=lambda: slow(BOX),
+            evaluate=lambda _script, _given: slow(True),
+            owner_frame=lambda: slow(frame),
+            dispose=lambda: slow(None),
+        )
+
+    return SimpleNamespace(
+        evaluate=lambda *_args, **_named: slow("framed"), element_handle=lambda **_named: slow(node(0))
+    )
+
+
+async def test_a_pointer_question_on_a_slow_page_that_answers_is_answered() -> None:
+    # Kept (Opus's probe): each call in 150 ms, two frames up, within what the click has left: a yes, as in 1.18.1.
+    locator = _slow_frames(2, 0.15)
+
+    found = await asyncio.wait_for(
+        BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000), 10
+    )
+
+    assert found is True
+
+
+async def test_each_call_of_a_pointer_question_has_its_own_bound_within_what_the_click_has_left() -> None:
+    # A call that never answers still ends the question at POINTER_CHECK_TIMEOUT_MS, however much the click has left.
+    target, _outer, locator = _frames_that_stall("bounding_box")
+
+    with patch.object(actions, "POINTER_CHECK_TIMEOUT_MS", BOUND_MS):
+        began = time.monotonic()
+        with pytest.raises(PlaywrightTimeoutError):
+            await asyncio.wait_for(
+                BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000), 10
+            )
+        took = time.monotonic() - began
+
+    assert took < WITHIN_THREE_BOUNDS_S, took
+    target.dispose.assert_awaited_once()

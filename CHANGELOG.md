@@ -155,12 +155,13 @@ All notable changes to auto-browser are documented here.
   click Playwright places asked its target's handle for the box and set the pointer watch up on it with no bound, and
   the question whether the pointer finds the target asked each handle on its way up the frames with none: a
   Locator's own `timeout` bounds only the look-up of the element. Each is now asked within what the click's budget
-  leaves (the question within its own second at most), past which the click ends as a timeout, as at any of its
-  other waits; the handles it took are given back, each within a second. By selector, a type's check that focus is
-  in its field answers within a second or refuses the type (`focus_lost`). The clear's select-all and Delete are
-  each bounded at 2 seconds, the least a keystroke is given, past which the type ends as `typing_timeout` with none
-  of its text typed. And a type whose field cannot be found again is refused before select-all, which was pressed
-  first, into whatever had focus. The pointer's moves and the press still wait for the page.
+  leaves (each call of the question, on its way up the frames, within a second at most), past which the click ends
+  as a timeout, as at any of its other waits; the handles it took are given back, each within a second. By
+  selector, a type's check that focus is in its field answers within a second or refuses the type (`focus_lost`).
+  The clear's select-all and Delete are each bounded at 2 seconds, the least a keystroke is given, past which the
+  type ends as `typing_timeout` with none of its text typed. And a type whose field cannot be found again is refused
+  before select-all, which was pressed first, into whatever had focus. The pointer's moves and the press still wait
+  for the page.
 - **A click cancelled between pressing the mouse button and letting it go no longer leaves the button pressed.**
   The press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or
   while the page had not yet answered the button going down, skipped the up: whatever ran next on the page began
