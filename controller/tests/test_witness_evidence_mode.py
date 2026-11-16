@@ -17,7 +17,7 @@ from app.action_errors import BrowserActionError
 from app.action_records import wait_for_pending_record
 from app.approvals import ApprovalRequiredError
 from app.audit import reset_current_operator, set_current_operator
-from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT, FIELD_HOLD_TAKE_SCRIPT
 from app.browser.services.actions import FIELD_RECHECK_TIMEOUT_MS
 from app.browser.services.witness import BrowserWitnessService
 from app.browser_manager import BrowserManager, BrowserSession
@@ -744,7 +744,7 @@ async def test_a_read_once_the_text_is_in_that_fails_keeps_no_preview(tmp_path: 
     page.keyboard.type = AsyncMock(side_effect=typed.append)
     if by == "selector":
         field = FakeLocator("#login", attributes={"type": "text", "name": "login"})
-        hold = field._hold("")
+        hold = field._hold(FIELD_HOLD_TAKE_SCRIPT)
         gone = PlaywrightError("Execution context was destroyed, most likely because of a navigation")
         read = hold.evaluate.side_effect
         hold.evaluate = AsyncMock(side_effect=lambda script: _raise(gone) if typed else read(script))
@@ -939,7 +939,7 @@ async def test_a_field_by_selector_that_cannot_be_held_or_read_keeps_no_preview_
     elif fails == "taking-the-hold":
         field.element.evaluate_handle = AsyncMock(side_effect=PlaywrightError("Execution context was destroyed"))
     else:
-        hold = field._hold("")
+        hold = field._hold(FIELD_HOLD_TAKE_SCRIPT)
         hold.evaluate = AsyncMock(side_effect=gone)
         field.element.evaluate_handle = AsyncMock(return_value=hold)
 

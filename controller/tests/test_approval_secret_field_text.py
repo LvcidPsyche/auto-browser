@@ -362,7 +362,8 @@ async def test_an_approvals_read_of_a_field_that_does_not_answer_is_bounded(tmp_
     took = time.monotonic() - began
 
     assert (approval["field_read"], approval["action"]["text"]) == ("unread", UNREAD)
-    assert took < 5, took
+    # Under three bounds, overhead and all: a read bounded five times as long does not pass for it.
+    assert took < 3 * bound_ms / 1000, took
     if by == "selector":
         # The wait for the selector's element has the bound, and the question asked of it is given up on at it.
         assert manager.sessions["s1"].page.locators["#f"].element_handle.await_args.kwargs == {"timeout": bound_ms}

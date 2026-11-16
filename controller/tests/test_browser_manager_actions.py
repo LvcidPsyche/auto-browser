@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
-from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from app.browser.element_scripts import (
+    ELEMENT_HAS_FOCUS_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+    NAMED_FIELDS_SCRIPT,
+)
 from app.browser.services import BrowserRemoteAccessService, actions
 from app.browser.services.actions import _Budget
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
@@ -55,15 +61,22 @@ class FakeKeyboard:
 class FakeFieldHold:
     """A type's hold on the node its text goes to (app.browser.services.actions._TypedField), taken on a FakeLocator:
     the field the locator named then, whose attributes it reads as they are now, for as long as the node has kept
-    focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away)."""
+    focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away).
+    It answers the hold's read and release scripts only, and nothing once released: the release takes its
+    listeners off, so a hold first read with the release script reads as left when it is given back."""
 
     def __init__(self, attributes: dict[str, str]) -> None:
         self.attributes = attributes
         self.focused = True
+        self.released = False
         self.evaluate = AsyncMock(side_effect=self._read)
         self.dispose = AsyncMock()
 
-    def _read(self, _script: str) -> dict[str, str] | None:
+    def _read(self, script: str) -> dict[str, str] | None:
+        assert script in (FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT), script
+        if self.released:
+            return None
+        self.released = script == FIELD_HOLD_RELEASE_SCRIPT
         if not self.focused:
             return None
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
@@ -104,13 +117,15 @@ class FakeLocator:
         self.evaluate = AsyncMock(return_value=True)
         self.focus = AsyncMock()
 
-    def _hold(self, _script: str, **_given: object) -> FakeFieldHold:
+    def _hold(self, script: str, **_given: object) -> FakeFieldHold:
+        assert script == FIELD_HOLD_TAKE_SCRIPT, script
         self.holds.append(FakeFieldHold(self.attributes))
         return self.holds[-1]
 
     def _asked(self, script: str, *_args: object) -> object:
         if script == ELEMENT_HAS_FOCUS_SCRIPT:
             return True
+        assert script == NAMED_FIELDS_SCRIPT, script
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
         return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "idle": [], "frame": False}
 
