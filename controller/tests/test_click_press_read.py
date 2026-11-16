@@ -847,11 +847,9 @@ def _framed_click(
     return service, session, locator, watch, done
 
 
-def _assert_given_back(steps: list[str] | None) -> None:
-    """The steps of a placed click's give-back in a frame (None: one not in a frame, which has none): the watch
-    stopped, then given back, and the target given back beside it (B1-fix1 item 12: together, not in turn)."""
-    if steps is None:
-        return
+def _assert_given_back(steps: list[str]) -> None:
+    """The steps of a placed click's give-back in a frame: the watch stopped, then given back, and the target given
+    back beside it (B1-fix1 item 12: together, not in turn)."""
     assert sorted(steps) == ["give the target back", "give the watch back", "stop the watch"], steps
     assert steps.index("stop the watch") < steps.index("give the watch back"), steps
 
@@ -876,7 +874,11 @@ async def test_a_placed_click_in_a_frame_sets_its_watch_up_between_playwrights_h
     looked = ["look for the target", "the target's box", "watch the pointer"] if framed else []
     pressed = [*CHECKS, "hover at {'x': 12.0, 'y': 7.0}", *looked, put, "mouse down", "mouse up"]
     assert done[: len(pressed)] == pressed, done
-    _assert_given_back(done[len(pressed) :] if framed else None)
+    # Out of a frame nothing is given back: nothing comes after the press (B1-fix2 item 22).
+    if framed:
+        _assert_given_back(done[len(pressed) :])
+    else:
+        assert done[len(pressed) :] == [], done
     asked = service._receives_pointer_at.await_args.kwargs
     assert asked["watch"] is (watch if framed else None)
     # The box the click was placed by, which the target's must still be where a record is taken.
@@ -923,9 +925,7 @@ async def test_a_click_cancelled_as_it_gives_its_watch_back_still_gives_the_targ
         with reading_presses("click", "read", None), pytest.raises(asyncio.CancelledError):
             await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
     # Given back together (B1-fix1 item 12): the watch stopped before it is given back, the target beside it.
-    given = done[done.index("mouse up") + 1 :]
-    assert sorted(given) == ["give the target back", "give the watch back", "stop the watch"], done
-    assert given.index("stop the watch") < given.index("give the watch back"), done
+    _assert_given_back(done[done.index("mouse up") + 1 :])
 
 
 async def test_a_placed_click_in_a_frame_whose_target_has_no_box_sets_no_watch_up() -> None:
