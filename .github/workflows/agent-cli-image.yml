@@ -1,11 +1,11 @@
 name: agent-cli-image
 
-# The controller image with INSTALL_AGENT_CLIS=true, which no other workflow builds. In it Codex's own command sandbox
-# must run beneath the controller's Landlock launcher, and the two together must still refuse a read of a file in
-# /data and a write outside the roots the launcher gives. The npm package's musl codex could not run there (its
-# helper's open of / reached the kernel without O_PATH and was refused); the release's glibc build can (measured on
-# these two runners, 2026-11-16). Landlock needs a Linux kernel, so this runs on GitHub's runners, as root in the
-# container, so that only the sandboxes refuse what is refused.
+# The two images no other workflow builds: the root (Glama) image, and the controller with INSTALL_AGENT_CLIS=true.
+# In the second, Codex's own command sandbox must run beneath the controller's Landlock launcher, and the two together
+# must still refuse a read of a file in /data and a write outside the roots the launcher gives. The npm package's
+# musl codex could not run there (its helper's open of / reached the kernel without O_PATH and was refused); the
+# release's glibc build can (measured on these two runners, 2026-11-16). Landlock needs a Linux kernel, so this runs
+# on GitHub's runners, as root in the container, so that only the sandboxes refuse what is refused.
 on:
   pull_request:
     paths:
@@ -13,6 +13,10 @@ on:
       - "controller/app/cli_sandbox*.py"
       - "controller/app/providers/openai_adapter.py"
       - "controller/app/codex_sandbox.py"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "controller/requirements.txt"
+      - "controller/constraints.txt"
       - ".github/workflows/agent-cli-image.yml"
   push:
     branches:
@@ -22,6 +26,10 @@ on:
       - "controller/app/cli_sandbox*.py"
       - "controller/app/providers/openai_adapter.py"
       - "controller/app/codex_sandbox.py"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "controller/requirements.txt"
+      - "controller/constraints.txt"
       - ".github/workflows/agent-cli-image.yml"
   workflow_dispatch:
 
@@ -75,3 +83,16 @@ jobs:
           )
           docker run --rm --user root --security-opt no-new-privileges:true -e HOME=/data/cli-home \
             --entrypoint sh "$IMAGE" -c "$checks"
+
+  # The root (Glama) image, which no other workflow builds: its own Dockerfile, its .dockerignore and the two files
+  # it installs from are in the paths above.
+  root-image:
+    name: The root (Glama) image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the root Dockerfile
+        run: docker build -t auto-browser-glama:ci .

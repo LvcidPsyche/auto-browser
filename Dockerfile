@@ -17,8 +17,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY controller/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Under the controller image's constraints.txt, which pins every package requirements.txt pulls in at releases at
+# least 72 hours old (controller/Dockerfile says when to generate it again).
+COPY controller/requirements.txt controller/constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 COPY controller/app ./app
 

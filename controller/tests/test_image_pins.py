@@ -46,6 +46,15 @@ class BaseImagesArePinnedTests(unittest.TestCase):
                 self.assertIsNotNone(entry, f"no docker entry for /{context} in .github/dependabot.yml")
                 self.assertGreaterEqual(entry.get("cooldown", {}).get("default-days", 0), 3)
 
+    def test_the_root_image_installs_its_requirements_under_the_constraints(self) -> None:
+        # The root (Glama) image installed requirements.txt alone, so each build resolved the tree afresh and could
+        # take a release under 72 hours old; the controller image installs under controller/constraints.txt.
+        text = (REPO / "Dockerfile").read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^COPY controller/requirements\.txt controller/constraints\.txt \./$")
+        installs = re.findall(r"(?m)^RUN pip install .*$", text)
+        self.assertEqual(len(installs), 1, installs)
+        self.assertRegex(installs[0], r" -r requirements\.txt -c constraints\.txt$")
+
     def test_each_build_context_keeps_the_checkout_s_secrets_and_caches_out(self) -> None:
         for context in CONTEXTS:
             ignore = REPO / context / ".dockerignore"

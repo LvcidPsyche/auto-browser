@@ -28,6 +28,10 @@ All notable changes to auto-browser are documented here.
   both architectures and checks the same whenever the install, the CLI sandbox or Codex's adapter changes. A
   controller run on the host with the npm package's codex keeps the limit (`docs/deployment.md`, "Codex's own
   sandbox").
+- **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image
+  does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
+  release published that hour. No workflow built it: `agent-cli-image` now does, whenever its Dockerfile, its
+  `.dockerignore` or either file it installs from changes.
 
 ### Changed
 
