@@ -124,6 +124,11 @@ All notable changes to auto-browser are documented here.
   `host` of its own was refused the same way. And the check before a press that the pointer finds its target no
   longer runs on without end from a form with a control named `parentNode`, which it walked to and back from, holding
   the page and the click: it reads the form's own parent, and stops at 256 steps as the click target's walks do.
+- **A page whose `addEventListener` or `removeEventListener` throws no longer keeps a type's listeners.** By selector
+  the hold on the field a type's text goes to puts its listeners on in the page's own world, with what the page has
+  made of those methods. One that threw as it went on ended the take with the listener before it left on the field
+  for good, and one that threw as it came off left those after it. Each now goes on and comes off on its own, and a
+  hold that could not put one on withholds the type's preview, as one whose field lost focus does.
 
 ### Changed
 

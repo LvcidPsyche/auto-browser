@@ -548,7 +548,10 @@ _FIELD_ATTRIBUTES_JS = """(node) => {
 # So does a focusin in the node's own open shadow root: focus that goes from the node into its shadow tree and back
 # fires neither a blur nor a focus on it (both ends of the move are the node, seen from outside the tree), and a
 # move into a root further down passes through that root too. A root the node has only since the take was heard by
-# nothing, so it says the same.
+# nothing, so it says the same. Each listener goes on and comes off on its own: by selector they are put on with what
+# the page has made of EventTarget.prototype, and one that threw as it went on ended the take with those before it
+# left on the node, and as it came off left those after it. A hold one of whose listeners did not go on cannot hear
+# every move, and says focus left; a release whose removal of one threw takes the others off and then throws.
 # read(hold): the node's own attributes, as is_sensitive_field reads them, while it is still the innermost focused
 # element of its root and focus never left it; else null. One the page took out of its document is no root's
 # focused element. Run in the main world too, on a locator, for a selector target (see DOM_JS).
@@ -570,9 +573,20 @@ const held = {{
     hold.node = active;
     hold.root = dom.shadowRoot(active);
     hold.listener = () => {{ hold.left = true; }};
-    for (const type of ['blur', 'focus']) dom.listen(active, type, hold.listener, true);
-    if (hold.root) dom.listen(hold.root, 'focusin', hold.listener, true);
+    for (const [node, type] of held.listened(hold)) {{
+      try {{
+        dom.listen(node, type, hold.listener, true);
+      }} catch (error) {{
+        hold.left = true;
+      }}
+    }}
     return hold;
+  }},
+  // The nodes the hold's listeners go on, each with its event: the node's blur and focus, its shadow root's focusin.
+  listened(hold) {{
+    const on = [[hold.node, 'blur'], [hold.node, 'focus']];
+    if (hold.root) on.push([hold.root, 'focusin']);
+    return on;
   }},
   read(hold) {{
     const node = hold.node;
@@ -581,8 +595,15 @@ const held = {{
   }},
   release(hold) {{
     if (!hold.node) return;
-    for (const type of ['blur', 'focus']) dom.unlisten(hold.node, type, hold.listener, true);
-    if (hold.root) dom.unlisten(hold.root, 'focusin', hold.listener, true);
+    const failures = [];
+    for (const [node, type] of held.listened(hold)) {{
+      try {{
+        dom.unlisten(node, type, hold.listener, true);
+      }} catch (error) {{
+        failures.push(error);
+      }}
+    }}
+    if (failures.length) throw failures[0];
   }},
 }};"""
 

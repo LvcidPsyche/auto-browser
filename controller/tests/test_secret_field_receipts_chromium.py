@@ -419,6 +419,45 @@ async def test_a_release_by_selector_whose_read_throws_still_takes_its_listeners
         assert await _listening(session) == 0
 
 
+def _listener_method_throws(method: str, event_type: str) -> str:
+    """A page whose EventTarget ``method`` (add or remove) throws for a capture listener of ``event_type``, and that
+    keeps the capture listeners for focus events its world has on its nodes, put on and not taken off (window.kept)."""
+    return (
+        "<script>const records = []; window.kept = () => records.length;"
+        "const realAdd = EventTarget.prototype.addEventListener;"
+        "const realRemove = EventTarget.prototype.removeEventListener;"
+        "EventTarget.prototype.addEventListener = function (type, listener, options) {"
+        f" if (options === true && `{method}` === `add` && type === `{event_type}`) throw new Error(`no`);"
+        " if (options === true && [`blur`, `focus`, `focusin`].includes(type)) records.push([this, type, listener]);"
+        " return realAdd.call(this, type, listener, options); };"
+        "EventTarget.prototype.removeEventListener = function (type, listener, options) {"
+        f" if (options === true && `{method}` === `remove` && type === `{event_type}`) throw new Error(`no`);"
+        " const at = records.findIndex(([node, kind, held]) => node === this && kind === type && held === listener);"
+        " if (at >= 0) records.splice(at, 1);"
+        " return realRemove.call(this, type, listener, options); };</script>"
+        '<title>note</title><textarea id="note" aria-label="Note"></textarea>'
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "event_type", "kept"), [("add", "focus", 0), ("remove", "blur", 1)], ids=["add", "remove"]
+)
+async def test_a_hold_whose_page_throws_for_one_listener_still_takes_the_others_off(
+    tmp_path: Path, method: str, event_type: str, kept: int
+) -> None:
+    # By selector the hold puts its listeners on in the page's own world, with what the page has made of
+    # EventTarget.prototype. One that threw as it was put on ended the take with the listener before it on the node
+    # and no hold to take it off; one that threw as it was taken off left those after it. Each goes on and comes off
+    # on its own: a hold that could not put one on says focus left (the preview is withheld), and only a listener
+    # whose own removal threw stays.
+    async with browser_env(tmp_path, {"/note": _listener_method_throws(method, event_type)}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_withheld(records)
+        assert await session.page.evaluate("() => window.kept()") == kept
+
+
 async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_back(tmp_path: Path) -> None:
     # The world's script took the hold out of the registry, read, and then released: a read that threw left the
     # listeners on the node with nothing to find them by. No page can make a read throw in the element ids' world,
