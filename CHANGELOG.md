@@ -52,7 +52,8 @@ All notable changes to auto-browser are documented here.
   editing host and, inside it, only what carries a field's name by an attribute other than `id` (a text box named
   as a secret), and it answers fields alike in every attribute once: counting every block, the 20,000 paragraphs of
   an editor took 2.9 s, and over 3 s with an `id` each, past the read's bound of a second, and now take under a
-  quarter of a second either way (measured). A block named by its `id` alone is not read, as before.
+  quarter of a second either way (measured). A block named by its `id` alone is not read, as before, unless it is
+  the element the type names.
 - **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
   plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
   text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
