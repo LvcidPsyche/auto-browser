@@ -346,6 +346,28 @@ async def _each_on_its_own(steps: list[Callable[[], Awaitable[Any]]]) -> None:
         raise cancelled
 
 
+async def _given_back_together(steps: list[Callable[[], Awaitable[Any]]]) -> None:
+    """Run the steps of a give-back at once, each as _each_on_its_own runs it: a step that fails is let go, and a
+    cancellation skips none (the steps run on, and it is raised once all are done). Each step has the bound of its
+    own, so all take about one: in turn, a page that answered none held its caller a bound per step."""
+    running = [asyncio.ensure_future(_each_on_its_own([step])) for step in steps]
+    cancelled: asyncio.CancelledError | None = None
+    waiting = set(running)
+    while waiting:
+        try:
+            # asyncio.wait does not cancel the steps when this task is cancelled.
+            _, waiting = await asyncio.wait(waiting)
+        except asyncio.CancelledError as exc:
+            cancelled = cancelled or exc
+    for step in running:
+        _outcome_left_behind(step)
+    if cancelled is not None:
+        raise cancelled
+    # A step's own cancellation (_each_on_its_own raises it once the step is done), as _each_on_its_own raises one.
+    if any(step.cancelled() for step in running):
+        raise asyncio.CancelledError
+
+
 def _box_kept(box: dict[str, float] | None, placed_by: dict[str, float] | None) -> bool:
     """Whether ``box`` is where ``placed_by`` was and of its size, to PLACED_BOX_MOVED_PX each way: a frame scaled
     about the target's corner keeps the corner of its box."""
@@ -1920,16 +1942,22 @@ class BrowserActionService:
         to the target's document, and the question ended before it read the record) left the watch's listeners on
         the frame's window until its next move. Each step answers within FIELD_RECHECK_TIMEOUT_MS or is let go, as
         any give-back's: a page that did not answer the stop held the click, and the target was never given back.
+        The target goes back beside the watch, not after it (_given_back_together); the watch is stopped before it
+        is disposed of.
         """
         steps: list[Any] = []
         if watch is not None:
-            steps += [
-                lambda: _answered_soon(watch.evaluate(_POINTER_WATCH_STOP_SCRIPT)),
-                lambda: _answered_soon(watch.dispose()),
-            ]
+            steps.append(
+                lambda: _each_on_its_own(
+                    [
+                        lambda: _answered_soon(watch.evaluate(_POINTER_WATCH_STOP_SCRIPT)),
+                        lambda: _answered_soon(watch.dispose()),
+                    ]
+                )
+            )
         if target is not None:
             steps.append(lambda: _answered_soon(target.dispose()))
-        await _each_on_its_own(steps)
+        await _given_back_together(steps)
 
     @staticmethod
     async def _place_of(locator: Any, budget: _Budget) -> tuple[Any, dict[str, Any]]:
@@ -2067,7 +2095,7 @@ class BrowserActionService:
         except Exception:
             return False
         finally:
-            await _each_on_its_own([lambda handle=handle: _answered_soon(handle.dispose()) for handle in handles])
+            await _given_back_together([lambda handle=handle: _answered_soon(handle.dispose()) for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         coords = await self.locator_center(locator)

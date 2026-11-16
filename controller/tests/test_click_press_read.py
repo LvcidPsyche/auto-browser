@@ -845,6 +845,15 @@ def _framed_click(
     return service, session, locator, watch, done
 
 
+def _assert_given_back(steps: list[str] | None) -> None:
+    """The steps of a placed click's give-back in a frame (None: one not in a frame, which has none): the watch
+    stopped, then given back, and the target given back beside it (B1-fix1 item 12: together, not in turn)."""
+    if steps is None:
+        return
+    assert sorted(steps) == ["give the target back", "give the watch back", "stop the watch"], steps
+    assert steps.index("stop the watch") < steps.index("give the watch back"), steps
+
+
 @pytest.mark.parametrize("framed", [True, False])
 async def test_a_placed_click_in_a_frame_sets_its_watch_up_between_playwrights_hover_and_its_own_move(
     framed: bool,
@@ -863,8 +872,9 @@ async def test_a_placed_click_in_a_frame_sets_its_watch_up_between_playwrights_h
             await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
     put = f"the pointer is put at {PLACED_AT}"
     looked = ["look for the target", "the target's box", "watch the pointer"] if framed else []
-    given_back = ["stop the watch", "give the watch back", "give the target back"] if framed else []
-    assert done == [*CHECKS, "hover at {'x': 12.0, 'y': 7.0}", *looked, put, "mouse down", "mouse up", *given_back]
+    pressed = [*CHECKS, "hover at {'x': 12.0, 'y': 7.0}", *looked, put, "mouse down", "mouse up"]
+    assert done[: len(pressed)] == pressed, done
+    _assert_given_back(done[len(pressed) :] if framed else None)
     asked = service._receives_pointer_at.await_args.kwargs
     assert asked["watch"] is (watch if framed else None)
     # The box the click was placed by, which the target's must still be where a record is taken.
@@ -879,7 +889,7 @@ async def test_the_watch_of_a_placed_click_is_given_back_when_the_click_ends_bef
         session.page.mouse.move = AsyncMock(side_effect=RuntimeError("the page has gone"))
         with reading_presses("click", "read", None), pytest.raises(RuntimeError, match="the page has gone"):
             await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
-    assert done[-3:] == ["stop the watch", "give the watch back", "give the target back"]
+    _assert_given_back(done[-3:])
     service._receives_pointer_at.assert_not_awaited()
     assert "mouse down" not in done
 
@@ -893,7 +903,7 @@ async def test_the_watch_of_a_placed_click_is_stopped_where_its_record_was_never
         with reading_presses("click", "read", None), pytest.raises(BrowserActionError) as ended:
             await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
     assert (ended.value.code, ended.value.retryable) == ("target_moved", True)
-    assert done[-3:] == ["stop the watch", "give the watch back", "give the target back"]
+    _assert_given_back(done[-3:])
     assert "mouse down" not in done
 
 
@@ -910,7 +920,10 @@ async def test_a_click_cancelled_as_it_gives_its_watch_back_still_gives_the_targ
         watch.dispose = cancelled
         with reading_presses("click", "read", None), pytest.raises(asyncio.CancelledError):
             await service.click_as_playwright_places_it(session, locator, budget=_Budget(1000))
-    assert done[-4:] == ["mouse up", "stop the watch", "give the watch back", "give the target back"]
+    # Given back together (B1-fix1 item 12): the watch stopped before it is given back, the target beside it.
+    given = done[done.index("mouse up") + 1 :]
+    assert sorted(given) == ["give the target back", "give the watch back", "stop the watch"], done
+    assert given.index("stop the watch") < given.index("give the watch back"), done
 
 
 async def test_a_placed_click_in_a_frame_whose_target_has_no_box_sets_no_watch_up() -> None:
@@ -1213,3 +1226,47 @@ async def test_each_call_of_a_pointer_question_has_its_own_bound_within_what_the
 
     assert took < WITHIN_THREE_BOUNDS_S, took
     target.dispose.assert_awaited_once()
+
+
+def _frames_whose_handles_are_never_given_back(depth: int) -> tuple[SimpleNamespace, list[SimpleNamespace]]:
+    """A target ``depth`` frames down whose page answers every call but the disposals of its handles; the locator
+    that finds it, and every handle the walk up the frames takes."""
+    handles: list[SimpleNamespace] = []
+
+    def node(level: int) -> SimpleNamespace:
+        frame = SimpleNamespace(
+            parent_frame=object() if level < depth else None,
+            frame_element=AsyncMock(side_effect=lambda: node(level + 1)),
+        )
+        handle = SimpleNamespace(
+            bounding_box=AsyncMock(return_value=BOX),
+            evaluate=AsyncMock(return_value=True),
+            owner_frame=AsyncMock(return_value=frame),
+            dispose=AsyncMock(side_effect=_never),
+        )
+        handles.append(handle)
+        return handle
+
+    locator = SimpleNamespace(
+        evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(side_effect=lambda **_: node(0))
+    )
+    return locator, handles
+
+
+async def test_the_handles_of_a_pointer_question_are_given_back_together() -> None:
+    # B1-fix1 item 12 (Opus F17): each handle the walk up the frames took was given back in turn, each within its
+    # bound, so a page that answered the walk and then no disposal held the click a bound per handle past its own
+    # (1.89 s for eight frames under 200 ms bounds). They are given back together: about one bound in all.
+    locator, handles = _frames_whose_handles_are_never_given_back(3)
+
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
+        began = time.monotonic()
+        found = await asyncio.wait_for(
+            BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000), 10
+        )
+        took = time.monotonic() - began
+
+    assert found is True
+    assert len(handles) == 4
+    assert all(handle.dispose.await_count == 1 for handle in handles)
+    assert took < 2 * BOUND_MS / 1000, took
