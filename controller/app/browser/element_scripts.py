@@ -4,11 +4,15 @@ By element_id a function here is sent through ``element_world.element_declaratio
 (or, for ``UPLOAD_UNMARK_SCRIPT``, as a world function of its own), so it runs in
 the page's isolated world, which the page's scripts cannot reach: nothing it calls
 can be replaced by them. By selector, ELEMENT_HAS_FOCUS_SCRIPT,
-ELEMENT_FOCUS_PLACE_SCRIPT, the FIELD_HOLD_* scripts and NAMED_FIELDS_SCRIPT run on
-a locator in the page's own world, and FIELD_ATTRIBUTES_SCRIPT runs only there (the
-TOTP autofill's read of a candidate field); so do the scripts of click_target.py and
-actions.py that start with DOM_JS. There the page answers for what they read off a
-node or a document, but for what DOM_JS reads through the prototypes (its comment).
+ELEMENT_FOCUS_PLACE_SCRIPT, the FIELD_HOLD_* scripts and NAMED_FIELDS_SCRIPT run in
+the page's own world, on a locator or a handle of the element it found, and
+FIELD_ATTRIBUTES_SCRIPT runs only there (the TOTP autofill's read of a candidate
+field); so do two scripts of other modules that start with DOM_JS,
+click_target.DESCRIBE_TARGET_SCRIPT (for a selector's target) and
+actions._RECEIVES_POINTER_SCRIPT. click_target's other scripts with DOM_JS in them
+(CLICK_TARGET_SCRIPT, SAME_ELEMENT_SCRIPT) run only in the isolated world. In the
+page's world the page answers for what they read off a node or a document, but for
+what DOM_JS reads through the prototypes (its comment).
 """
 
 from __future__ import annotations
@@ -23,8 +27,8 @@ MARKER_ATTRIBUTE = "data-auto-browser-target"
 # that input, so a walk up the tree that read it could be steered onto the
 # element it was looking for, or sent round the form and its control for good.
 # Defines `dom`. Also run in the page's own world (a selector target's focus
-# check, hold and approval read, and the scripts of click_target.py and
-# actions.py that start with it), where more stands in for a property: a
+# check, hold and approval read, a selector's click target, and the pointer
+# question: the module docstring names them), where more stands in for a property: a
 # document's named elements (with <img name="activeElement"> on the page,
 # document.activeElement is that img there, and not here), and what a page
 # defines on a node of its own (a shadow root's `host`, a label's `control`).
