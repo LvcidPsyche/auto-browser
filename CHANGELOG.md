@@ -65,9 +65,11 @@ All notable changes to auto-browser are documented here.
 - **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
   plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
   text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
-  (hidden by `hidden`, `display` or `visibility`, or in an `inert` subtree, across shadow roots too) no longer
-  makes the read `plain`; named as a secret, it still makes it `secret`, since a page can enable or show it as the
-  type focuses. A plain field that can take text, however small or faint the page draws it, still makes a read
+  (hidden by `hidden`, `display` or `visibility`, in an `inert` subtree, across shadow roots too, or outside a modal
+  dialog the document has open) no longer makes the read `plain`; named as a secret, it still makes it `secret`,
+  since a page can enable or show it as the type focuses. A field in an open modal dialog is not inert by an `inert`
+  subtree the dialog is in, as the browser has it, and one whose walk up to the document runs past 256 steps counts
+  as unable to take text. A modal dialog in a shadow root is not seen: a field outside one still counts. A plain field that can take text, however small or faint the page draws it, still makes a read
   beside such a component `plain`. And a plain field the page shows only once what holds it is focused (a search
   box that opens on focus) is hidden when the approval reads it, so that approval now reads `unread` and shows no
   text, where it read `plain`.

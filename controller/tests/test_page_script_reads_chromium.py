@@ -534,6 +534,28 @@ READS_AS_THE_BROWSER_TAKES_ITS_KEYS = {
         ' \'<div contenteditable id="password" style="min-height: 20px">s</div>\';</script>',
         "secret",
     ),
+    # 2a: a plain field outside an open modal dialog takes no focus.
+    "a-plain-field-behind-a-modal-dialog": (
+        f'<div id="named"><input aria-label="Name">{A_COMPONENT}</div><dialog id="d"><button>x</button></dialog>'
+        "<script>d.showModal();</script>",
+        "unread",
+    ),
+    # 2b: a modal dialog escapes the inert subtree it is in, and a plain field in it takes focus.
+    "a-plain-field-in-a-modal-dialog-in-an-inert-subtree": (
+        '<div inert><dialog id="d"><div id="named"><input aria-label="Name"></div></dialog></div>'
+        "<script>d.showModal();</script>",
+        "plain",
+    ),
+    # 3: an inert ancestor 259 nodes up, past the walk's 256 steps (display: contents builds no boxes; a page whose
+    # boxes are about 258 deep crashes this Chromium's renderer).
+    "a-plain-field-under-an-inert-ancestor-past-the-walk": (
+        '<div id="d0" inert></div><script>let at = document.getElementById("d0");'
+        ' for (let i = 0; i < 258; i += 1) { const d = document.createElement("div");'
+        ' d.style.display = "contents"; at.appendChild(d); at = d; }'
+        ' const n = document.createElement("div"); n.id = "named";'
+        f" n.innerHTML = '<input aria-label=Name>{A_COMPONENT}'; at.appendChild(n);</script>",
+        "unread",
+    ),
 }
 
 
