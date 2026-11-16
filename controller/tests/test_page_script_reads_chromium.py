@@ -354,3 +354,44 @@ async def test_the_pointer_check_finds_no_target_under_a_form_whose_control_is_n
         )
 
         assert found is False
+
+
+# A button the read click asks for by selector, on pages that answer for what the pointer check asks of the browser:
+# a document's image named for its elementFromPoint, which it then stands in for; and a button two frames down, the
+# frame between giving the frame it holds no box at all.
+ANSWERED_FOR_BY_THE_POINTER_CHECKS_PAGE = {
+    "elementFromPoint": (
+        {
+            "/go": '<title>go</title><img name="elementFromPoint" alt="">'
+            "<button id=go onclick=\"document.title = 'PRESSED'\">Go</button>"
+        },
+        "#go",
+    ),
+    "getBoundingClientRect": (
+        {
+            "/go": "<title>go</title><iframe id=outer src=/outer></iframe>",
+            "/outer": "<iframe id=inner src=/inner></iframe><script>document.getElementById('inner')"
+            ".getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0 });</script>",
+            "/inner": "<button id=go onclick=\"top.document.title = 'PRESSED'\">Go</button>",
+        },
+        "#outer >> internal:control=enter-frame >> #inner >> internal:control=enter-frame >> #go",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(ANSWERED_FOR_BY_THE_POINTER_CHECKS_PAGE))
+async def test_a_read_click_by_selector_presses_whatever_its_page_answers_for_the_pointer_check(
+    tmp_path: Path, case: str
+) -> None:
+    # B1-fix1 item 16 (Opus F13): by selector the pointer check runs in the page's own world, and asked
+    # document.elementFromPoint and getBoundingClientRect as properties: a document's named image stood in for the
+    # one (the check threw, a no), and a frame's own method gave the box the point was carried into it by, so a page
+    # refused, or moved, where the click was checked. Each is asked of its prototype, as DOM_JS's reads are.
+    pages, selector = ANSWERED_FOR_BY_THE_POINTER_CHECKS_PAGE[case]
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/go")
+        click = BrowserActionDecision(action="click", reason="go", risk_category="read", selector=selector)
+
+        await env.manager.execute_decision(session_id, click)
+
+        assert await env.manager.sessions[session_id].page.title() == "PRESSED"

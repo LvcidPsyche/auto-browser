@@ -176,14 +176,15 @@ _RECEIVES_POINTER_SCRIPT = (
   const target = (wide && !field && el.closest('button, [role=button], a, [role=link]')) || el;
   if (window !== window.top && box !== true) {
     if (!box) return 'framed';
-    const own = el.getBoundingClientRect();
+    const own = dom.rect(el);
     if (!(own.width > 0 && own.height > 0 && box.width > 0 && box.height > 0)) return false;
     x = own.left + ((x - box.x) * own.width) / box.width;
     y = own.top + ((y - box.y) * own.height) / box.height;
   }
-  let hit = document.elementFromPoint(x, y);
-  while (hit && hit.shadowRoot) {
-    const inner = hit.shadowRoot.elementFromPoint(x, y);
+  let hit = dom.at(document, x, y);
+  for (;;) {
+    const root = hit && dom.shadowRoot(hit);
+    const inner = root && dom.at(root, x, y);
     if (!inner || inner === hit) break;
     hit = inner;
   }

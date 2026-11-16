@@ -50,6 +50,8 @@ DOM_JS = """const dom = (() => {
   const editable = getter(HTMLElement.prototype, 'isContentEditable');
   const elementAll = method(Element.prototype, 'querySelectorAll');
   const fragmentAll = method(DocumentFragment.prototype, 'querySelectorAll');
+  const documentAt = method(Document.prototype, 'elementFromPoint');
+  const shadowAt = method(ShadowRoot.prototype, 'elementFromPoint');
   // What holds a document of its own, or is a plugin, whose inside this document cannot see: keys sent to one go
   // there. A portal is listed though the Chromium measured (156) has no such element: one so named is then the page's.
   const FRAME_TAGS = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'FENCEDFRAME', 'PORTAL'];
@@ -135,6 +137,10 @@ DOM_JS = """const dom = (() => {
     unset: method(Element.prototype, 'removeAttribute'),
     matches: method(Element.prototype, 'matches'),
     closest: method(Element.prototype, 'closest'),
+    rect: method(Element.prototype, 'getBoundingClientRect'),
+    // The element at (x, y) of a document or a shadow root, by the prototype's method: read off the document, an
+    // element the page named elementFromPoint stood in for it.
+    at: (root, x, y) => (nodeType.call(root) === 9 ? documentAt : shadowAt)(root, x, y),
   };
   return dom;
 })();"""

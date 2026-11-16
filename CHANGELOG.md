@@ -39,9 +39,12 @@ All notable changes to auto-browser are documented here.
   `plain` and show the text. By selector, element_id or point, a hidden input named `parentNode` in a form inside a
   button made a click on the form's text read as a press on that input, so a click labelled `read` on a "Delete
   account" button went on unclassified; and a control named `isContentEditable` kept an approval's read from counting
-  a form that is editable by what it is in, and so from reading the form's secret name. The reads now go through the
-  prototypes' own getters and methods, taken as each script starts. In the element ids' world no page script reaches
-  those; by selector, a page that replaces a prototype's getter before the script runs still answers for it.
+  a form that is editable by what it is in, and so from reading the form's secret name. By selector, an image named
+  `elementFromPoint` stood in for the document's own, so the check that the pointer finds a click's target threw
+  and the click was refused, and a frame given its own `getBoundingClientRect` moved the point it was asked at. The
+  reads now go through the prototypes' own getters and methods, taken as each script starts. In the element ids'
+  world no page script reaches those; by selector, a page that replaces a prototype's getter before the script runs
+  still answers for it.
 - **An approval's read of the fields a type's text can go to counts them as the browser has them.** It looked an
   input's type up from its `type` attribute trimmed, so `type="hidden "`, which the browser has as a text field, was
   no field, and one named as a secret beside a plain field read `plain` and the approval showed the text. And it
