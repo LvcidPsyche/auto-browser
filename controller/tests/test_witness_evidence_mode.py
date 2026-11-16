@@ -17,7 +17,7 @@ from app.action_errors import BrowserActionError
 from app.action_records import wait_for_pending_record
 from app.approvals import ApprovalRequiredError
 from app.audit import reset_current_operator, set_current_operator
-from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT, FIELD_HOLD_TAKE_SCRIPT
+from app.browser.element_scripts import ELEMENT_FOCUS_PLACE_SCRIPT, FIELD_HOLD_TAKE_SCRIPT
 from app.browser.services.actions import FIELD_RECHECK_TIMEOUT_MS
 from app.browser.services.witness import BrowserWitnessService
 from app.browser_manager import BrowserManager, BrowserSession
@@ -977,12 +977,11 @@ async def test_a_type_by_selector_whose_field_does_not_keep_focus_through_its_cl
     elif lost == "no-answer":
         field.element.evaluate = AsyncMock(side_effect=PlaywrightError("Execution context was destroyed"))
     else:
-        # What the element answers before the clear (asked again as one that may hold a frame where it says no),
-        # after select-all and after the Delete, until one says no.
+        # Where the element says focus is before the clear, after select-all and after the Delete, until it is out.
         answers = {
-            "before-select-all": [False, False],
-            "after-select-all": [True, False],
-            "through-the-clear": [True, True, False],
+            "before-select-all": ["out"],
+            "after-select-all": ["in", "out"],
+            "through-the-clear": ["in", "in", "out"],
         }
         field.element.evaluate = AsyncMock(side_effect=answers[lost])
 
@@ -1046,7 +1045,7 @@ async def test_the_focus_checks_through_a_clear_by_selector_ask_the_element_foun
         await manager.type("s1", selector="#note", text="note", clear_first=False)
 
     assert [call.args[0] for call in page.keyboard.press.await_args_list] == ["Control+a", "Delete"]
-    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT, True)] * 3
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_FOCUS_PLACE_SCRIPT,)] * 3
     # One find for each type: the type that clears finds its element before the clear, and holds that one.
     assert field.element_handle.await_count == 2
     # The locator is asked as often with a clear as without: for the focus that precedes it, and no more.

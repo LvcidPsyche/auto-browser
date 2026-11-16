@@ -54,6 +54,7 @@ from ..click_target import (
 from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import (
     DOM_JS,
+    ELEMENT_FOCUS_PLACE_SCRIPT,
     ELEMENT_HAS_FOCUS_SCRIPT,
     FIELD_ATTRIBUTES_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
@@ -677,8 +678,9 @@ class _TypedField:
         # By selector: the handle of the element the selector found, and the hold made on it.
         self._found: Any = None
         self._handle: Any = None
-        # By selector: whether focus may be in a frame inside the element found, as it was at the first check.
-        self._in_a_frame: bool | None = None
+        # By selector: whether focus in a frame inside the element found is refused, as it is unless focus was in
+        # one at the first check. None until a first check found focus in the element.
+        self._refuse_frames: bool | None = None
         self.not_secret = False
 
     async def find(self) -> None:
@@ -714,13 +716,11 @@ class _TypedField:
             )
 
     async def _focus_is_in_it(self) -> bool:
-        if self._in_a_frame is None:
-            if await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, True)):
-                self._in_a_frame = False
-                return True
-            self._in_a_frame = bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, False)))
-            return self._in_a_frame
-        return bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, not self._in_a_frame)))
+        # One question, so focus and frames are read at one moment (ELEMENT_FOCUS_PLACE_SCRIPT).
+        place = await _answered_soon(self._found.evaluate(ELEMENT_FOCUS_PLACE_SCRIPT))
+        if self._refuse_frames is None and place != "out":
+            self._refuse_frames = place == "in"
+        return place == "in" or (place == "framed" and self._refuse_frames is False)
 
     async def take(self) -> None:
         if self._element is not None:

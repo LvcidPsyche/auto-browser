@@ -514,18 +514,28 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # Focus behind an open shadow root shows as its host, so the check follows it
 # down to the innermost focused element first. With refuseFrames (an element_id
 # target), focus in a frame inside the element is not focus in it: keys sent
-# then go to the frame's document. Also run in the main world for a selector
-# target: on a locator without it, and on the element a type's clear found with
-# it, unless focus was in a frame there at the clear's first check.
+# then go to the frame's document. Also run in the main world, on a locator, for
+# a selector target, without it. _FOCUS_PLACE_JS is that walk (needs `dom`).
+_FOCUS_PLACE_JS = """(el) => {
+    let active = dom.active(dom.root(el));
+    for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {
+      active = dom.active(root);
+    }
+    if (!active || !dom.within(active, el)) return 'out';
+    return active !== el && dom.frame(active) ? 'framed' : 'in';
+  }"""
 ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
   {DOM_JS}
-  let active = dom.active(dom.root(el));
-  for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
-    active = dom.active(root);
-  }}
-  if (!active) return false;
-  if (refuseFrames && active !== el && dom.frame(active)) return false;
-  return dom.within(active, el);
+  const place = ({_FOCUS_PLACE_JS})(el);
+  return place === 'in' || (place === 'framed' && !refuseFrames);
+}}"""
+# Where keyboard focus is, read as ELEMENT_HAS_FOCUS_SCRIPT reads it, in one answer: 'in' the element, 'framed' (in a
+# frame inside it, the frame not the element itself) or 'out'. For a type's checks through its clear by selector,
+# whose first check decides whether a frame counts (_TypedField.require_focus): asked as two questions, frames
+# refused and then not, focus that moved between them set that from two moments.
+ELEMENT_FOCUS_PLACE_SCRIPT = f"""(el) => {{
+  {DOM_JS}
+  return ({_FOCUS_PLACE_JS})(el);
 }}"""
 
 # A field's own attributes, as is_sensitive_field reads them. Needs `dom`.

@@ -25,7 +25,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.element_scripts import (
-    ELEMENT_HAS_FOCUS_SCRIPT,
+    ELEMENT_FOCUS_PLACE_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
     FIELD_HOLD_TAKE_SCRIPT,
@@ -79,10 +79,10 @@ class FoundField:
         await self._step("finding-the-element")
         return self.element
 
-    async def _has_focus(self, script: str, *_args: Any) -> bool:
-        assert script == ELEMENT_HAS_FOCUS_SCRIPT, script
+    async def _has_focus(self, script: str) -> str:
+        assert script == ELEMENT_FOCUS_PLACE_SCRIPT, script
         await self._step("asking-for-focus")
-        return self.focused
+        return "in" if self.focused else "out"
 
     async def _hold(self, script: str) -> Any:
         assert script == FIELD_HOLD_TAKE_SCRIPT, script
@@ -298,9 +298,34 @@ async def test_the_checks_through_the_clear_and_the_hold_are_of_the_element_foun
     await typed.release()
 
     assert field.locator.element_handle.await_count == 1
-    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT, True)] * 3
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_FOCUS_PLACE_SCRIPT,)] * 3
     assert typed.not_secret is True
     assert field.given_back() == (1, 1, 1)
+
+
+async def test_the_first_check_reads_focus_and_frames_at_one_moment() -> None:
+    # B1-fix1 item 2 (Codex B1-2): the first check asked the page twice, frames refused and then not, so focus outside
+    # the element at the first question and back in a plain field at the second passed the check and let frames in:
+    # a move into a frame inside the element then passed every check after it. One question now says whether focus
+    # is in the element, in a frame inside it, or out. The page's focus moves on at each question it is asked.
+    field = FoundField()
+    moves = iter(["out", "in", "framed", "framed"])
+
+    async def asked(_script: str, *refuse_frames: bool) -> Any:
+        place = next(moves)
+        if refuse_frames:  # the yes-or-no question, which the two asked at 13d7ae9d
+            return place == "in" or (place == "framed" and not refuse_frames[0])
+        return place
+
+    field.element.evaluate = AsyncMock(side_effect=asked)
+    typed = _TypedField(None, field.locator)
+    await typed.find()
+
+    with pytest.raises(BrowserActionError) as refused:
+        await typed.require_focus(BEFORE_SELECT_ALL)
+
+    assert refused.value.code == "focus_lost"
+    assert field.element.evaluate.await_count == 1
 
 
 @pytest.mark.parametrize("during", [AFTER_SELECT_ALL, THROUGH_THE_CLEAR])

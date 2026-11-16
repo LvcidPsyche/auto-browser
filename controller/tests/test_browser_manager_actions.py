@@ -13,7 +13,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.element_scripts import (
-    ELEMENT_HAS_FOCUS_SCRIPT,
+    ELEMENT_FOCUS_PLACE_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
     FIELD_HOLD_TAKE_SCRIPT,
@@ -122,9 +122,9 @@ class FakeLocator:
         self.holds.append(FakeFieldHold(self.attributes))
         return self.holds[-1]
 
-    def _asked(self, script: str, *_args: object) -> object:
-        if script == ELEMENT_HAS_FOCUS_SCRIPT:
-            return True
+    def _asked(self, script: str) -> object:
+        if script == ELEMENT_FOCUS_PLACE_SCRIPT:
+            return "in"
         assert script == NAMED_FIELDS_SCRIPT, script
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
         return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "idle": [], "frame": False}
