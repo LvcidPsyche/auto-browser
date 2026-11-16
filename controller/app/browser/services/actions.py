@@ -885,7 +885,7 @@ class BrowserActionService:
                 locator = session.page.locator(target["selector"]).first
                 # One budget for every wait of the click, as Playwright's own click has one timeout. The scroll
                 # and the read of the box each waited by Playwright's default, a whole budget more apiece.
-                budget = self._budget(None)
+                budget = self._budget()
                 await self._scroll_into_view(locator, budget)
                 coords = await self.locator_center(locator, timeout_ms=budget.left_ms())
                 if coords is None:
@@ -1758,7 +1758,6 @@ class BrowserActionService:
         locator: Any,
         coords: tuple[float, float],
         *,
-        timeout_ms: float | None = None,
         budget: _Budget | None = None,
     ) -> None:
         """Click `locator` along a human-like path, but only if it is what the pointer hits.
@@ -1784,11 +1783,11 @@ class BrowserActionService:
 
         The click has one budget for all its waits, as Playwright's own click has
         one timeout: ``budget`` where the caller began it (a step of the same
-        click came first), else one of ``timeout_ms``. The placed click is given
+        click came first), else one of ACTION_TIMEOUT_MS. The placed click is given
         what is left of it. It had a whole budget of its own, so a target that
         kept the checks waiting and then the placing held its session for two.
         """
-        budget = budget or self._budget(timeout_ms)
+        budget = budget or self._budget()
         await self._checks_of_a_click(locator, budget)
         x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
@@ -1811,9 +1810,10 @@ class BrowserActionService:
         except Exception:
             return False
 
-    def _budget(self, timeout_ms: float | None) -> _Budget:
-        """A click's budget: the caller's, or the one Playwright gives an action of this session (ACTION_TIMEOUT_MS)."""
-        return _Budget(self.manager.settings.action_timeout_ms if timeout_ms is None else timeout_ms)
+    def _budget(self) -> _Budget:
+        """A click's budget where its caller began none: the one Playwright gives an action of this session
+        (ACTION_TIMEOUT_MS)."""
+        return _Budget(self.manager.settings.action_timeout_ms)
 
     @staticmethod
     async def _scroll_into_view(locator: Any, budget: _Budget) -> None:
@@ -1891,7 +1891,7 @@ class BrowserActionService:
         own click share its timeout: ``budget`` where the click began before this (a human-like try, the scroll
         into view), else the session's own (ACTION_TIMEOUT_MS). Playwright's own click is given what is left of it.
         """
-        budget = budget or self._budget(None)
+        budget = budget or self._budget()
         if not press_is_read():
             await locator.click(timeout=budget.left_ms())
             return
@@ -2123,12 +2123,14 @@ class BrowserActionService:
             await _given_back_together([lambda handle=handle: _answered_soon(handle.dispose()) for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
-        # The box within the focus click's own bound: read with none, a page that did not answer held the type.
-        coords = await self.locator_center(locator, timeout_ms=FOCUS_CLICK_TIMEOUT_MS)
+        # The box and the click within the focus click's one budget, as a click's steps share one: read with no bound,
+        # a page that did not answer held the type, and with a bound of its own beside the click's, two bounds.
+        budget = _Budget(FOCUS_CLICK_TIMEOUT_MS)
+        coords = await self.locator_center(locator, timeout_ms=budget.left_ms())
         if coords is None:
             await self.click_as_playwright_places_it(session, locator)
         else:
-            await self.click_locator_human_like(session, locator, coords, timeout_ms=FOCUS_CLICK_TIMEOUT_MS)
+            await self.click_locator_human_like(session, locator, coords, budget=budget)
         await asyncio.sleep(0.05 + random.random() * 0.1)
 
     async def focus_verified(self, session: "BrowserSession", locator: Any, *, action: str) -> None:

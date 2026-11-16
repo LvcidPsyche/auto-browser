@@ -384,9 +384,9 @@ async def test_a_click_playwright_places_after_a_human_like_try_has_what_the_try
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
         if read:
             with reading_presses("click", "read", None):
-                await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=1000)
+                await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(1000))
         else:
-            await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=1000)
+            await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(1000))
     if read:
         # The try's two checks, then the placed click's two: four steps before the place is read, where a
         # budget of its own had lost two.
@@ -450,7 +450,7 @@ async def test_the_last_questions_before_a_human_like_press_are_bounded_by_the_c
 
     locator.is_enabled = is_enabled
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
-        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=1000)
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(1000))
     assert done == [*CHECKS, ASKED, "is it enabled", "mouse down", "mouse up"]
     assert 0 < asked[1] <= locator.budgets["pointer"] <= 1000 - 50, (asked, locator.budgets)
 
@@ -471,7 +471,7 @@ async def test_the_checks_before_a_human_like_press_are_no_click_either() -> Non
     service.pause_before_press = AsyncMock()
     service._receives_pointer_at = AsyncMock(return_value=True)
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
-        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(250))
     # Enabled is asked once more where the press is about to be made: the pointer was a while on its way.
     assert done == [*CHECKS, "is it enabled", "mouse down", "mouse up"]
     assert set(locator.budgets) == {"enabled", "trial hover"}
@@ -488,7 +488,7 @@ async def test_a_target_that_is_not_enabled_when_the_pointer_arrives_is_not_pres
     service.pause_before_press = AsyncMock()
     service._receives_pointer_at = AsyncMock(return_value=True)
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
-        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(250))
     assert done == [*CHECKS, "is it enabled", "click"]
 
 
@@ -500,7 +500,7 @@ async def test_a_disabled_target_is_looked_at_again_until_it_is_enabled() -> Non
     service.pause_before_press = AsyncMock()
     service._receives_pointer_at = AsyncMock(return_value=True)
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()) as waited:
-        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=250)
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(250))
     assert done == [*["is it enabled"] * 3, "trial hover", "is it enabled", "mouse down", "mouse up"]
     assert [call.args for call in waited.await_args_list[:2]] == [(ENABLED_POLL_SECONDS,)] * 2
 
@@ -512,7 +512,7 @@ async def test_a_target_that_stays_disabled_ends_the_click_when_its_budget_does(
         patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()),
         pytest.raises(PlaywrightTimeoutError, match="enabled"),
     ):
-        await service.click_locator_human_like(session, locator, (40.0, 50.0), timeout_ms=500)
+        await service.click_locator_human_like(session, locator, (40.0, 50.0), budget=_Budget(500))
     # 20 ms a look under a budget of 500: looked at more than once, also where a look is held up for ten
     # times as long (under a budget of 50 one stall of 30 ms left it at a single look), and nothing else done.
     assert len(done) >= 2 and set(done) == {"is it enabled"}, done
@@ -1546,3 +1546,29 @@ async def test_a_placed_clicks_give_back_the_page_answers_nothing_of_takes_about
     assert took < 1.5 * GIVE_BACK_BOUND_MS / 1000, took
     watch.evaluate.assert_awaited_once()
     target.dispose.assert_awaited_once()
+
+
+async def test_a_types_focus_click_ends_within_one_bound_in_all() -> None:
+    # B1-fix2 item 17 (the Opus simplification read, S19): the focus click read its target's box within
+    # FOCUS_CLICK_TIMEOUT_MS and then gave the click a budget of its own of as much, so a box that answered late and a
+    # target never enabled held the type most of two bounds (Opus: 0.56 s of a 0.3 s bound). The box and the click
+    # share one budget, as a click's steps do.
+    service, session, _done = _service(CLOSE)
+
+    async def late_box(**_given: Any) -> dict[str, float]:
+        await asyncio.sleep(0.75 * GIVE_BACK_BOUND_MS / 1000)
+        return BOX
+
+    async def never_enabled(**_given: Any) -> bool:
+        return False
+
+    locator = SimpleNamespace(bounding_box=late_box, is_enabled=never_enabled)
+
+    with patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", GIVE_BACK_BOUND_MS), pytest.raises(PlaywrightTimeoutError):
+        began = time.monotonic()
+        try:
+            await asyncio.wait_for(service.focus_locator(session, locator), 5)
+        finally:
+            took = time.monotonic() - began
+
+    assert took < 1.4 * GIVE_BACK_BOUND_MS / 1000, took
