@@ -1230,17 +1230,20 @@ async def test_a_pointer_question_on_a_slow_page_that_answers_is_answered() -> N
 
 async def test_each_call_of_a_pointer_question_has_its_own_bound_within_what_the_click_has_left() -> None:
     # A call that never answers still ends the question at POINTER_CHECK_TIMEOUT_MS, however much the click has left.
+    # Its timeout names that bound, where it named the question's (B1-fix2 item 24, Opus S20: "Timeout 5000ms
+    # exceeded" for a call cut at 200 ms).
     target, _outer, locator = _frames_that_stall("bounding_box")
 
     with patch.object(actions, "POINTER_CHECK_TIMEOUT_MS", BOUND_MS):
         began = time.monotonic()
-        with pytest.raises(PlaywrightTimeoutError):
+        with pytest.raises(PlaywrightTimeoutError) as ended:
             await asyncio.wait_for(
                 BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000), 10
             )
         took = time.monotonic() - began
 
     assert took < WITHIN_THREE_BOUNDS_S, took
+    assert str(ended.value).startswith(f"Timeout {BOUND_MS}ms exceeded"), ended.value
     target.dispose.assert_awaited_once()
 
 

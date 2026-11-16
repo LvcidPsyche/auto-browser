@@ -386,25 +386,27 @@ class _Budget:
     mouse going down held it for 8, and the click pressed.
     """
 
-    def __init__(self, timeout_ms: float) -> None:
+    def __init__(self, timeout_ms: float, *, each_at_most: int | None = None) -> None:
         self.timeout_ms = timeout_ms
+        # The most any one wait of it is given, where that is less than what is left (the pointer question's calls).
+        self.each_at_most = each_at_most
         self._ends = time.monotonic() + timeout_ms / 1000
 
     async def answered(
-        self,
-        call: Awaitable[Any],
-        give_back: Callable[[Any], Coroutine[Any, Any, None]] | None = None,
-        *,
-        at_most: int | None = None,
+        self, call: Awaitable[Any], give_back: Callable[[Any], Coroutine[Any, Any, None]] | None = None
     ) -> Any:
-        """``call``'s answer, where the page gives it within what is left of the budget (``at_most`` ms of it at
-        most): else Playwright's timeout error, which ends a click as any of its waits ends one. A handle ``call``
-        answers once it was given up on is given back as it arrives, by ``give_back`` (_arrives_by)."""
-        ends = asyncio.get_running_loop().time() + self.left_ms(at_most) / 1000
+        """``call``'s answer, where the page gives it within what is left of the budget: else Playwright's timeout
+        error, which ends a click as any of its waits ends one, and names the limit that ended the wait (the budget's,
+        or each_at_most where that came first). A handle ``call`` answers once it was given up on is given back as it
+        arrives, by ``give_back`` (_arrives_by)."""
+        waited_ms = self.left_ms()
+        ends = asyncio.get_running_loop().time() + waited_ms / 1000
         try:
             return await _arrives_by(call, ends, give_back or _kept_by_nobody)
         except TimeoutError:
-            raise PlaywrightTimeoutError(f"Timeout {self.timeout_ms:g}ms exceeded: the page did not answer.") from None
+            capped = self.each_at_most is not None and waited_ms >= self.each_at_most
+            limit = self.each_at_most if capped else self.timeout_ms
+            raise PlaywrightTimeoutError(f"Timeout {limit:g}ms exceeded: the page did not answer.") from None
 
     @property
     def spent(self) -> bool:
@@ -414,7 +416,10 @@ class _Budget:
         # Never 0, which Playwright reads as no limit at all: a wait begun with nothing left has a millisecond,
         # and ends as the timeout it is. ``at_most``: for a wait that has a bound of its own within the budget.
         left = max(1, round((self._ends - time.monotonic()) * 1000))
-        return left if at_most is None else min(left, at_most)
+        for cap in (at_most, self.each_at_most):
+            if cap is not None:
+                left = min(left, cap)
+        return left
 
 
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
@@ -2045,54 +2050,48 @@ class BrowserActionService:
         Taken for one, it ended a click as target_moved where the page was busy, with the click's time not spent,
         and every step before the question ends a click as the timeout it is.
         """
-        bound = _Budget(timeout_ms)
-
-        def answered(call: Awaitable[Any], give_back: Callable[[Any], Coroutine[Any, Any, None]] | None = None) -> Any:
-            return bound.answered(call, give_back, at_most=POINTER_CHECK_TIMEOUT_MS)
-
+        bound = _Budget(timeout_ms, each_at_most=POINTER_CHECK_TIMEOUT_MS)
         handles: list[Any] = []
         try:
             if watch is None:
-                found = await answered(
+                found = await bound.answered(
                     locator.evaluate(
                         _RECEIVES_POINTER_SCRIPT,
                         [x, y, None, False, placed],
-                        timeout=bound.left_ms(POINTER_CHECK_TIMEOUT_MS),
+                        timeout=bound.left_ms(),
                     )
                 )
                 if found != "framed":
                     return found is True
             # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
             # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
-            node = await answered(
-                locator.element_handle(timeout=bound.left_ms(POINTER_CHECK_TIMEOUT_MS)), _disposed_soon
-            )
+            node = await bound.answered(locator.element_handle(timeout=bound.left_ms()), _disposed_soon)
             handles.append(node)
             # Where the target's document saw the pointer arrive: a point there, None for no move, False for a
             # document that runs no script, and for no watch (the two boxes carry the point, as before).
-            at = await answered(node.evaluate(_POINTER_SEEN_SCRIPT, watch)) if watch is not None else False
+            at = await bound.answered(node.evaluate(_POINTER_SEEN_SCRIPT, watch)) if watch is not None else False
             only_frames = at is None
             # The element itself, before a human-like press, is asked as well that the pointer is over it, and
             # where the click was placed, as the button or the link it is in. Neither is asked of a frame.
             arrived, wide = not placed, placed
             for turn in range(POINTER_CHECK_FRAMES):
-                box = await answered(node.bounding_box())
+                box = await bound.answered(node.bounding_box())
                 if at and not _box_kept(box, placed_by):
                     return False
                 asked = [*(at or (x, y)), True if at else box, arrived, wide]
                 if only_frames:
                     asked.append(True)
-                if not box or await answered(node.evaluate(_RECEIVES_POINTER_SCRIPT, asked)) is not True:
+                if not box or await bound.answered(node.evaluate(_RECEIVES_POINTER_SCRIPT, asked)) is not True:
                     return False
                 at = only_frames = arrived = wide = False
-                frame = await answered(node.owner_frame())
+                frame = await bound.answered(node.owner_frame())
                 if frame is None or frame.parent_frame is None:
                     return True
                 if turn == POINTER_CHECK_FRAMES - 1:
                     # Out of documents to ask: fetched here, the frame's element was never asked, and a fetch that
                     # failed or went unanswered failed the click.
                     break
-                node = await answered(frame.frame_element(), _disposed_soon)
+                node = await bound.answered(frame.frame_element(), _disposed_soon)
                 handles.append(node)
             return placed
         except PlaywrightTimeoutError:
