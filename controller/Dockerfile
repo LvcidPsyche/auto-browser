@@ -14,10 +14,9 @@ ARG INSTALL_AGENT_CLIS=false
 # refuses, so under read-only and workspace-write no command of Codex's model ran. The sums are of
 # rust-v${CODEX_CLI_VERSION}'s codex-<arch>-unknown-linux-gnu.tar.gz and of the binary in it, which the release's
 # .sigstore bundle signs. A bump changes the version and all four sums in one commit (AGENTS.md says how to verify
-# them). Beside it goes
-# /etc/codex/requirements.toml with mcp_servers = {}, so that no MCP server a CODEX_HOME config.toml names loads: the
-# adapter's -c mcp_servers={} clears none (Codex merges -c tables key by key), and no grant of the CLI sandbox reaches
-# /etc/codex.
+# them). Beside it goes /etc/codex/requirements.toml with mcp_servers = {}, so that no MCP server a CODEX_HOME
+# config.toml names loads: the adapter's -c mcp_servers={} clears none (Codex merges -c tables key by key), and no
+# grant of the CLI sandbox reaches /etc/codex.
 ARG CODEX_CLI_VERSION=0.114.0
 ARG CODEX_CLI_TARBALL_SHA256_AMD64=f18294d4da6756e9e5ad4dc62b3030b7a75a94e5e5022f3bfa4a21a7d3c52ae0
 ARG CODEX_CLI_BINARY_SHA256_AMD64=8bae8fa33887a8d829815fa0af85887cbac3658ac1b6147a4b1d3d54c5e015de
