@@ -87,7 +87,8 @@ class TotpAutofillTests(unittest.TestCase):
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
-        "typing" for the code's keystrokes) during which the page goes to another host. ``focused``: what the field
+        "focus question" for the question whether focus is in the field, asked before each of them, "typing" for the
+        code's keystrokes) during which the page goes to another host. ``focused``: what the field
         answers when it is asked whether focus is in it, or a list of its answers in turn."""
         self.typed_keys: list[str] = []
 
@@ -115,6 +116,7 @@ class TotpAutofillTests(unittest.TestCase):
         async def asked(script: str, *_args: object, **_named: object) -> bool:
             # The field answers the focus check's own script only (B1-fix1 item 29, staged F13).
             assert script == ELEMENT_HAS_FOCUS_SCRIPT, script
+            leave_during("focus question")
             return answers.pop(0) if answers is not None else focused
 
         locator = SimpleNamespace(
@@ -252,6 +254,20 @@ class TotpAutofillTests(unittest.TestCase):
         # so only the host's check keeps select-all and Delete off the page the failed fill left the named host for.
         result, typed = self.run_autofill(
             "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="clear", fill_fails=True
+        )
+        self.assertIsNone(result)
+        self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
+
+    def test_a_page_that_leaves_the_named_host_as_its_field_is_asked_for_focus_gets_no_keys(self) -> None:
+        # B1-fix2 item 8 (the Opus correctness read, F7): before each key the host was asked, then the field whether
+        # focus was in it, a round trip in which the page can leave, and select-all went to the page it left for. The
+        # host is asked once focus has answered, with nothing awaited between it and the key.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa",
+            hosts=("login.example.com",),
+            leaves_during="focus question",
+            fill_fails=True,
         )
         self.assertIsNone(result)
         self.keys.assert_not_awaited()
