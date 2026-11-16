@@ -227,10 +227,11 @@ class ElementTarget:
     async def has_focus(self) -> bool:
         return bool(await self.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, True, effect=READ))
 
-    async def hold_field(self, nonce: str) -> dict[str, str] | None:
+    async def hold_field(self, nonce: str, *, within_ms: int | None = None) -> dict[str, str] | None:
         """Take hold, under ``nonce``, of the node keys go to while focus is in the element, and read it: its own
-        attributes, or None where no node in the element has focus (see _HELD_FIELD_JS). To be released."""
-        return await self.evaluate(ELEMENT_FIELD_HOLD_SCRIPT, nonce, effect=READ)
+        attributes, or None where no node in the element has focus (see _HELD_FIELD_JS). To be released. Taken
+        again under the nonce it reads the hold the first take made: ``within_ms`` bounds such a read as a read."""
+        return await self.evaluate(ELEMENT_FIELD_HOLD_SCRIPT, nonce, effect=READ, within_ms=within_ms)
 
     async def release_field(self, nonce: str, *, within_ms: int) -> dict[str, str] | None:
         """Give back the hold taken under ``nonce``, read once more: the held node's attributes if it kept focus

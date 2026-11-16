@@ -25,11 +25,13 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.element_scripts import (
+    ELEMENT_FIELD_HOLD_SCRIPT,
     ELEMENT_FOCUS_PLACE_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
     FIELD_HOLD_TAKE_SCRIPT,
 )
+from app.browser.element_target import ElementTarget
 from app.browser.services import actions
 from app.browser.services.actions import _arrives_by, _TypedField
 
@@ -527,3 +529,33 @@ async def test_a_step_that_answered_by_its_bound_is_accepted_though_its_caller_h
     for _ in range(20):
         await asyncio.sleep(0)
     assert given_back == []
+
+
+async def test_the_read_after_the_clear_by_element_id_is_a_read_within_its_bound() -> None:
+    # B1-fix2 item 9 (the Opus correctness read, F12): by element_id the read once the clear was done was a take's
+    # call, bounded by the world's timeout (15 s), past which the world's session was reset: a page that stopped
+    # answering after the clear held the type that long. It is a read, within FIELD_RECHECK_TIMEOUT_MS, that keeps the
+    # page's session. The world here answers the take, and gives up on each later call at the bound it is given.
+    bounds: list[dict[str, Any]] = []
+
+    async def call(_page: Any, declaration: str, *_args: Any, effect: str, **given: Any) -> dict[str, Any]:
+        assert ELEMENT_FIELD_HOLD_SCRIPT in declaration
+        bounds.append(given)
+        if len(bounds) == 1:
+            return {"status": "ok", "tag": "t1", "value": PLAIN}
+        await asyncio.sleep(given["timeout_ms"] / 1000)
+        raise TimeoutError
+
+    field = _TypedField(ElementTarget(SimpleNamespace(call=call, timeout_ms=15_000), object(), "op-1"), None)
+    await field.take()
+    assert field.not_secret is True
+
+    began = time.monotonic()
+    reading = asyncio.ensure_future(field.read_after_the_clear())
+    done, _ = await asyncio.wait({reading}, timeout=5)
+    took = time.monotonic() - began
+    reading.cancel()
+
+    assert bounds[1] == {"timeout_ms": BOUND_MS, "setup_timeout_ms": BOUND_MS, "keep_session": True}, bounds
+    assert done and took < WITHIN_THE_BOUND_S, took
+    assert field.not_secret is False

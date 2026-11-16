@@ -790,8 +790,9 @@ class _TypedField:
             return
         try:
             if self._element is not None:
-                # A take under the nonce it was taken with reads the hold that take made (ELEMENT_FIELD_HOLD_SCRIPT).
-                attributes = await self._element.hold_field(self._nonce)
+                # A take under the nonce it was taken with reads the hold that take made (ELEMENT_FIELD_HOLD_SCRIPT),
+                # bounded as a read: as a take, by the world's timeout, and its session reset past it.
+                attributes = await self._element.hold_field(self._nonce, within_ms=FIELD_RECHECK_TIMEOUT_MS)
             else:
                 attributes = await _answered_soon(self._handle.evaluate(FIELD_HOLD_READ_SCRIPT))
         except Exception:
