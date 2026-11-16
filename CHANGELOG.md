@@ -47,16 +47,19 @@ All notable changes to auto-browser are documented here.
   (uid 10002, the CLI sandbox's grants, a call directory in the CLI home) on Docker Desktop:
   - `read-only`: it reads what the CLI sandbox leaves readable, which inside `/data` is the CLI home (Codex's
     sign-in, and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by
-    the CLI sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes nothing
-    and cannot connect (a connect to 127.0.0.1 was refused).
+    the CLI sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes no
+    file's content (the CLI sandbox's caveats still apply: metadata changes, and truncation on a kernel older
+    than 6.2) and cannot connect (a connect to 127.0.0.1 was refused).
   - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
     home; it cannot connect.
   - `danger-full-access` and `CODEX_BRIDGE_ALLOW_HOST_EXEC=true`: everything the CLI sandbox allows, which includes
     writing the CLI home (and so the configuration the next call reads) and connecting.
   No setting reads or writes the rest of `/data`. A new workflow, `agent-cli-image`, builds that image on both
-  architectures whenever the install or the CLI sandbox changes, runs Codex there the same way against a stand-in
-  model that asks for one command, and fails unless each setting reaches what `docs/deployment.md` ("Codex's own
-  sandbox") says. A controller run on the host with the npm package's codex keeps the old limit, and has no
+  architectures on a change to the controller's Dockerfile, `.dockerignore` or entrypoint, the CLI sandbox's code,
+  the CLI launch in `providers/base.py`, the root image's inputs, its own check scripts or the workflow itself. It
+  runs Codex there the same way against a stand-in model that asks for one command, and fails unless each setting
+  reaches what `docs/deployment.md` ("Codex's own sandbox") says; other changes to the image's inputs do not start
+  it. A controller run on the host with the npm package's codex keeps the old limit, and has no
   `/etc/codex/requirements.toml`, so there the MCP servers its Codex home names load (the same section).
 - **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image
   does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
@@ -80,7 +83,7 @@ All notable changes to auto-browser are documented here.
   (Glama) images build on `python:3.11-slim`, and reverse-ssh and the smoke bastion on `alpine:3.21`, each at the
   digest the tag has named since 2026-11-08; before, a build took whatever the tag named that day. Dependabot now
   proposes each base's newer digest, with one docker entry listing each Dockerfile's directory and the 3-day
-  cooldown its other entries have. Each build context has a `.dockerignore` that keeps out `.git`, virtualenvs,
+  cooldown its other entries have. Each build context has a `.dockerignore` that keeps out `.git`, `.venv*`,
   `node_modules`, `__pycache__`, `data/` and `.env*`, with no exception and nothing its Dockerfile copies: a build of
   the root image was sent the whole checkout, `data/` and any `.env` included, though it copies only a few paths of
   it.

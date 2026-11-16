@@ -5,11 +5,11 @@
 # Codex runs as the controller runs it: as uid 10002 with no new privileges and no capabilities, under the launcher
 # with the grants cli_sandbox.launch_command gives (the CLI home, /tmp, /var/tmp, /dev), in a call directory inside the
 # home, against codex_responses_mock.py, which asks it to run one probe. Each CODEX_SANDBOX_MODE setting must reach
-# what docs/deployment.md ("Codex's own sandbox") says and no more: read-only reads but writes nothing and connects
-# nowhere; workspace-write also writes /tmp and its working directory; danger-full-access and the bypass flag run the
-# command with no sandbox of Codex's (the control: what read-only refuses there, Codex's sandbox refused). No setting
-# reaches the rest of /data. Then Codex's own sandbox runs a command under the launcher, and an MCP server planted in
-# the home's config.toml is disabled by /etc/codex/requirements.toml.
+# what docs/deployment.md ("Codex's own sandbox") says and no more: read-only reads but writes no file's content
+# and connects nowhere; workspace-write also writes /tmp and its working directory; danger-full-access and the
+# bypass flag run the command with no sandbox of Codex's (the control: what read-only refuses there, Codex's sandbox
+# refused). No setting reaches the rest of /data. Then Codex's own sandbox runs a command under the launcher, and an
+# MCP server planted in the home's config.toml is disabled by /etc/codex/requirements.toml.
 set -u
 CI_DIR=$(dirname "$0")
 H=/data/cli-home

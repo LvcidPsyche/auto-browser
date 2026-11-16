@@ -4,7 +4,9 @@ name: agent-cli-image
 # In the second, scripts/ci/codex_sandbox_check.sh runs Codex as the controller runs it (the CLI's uid, under the
 # launcher with the controller's grants) against a stand-in model that asks for one command, and fails unless each
 # CODEX_SANDBOX_MODE setting reaches what docs/deployment.md ("Codex's own sandbox") says and no more. Landlock needs
-# a Linux kernel, so this runs on GitHub's runners; the container has no network, and needs none.
+# a Linux kernel, so this runs on GitHub's runners; the container has no network, and needs none. It runs on a change
+# to a path listed below, not on every change to the images' inputs (ci.yml builds the controller image on every
+# pull request and push to main, without the CLIs).
 on:
   pull_request:
     paths:

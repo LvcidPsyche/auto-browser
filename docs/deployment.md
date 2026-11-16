@@ -660,12 +660,14 @@ What the sandbox does not stop, and what does not work under it:
   alone. An image built with `INSTALL_AGENT_CLIS=true` has the glibc build of codex-cli 0.114.0 from Codex's GitHub
   release, whose sandbox runs beneath this one. What a command of the model's reaches there, measured 2026-11-16 on
   Docker Desktop with Codex run as the controller runs it (uid 10002, this sandbox's grants, a call directory in the
-  CLI home; the `agent-cli-image` workflow checks the same on GitHub's amd64 and arm64 runners whenever the install
-  or this sandbox changes):
+  CLI home; the `agent-cli-image` workflow checks the same on GitHub's amd64 and arm64 runners on a change to the
+  controller's Dockerfile, `.dockerignore` or entrypoint, this sandbox's code, the CLI launch in
+  `providers/base.py` or the check's own scripts):
   - `read-only`: it reads what this sandbox leaves readable, which inside `/data` is the CLI home (Codex's sign-in,
     and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by this
-    sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes nothing, and a
-    connect to 127.0.0.1 is refused.
+    sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes no file's
+    content ("Metadata, and names learnt by watching" and "Truncation, on a kernel older than 6.2" above
+    still apply), and a connect to 127.0.0.1 is refused.
   - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
     home; the connect is refused.
   - `danger-full-access` and the bypass: everything this sandbox allows, which includes writing the CLI home (and so
