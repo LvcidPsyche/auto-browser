@@ -161,11 +161,6 @@ LEAVES_AS_ITS_FILL_WAITS = f"""<!doctype html>
 KEEPS = '<!doctype html><input name="otp" value="kept" autofocus>'
 
 
-def _autofill_where_the_press_leaves(runs: int) -> list[dict]:
-    """The autofill on LEAVES_ON_PRESS, ``runs`` times in one browser, each on a page of its own."""
-    return _autofill_where_the_page_leaves(LEAVES_ON_PRESS, COLLECTS, runs)
-
-
 def _autofill_where_the_page_leaves(named: str, other: str, runs: int) -> list[dict]:
     """The autofill on the named host's page ``named``, which may send the page to the other host's ``other``, ``runs``
     times in one browser, each on a page of its own."""
@@ -221,7 +216,7 @@ def test_a_page_that_leaves_the_named_host_as_its_field_is_pressed_gets_no_code(
     # the field without one, so the page never moves (and the code goes into the named host's field, as it should):
     # the runs share one browser, and every one must hold. Three runs that all focused so would pass with nothing
     # tested: one at least must have reached the other host's page, its field there and empty.
-    outcomes = _autofill_where_the_press_leaves(3)
+    outcomes = _autofill_where_the_page_leaves(LEAVES_ON_PRESS, COLLECTS, 3)
     assert any(OTHER_HOST in seen["url"] and seen["other_host_field"] == "" for seen in outcomes), outcomes
     for seen in outcomes:
         assert not seen["title"].startswith("RECEIVED:") and not seen["other_host_field"], seen

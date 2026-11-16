@@ -1,8 +1,14 @@
-"""The JavaScript an action by element_id runs on the element, in the page's isolated world.
+"""The JavaScript an action runs on the element it names.
 
-Every function here is sent through ``element_world.element_declaration`` (or,
-for ``UPLOAD_UNMARK_SCRIPT``, as a world function of its own), so it runs in a
-world the page's scripts cannot reach: nothing it calls can be replaced by them.
+By element_id a function here is sent through ``element_world.element_declaration``
+(or, for ``UPLOAD_UNMARK_SCRIPT``, as a world function of its own), so it runs in
+the page's isolated world, which the page's scripts cannot reach: nothing it calls
+can be replaced by them. By selector, ELEMENT_HAS_FOCUS_SCRIPT,
+ELEMENT_FOCUS_PLACE_SCRIPT, the FIELD_HOLD_* scripts and NAMED_FIELDS_SCRIPT run on
+a locator in the page's own world, and FIELD_ATTRIBUTES_SCRIPT runs only there (the
+TOTP autofill's read of a candidate field); so do the scripts of click_target.py and
+actions.py that start with DOM_JS. There the page answers for what they read off a
+node or a document, but for what DOM_JS reads through the prototypes (its comment).
 """
 
 from __future__ import annotations

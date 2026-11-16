@@ -469,7 +469,9 @@ _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
 # away (the text's Enter submitted its form) fails at once, where a read by selector waited this long for each
 # attribute of a field that was gone.
 # And how long the read of a type's field for its approval takes at most, before the approval is asked for
-# (_approval_field_read): one that has not answered by then leaves the field unread.
+# (_approval_field_read): one that has not answered by then leaves the field unread. And the bound of each question
+# _answered_soon asks elsewhere: each step of a placed click's give-back (_give_back, and the pointer question's
+# handles), and the check that focus is in a field (_has_focus: focus_verified's, and the TOTP clear's before each key).
 FIELD_RECHECK_TIMEOUT_MS = 1000
 
 # What an action's result says of a tab the action opened (NAV-08): a page's new tab does not become the active one.
@@ -529,7 +531,7 @@ def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
 
 async def _answered_soon(call: Awaitable[Any]) -> Any:
     """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own, and
-    a page that stops answering would hold the type, and its session, with it.
+    a page that stops answering would hold the type or the click that asks it, and its session, with it.
 
     The bound is this one call's. Steps that must answer within it together are either awaited as one call (an
     approval's read of the fields its text could go to, _named_fields: finding the element and asking it) or share
