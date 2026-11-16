@@ -89,5 +89,6 @@ class TheLifespanIsOnTests(unittest.TestCase):
             log = output.read().decode("utf-8", errors="replace")
         self.assertFalse(served, f"uvicorn served with CONTROLLER_ALLOWED_HOSTS={MALFORMED_ALLOWED_HOSTS!r}:\n{log}")
         self.assertTrue(exited, f"uvicorn neither served nor exited in {START_LIMIT_SECONDS:.0f} s:\n{log}")
-        self.assertNotEqual(process.returncode, 0, log)
+        # 3, uvicorn's status for a failed startup, as the docs and the CHANGELOG say: an import error is 1.
+        self.assertEqual(process.returncode, 3, log)
         self.assertIsNotNone(re.search(r"invalid host pattern 'local\*host'", log), log)
