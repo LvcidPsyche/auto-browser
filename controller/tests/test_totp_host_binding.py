@@ -72,12 +72,12 @@ class TotpAutofillTests(unittest.TestCase):
         shown: str | None = None,
         leaves_during: str | None = None,
         fill_fails: bool = False,
-        focused: bool = True,
+        focused: bool | list[bool] = True,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
         "typing" for the code's keystrokes) during which the page goes to another host. ``focused``: what the field
-        answers when it is asked whether focus is in it."""
+        answers when it is asked whether focus is in it, or a list of its answers in turn."""
         typed = AsyncMock(side_effect=lambda *_args: leave_during("typing"))
 
         async def clear(_value: str) -> None:
@@ -89,7 +89,9 @@ class TotpAutofillTests(unittest.TestCase):
             leave_during("clear by keys")
 
         locator = SimpleNamespace(
-            fill=AsyncMock(side_effect=clear), press=AsyncMock(), evaluate=AsyncMock(return_value=focused)
+            fill=AsyncMock(side_effect=clear),
+            press=AsyncMock(),
+            evaluate=AsyncMock(side_effect=focused if isinstance(focused, list) else lambda *_args, **_named: focused),
         )
         manager = SimpleNamespace(
             _settle=AsyncMock(),
@@ -191,6 +193,9 @@ class TotpAutofillTests(unittest.TestCase):
                 self.assertIsNone(result)
                 typed.assert_not_awaited()
                 self.pressed.assert_not_awaited()
+                # The page left as select-all went in: no Delete into the page it went to (B1-fix1 item 3, Opus A12c).
+                if step == "clear by keys":
+                    self.assertEqual(self.keys.await_args_list, [call("Control+a")])
 
     def test_a_page_that_leaves_the_named_host_as_the_code_is_typed_gets_no_enter(self) -> None:
         # Typing the code awaits the page at each keystroke, after the last check: a page a key handler sent to
@@ -219,6 +224,17 @@ class TotpAutofillTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
+
+    def test_a_field_whose_select_all_sends_focus_elsewhere_gets_no_delete(self) -> None:
+        # B1-fix1 item 3 (Codex B1-3, Opus F8): focus was asked before select-all only, so a select-all handler that
+        # sent focus to another field of the page had that field emptied by the Delete, and the code typed into it.
+        # Focus is asked before the Delete as well.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, focused=[True, False]
+        )
+        self.assertIsNone(result)
+        self.assertEqual(self.keys.await_args_list, [call("Control+a")])
         typed.assert_not_awaited()
 
     def test_totp_unavailable_names_the_page_as_it_is_shown(self) -> None:

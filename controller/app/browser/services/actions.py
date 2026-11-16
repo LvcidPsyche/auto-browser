@@ -2227,13 +2227,12 @@ class BrowserActionService:
             await locator.fill("")
         except Exception:
             # Its own keys go to whatever has focus, on whatever page is there by now: they were pressed into another
-            # host's field, which the Delete emptied. Only into the field, on a named host.
-            if not self._may_fill_totp(session) or not await self._has_focus(locator):
-                return None
-            await session.page.keyboard.press("Control+a")
-            if not self._may_fill_totp(session):
-                return None
-            await session.page.keyboard.press("Delete")
+            # host's field, which the Delete emptied. Only into the field, on a named host, asked before each: a
+            # select-all handler can send focus on to another field, or the page to another host.
+            for key in ("Control+a", "Delete"):
+                if not self._may_fill_totp(session) or not await self._has_focus(locator):
+                    return None
+                await session.page.keyboard.press(key)
         # And so did the clear: a field whose page an input or a key handler sends elsewhere as it is emptied.
         # And so does each key of the code: a key handler that sent the page to another host had the rest of the code
         # typed into whatever had focus there.
