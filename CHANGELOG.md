@@ -41,10 +41,14 @@ All notable changes to auto-browser are documented here.
   account" button went on unclassified; and a control named `isContentEditable` kept an approval's read from counting
   a form that is editable by what it is in, and so from reading the form's secret name. By selector, an image named
   `elementFromPoint` stood in for the document's own, so the check that the pointer finds a click's target threw
-  and the click was refused, and a frame given its own `getBoundingClientRect` moved the point it was asked at. The
-  reads now go through the prototypes' own getters and methods, taken as each script starts. In the element ids'
-  world no page script reaches those; by selector, a page that replaces a prototype's getter before the script runs
-  still answers for it.
+  and the click was refused, and a frame given its own `getBoundingClientRect` moved the point it was asked at.
+  These reads (a node's parent, shadow root, host, slot, tag and document, a label's `control`, a document's or a
+  shadow root's focused element, `isContentEditable`, `querySelectorAll`, the listener methods, and the pointer
+  check's `elementFromPoint` and `getBoundingClientRect`) now go through the prototypes' own getters and methods,
+  taken as each script starts. In the element ids' world no page script reaches those; by selector, a page that
+  replaces a prototype's getter before the script runs still answers for it, and what a click's description reads
+  of the element it names (its type, text, attributes and labels) and the pointer check's `matches` and `closest`
+  on its target are still read off the node.
 - **An approval's read of the fields a type's text can go to counts them as the browser has them.** It looked an
   input's type up from its `type` attribute trimmed, so `type="hidden "`, which the browser has as a text field, was
   no field, and one named as a secret beside a plain field read `plain` and the approval showed the text. And it
@@ -77,12 +81,13 @@ All notable changes to auto-browser are documented here.
   its own, through the field's own `getAttribute`, which a page can define on the field: a promo-code field that said
   it took a one-time code had the code typed into it, and Enter submitted its form (on a checkout page, the order).
   It now reads them with the hold's script, through `Element.prototype`'s.
-- **The TOTP autofill types no more of the code into a page that left the named host while it typed.** It checked
-  the host before the typing and after it, before Enter, but not between the keys, so a key handler that sent the
-  page to another host had the rest of the code typed into whatever had focus there (four of the six digits, in one
-  run measured). It now checks before each key. Where its fill of the field failed it pressed select-all and Delete
-  into whatever had focus, on whatever page was there by then, which emptied another host's field: they are now
-  pressed only where the page is still on a named host and focus is in the field.
+- **The TOTP autofill stops typing the code once it finds the page has left the named host.** It checked the host
+  before the typing and after it, before Enter, but not between the keys, so a key handler that sent the page to
+  another host had the rest of the code typed into whatever had focus there (four of the six digits, in one run
+  measured). It now checks before each key, and types none after a check that finds the page gone; a page that
+  leaves between a check and its key still gets that key. Where its fill of the field failed it pressed select-all
+  and Delete into whatever had focus, on whatever page was there by then, which emptied another host's field: each
+  is now pressed only where the page is still on a named host and focus is in the field, asked before each key.
 - **A type that clears its field takes its hold on the field before the clear, not after it.** Taken after, the hold
   heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a
   plain one in the same element the type named kept the preview of the text meant for the password field, and a
@@ -157,11 +162,12 @@ All notable changes to auto-browser are documented here.
   `host` of its own was refused the same way. And the check before a press that the pointer finds its target no
   longer runs on without end from a form with a control named `parentNode`, which it walked to and back from, holding
   the page and the click: it reads the form's own parent, and stops at 256 steps as the click target's walks do.
-- **A page whose `addEventListener` or `removeEventListener` throws no longer keeps a type's listeners.** By selector
-  the hold on the field a type's text goes to puts its listeners on in the page's own world, with what the page has
-  made of those methods. One that threw as it went on ended the take with the listener before it left on the field
-  for good, and one that threw as it came off left those after it. Each now goes on and comes off on its own, and a
-  hold that could not put one on withholds the type's preview, as one whose field lost focus does.
+- **A page whose `addEventListener` or `removeEventListener` throws keeps no more of a type's listeners than the
+  one that threw.** By selector the hold on the field a type's text goes to puts its listeners on in the page's own
+  world, with what the page has made of those methods. One that threw as it went on ended the take with the listener
+  before it left on the field for good, and one that threw as it came off left those after it. Each now goes on and
+  comes off on its own: a listener whose own removal throws stays on the field, and the others come off. A hold that
+  could not put one on withholds the type's preview, as one whose field lost focus does.
 - **A page that stops answering no longer holds a click, or a type's focus check and clear, past their bounds.** A
   click Playwright places asked its target's handle for the box and set the pointer watch up on it with no bound, and
   the question whether the pointer finds the target asked each handle on its way up the frames with none: a
