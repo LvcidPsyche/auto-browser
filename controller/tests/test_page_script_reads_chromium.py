@@ -176,6 +176,22 @@ async def test_an_approval_counts_the_fields_the_browser_takes_text_in(tmp_path:
     assert await _approval_read(tmp_path, page) == _read_as(read)
 
 
+# An editor of 20,000 paragraphs, each with an id of its own.
+AN_EDITOR_WHOSE_BLOCKS_HAVE_IDS = (
+    '<div id="named" contenteditable aria-label="Note">'
+    + "".join(f'<p id="p{i}">x</p>' for i in range(20000))
+    + "</div>"
+)
+
+
+async def test_an_approval_reads_an_editor_whose_blocks_carry_ids_of_their_own_within_its_bound(tmp_path: Path) -> None:
+    # B1-fix1 item 11 (Opus F3): every editable element was counted, and blocks alike in every attribute answered
+    # once; blocks with ids of their own are not alike, and 20,000 of them took 3.3 s, past the read's bound of a
+    # second: unread, where 1.18.1 read plain. An editor's editing host counts, and what in it carries a field's name
+    # (any of its naming attributes but id): a block named only by its id is not read, as in 1.18.1.
+    assert await _approval_read(tmp_path, AN_EDITOR_WHOSE_BLOCKS_HAVE_IDS) == _read_as("plain")
+
+
 # What an approval's read says of fields that cannot take text now, beside what can.
 TAKES_NO_TEXT_NOW = {
     # A disabled plain field beside a component the page lists as a text box, which takes its keys itself.
