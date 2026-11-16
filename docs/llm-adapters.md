@@ -70,12 +70,14 @@ still empty any file the controller's user may write). Where the sandbox is not 
 in use and would leave a secret open (a secret's setting outside `/data`, for one), the controller says so in one
 warning, and `CLI_SANDBOX_REQUIRED=true` refuses to run the CLI instead ("The CLI sandbox" in docs/deployment.md,
 which also lists what it does not stop). `CLI_SANDBOX_ENABLED=false` turns the sandbox off, for a CLI that cannot run
-under it. With the sandbox on, the image's codex (the glibc build of codex-cli 0.114.0, from Codex's GitHub
-release) runs its own sandbox, which wraps each command its model asks for, beneath this one (measured 2026-11-16
-on GitHub's amd64 and arm64 runners). The npm package's codex is the musl build, whose own sandbox does not work
-beneath this one, so a controller run on the host with it cannot run such a command, whatever `CODEX_SANDBOX_MODE`
-says; a pin of 0.115.0 or later needs a different design ("Codex's own sandbox" in docs/deployment.md). The
-decision the controller asks Codex for needs no command. Known
+under it. With the sandbox on, the codex of an image built with `INSTALL_AGENT_CLIS=true` (the glibc build of
+codex-cli 0.114.0, from Codex's GitHub release) runs its own sandbox, which wraps each command its model asks for
+under `CODEX_SANDBOX_MODE=read-only` and `workspace-write`, beneath this one; under `danger-full-access` and with
+`CODEX_BRIDGE_ALLOW_HOST_EXEC=true` Codex runs the command beneath this sandbox alone. The npm package's codex is the
+musl build, whose own sandbox does not work beneath this one, so a controller run on the host with it cannot run
+such a command under `read-only` or `workspace-write`. "Codex's own sandbox" in docs/deployment.md gives what each
+setting reaches (measured), why a host run loads the MCP servers its Codex home names, and what a pin of 0.115.0 or
+later needs. The decision the controller asks Codex for needs no command. Known
 limit: the bridge's Codex runs as the bridge's uid on the host, outside that sandbox, so it can still read that
 user's files. Page content shown to the model can prompt-inject a CLI into trying. On
 macOS and Windows there is no sandbox and the controller and the bridge do not make themselves non-dumpable, and

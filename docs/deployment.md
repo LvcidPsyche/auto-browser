@@ -653,20 +653,38 @@ What the sandbox does not stop, and what does not work under it:
   so a file outside `/data` that the controller's user may write.
 - **A tool that builds its own mount namespace.** Landlock refuses mounting or unmounting to every process it
   restricts.
-- **Codex's own sandbox.** Codex wraps each command its model asks for in a sandbox of its own, whose helper opens
-  `/` with `O_PATH` before it makes its rules. The image's codex, the glibc build of codex-cli 0.114.0 from Codex's
-  GitHub release, runs that sandbox beneath this one: `codex sandbox linux -- sh -c "echo nested-ok"` prints
-  `nested-ok`, and under the two a read of a file in `/data` and a write outside the roots this sandbox gives are
-  both refused (measured 2026-11-16 on GitHub's amd64 and arm64 runners; the `agent-cli-image` workflow checks it
-  again whenever the install or this sandbox changes). The npm package's codex is the musl build, where Rust's
-  standard library drops `O_PATH` from the open: it reaches the kernel as an open of `/` for reading, which this
-  sandbox refuses (`/` itself has no rule, and a rule there would make every name under `/data` listable), and the
-  command ends with `Failed to execvp sh: Permission denied`. So a controller run on the host with that codex still
-  cannot run a command of its model's, in any `CODEX_SANDBOX_MODE`; it needs the release's glibc build. The decision the
-  controller asks Codex for needs none: the page goes in on stdin, the screenshot as `--image`. A pin of codex-cli
-  0.115.0 or later needs a different design: from that release the helper defaults to bubblewrap, which builds its
-  own mount namespace, and Landlock refuses mounting (inferred, not measured). Claude Code's and Gemini's own
-  sandboxes are not tested under this one.
+- **Codex's own sandbox.** Under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write` Codex wraps
+  each command its model asks for in a sandbox of its own, whose helper opens `/` with `O_PATH` before it makes its
+  rules. Under `danger-full-access`, and with `CODEX_BRIDGE_ALLOW_HOST_EXEC=true` (which passes
+  `--dangerously-bypass-approvals-and-sandbox`), Codex runs the command with no sandbox of its own, beneath this one
+  alone. An image built with `INSTALL_AGENT_CLIS=true` has the glibc build of codex-cli 0.114.0 from Codex's GitHub
+  release, whose sandbox runs beneath this one. What a command of the model's reaches there, measured 2026-11-16 on
+  Docker Desktop with Codex run as the controller runs it (uid 10002, this sandbox's grants, a call directory in the
+  CLI home; the `agent-cli-image` workflow checks the same on GitHub's amd64 and arm64 runners whenever the install
+  or this sandbox changes):
+  - `read-only`: it reads what this sandbox leaves readable, which inside `/data` is the CLI home (Codex's sign-in,
+    and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by this
+    sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes nothing, and a
+    connect to 127.0.0.1 is refused.
+  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
+    home; the connect is refused.
+  - `danger-full-access` and the bypass: everything this sandbox allows, which includes writing the CLI home (and so
+    the configuration the next call reads) and connecting where the container can.
+
+  No setting reads or writes the rest of `/data`. The image also writes `/etc/codex/requirements.toml` with
+  `mcp_servers = {}`, which no grant of this sandbox reaches, so no MCP server the home's `config.toml` names loads:
+  `codex mcp list` shows such a server `disabled: requirements`. The controller's `-c mcp_servers={}` alone clears
+  none, as Codex merges `-c` tables key by key (measured). A controller run on the host has no such file, so there
+  the MCP servers its Codex home names load: give it a `CLI_HOME` of its own. The npm package's codex is the musl
+  build, where Rust's standard library drops `O_PATH` from the helper's open: it reaches the kernel as an open of `/`
+  for reading, which this sandbox refuses (`/` itself has no rule, and a rule there would make every name under
+  `/data` listable). Under `read-only` and `workspace-write` that helper fails (exit 101) and no command of the
+  model's runs, so a controller run on the host with that codex needs the release's glibc build for them; under
+  `danger-full-access` and the bypass its commands run as they do with the glibc build (measured in 1.18.1's
+  image). The decision the controller asks Codex for needs no command: the page goes in on stdin, the screenshot as
+  `--image`. A pin of codex-cli 0.115.0 or later needs a different design: from that release the helper defaults to
+  bubblewrap, a tool that builds its own mount namespace (above; inferred, not measured). Claude Code's and Gemini's
+  own sandboxes are not tested under this one.
 - **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
   part of it, is mounted at a second path of the container too, what is mounted there is open to the CLI: to read
   like anything else beside `/data`, and to write as well where that path lies in a directory a CLI may write (inside

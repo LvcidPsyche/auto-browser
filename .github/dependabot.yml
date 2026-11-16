@@ -65,7 +65,8 @@ updates:
           - patch
 
   # Each Dockerfile's FROM is pinned by digest, which without these entries would freeze the base image's
-  # security patches: Dependabot proposes the tag's newer digest, after the 72-hour cooldown. One entry per
+  # security patches: Dependabot proposes the tag's newer digest. They have the cooldown the other entries have
+  # (GitHub's docs list docker as taking default-days, and say nothing of a digest-only update). One entry per
   # Dockerfile directory, which is also its build context.
   - package-ecosystem: docker
     directory: /

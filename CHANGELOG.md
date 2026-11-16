@@ -8,8 +8,12 @@ All notable changes to auto-browser are documented here.
 
 - **Rebuild an image built with `INSTALL_AGENT_CLIS=true`.** Its codex now comes from Codex's GitHub release, not
   from npm (see Fixed); an image built before keeps the npm package's codex, whose own sandbox cannot run under the
-  CLI sandbox, until it is built again (`docker compose build controller` with the same `.env`). In the rebuilt
-  image Codex's model runs its commands again, beneath both sandboxes (see Fixed). With
+  CLI sandbox, until it is built again with the compose files and `.env` you run it with. Under
+  `docker-compose.host-subscriptions.yml` that is
+  `docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up -d --build`: the overlay sets
+  `INSTALL_AGENT_CLIS=true`, and `docker compose build controller` without it builds an image with no CLI unless
+  `.env` sets it. In the rebuilt image the commands Codex's model asks for run again under `read-only` and
+  `workspace-write`, and the image disables the MCP servers a Codex home names (see Security). With
   `INSTALL_AGENT_CLIS=true` the build now stops on an architecture other than amd64 and arm64, for which no codex
   build is pinned.
 - **If you start uvicorn yourself, add `--lifespan on`** (`docs/deployment.md` gives the whole command). Without it a
@@ -31,21 +35,29 @@ All notable changes to auto-browser are documented here.
 - **Codex's own sandbox now runs beneath the CLI sandbox, in an image built with `INSTALL_AGENT_CLIS=true`.** The
   image installed codex-cli 0.114.0 from npm, whose binary is the musl build. Its sandbox helper opens `/` with
   `O_PATH`, which Rust's standard library drops on musl, so the open reached the kernel as an open of `/` for
-  reading, the CLI sandbox refused it, and every command Codex's model asked for ended with `Failed to execvp sh:
-  Permission denied`, in any `CODEX_SANDBOX_MODE`. The decision the controller asks Codex for needs no command, so
-  nothing was given away. The image now installs the glibc build of the same release from Codex's GitHub release
-  (`rust-v0.114.0`, for amd64 and arm64): it checks the tarball, and then the binary in it, against pinned sha256s
-  (the binaries verified first against the release's sigstore bundles) and installs it as `/usr/local/bin/codex`,
-  owned by root, mode 0755. npm installs only the Claude and Gemini CLIs. Measured on GitHub's amd64 and arm64
-  runners: under the CLI sandbox, Codex's sandbox runs a command, and the two together still refuse a read of a
-  file in `/data` and a write outside the sandbox's roots. A new workflow, `agent-cli-image`, builds that image on
-  both architectures whenever the install or the CLI sandbox changes, and runs Codex there as the controller does,
-  against a stand-in model that asks for one command, failing unless each `CODEX_SANDBOX_MODE` setting reaches what
-  `docs/deployment.md` says. A controller run on the host with the npm package's codex keeps the limit (`docs/deployment.md`, "Codex's own
-  sandbox"). So Codex's model can again run the commands it asks for, as it could before 1.18.0, and now beneath the
-  CLI sandbox as well: under the default `CODEX_SANDBOX_MODE=read-only` such a command can read what the CLI sandbox
-  leaves readable (what lies outside `/data`) and write nothing; under `workspace-write` it can also write where
-  both sandboxes allow.
+  reading and the CLI sandbox refused it: under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write`
+  the helper failed, and no command Codex's model asked for ran. Under `danger-full-access`, and with
+  `CODEX_BRIDGE_ALLOW_HOST_EXEC=true`, Codex runs the command with no sandbox of its own, beneath the CLI sandbox
+  alone, and those commands ran in 1.18.1's image too (measured): 1.18.0's notes and the GHSA-9qq7 advisory said no
+  command ran in any mode. The decision the controller asks Codex for needs no command. The image now installs the
+  glibc build of the same release from Codex's GitHub release (`rust-v0.114.0`, for amd64 and arm64): it checks the
+  tarball, and then the binary in it, against pinned sha256s (the binaries verified first against the release's
+  sigstore bundles) and installs it as `/usr/local/bin/codex`, owned by root, mode 0755. npm installs only the Claude
+  and Gemini CLIs. What a command of the model's reaches there, measured with Codex run as the controller runs it
+  (uid 10002, the CLI sandbox's grants, a call directory in the CLI home) on Docker Desktop:
+  - `read-only`: it reads what the CLI sandbox leaves readable, which inside `/data` is the CLI home (Codex's
+    sign-in, and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by
+    the CLI sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes nothing
+    and cannot connect (a connect to 127.0.0.1 was refused).
+  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
+    home; it cannot connect.
+  - `danger-full-access` and `CODEX_BRIDGE_ALLOW_HOST_EXEC=true`: everything the CLI sandbox allows, which includes
+    writing the CLI home (and so the configuration the next call reads) and connecting.
+  No setting reads or writes the rest of `/data`. A new workflow, `agent-cli-image`, builds that image on both
+  architectures whenever the install or the CLI sandbox changes, runs Codex there the same way against a stand-in
+  model that asks for one command, and fails unless each setting reaches what `docs/deployment.md` ("Codex's own
+  sandbox") says. A controller run on the host with the npm package's codex keeps the old limit, and has no
+  `/etc/codex/requirements.toml`, so there the MCP servers its Codex home names load (the same section).
 - **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image
   does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
   release published that hour. No workflow built it: `agent-cli-image` now does, whenever its Dockerfile, its

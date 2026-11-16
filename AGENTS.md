@@ -51,7 +51,8 @@ make release-audit   # launch-prep audit; run before any release PR
   bundle: `cosign verify-blob --bundle codex-<triple>.sigstore --new-bundle-format=false --certificate-identity
   https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v<version>
   --certificate-oidc-issuer https://token.actions.githubusercontent.com codex-<triple>`. From 0.115.0 Codex's helper
-  defaults to bubblewrap, so such a bump needs more than new sums (`docs/deployment.md`, "Codex's own sandbox").
+  defaults to bubblewrap, so such a bump very likely needs more than new sums (inferred, not measured:
+  `docs/deployment.md`, "Codex's own sandbox").
 - Security-sensitive changes (auth, isolation, witness receipts, PII scrubbing) follow `SECURITY.md`.
 
 ## Releases

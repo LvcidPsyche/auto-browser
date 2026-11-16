@@ -11,9 +11,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ARG INSTALL_AGENT_CLIS=false
 # codex is the glibc build from its own GitHub release, not the npm package: that one's binary is the musl build, whose
 # sandbox helper opens / without O_PATH (Rust std drops the flag on musl), which the controller's Landlock launcher
-# refuses, so Codex ran none of its model's commands. The sums are of rust-v${CODEX_CLI_VERSION}'s
-# codex-<arch>-unknown-linux-gnu.tar.gz and of the binary in it, which the release's .sigstore bundle signs. A bump
-# changes the version and all four sums in one commit (AGENTS.md says how to verify them). Beside it goes
+# refuses, so under read-only and workspace-write no command of Codex's model ran. The sums are of
+# rust-v${CODEX_CLI_VERSION}'s codex-<arch>-unknown-linux-gnu.tar.gz and of the binary in it, which the release's
+# .sigstore bundle signs. A bump changes the version and all four sums in one commit (AGENTS.md says how to verify
+# them). Beside it goes
 # /etc/codex/requirements.toml with mcp_servers = {}, so that no MCP server a CODEX_HOME config.toml names loads: the
 # adapter's -c mcp_servers={} clears none (Codex merges -c tables key by key), and no grant of the CLI sandbox reaches
 # /etc/codex.
