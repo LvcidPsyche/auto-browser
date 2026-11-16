@@ -796,8 +796,11 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
                 self.session.page.locators["#name"] = FakeLocator("#name")
                 self.session.page.keyboard = FakeKeyboard()
 
+                stalled_at: list[float] = []
+
                 async def press(pressed: str, stalls: str = key) -> None:
                     if pressed == stalls:
+                        stalled_at.append(time.monotonic())
                         await asyncio.Event().wait()
 
                 self.session.page.keyboard.press = AsyncMock(side_effect=press)
@@ -806,13 +809,14 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(actions, "HUMAN_TYPING_STEP_FLOOR_SECONDS", CLEAR_KEY_BOUND_S),
                     self.assertRaises(BrowserActionError) as ended,
                 ):
-                    began = time.monotonic()
                     await asyncio.wait_for(self.manager.type("session-1", selector="#name", text="hello"), 5)
-                took = time.monotonic() - began
+                took = time.monotonic() - stalled_at[0]
 
                 self.assertEqual((ended.exception.code, ended.exception.retryable), ("typing_timeout", False))
                 self.assertIn(key, ended.exception.message)
-                # Three bounds, overhead and all: a key bounded five times as long does not pass (B1-fix1 item 7).
+                # From the key that stalled to the type's end, within three bounds: a key bounded five times as long
+                # does not pass (B1-fix1 item 7). Timed from the type's start, the image's Python 3.11 spent most of
+                # a second on the fakes' calls before the clear, and the bound was not what was measured.
                 self.assertLess(took, 3 * CLEAR_KEY_BOUND_S)
                 self.session.page.keyboard.type.assert_not_awaited()
 
