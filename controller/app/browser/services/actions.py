@@ -628,8 +628,10 @@ async def release_mouse_through_a_cancel(page: Any, after: str) -> None:
         release.result()
         return
     if not release.cancelled() and release.exception() is not None:
+        # The cancel came as the button was let go, whatever the press or the drag did: one that failed is logged
+        # by release_mouse_after_failure only where no cancel cuts it short.
         logger.warning(
-            "could not release the mouse button after a %s that was cancelled: %s",
+            "could not release the mouse button after a %s, with the action cancelled while it was let go: %s",
             after,
             error_text_for_log(release.exception()),
         )
