@@ -1228,6 +1228,26 @@ async def test_each_call_of_a_pointer_question_has_its_own_bound_within_what_the
     target.dispose.assert_awaited_once()
 
 
+async def test_a_types_focus_click_reads_its_targets_box_within_its_bound() -> None:
+    # B1-fix1 item 13 (Opus F10): the focus click of a type read its target's box with no timeout, so the look-up
+    # waited by Playwright's default and the box asked of the handle with no bound at all: a page that did not answer
+    # held the type. It is read within FOCUS_CLICK_TIMEOUT_MS; one not read by then is a click Playwright places.
+    service, session, _done = _service(CLOSE)
+    service.click_as_playwright_places_it = AsyncMock()
+    locator = SimpleNamespace(bounding_box=_never)
+
+    with (
+        patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", BOUND_MS),
+        patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()),
+    ):
+        began = time.monotonic()
+        await asyncio.wait_for(service.focus_locator(session, locator), 5)
+        took = time.monotonic() - began
+
+    assert took < WITHIN_THREE_BOUNDS_S, took
+    service.click_as_playwright_places_it.assert_awaited_once()
+
+
 def _frames_whose_handles_are_never_given_back(depth: int) -> tuple[SimpleNamespace, list[SimpleNamespace]]:
     """A target ``depth`` frames down whose page answers every call but the disposals of its handles; the locator
     that finds it, and every handle the walk up the frames takes."""

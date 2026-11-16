@@ -2098,7 +2098,8 @@ class BrowserActionService:
             await _given_back_together([lambda handle=handle: _answered_soon(handle.dispose()) for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
-        coords = await self.locator_center(locator)
+        # The box within the focus click's own bound: read with none, a page that did not answer held the type.
+        coords = await self.locator_center(locator, timeout_ms=FOCUS_CLICK_TIMEOUT_MS)
         if coords is None:
             await self.click_as_playwright_places_it(session, locator)
         else:
