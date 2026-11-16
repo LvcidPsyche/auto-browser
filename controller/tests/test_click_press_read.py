@@ -41,6 +41,7 @@ from app.browser.services.actions import (
     _RECEIVES_POINTER_SCRIPT,
     ENABLED_POLL_SECONDS,
     PLACE_RECOUNTS,
+    POINTER_CHECK_FRAMES,
     POINTER_CHECK_TIMEOUT_MS,
     BrowserActionService,
     _Budget,
@@ -1465,3 +1466,35 @@ async def test_a_watch_that_arrives_once_its_click_ended_is_stopped_and_given_ba
 
     await _until_given_back(watch)
     watch.evaluate.assert_awaited_once()
+
+
+def _frames_whose_last_fetch_fails(fails: str, asked: list[Any]) -> SimpleNamespace:
+    """A target deeper than POINTER_CHECK_FRAMES frames, every call of whose walk up answers but the frame element
+    fetched on its last turn, which raises (``fails`` "raises") or never answers ("stalls"); the target's handle."""
+
+    def node(level: int) -> SimpleNamespace:
+        if level == POINTER_CHECK_FRAMES - 1:
+            failing = PlaywrightError("the frame has gone") if fails == "raises" else _never
+            fetch = AsyncMock(side_effect=failing)
+        else:
+            fetch = AsyncMock(side_effect=lambda: node(level + 1))
+        return _framed_node(f"frame {level}", SimpleNamespace(parent_frame=object(), frame_element=fetch), asked)
+
+    return node(0)
+
+
+@pytest.mark.parametrize("fails", ["raises", "stalls"])
+async def test_a_walk_that_runs_out_of_frames_fetches_no_frame_element_it_would_not_ask(fails: str) -> None:
+    # B1-fix1 item 25 (staged F02): on its last turn the walk up the frames fetched the next frame's element, and
+    # never asked it: that fetch failing or not answering failed the click. A target POINTER_CHECK_FRAMES frames down
+    # or deeper is a yes where the click was placed, by what the documents it asked said.
+    asked: list[tuple[str, list[Any]]] = []
+    target = _frames_whose_last_fetch_fails(fails, asked)
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    found = await asyncio.wait_for(
+        BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=BOUND_MS), 5
+    )
+
+    assert found is True
+    assert len(asked) == POINTER_CHECK_FRAMES

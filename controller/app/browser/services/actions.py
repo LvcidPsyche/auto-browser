@@ -2079,7 +2079,7 @@ class BrowserActionService:
             # The element itself, before a human-like press, is asked as well that the pointer is over it, and
             # where the click was placed, as the button or the link it is in. Neither is asked of a frame.
             arrived, wide = not placed, placed
-            for _ in range(POINTER_CHECK_FRAMES):
+            for turn in range(POINTER_CHECK_FRAMES):
                 box = await answered(node.bounding_box())
                 if at and not _box_kept(box, placed_by):
                     return False
@@ -2092,6 +2092,10 @@ class BrowserActionService:
                 frame = await answered(node.owner_frame())
                 if frame is None or frame.parent_frame is None:
                     return True
+                if turn == POINTER_CHECK_FRAMES - 1:
+                    # Out of documents to ask: fetched here, the frame's element was never asked, and a fetch that
+                    # failed or went unanswered failed the click.
+                    break
                 node = await answered(frame.frame_element(), _disposed_soon)
                 handles.append(node)
             return placed
