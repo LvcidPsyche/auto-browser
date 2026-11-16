@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from app.browser.element_target import ElementTarget
 from app.browser.page_read import bounded
+from app.browser.services import actions as actions_module
 from app.browser.services import tabs as tabs_module
 from app.cdp.passthrough import CDPPassthrough
 from app.routes.extensions import cdp as cdp_routes
@@ -126,7 +127,7 @@ async def test_a_drag_cut_off_by_its_deadline_still_releases_the_button(tmp_path
 
 
 async def test_a_button_release_that_never_answers_is_bounded(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(drag_module, "MOUSE_UP_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(actions_module, "MOUSE_UP_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("app.browser.page_read.PAGE_READ_TIMEOUT_SECONDS", PAGE_BOUND_SECONDS)
     manager, session = still_session(tmp_path)
     session.page.mouse.up = hang

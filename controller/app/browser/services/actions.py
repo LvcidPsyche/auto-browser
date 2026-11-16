@@ -406,6 +406,9 @@ HUMAN_TYPING_BUDGET_SECONDS = 20.0
 # case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest
 # of the text is then bounded by max(deadline, now) + this.
 HUMAN_TYPING_STEP_FLOOR_SECONDS = 2.0
+# How long a press or a drag waits for the mouse button to be released: sent once the press or the drag is done, or
+# has failed, with a bound of its own.
+MOUSE_UP_TIMEOUT_SECONDS = 5.0
 _CONTROL_KEYS = {"\n": "Enter", "\r": "Enter"}
 _CONTROL_KEY_PATTERN = re.compile("([" + "".join(_CONTROL_KEYS) + "])")
 
@@ -556,6 +559,49 @@ def _given_back_late(arrived: "asyncio.Future[Any]", give_back: Callable[[Any], 
     if arrived.cancelled() or arrived.exception() is not None:
         return  # nothing arrived: the step failed, as its take already has
     spawn_background_task(give_back(arrived.result()))
+
+
+async def release_mouse_through_a_cancel(page: Any, after: str) -> None:
+    """The release after a press or a drag (``after`` names which), whether it succeeded or failed, carried through
+    a cancel that arrives meanwhile (a client giving up as it ended): the button goes up before the session lock is
+    let go, then the cancel goes on. The release has its own bound, so the wait for it ends. A further cancel while it
+    is waited for is held too (a server shutdown after a client's), and one is raised at the end."""
+    release = asyncio.ensure_future(_release_mouse_button(page))
+    cancel: asyncio.CancelledError | None = None
+    while not release.done():
+        try:
+            # asyncio.wait does not cancel the release when this task is cancelled, nor raise its error.
+            await asyncio.wait([release])
+        except asyncio.CancelledError as exc:
+            cancel = cancel or exc
+    if cancel is None:
+        release.result()
+        return
+    if not release.cancelled() and release.exception() is not None:
+        logger.warning(
+            "could not release the mouse button after a %s that was cancelled: %s",
+            after,
+            error_text_for_log(release.exception()),
+        )
+    raise cancel
+
+
+async def release_mouse_after_failure(page: Any, after: str) -> None:
+    """The release after a press or a drag that failed or was cancelled, perhaps with the button down: the press's or
+    the drag's own error is the one reported, and a release that fails is logged."""
+    try:
+        await release_mouse_through_a_cancel(page, after)
+    except (PlaywrightError, RuntimeError) as exc:
+        logger.warning("could not release the mouse button after a %s that failed: %s", after, error_text_for_log(exc))
+
+
+async def _release_mouse_button(page: Any) -> None:
+    """mouse.up(), with its own bound, sent once after the press or the drag and outside its deadline, still under
+    the lock."""
+    try:
+        await asyncio.wait_for(page.mouse.up(), timeout=MOUSE_UP_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise RuntimeError(f"The mouse button was not released within {MOUSE_UP_TIMEOUT_SECONDS:g} seconds.") from None
 
 
 async def _kept_by_nobody(_answer: Any) -> None:
@@ -1610,9 +1656,16 @@ class BrowserActionService:
         """
         if press_is_read():
             await refuse_press_not_asked_about(self.manager.element_ids, session.page, x, y, session_id=session.id)
-        await session.page.mouse.down()
-        await asyncio.sleep(random.uniform(0.02, 0.08))
-        await session.page.mouse.up()
+        try:
+            await session.page.mouse.down()
+            await asyncio.sleep(random.uniform(0.02, 0.08))
+        except BaseException:
+            # Cancelled or failed with the button perhaps down (also where down() never answered): let it go, as a
+            # drag does, or the page keeps it pressed for whatever runs next. A cancel in the pause, from a client
+            # that gave up, skipped the up().
+            await release_mouse_after_failure(session.page, "press")
+            raise
+        await release_mouse_through_a_cancel(session.page, "press")
         session.mouse_position = (x, y)
 
     async def click_locator_human_like(

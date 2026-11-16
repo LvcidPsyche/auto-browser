@@ -1019,3 +1019,33 @@ async def test_a_focus_check_the_page_does_not_answer_refuses_the_type_within_it
     assert refused.value.code == "focus_lost"
     assert took < 2, took
     locator.focus.assert_awaited_once()
+
+
+@pytest.mark.parametrize("cancelled_during", ["the pause", "the press"])
+async def test_a_press_cancelled_before_its_release_still_lets_the_button_go(cancelled_during: str) -> None:
+    # 1b-3: press_mouse sent down(), paused, then up(), and nothing carried the up through a cancel: one in the pause
+    # (a client that gave up), or while down() was still unanswered, left the page with its button pressed for
+    # whatever ran next. It is let go as a drag's is, and the cancel then goes on.
+    reached = asyncio.Event()
+    released: list[str] = []
+
+    async def stalls(*_args: Any) -> None:
+        reached.set()
+        await asyncio.Event().wait()
+
+    async def up() -> None:
+        released.append("mouse up")
+
+    mouse = SimpleNamespace(down=AsyncMock(side_effect=stalls if cancelled_during == "the press" else None), up=up)
+    session = SimpleNamespace(id="session-7", page=SimpleNamespace(mouse=mouse), mouse_position=(10.0, 10.0))
+    service = BrowserActionService(SimpleNamespace())
+    pause = stalls if cancelled_during == "the pause" else AsyncMock()
+
+    with patch("app.browser.services.actions.asyncio.sleep", new=pause):
+        pressing = asyncio.create_task(service.press_mouse(session, 1.0, 2.0))
+        await asyncio.wait_for(reached.wait(), 5)
+        pressing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pressing, 5)
+
+    assert released == ["mouse up"]

@@ -156,6 +156,10 @@ All notable changes to auto-browser are documented here.
   each bounded at 2 seconds, the least a keystroke is given, past which the type ends as `typing_timeout` with none
   of its text typed. And a type whose field cannot be found again is refused before select-all, which was pressed
   first, into whatever had focus. The pointer's moves and the press still wait for the page.
+- **A click cancelled between pressing the mouse button and letting it go no longer leaves the button pressed.**
+  The press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or
+  while the page had not yet answered the button going down, skipped the up: whatever ran next on the page began
+  with the button held. It is let go as a drag's is, within 5 seconds, and the cancel then goes on.
 
 ### Changed
 
