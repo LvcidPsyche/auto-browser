@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
-from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
@@ -95,16 +94,9 @@ class TotpAutofillTests(unittest.TestCase):
         seconds the page takes to acknowledge each key of the clear by keys."""
         self.typed_keys: list[str] = []
 
-        async def typing(_page: object, text: str, *, keeps_on: Callable[[], bool]) -> bool:
-            # The typing code's own: keeps_on asked before each key, which goes in, the typing stopped at a no.
-            for key in text:
-                if not keeps_on():
-                    return False
-                self.typed_keys.append(key)
-                leave_during("typing")
-            return True
-
-        typed = AsyncMock(side_effect=typing)
+        async def type_key(key: str) -> None:
+            self.typed_keys.append(key)
+            leave_during("typing")
 
         async def clear(_value: str) -> None:
             leave_during("clear")
@@ -127,12 +119,16 @@ class TotpAutofillTests(unittest.TestCase):
             fill=AsyncMock(side_effect=clear), press=AsyncMock(), evaluate=AsyncMock(side_effect=asked)
         )
         manager = SimpleNamespace(
+            settings=SimpleNamespace(human_typing_min_delay_ms=0, human_typing_max_delay_ms=0),
             _settle=AsyncMock(),
             _page_refused=lambda page: refused,
             _shown_url=lambda page: shown if shown is not None else page.url,
         )
         service = BrowserActionService(manager)
-        keyboard = SimpleNamespace(press=AsyncMock(side_effect=press_key))
+        # The typing code itself runs, with no pauses, over a keyboard that notes each key (B1-fix2 item 16): a copy
+        # of its loop here passed a typing code that asked the host after each key, not before it.
+        typed = AsyncMock(wraps=service.type_text_human_like)
+        keyboard = SimpleNamespace(press=AsyncMock(side_effect=press_key), type=AsyncMock(side_effect=type_key))
         session = SimpleNamespace(
             page=SimpleNamespace(url=url, keyboard=keyboard), totp_secret=SECRET, totp_hosts=hosts
         )
