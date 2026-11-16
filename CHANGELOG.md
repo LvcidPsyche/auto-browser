@@ -53,8 +53,10 @@ All notable changes to auto-browser are documented here.
 - **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
   plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
   text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
-  no longer makes the read `plain`; named as a secret, it still makes it `secret`, since a page can enable or show it
-  as the type focuses.
+  (hidden by `hidden`, `display` or `visibility`, or in an `inert` subtree, across shadow roots too) no longer
+  makes the read `plain`; named as a secret, it still makes it `secret`, since a page can enable or show it as the
+  type focuses. A plain field that can take text, however small or faint the page draws it, still makes a read
+  beside such a component `plain`.
 - **A fenced frame is a frame to the in-page checks, as an iframe is.** The frame tags they knew were `iframe`,
   `frame`, `object` and `embed`, so a plain field beside a `<fencedframe>` made an approval read `plain` though the
   text can go into the frame's document; a click by element_id on a button a fenced frame filled went into the frame,

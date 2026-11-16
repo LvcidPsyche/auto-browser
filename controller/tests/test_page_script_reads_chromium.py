@@ -178,6 +178,24 @@ TAKES_NO_TEXT_NOW = {
     ),
     "a-read-only-field": ('<div id="named"><textarea readonly></textarea></div>', "unread"),
     "a-field-not-shown": ('<div id="named"><input aria-label="Note" hidden></div>', "unread"),
+    # B1-fix1 item 8 (orchestrator probe, Opus F2): a field visibility hides, and one in an inert subtree (across a
+    # shadow root too, where an inert host makes its shadow content inert and closest() does not see it), take no
+    # text either; both read plain beside a component that takes its keys.
+    "a-field-visibility-hides-beside-a-component-that-takes-its-keys": (
+        '<div id="named"><input aria-label="Name" style="visibility: hidden">'
+        '<div tabindex="0" role="textbox" aria-label="Code"></div></div>',
+        "unread",
+    ),
+    "an-inert-field-beside-a-component-that-takes-its-keys": (
+        '<div id="named"><div inert><input aria-label="Name"></div>'
+        '<div tabindex="0" role="textbox" aria-label="Code"></div></div>',
+        "unread",
+    ),
+    "a-field-in-an-inert-hosts-shadow-root-beside-a-component-that-takes-its-keys": (
+        '<div id="named"><div id="host" inert></div><div tabindex="0" role="textbox" aria-label="Code"></div>'
+        "</div><script>host.attachShadow({mode: 'open'}).innerHTML = '<input aria-label=Name>';</script>",
+        "unread",
+    ),
     # The control: a field that cannot take text now still says secret, for a page can enable it as the type focuses.
     "a-disabled-password-field-beside-a-plain-one": (
         '<div id="named"><input type="password" disabled><textarea></textarea></div>',

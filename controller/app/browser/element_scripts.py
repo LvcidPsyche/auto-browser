@@ -717,10 +717,20 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     if (shadow) lookInside(shadow);
     lookInside(node);
   }}
-  // A select has no read-only state: it takes keys unless it is disabled.
+  // Shown (visibility counts: a visibility:hidden field takes no keys) and in no inert subtree, which takes none either.
+  // Inert reaches across shadow roots and slots, where closest() does not (an inert host's shadow content is inert),
+  // so the walk is the tree as it is shown, bounded as the other walks. A select has no read-only state: it takes
+  // keys unless it is disabled.
   const checkVisibility = Element.prototype.checkVisibility;
+  const inert = (node) => {{
+    for (let at = node, steps = 0; at && steps < 256; at = dom.flatUp(at), steps += 1) {{
+      if (dom.type(at) === 1 && dom.has(at, 'inert')) return true;
+    }}
+    return false;
+  }};
   const live = (node) =>
-    checkVisibility.call(node) &&
+    checkVisibility.call(node, {{ visibilityProperty: true }}) &&
+    !inert(node) &&
     (dom.tag(node) === 'SELECT' ? !dom.matches(node, ':disabled') : dom.matches(node, ':read-write'));
   // Fields alike in every attribute are answered once: what is read of them is the same, and each paragraph of an
   // editor counts.
