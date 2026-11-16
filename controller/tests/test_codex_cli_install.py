@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -31,6 +33,11 @@ RELEASE_ASSET = re.compile(
 )
 ARCHITECTURE_CASE = re.compile(r'case "\$\(dpkg --print-architecture\)" in .*? esac')
 SUM_CHECK = re.compile(r'echo "\$\{?(\w+)\}?  ([^"]+)" \| sha256sum -c -')
+# The requirements file: printf'd to a staged path, then installed from that path, root-owned 0644.
+REQUIREMENTS = re.compile(
+    r"&& (?P<printf>printf '%s\\n' '[^']*'\s+'mcp_servers = \{\}') > (?P<staged>\S+)"
+    r"\s+&&\s+install -D -m 0644 -o root -g root (?P=staged) /etc/codex/requirements\.toml\s+&&"
+)
 
 
 def _dockerfile() -> str:
@@ -82,6 +89,32 @@ class CodexComesFromItsReleaseTests(unittest.TestCase):
         binary_check = text.index("| sha256sum -c -", extract)
         install = re.search(r"install -m 0755 -o root -g root \S+ /usr/local/bin/codex", text[binary_check:])
         self.assertIsNotNone(install, "the checked binary is not installed as /usr/local/bin/codex, root-owned, 0755")
+
+
+@unittest.skipUnless(DOCKERFILE.is_file(), NOT_IN_THIS_TREE)
+@unittest.skipIf(BASH is None, NO_BASH_REASON)
+class NoMcpServerLoadsTests(unittest.TestCase):
+    """/etc/codex/requirements.toml holds `mcp_servers = {}`: the adapter's `-c mcp_servers={}` clears no server a
+    CODEX_HOME config.toml names (Codex merges -c tables key by key), and the file lies outside every grant of the CLI
+    sandbox. The agent-cli-image workflow checks that Codex reads it so."""
+
+    def test_the_cli_branch_alone_writes_the_requirements_root_owned_0644(self) -> None:
+        text = _dockerfile()
+        branch = re.search(r'if \[ "\$INSTALL_AGENT_CLIS" = "true" \]; then (.*?) elif ', text)
+        self.assertIsNotNone(branch, "no INSTALL_AGENT_CLIS=true branch")
+        written = REQUIREMENTS.search(branch.group(1))
+        self.assertIsNotNone(written, "the CLI branch does not install /etc/codex/requirements.toml, root:root 0644")
+        self.assertNotIn("/etc/codex", text.replace(branch.group(1), ""))
+        with tempfile.TemporaryDirectory() as scratch:
+            staged = Path(scratch) / "requirements.toml"
+            subprocess.run(
+                [BASH, "--noprofile", "--norc", "-c", f'{written.group("printf")} > "$0"', staged.as_posix()],
+                check=True,
+                timeout=30,
+            )
+            lines = staged.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(tomllib.loads(staged.read_text(encoding="utf-8")), {"mcp_servers": {}})
+        self.assertTrue(lines[0].startswith("# "), lines)
 
 
 @unittest.skipUnless(DOCKERFILE.is_file(), NOT_IN_THIS_TREE)

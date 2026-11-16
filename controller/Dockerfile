@@ -13,7 +13,10 @@ ARG INSTALL_AGENT_CLIS=false
 # sandbox helper opens / without O_PATH (Rust std drops the flag on musl), which the controller's Landlock launcher
 # refuses, so Codex ran none of its model's commands. The sums are of rust-v${CODEX_CLI_VERSION}'s
 # codex-<arch>-unknown-linux-gnu.tar.gz and of the binary in it, which the release's .sigstore bundle signs. A bump
-# changes the version and all four sums in one commit (AGENTS.md says how to verify them).
+# changes the version and all four sums in one commit (AGENTS.md says how to verify them). Beside it goes
+# /etc/codex/requirements.toml with mcp_servers = {}, so that no MCP server a CODEX_HOME config.toml names loads: the
+# adapter's -c mcp_servers={} clears none (Codex merges -c tables key by key), and no grant of the CLI sandbox reaches
+# /etc/codex.
 ARG CODEX_CLI_VERSION=0.114.0
 ARG CODEX_CLI_TARBALL_SHA256_AMD64=f18294d4da6756e9e5ad4dc62b3030b7a75a94e5e5022f3bfa4a21a7d3c52ae0
 ARG CODEX_CLI_BINARY_SHA256_AMD64=8bae8fa33887a8d829815fa0af85887cbac3658ac1b6147a4b1d3d54c5e015de
@@ -51,6 +54,9 @@ RUN apt-get update \
         && tar -xzf /tmp/codex-cli/codex.tar.gz -C /tmp/codex-cli \
         && echo "${codex_bin_sum}  /tmp/codex-cli/codex-${codex_arch}-unknown-linux-gnu" | sha256sum -c - \
         && install -m 0755 -o root -g root "/tmp/codex-cli/codex-${codex_arch}-unknown-linux-gnu" /usr/local/bin/codex \
+        && printf '%s\n' '# No MCP server loads, whatever a CODEX_HOME config.toml names: -c mcp_servers={} clears none.' \
+            'mcp_servers = {}' > /tmp/codex-cli/requirements.toml \
+        && install -D -m 0644 -o root -g root /tmp/codex-cli/requirements.toml /etc/codex/requirements.toml \
         && rm -rf /tmp/codex-cli; \
     elif [ "$INSTALL_AGENT_CLIS" != "false" ]; then \
         echo "INSTALL_AGENT_CLIS must be true or false, got '$INSTALL_AGENT_CLIS'" >&2; exit 1; \

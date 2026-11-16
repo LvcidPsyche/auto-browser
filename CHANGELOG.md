@@ -16,6 +16,16 @@ All notable changes to auto-browser are documented here.
   malformed `CONTROLLER_ALLOWED_HOSTS` still leaves the controller serving a 500 to every request (see Fixed). The
   image's command and the root image's entrypoint pass it.
 
+### Security
+
+- **No MCP server named in Codex's home loads, in an image built with `INSTALL_AGENT_CLIS=true`.** Each Codex call
+  passes `-c mcp_servers={}` to load none, but Codex merges a `-c` table into its configuration key by key, so a
+  server named in `CLI_HOME/.codex/config.toml` (the host's own, under `docker-compose.host-subscriptions.yml`, or one
+  a command of the model's wrote there) stayed enabled: measured with codex-cli 0.114.0, `codex mcp list` still
+  showed it. The image now writes `/etc/codex/requirements.toml`, owned by root, mode 0644, holding
+  `mcp_servers = {}`. Codex then lists such a server as `disabled: requirements (/etc/codex/requirements.toml)`, and
+  `-c mcp_servers.<name>.enabled=true` does not turn it back on. No grant of the CLI sandbox reaches `/etc/codex`.
+
 ### Fixed
 
 - **Codex's own sandbox now runs beneath the CLI sandbox, in an image built with `INSTALL_AGENT_CLIS=true`.** The
