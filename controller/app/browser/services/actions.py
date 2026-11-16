@@ -141,7 +141,7 @@ _step_clock = time.perf_counter
 # The way up from what the pointer hits goes by the slot a node is given to, as a click's event does: a label
 # slotted into a component's button is that button's. By its parents alone it was not, which only sent the
 # click to Playwright's placing while nothing asked the target after that; the same question is asked there now.
-# It reads the tree through the prototypes' own getters (element_scripts.DOM_JS), 256 steps at most, as click_target's
+# It reads the tree through the prototypes' own getters (element_scripts.DOM_JS), dom.STEPS at most, as click_target's
 # walks do: read as properties, a form's control named parentNode answered for the form's parent, and the walk went to
 # the control (a button so named, under a layer of the form's, found itself) or round the form and its control for good.
 # ``arrived``: the pointer is at (x, y) now, and the element, in a frame, is asked as well whether the pointer is
@@ -181,18 +181,12 @@ _RECEIVES_POINTER_SCRIPT = (
     x = own.left + ((x - box.x) * own.width) / box.width;
     y = own.top + ((y - box.y) * own.height) / box.height;
   }
-  let hit = dom.at(document, x, y);
-  for (;;) {
-    const root = hit && dom.shadowRoot(hit);
-    const inner = root && dom.at(root, x, y);
-    if (!inner || inner === hit) break;
-    hit = inner;
-  }
+  const hit = dom.hit(x, y);
   if (!hit) return false;
   if (onlyFrames && !dom.frame(hit)) return false;
   const label = dom.closest(hit, 'label');
   if (label && dom.control(label) === el) return over(label);
-  for (let node = hit, steps = 0; node && steps < 256; node = dom.flatUp(node), steps += 1) {
+  for (let node = hit, steps = 0; node && steps < dom.STEPS; node = dom.flatUp(node), steps += 1) {
     if (node === target) return over(target);
   }
   return false;

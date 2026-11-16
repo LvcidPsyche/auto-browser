@@ -461,7 +461,7 @@ DESCRIBE_TARGET_SCRIPT = (
   const isButton = (node) => dom.matches(node, 'button, input, a[href]') || ROLES.includes(roleOf(node));
   let target = null;
   let label = null;
-  for (let node = el, steps = 0; node && steps < 256; steps += 1) {
+  for (let node = el, steps = 0; node && steps < dom.STEPS; steps += 1) {
     if (dom.type(node) === 1 && isButton(node)) { target = node; break; }
     if (!label && dom.type(node) === 1 && dom.tag(node) === 'LABEL') label = node;
     node = dom.flatUp(node);
@@ -470,7 +470,7 @@ DESCRIBE_TARGET_SCRIPT = (
   // is one on the item: from a link the walk goes on to the button or the menu item around it, if there is one.
   if (target && target.localName === 'a' && !ROLES.includes(roleOf(target))) {
     let node = dom.flatUp(target);
-    for (let steps = 0; node && steps < 256; steps += 1) {
+    for (let steps = 0; node && steps < dom.STEPS; steps += 1) {
       if (dom.type(node) === 1 && (dom.tag(node) === 'BUTTON' || ROLES.includes(roleOf(node)))) {
         target = node;
         break;
@@ -491,7 +491,7 @@ DESCRIBE_TARGET_SCRIPT = (
     let inner = null;
     for (const child of given.length <= 64 ? given : []) {
       let found = null;
-      for (let node = dom.slot(child), steps = 0; node && dom.type(node) === 1 && steps < 256; steps += 1) {
+      for (let node = dom.slot(child), steps = 0; node && dom.type(node) === 1 && steps < dom.STEPS; steps += 1) {
         if (isButton(node)) { found = node; break; }
         node = dom.flatUp(node);
       }

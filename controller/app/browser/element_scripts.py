@@ -66,6 +66,8 @@ DOM_JS = """const dom = (() => {
   // there. A portal is listed though the Chromium measured (156) has no such element: one so named is then the page's.
   const FRAME_TAGS = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'FENCEDFRAME', 'PORTAL'];
   const dom = {
+    // The most steps a walk along the tree takes: a page can make one go round for good (see above).
+    STEPS: 256,
     frame: (el) => FRAME_TAGS.includes(dom.tag(el)),
     // The element above: the parent element, or the host of the shadow root the element is in.
     up(el) {
@@ -138,6 +140,15 @@ DOM_JS = """const dom = (() => {
         return null;
       }
     },
+    // The innermost focused element of the node's root, through open shadow roots: what keys sent now go to, in
+    // this document. Null where nothing in it has focus.
+    focused(node) {
+      let active = dom.active(dom.root(node));
+      for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {
+        active = dom.active(root);
+      }
+      return active || null;
+    },
     shadowRoot: (el) => shadowRoot.call(el),
     tag: (el) => tagName.call(el).toUpperCase(),
     // Attached, and to this document: one a same-origin frame adopted has the frame's box.
@@ -151,6 +162,16 @@ DOM_JS = """const dom = (() => {
     // The element at (x, y) of a document or a shadow root, by the prototype's method: read off the document, an
     // element the page named elementFromPoint stood in for it.
     at: (root, x, y) => (nodeType.call(root) === 9 ? documentAt : shadowAt)(root, x, y),
+    // The innermost element at (x, y) of this document, through open shadow roots: what the pointer hits there.
+    hit(x, y) {
+      let hit = dom.at(document, x, y);
+      for (;;) {
+        const root = hit && dom.shadowRoot(hit);
+        const inner = root && dom.at(root, x, y);
+        if (!inner || inner === hit) return hit;
+        hit = inner;
+      }
+    },
   };
   return dom;
 })();"""
@@ -163,13 +184,7 @@ DOM_JS = """const dom = (() => {
 # Every page-chosen part of the description is bounded. A frame behind a closed
 # shadow root is not seen: the hit stays on the root's host.
 _COVER_AT_JS = r"""(el, x, y) => {
-  let hit = document.elementFromPoint(x, y);
-  for (;;) {
-    const root = hit && dom.shadowRoot(hit);
-    const inner = root && root.elementFromPoint(x, y);
-    if (!inner || inner === hit) break;
-    hit = inner;
-  }
+  const hit = dom.hit(x, y);
   if (!hit) return { tag: null };
   const frame = dom.frame(hit);
   const inside = dom.within(hit, el);
@@ -533,10 +548,7 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # then go to the frame's document. Also run in the main world, on a locator, for
 # a selector target, without it. _FOCUS_PLACE_JS is that walk (needs `dom`).
 _FOCUS_PLACE_JS = """(el) => {
-    let active = dom.active(dom.root(el));
-    for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {
-      active = dom.active(root);
-    }
+    const active = dom.focused(el);
     if (!active || !dom.within(active, el)) return 'out';
     return active !== el && dom.frame(active) ? 'framed' : 'in';
   }"""
@@ -597,16 +609,9 @@ const observe = Observer.prototype.observe;
 const takeRecords = Observer.prototype.takeRecords;
 const disconnect = Observer.prototype.disconnect;
 const held = {{
-  focused(from) {{
-    let active = dom.active(dom.root(from));
-    for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
-      active = dom.active(root);
-    }}
-    return active || null;
-  }},
   take(el) {{
     const hold = {{ node: null, root: null, target: el, left: false, listener: null, observer: null, renamed: false }};
-    const active = held.focused(el);
+    const active = dom.focused(el);
     if (!active || !dom.within(active, el) || dom.frame(active)) {{
       return hold;
     }}
@@ -637,7 +642,7 @@ const held = {{
   read(hold) {{
     const node = hold.node;
     if (!node || hold.left || held.wasRenamed(hold)) return null;
-    if (dom.shadowRoot(node) !== hold.root || held.focused(node) !== node) return null;
+    if (dom.shadowRoot(node) !== hold.root || dom.focused(node) !== node) return null;
     return ({_FIELD_ATTRIBUTES_JS})(node);
   }},
   // Whether the page changed one of the attributes read since the take: heard, or still in the observer's queue.
@@ -788,7 +793,7 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   const modals = Array.from(Document.prototype.querySelectorAll.call(document, 'dialog:modal'));
   const inert = (node) => {{
     for (let at = node, steps = 0; at; at = dom.flatUp(at), steps += 1) {{
-      if (steps === 256) return true;
+      if (steps === dom.STEPS) return true;
       if (dom.type(at) !== 1) continue;
       if (dom.has(at, 'inert')) return true;
       if (dom.matches(at, 'dialog:modal')) break;
