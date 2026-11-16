@@ -21,7 +21,7 @@ import pytest
 
 from app.action_errors import BrowserActionError
 from app.browser.click_target import classified_risk, read_click_target, same_element_at
-from app.browser.services.actions import _RECEIVES_POINTER_SCRIPT, BrowserActionService
+from app.browser.services.actions import _RECEIVES_POINTER_SCRIPT, POINTER_CHECK_TIMEOUT_MS, BrowserActionService
 from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
 from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromium: that module's autouse browser
@@ -343,19 +343,25 @@ async def test_the_pointer_check_finds_no_target_under_a_form_whose_control_is_n
     # _RECEIVES_POINTER_SCRIPT walked up from what the pointer hits by parentNode read as a property, with no bound:
     # the form's control took the walk to the button (the press then went to the layer over it), or round the form and
     # its control without end, which held the page. The pointer finds the form's layer, or the form, not the button.
+    # The check answers its no itself, well within its bound, and the page answers after it: a no past the bound, or
+    # an error, reads as the same False to the click (B1-fix1 item 31, staged F16).
     async with browser_env(tmp_path, {"/page": page}) as env:
         session_id = await env.create("/page")
-        locator = env.manager.sessions[session_id].page.locator("#target")
+        tab = env.manager.sessions[session_id].page
+        locator = tab.locator("#target")
         box = await locator.bounding_box()
+        point = [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2]
 
-        found = await asyncio.wait_for(
-            BrowserActionService._receives_pointer_at(
-                locator, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-            ),
-            10,
-        )
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        found = await asyncio.wait_for(BrowserActionService._receives_pointer_at(locator, *point), 10)
+        took = loop.time() - began
+        answered = await asyncio.wait_for(locator.evaluate(_RECEIVES_POINTER_SCRIPT, [*point, None, False, False]), 5)
 
         assert found is False
+        assert answered is False
+        assert took < POINTER_CHECK_TIMEOUT_MS / 2000, took
+        assert await asyncio.wait_for(tab.evaluate("() => 1 + 1"), 5) == 2
 
 
 # A button the read click asks for by selector, on pages that answer for what the pointer check asks of the browser:
