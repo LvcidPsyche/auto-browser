@@ -84,12 +84,13 @@ All notable changes to auto-browser are documented here.
 - **A type that clears its field takes its hold on the field before the clear, not after it.** Taken after, the hold
   heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a
   plain one in the same element the type named kept the preview of the text meant for the password field, and a
-  move away and back between the clear's checks passed them both. Its preview is now withheld. The hold reads the
-  field once the clear is done as well, as the hold taken then did: a field the clear's Delete makes a password field
-  keeps no preview however it reads once the text is in. By selector, the clear's checks also took focus in a frame
-  inside the named element for focus in it, as by `element_id` they do not, and the clear's keys and the text went to
-  the frame's document: the type is now refused there (`focus_lost`), unless focus was already in the frame as the
-  type began.
+  move away and back between the clear's checks passed them both. Its preview is now withheld, unless the page
+  stops focus events before the field hears them: a hold has never heard a move away and back on such a page
+  (docs/llm-adapters.md). The hold reads the field once the clear is done as well, as the hold taken then did: a
+  field the clear's Delete makes a password field keeps no preview however it reads once the text is in. By
+  selector, the clear's checks also took focus in a frame inside the named element for focus in it, as by
+  `element_id` they do not, and the clear's keys and the text went to the frame's document: the type is now refused
+  there (`focus_lost`), unless focus was already in the frame as the type began.
 
 ### Fixed
 
@@ -181,8 +182,9 @@ All notable changes to auto-browser are documented here.
   observe the page before acting again. A drag's ended as an untyped `RuntimeError`.
 - **A type cancelled as the page answered one of its calls no longer goes on, on the image's Python 3.11.** There,
   `asyncio.wait_for` answered a caller cancelled in the loop turn its call answered with that answer, so the cancel
-  was lost: the next keystroke was typed, a key of the clear pressed, or a take read on. The bounds of a type's
-  questions to its field, of its take's read, and of each keystroke and key of the clear now raise the cancel.
+  was lost: the next keystroke was typed, a key of the clear pressed, or a take read on. The bounds of each
+  keystroke and key of the clear now raise the cancel, and by selector so do those of a type's questions to its
+  field and of its take's read. By `element_id` those questions and the take still go through `asyncio.wait_for`.
 
 ### Changed
 
