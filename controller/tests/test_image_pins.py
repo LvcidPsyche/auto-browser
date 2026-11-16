@@ -3,8 +3,8 @@
 A FROM by tag alone builds on whatever the tag names on the day of the build; by digest it builds on one image. The
 pin would freeze the base's security patches without Dependabot's docker entry, which proposes the tag's newer digest
 (with the cooldown the other entries have), so the two land together. The root (Glama) image installs under the
-controller's constraints.txt. Each build context also has a .dockerignore that keeps the checkout's secrets,
-virtualenvs and caches out of what the build is sent, and nothing its Dockerfile copies. A repo-layout check: the
+controller's constraints.txt. Each build context also has a .dockerignore that keeps the checkout's secrets, .venv*,
+node_modules and __pycache__ out of what the build is sent, and nothing its Dockerfile copies. A repo-layout check: the
 controller image ships only app/ and tests/, so it skips there.
 """
 
@@ -20,12 +20,14 @@ REPO = Path(__file__).resolve().parents[2]
 # The directory of each Dockerfile, which is also its build context.
 CONTEXTS = ("", "controller", "browser-node", "reverse-ssh", "smoke/bastion")
 PINNED = re.compile(r"^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$")
-# Paths no build may be sent, wherever a checkout holds them: history, virtualenvs, node_modules, bytecode, the
+# Paths no build may be sent, wherever a checkout holds them: history, .venv*, node_modules, __pycache__, the
 # runtime data (data/ holds the API token and the keys) and .env files.
+RECURSIVE = ("**/.venv*", "**/node_modules", "**/__pycache__", "**/.env*")
 PRIVATE = (
     ".git/config",
     ".venv/bin/python",
     ".venv-codex/bin/python",
+    "app/.venv/bin/python",
     "node_modules/x/index.js",
     "app/node_modules/x/index.js",
     "__pycache__/m.pyc",
@@ -103,22 +105,26 @@ class ImageBuildInputsTests(unittest.TestCase):
                 self.assertGreaterEqual(entry.get("cooldown", {}).get("default-days", 0), 3)
                 # A new digest of the pinned tag, not a new tag: python:3.11-slim to 3.14-slim is a decision of its
                 # own, which a weekly pull request is not.
-                self.assertIn(
-                    {
-                        "dependency-name": "*",
-                        "update-types": ["version-update:semver-major", "version-update:semver-minor"],
-                    },
-                    entry.get("ignore", []),
-                )
+                ignored = [
+                    set(rule.get("update-types", []))
+                    for rule in entry.get("ignore", [])
+                    if rule.get("dependency-name") == "*"
+                ]
+                self.assertIn({"version-update:semver-major", "version-update:semver-minor"}, ignored)
 
     def test_the_root_image_installs_its_requirements_under_the_constraints(self) -> None:
         # The root (Glama) image installed requirements.txt alone, so each build resolved the tree afresh and could
         # take a release under 72 hours old; the controller image installs under controller/constraints.txt.
         text = (REPO / "Dockerfile").read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^COPY controller/requirements\.txt controller/constraints\.txt \./$")
-        installs = re.findall(r"(?m)^RUN pip install .*$", text)
-        self.assertEqual(len(installs), 1, installs)
-        self.assertRegex(installs[0], r" -r requirements\.txt -c constraints\.txt$")
+        instructions = re.sub(r"\\\n\s*", " ", re.sub(r"(?m)^\s*#.*\n", "", text))
+        # Every pip install, in any RUN, chained or not, up to the next command of its line.
+        installs = re.findall(r"\bpip3? install\b[^&;|\n]*", instructions)
+        self.assertTrue(installs)
+        for install in installs:
+            with self.subTest(install=install):
+                self.assertRegex(install, r"\s-c constraints\.txt(\s|$)")
+        self.assertRegex(installs[0], r"-r requirements\.txt -c constraints\.txt")
 
     def test_each_build_context_keeps_the_checkout_s_secrets_and_caches_out(self) -> None:
         for context in CONTEXTS:
@@ -127,6 +133,8 @@ class ImageBuildInputsTests(unittest.TestCase):
                 lines = _ignore_lines(context)
                 # An exception (`!data`) would let a path the lines above keep out back in.
                 self.assertEqual([line for line in lines if line.startswith("!")], [])
+                # The classes a checkout holds at any depth are kept out at any depth.
+                self.assertLessEqual(set(RECURSIVE), set(lines))
                 patterns = [_pattern(line) for line in lines]
                 self.assertEqual([path for path in PRIVATE if not _ignored(path, patterns)], [])
 
