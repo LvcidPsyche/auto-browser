@@ -37,7 +37,7 @@ colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
     # via
     #   build
     #   pytest
-coverage==7.17.2
+coverage==7.17.3
     # via pytest-cov
 cryptography==50.0.2
     # via -r requirements.txt
@@ -47,7 +47,7 @@ defusedxml==0.7.1
     # via py-serializable
 docker==7.2.0
     # via -r requirements.txt
-fastapi==0.162.4
+fastapi==0.162.5
     # via -r requirements.txt
 filelock==4.2.10
     # via cachecontrol
@@ -148,7 +148,7 @@ pytest==9.2.0
     #   -r requirements-dev.txt
     #   pytest-asyncio
     #   pytest-cov
-pytest-asyncio==1.4.1.post1
+pytest-asyncio==1.5.0
     # via -r requirements-dev.txt
 pytest-cov==7.1.0
     # via -r requirements-dev.txt
@@ -171,7 +171,7 @@ respx==0.23.1
     # via -r requirements-dev.txt
 rich==15.0.0
     # via pip-audit
-ruff==0.17.4
+ruff==0.17.5
     # via -r requirements-dev.txt
 sortedcontainers==2.4.0
     # via cyclonedx-python-lib
