@@ -12,6 +12,7 @@ against real Chromium.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from types import SimpleNamespace
@@ -1049,3 +1050,93 @@ async def test_a_press_cancelled_before_its_release_still_lets_the_button_go(can
             await asyncio.wait_for(pressing, 5)
 
     assert released == ["mouse up"]
+
+
+# What a press's tests give the mouse-up to answer in: the bound a release has, shortened.
+RELEASE_BOUND_S = 0.2
+
+
+def _press_session(down: Any, up: Any) -> tuple[BrowserActionService, SimpleNamespace]:
+    """A service, and a session whose mouse goes down and up by ``down`` and ``up``."""
+    mouse = SimpleNamespace(down=down, up=up)
+    session = SimpleNamespace(id="session-7", page=SimpleNamespace(mouse=mouse), mouse_position=(10.0, 10.0))
+    return BrowserActionService(SimpleNamespace()), session
+
+
+async def test_a_press_whose_button_is_not_let_go_in_time_says_it_may_still_be_held() -> None:
+    # B1-fix1 item 5 (Codex B1-5, Opus F14): the mouse-up's bound raised a RuntimeError, which a click's caller met as
+    # HTTP 500 "Internal error", with nothing to say that the press went down: a retry pressed again. The error is a
+    # typed one now, not to be retried, and says the button went down and may still be held.
+    service, session = _press_session(AsyncMock(), _never)
+
+    with patch.object(actions, "MOUSE_UP_TIMEOUT_SECONDS", RELEASE_BOUND_S), pytest.raises(BrowserActionError) as ended:
+        await asyncio.wait_for(service.press_mouse(session, 1.0, 2.0), 5)
+
+    assert (ended.value.code, ended.value.status_code, ended.value.retryable) == ("mouse_not_released", 504, False)
+    assert "may still be held" in ended.value.message, ended.value.message
+
+
+async def test_a_mouse_up_whose_cancel_is_never_answered_still_ends_at_its_bound() -> None:
+    # B1-fix1 item 23 (staged triage F01): the bound was asyncio.wait_for, which cancels mouse.up() at its timeout and
+    # then waits for the cancel to finish; Playwright's cancelled call waits for the driver to answer its abort, with
+    # no bound, so a driver that never answered held the press past the 5 s. The bound no longer waits for the cancel.
+    aborted = asyncio.Event()
+
+    async def up() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await aborted.wait()  # the driver's answer to the abort
+            raise
+
+    service, session = _press_session(AsyncMock(), up)
+    with patch.object(actions, "MOUSE_UP_TIMEOUT_SECONDS", RELEASE_BOUND_S):
+        pressing = asyncio.ensure_future(service.press_mouse(session, 1.0, 2.0))
+        try:
+            done, _ = await asyncio.wait({pressing}, timeout=3 * RELEASE_BOUND_S)
+        finally:
+            aborted.set()
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(asyncio.shield(pressing), 5)
+
+    assert done, "the press waited for the cancel of its mouse-up"
+    assert isinstance(pressing.exception(), BrowserActionError), pressing.exception()
+
+
+async def test_a_release_that_fails_another_way_after_a_failed_press_keeps_the_press_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # B1-fix1 item 24 (staged triage F06): only a PlaywrightError or a RuntimeError of the release was logged and let
+    # go; any other replaced the press's own error. Any error of the release is logged, and the press's is raised.
+    service, session = _press_session(
+        AsyncMock(side_effect=PlaywrightError("the button did not go down")), AsyncMock(side_effect=ValueError("up"))
+    )
+
+    with caplog.at_level(logging.WARNING, logger=actions.logger.name), pytest.raises(PlaywrightError):
+        await service.press_mouse(session, 1.0, 2.0)
+
+    assert any("after a press that failed" in record.getMessage() for record in caplog.records), caplog.records
+
+
+async def test_a_cancelled_press_whose_release_fails_is_logged_as_cancelled(caplog: pytest.LogCaptureFixture) -> None:
+    # B1-fix1 item 5 (Opus F19): a press cancelled in its pause, whose release then failed, was logged as a press "that
+    # failed": the cancel was the error the press was handling, and the release saw none of its own.
+    reached = asyncio.Event()
+
+    async def stalls(*_args: Any) -> None:
+        reached.set()
+        await asyncio.Event().wait()
+
+    service, session = _press_session(AsyncMock(), AsyncMock(side_effect=PlaywrightError("Target closed")))
+    with (
+        patch("app.browser.services.actions.asyncio.sleep", new=stalls),
+        caplog.at_level(logging.WARNING, logger=actions.logger.name),
+    ):
+        pressing = asyncio.create_task(service.press_mouse(session, 1.0, 2.0))
+        await asyncio.wait_for(reached.wait(), 5)
+        pressing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pressing, 5)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("after a press that was cancelled" in message for message in messages), messages

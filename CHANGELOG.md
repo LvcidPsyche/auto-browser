@@ -161,7 +161,10 @@ All notable changes to auto-browser are documented here.
 - **A click cancelled between pressing the mouse button and letting it go no longer leaves the button pressed.**
   The press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or
   while the page had not yet answered the button going down, skipped the up: whatever ran next on the page began
-  with the button held. It is let go as a drag's is, within 5 seconds, and the cancel then goes on.
+  with the button held. It is let go as a drag's is, within 5 seconds, and the cancel then goes on. A click or a drag
+  whose button is not let go within those 5 seconds, also where the browser does not answer the cancel of the
+  release, ends as `mouse_not_released` (504, not to be retried): the button went down and may still be held, so
+  observe the page before acting again. A drag's ended as an untyped `RuntimeError`.
 - **A type cancelled as the page answered one of its calls no longer goes on, on the image's Python 3.11.** There,
   `asyncio.wait_for` answered a caller cancelled in the loop turn its call answered with that answer, so the cancel
   was lost: the next keystroke was typed, a key of the clear pressed, or a take read on. The bounds of a type's

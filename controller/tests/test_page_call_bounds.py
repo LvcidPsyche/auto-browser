@@ -16,6 +16,7 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 
+from app.action_errors import BrowserActionError
 from app.browser.element_target import ElementTarget
 from app.browser.page_read import bounded
 from app.browser.services import actions as actions_module
@@ -132,10 +133,12 @@ async def test_a_button_release_that_never_answers_is_bounded(tmp_path: Path, mo
     manager, session = still_session(tmp_path)
     session.page.mouse.up = hang
 
-    with pytest.raises(RuntimeError, match="not released"):
+    with pytest.raises(BrowserActionError) as ended:
         await asyncio.wait_for(gateway_for(manager)._drag_drop(drag_payload()), timeout=TEST_BOUND_SECONDS)
 
     assert not session.lock.locked()
+    # B1-fix1 item 5: a typed error, not to be retried: the drag went down and its button may still be held.
+    assert (ended.value.code, ended.value.status_code, ended.value.retryable) == ("mouse_not_released", 504, False)
 
 
 class Button:

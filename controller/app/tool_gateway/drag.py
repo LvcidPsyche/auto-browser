@@ -149,11 +149,11 @@ async def drag_drop(manager: Any, payload: "DragDropInput") -> dict[str, Any]:
         deadline = _deadline_seconds(manager, source, target)
         try:
             result = await bounded(_drag(manager, session, payload, source, target, button), seconds=deadline)
-        except BaseException:
+        except BaseException as exc:
             # The drag failed or reached its deadline, perhaps with the button down: let it go, or
             # the page keeps it pressed for whatever runs next. The drag's own error is the one reported.
             if button.may_be_down:
-                await release_mouse_after_failure(session.page, "drag")
+                await release_mouse_after_failure(session.page, "drag", exc)
             raise
         # After the deadline, not under it: a deadline that expired during the release cancelled it.
         if button.may_be_down:

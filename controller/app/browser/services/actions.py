@@ -585,7 +585,7 @@ async def release_mouse_through_a_cancel(page: Any, after: str) -> None:
     a cancel that arrives meanwhile (a client giving up as it ended): the button goes up before the session lock is
     let go, then the cancel goes on. The release has its own bound, so the wait for it ends. A further cancel while it
     is waited for is held too (a server shutdown after a client's), and one is raised at the end."""
-    release = asyncio.ensure_future(_release_mouse_button(page))
+    release = asyncio.ensure_future(_release_mouse_button(page, after))
     cancel: asyncio.CancelledError | None = None
     while not release.done():
         try:
@@ -605,22 +605,34 @@ async def release_mouse_through_a_cancel(page: Any, after: str) -> None:
     raise cancel
 
 
-async def release_mouse_after_failure(page: Any, after: str) -> None:
-    """The release after a press or a drag that failed or was cancelled, perhaps with the button down: the press's or
-    the drag's own error is the one reported, and a release that fails is logged."""
+async def release_mouse_after_failure(page: Any, after: str, ended: BaseException) -> None:
+    """The release after a press or a drag that failed or was cancelled (``ended``, the error it is handling), perhaps
+    with the button down: the press's or the drag's own error is the one reported, and a release that fails, however
+    it fails, is logged. Only a cancel that comes while the release is waited for is raised instead."""
+    how = "was cancelled" if isinstance(ended, asyncio.CancelledError) else "failed"
     try:
         await release_mouse_through_a_cancel(page, after)
-    except (PlaywrightError, RuntimeError) as exc:
-        logger.warning("could not release the mouse button after a %s that failed: %s", after, error_text_for_log(exc))
+    except Exception as exc:
+        logger.warning("could not release the mouse button after a %s that %s: %s", after, how, error_text_for_log(exc))
 
 
-async def _release_mouse_button(page: Any) -> None:
+async def _release_mouse_button(page: Any, after: str) -> None:
     """mouse.up(), with its own bound, sent once after the press or the drag and outside its deadline, still under
-    the lock."""
+    the lock. The bound does not wait for the cancel of a mouse.up() it gives up on (_within): Playwright's cancelled
+    call waits for the driver to answer its abort, with no bound of its own."""
     try:
-        await asyncio.wait_for(page.mouse.up(), timeout=MOUSE_UP_TIMEOUT_SECONDS)
+        await _within(page.mouse.up(), MOUSE_UP_TIMEOUT_SECONDS)
     except TimeoutError:
-        raise RuntimeError(f"The mouse button was not released within {MOUSE_UP_TIMEOUT_SECONDS:g} seconds.") from None
+        # Not a RuntimeError, which a click's caller met as an HTTP 500 with nothing to say the button went down: a
+        # retry pressed again.
+        raise BrowserActionError(
+            f"The mouse button went down for the {after} and was not let go within {MOUSE_UP_TIMEOUT_SECONDS:g} "
+            f"seconds: it may still be held, and the {after} may have done what it does. Observe the page before "
+            "acting again.",
+            code="mouse_not_released",
+            status_code=504,
+            retryable=False,
+        ) from None
 
 
 async def _kept_by_nobody(_answer: Any) -> None:
@@ -1697,11 +1709,11 @@ class BrowserActionService:
         try:
             await session.page.mouse.down()
             await asyncio.sleep(random.uniform(0.02, 0.08))
-        except BaseException:
+        except BaseException as exc:
             # Cancelled or failed with the button perhaps down (also where down() never answered): let it go, as a
             # drag does, or the page keeps it pressed for whatever runs next. A cancel in the pause, from a client
             # that gave up, skipped the up().
-            await release_mouse_after_failure(session.page, "press")
+            await release_mouse_after_failure(session.page, "press", exc)
             raise
         await release_mouse_through_a_cancel(session.page, "press")
         session.mouse_position = (x, y)
