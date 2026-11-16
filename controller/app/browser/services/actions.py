@@ -1791,9 +1791,11 @@ class BrowserActionService:
         y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
         await self.pause_before_press()
-        if await self._receives_pointer_at(locator, x, y, timeout_ms=budget.left_ms()) and await self._is_enabled_now(
-            locator, budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
-        ):
+        # Bounded at POINTER_CHECK_TIMEOUT_MS in all: its no, or its timeout, hands the click to Playwright's placing,
+        # which needs the rest (_receives_pointer_at).
+        if await self._receives_pointer_at(
+            locator, x, y, timeout_ms=budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
+        ) and await self._is_enabled_now(locator, budget.left_ms(POINTER_CHECK_TIMEOUT_MS)):
             await self.press_mouse(session, x, y)
         else:
             await self.click_as_playwright_places_it(session, locator, budget=budget)
@@ -2041,11 +2043,14 @@ class BrowserActionService:
         is under the pointer, which click_target.py's "Not caught" lists; a guard of every frame's geometry read in
         the page's own world, which such a page can answer for itself, would not stop it.
 
-        ``timeout_ms`` bounds the whole question, the walk up the frames with it: what the click has left. Each
-        call of it to the page (the look-up of the element, its box, the question, its frame and the frame's
-        element) answers within POINTER_CHECK_TIMEOUT_MS, or what is left where that is less. Bound as a whole by
-        POINTER_CHECK_TIMEOUT_MS, a page that answered each call in 150 ms ended a placed click on a target two
-        frames down as a timeout. The first message had no bound given, so it waited by Playwright's default, a
+        ``timeout_ms`` bounds the whole question, the walk up the frames with it, and each call of it to the page
+        (the look-up of the element, its box, the question, its frame and the frame's element) answers within
+        POINTER_CHECK_TIMEOUT_MS, or what is left where that is less. Where the click was placed it is what the
+        click has left: bound as a whole by POINTER_CHECK_TIMEOUT_MS, a page that answered each call in 150 ms
+        ended a placed click on a target two frames down as a timeout. Before a human-like press it is
+        POINTER_CHECK_TIMEOUT_MS at most: its no, or its timeout, hands the click to Playwright's placing, and
+        given what the click had left, a page that answered each call just inside its bound left that none of it.
+        The first message had no bound given, so it waited by Playwright's default, a
         whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed. Where the click
         was placed, a call that runs past its bound raises its timeout: the page did not answer, which is no no.
         Taken for one, it ended a click as target_moved where the page was busy, with the click's time not spent,

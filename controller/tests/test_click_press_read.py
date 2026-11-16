@@ -1498,3 +1498,29 @@ async def test_a_walk_that_runs_out_of_frames_fetches_no_frame_element_it_would_
 
     assert found is True
     assert len(asked) == POINTER_CHECK_FRAMES
+
+
+async def test_a_human_like_clicks_pointer_check_leaves_its_fallback_the_rest_of_the_budget() -> None:
+    # B1-fix2 item 4 (Codex round 2 #4): B1-fix1 item 10 gave the check before a human-like press what the click had
+    # left. On a page that answered each call of the walk up the frames just inside its bound, the check spent the
+    # click's budget, and the click Playwright places, which its no hands the click to, had none left (Codex: 1 ms of
+    # 15 s). The check is bounded at POINTER_CHECK_TIMEOUT_MS in all again; the placed click's own keeps what is left.
+    service, session, _done = _service(CLOSE)
+    service._checks_of_a_click = AsyncMock()
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    left_to_the_fallback: list[float] = []
+
+    async def placed(_session: Any, _locator: Any, *, budget: _Budget) -> None:
+        left_to_the_fallback.append(budget.left_ms())
+
+    service.click_as_playwright_places_it = placed
+    budget_ms = 20 * BOUND_MS
+    locator = _slow_frames(POINTER_CHECK_FRAMES, 0.75 * BOUND_MS / 1000)
+
+    with patch.object(actions, "POINTER_CHECK_TIMEOUT_MS", BOUND_MS):
+        await asyncio.wait_for(
+            service.click_locator_human_like(session, locator, (5.0, 6.0), budget=_Budget(budget_ms)), 10
+        )
+
+    assert left_to_the_fallback and left_to_the_fallback[0] > budget_ms / 2, left_to_the_fallback
