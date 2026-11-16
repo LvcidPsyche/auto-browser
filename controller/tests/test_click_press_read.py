@@ -1010,15 +1010,28 @@ async def test_a_pointer_question_the_page_does_not_answer_ends_at_its_bound(sta
     assert outer.dispose.await_count == 0
 
 
-async def test_a_placed_clicks_watch_that_does_not_answer_its_stop_still_gives_the_target_back() -> None:
+async def _ended_within(call: Awaitable[Any], seconds: float) -> Any:
+    """``call``'s answer, where it ends within ``seconds``; a failed test where it does not. Not wait_for: a give-back
+    runs on through a cancel until each of its steps is done, so one step with no bound held wait_for's cancel, and the
+    test, for good."""
+    ending = asyncio.ensure_future(call)
+    done, _ = await asyncio.wait({ending}, timeout=seconds)
+    assert done, f"not ended within {seconds} s"
+    return ending.result()
+
+
+@pytest.mark.parametrize("stalls", ["the watch's stop", "the target's disposal"])
+async def test_a_placed_clicks_give_back_the_page_does_not_answer_still_gives_each_handle_back(stalls: str) -> None:
     # Each give-back step waited for the page with no bound: a watch whose stop never answered held the click, and
-    # its session, with the target never given back. Each step has the bound a give-back has.
-    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never), dispose=AsyncMock())
-    target = SimpleNamespace(dispose=AsyncMock())
+    # its session, with the target never given back. Each step has the bound a give-back has: the target's disposal
+    # too (B1-fix1 item 17, A25).
+    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never if stalls == "the watch's stop" else None))
+    watch.dispose = AsyncMock()
+    target = SimpleNamespace(dispose=AsyncMock(side_effect=_never if stalls == "the target's disposal" else None))
 
     with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
         began = time.monotonic()
-        await asyncio.wait_for(BrowserActionService._give_back(watch, target), 5)
+        await _ended_within(BrowserActionService._give_back(watch, target), 5)
         took = time.monotonic() - began
 
     assert took < WITHIN_THREE_BOUNDS_S, took
@@ -1256,7 +1269,7 @@ def _handle_the_page_makes_late() -> tuple[asyncio.Future[Any], asyncio.Event, C
     asked = asyncio.Event()
     handle = SimpleNamespace(dispose=AsyncMock())
 
-    async def element_handle(**_given: Any) -> Any:
+    async def element_handle(*_args: Any, **_given: Any) -> Any:
         asked.set()
         return await asyncio.shield(made)
 
@@ -1332,8 +1345,8 @@ async def test_the_handles_of_a_pointer_question_are_given_back_together() -> No
 
     with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
         began = time.monotonic()
-        found = await asyncio.wait_for(
-            BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000), 10
+        found = await _ended_within(
+            BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000), 5
         )
         took = time.monotonic() - began
 
@@ -1341,3 +1354,114 @@ async def test_the_handles_of_a_pointer_question_are_given_back_together() -> No
     assert len(handles) == 4
     assert all(handle.dispose.await_count == 1 for handle in handles)
     assert took < 2 * BOUND_MS / 1000, took
+
+
+# B1-fix1 item 17 (Opus T1): the bound sites and late give-backs of a placed click that no test noticed.
+
+
+def _a_placed_click_that_stalls(stalls: str) -> tuple[Any, Any, Any, list[str]]:
+    """A read click Playwright places whose page never answers at ``stalls``: the target's first box (the place is
+    counted from it), its box again once the hover is done, or, in a frame, the frame's size."""
+    framed = stalls == "the frame's size"
+    if framed:
+        service, session, locator, _watch, done = _framed_click(True)
+        session.page.locator = lambda _selector: SimpleNamespace(evaluate=AsyncMock(side_effect=_never))
+        return service, session, locator, done
+    service, session, done = _service(CLOSE)
+    locator = _locator(done)
+    service._receives_pointer_at = AsyncMock(return_value=True)
+    boxes = [BOX] if stalls == "the box again" else []
+
+    async def bounding_box(**_given: Any) -> Any:
+        if boxes:
+            return boxes.pop()
+        return await _never()
+
+    locator.bounding_box = bounding_box
+    return service, session, locator, done
+
+
+@pytest.mark.parametrize("stalls", ["the box", "the box again", "the frame's size"])
+async def test_a_placed_click_whose_page_stops_answering_at_a_box_or_a_size_ends_at_its_budget(stalls: str) -> None:
+    # A27, A33 and A28: each of these reads is asked within what the click has left. Awaited as it is, a page that
+    # did not answer held the click and its session past its budget.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, done = _a_placed_click_that_stalls(stalls)
+        began = time.monotonic()
+        with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError):
+            await asyncio.wait_for(service.click_as_playwright_places_it(session, locator, budget=_Budget(BOUND_MS)), 5)
+        took = time.monotonic() - began
+    assert took < WITHIN_THREE_BOUNDS_S, took
+    assert "mouse down" not in done
+
+
+async def test_a_pointer_question_whose_record_is_not_answered_ends_at_its_bound() -> None:
+    # A22: the read of where the target's document saw the pointer arrive is asked within the question's bound.
+    asked: list[tuple[str, list[Any]]] = []
+    outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
+    up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))
+    target = _framed_node("the target", up, asked)
+    answer = target.evaluate
+
+    async def evaluate(script: str, given: Any) -> Any:
+        if script != _RECEIVES_POINTER_SCRIPT:
+            await _never()
+        return await answer(script, given)
+
+    target.evaluate = evaluate
+    locator = SimpleNamespace(evaluate=AsyncMock(), element_handle=AsyncMock(return_value=target))
+    asking = BrowserActionService._receives_pointer_at(
+        locator, 5.0, 6.0, placed=True, watch=SimpleNamespace(), timeout_ms=BOUND_MS
+    )
+
+    began = time.monotonic()
+    with pytest.raises(PlaywrightTimeoutError):
+        await asyncio.wait_for(asking, 5)
+    took = time.monotonic() - began
+
+    assert took < WITHIN_THREE_BOUNDS_S, took
+    assert asked == []
+    target.dispose.assert_awaited_once()
+
+
+async def test_a_frame_element_that_arrives_once_its_question_ended_is_given_back() -> None:
+    # A21: the frame's element a walk up the frames asks for is the page's to keep until it is given back, and one
+    # that arrives once the question gave up on it is given back as it arrives.
+    made, asked_for, frame_element, handle = _handle_the_page_makes_late()
+    asked: list[tuple[str, list[Any]]] = []
+    up = SimpleNamespace(parent_frame=object(), frame_element=frame_element)
+    target = _framed_node("the target", up, asked)
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+
+    with pytest.raises(PlaywrightTimeoutError):
+        await asyncio.wait_for(
+            BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=BOUND_MS), 5
+        )
+    assert asked_for.is_set()
+    made.set_result(handle)
+
+    await _until_given_back(handle)
+
+
+async def test_a_watch_that_arrives_once_its_click_ended_is_stopped_and_given_back() -> None:
+    # A16: the pointer watch set up on a framed target is a handle with listeners on the frame's window: one that
+    # arrives once the click gave up on it is stopped and given back as it arrives.
+    made, asked_for, evaluate_handle, _unused = _handle_the_page_makes_late()
+    watch = SimpleNamespace(evaluate=AsyncMock(), dispose=AsyncMock())
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, _watch, _done = _framed_click(True)
+        looked_up = locator.element_handle
+
+        async def element_handle(**given: Any) -> Any:
+            target = await looked_up(**given)
+            target.evaluate_handle = evaluate_handle
+            return target
+
+        locator.element_handle = element_handle
+        with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError):
+            await asyncio.wait_for(service.click_as_playwright_places_it(session, locator, budget=_Budget(BOUND_MS)), 5)
+    assert asked_for.is_set()
+    made.set_result(watch)
+
+    await _until_given_back(watch)
+    watch.evaluate.assert_awaited_once()

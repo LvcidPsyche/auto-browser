@@ -395,3 +395,79 @@ async def test_a_read_click_by_selector_presses_whatever_its_page_answers_for_th
         await env.manager.execute_decision(session_id, click)
 
         assert await env.manager.sessions[session_id].page.title() == "PRESSED"
+
+
+# B1-fix1 item 17 (Opus T1): the reads by selector no test noticed. A label for a "Delete account" button that the
+# page gives no control of its own; a button under a label for it that the page gives no control; and a word in a
+# button drawn as a div, under a layer of the button's, that the page calls editable.
+A_LABEL_FOR_DELETE_WITH_NO_CONTROL_OF_ITS_OWN = (
+    "<title>label</title><label id=words for=delete>Read more</label><button id=delete>Delete account</button>"
+    "<script>Object.defineProperty(document.getElementById('words'), 'control', { value: null });</script>"
+)
+A_BUTTON_UNDER_ITS_LABEL_WITH_NO_CONTROL_OF_ITS_OWN = (
+    "<title>label</title><div style='position: relative; width: 200px; height: 50px'>"
+    "<button id=target style='position: absolute; inset: 0'>Go</button>"
+    "<label id=over for=target style='position: absolute; inset: 0'></label></div>"
+    "<script>Object.defineProperty(document.getElementById('over'), 'control', { value: null });</script>"
+)
+A_WORD_THE_PAGE_CALLS_EDITABLE_UNDER_ITS_BUTTONS_LAYER = (
+    "<title>word</title><div role=button style='position: relative; width: 200px; height: 50px'>"
+    "<span id=target>Go</span><i style='position: absolute; inset: 0'></i></div>"
+    "<script>Object.defineProperty(document.getElementById('target'), 'isContentEditable', { value: true });</script>"
+)
+
+
+async def test_a_click_by_selector_on_a_label_the_page_gives_no_control_is_read_as_its_button(
+    tmp_path: Path,
+) -> None:
+    # C2: DESCRIBE_TARGET_SCRIPT takes a press on a label for its control, through HTMLLabelElement.prototype's.
+    async with browser_env(tmp_path, {"/label": A_LABEL_FOR_DELETE_WITH_NO_CONTROL_OF_ITS_OWN}) as env:
+        session_id = await env.create("/label")
+        page = env.manager.sessions[session_id].page
+        click = BrowserActionDecision(action="click", reason="look", risk_category="read", selector="#words")
+
+        target = await read_click_target(env.manager.element_ids, page, click, session_id=session_id)
+
+        assert target["tag"] == "button"
+        assert classified_risk(target, "read") == "destructive"
+
+
+@pytest.mark.parametrize(
+    ("page", "placed"),
+    [
+        (A_BUTTON_UNDER_ITS_LABEL_WITH_NO_CONTROL_OF_ITS_OWN, False),
+        (A_WORD_THE_PAGE_CALLS_EDITABLE_UNDER_ITS_BUTTONS_LAYER, True),
+    ],
+    ids=["label-control", "isContentEditable"],
+)
+async def test_the_pointer_check_by_selector_reads_what_the_browser_has(
+    tmp_path: Path, page: str, placed: bool
+) -> None:
+    # A2 and A3: _RECEIVES_POINTER_SCRIPT takes a hit on a label for the target as one on the target, through the
+    # label's prototype; and, where the click was placed, a word in a button as the button, by whether the word is
+    # editable as the browser has it. Read off the page's nodes, both said no here.
+    async with browser_env(tmp_path, {"/page": page}) as env:
+        session_id = await env.create("/page")
+        locator = env.manager.sessions[session_id].page.locator("#target")
+        box = await locator.bounding_box()
+
+        found = await asyncio.wait_for(
+            BrowserActionService._receives_pointer_at(
+                locator, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, placed=placed
+            ),
+            10,
+        )
+
+        assert found is True
+
+
+# An editor of 20,000 paragraphs alike, each named for a line.
+AN_EDITOR_WHOSE_BLOCKS_ARE_NAMED_ALIKE = (
+    '<div id="named" contenteditable aria-label="Note">' + '<p name="line">x</p>' * 20000 + "</div>"
+)
+
+
+async def test_an_approval_reads_an_editor_whose_named_blocks_are_alike_within_its_bound(tmp_path: Path) -> None:
+    # E15: fields alike in every attribute are answered once. Each answered on its own, 20,000 took past the read's
+    # bound of a second: unread.
+    assert await _approval_read(tmp_path, AN_EDITOR_WHOSE_BLOCKS_ARE_NAMED_ALIKE) == _read_as("plain")
