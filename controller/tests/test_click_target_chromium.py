@@ -29,6 +29,7 @@ from app.browser.click_target import (
     READ_TIMEOUT_MS,
     same_element_at,
 )
+from app.browser.element_scripts import DOM_JS
 from app.browser.services import actions as actions_module
 from app.models import BrowserActionDecision
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
@@ -316,7 +317,7 @@ NOT_ENTERED = {
 # frame element on the way]. Run where the page's script runs, with each window the page can reach marked
 # first; one of another origin cannot be asked at all.
 _READ_AT_AND_COUNT = (
-    "([x, y]) => { let asked = 0; "
+    "([x, y]) => { " + DOM_JS + " let asked = 0; "
     "for (let index = 0; index < window.length; index += 1) { try { const held = window[index]; "
     "const frame = held.frameElement; "
     "Object.defineProperty(held, 'frameElement', { get() { asked += 1; return frame; } }); "

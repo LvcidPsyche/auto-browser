@@ -571,13 +571,11 @@ DESCRIBE_TARGET_SCRIPT = (
 # to reach, it ran to its end for every frame of another site, and in this world the first look costs about 2 ms
 # a window, which on a page of 255 frames used up the half second the read before a press has.
 # The point is carried into a frame by its box, border and padding; a frame that CSS scales or turns is read at a
-# point that is off. A frame of another origin is as far as it goes: the element is the frame.
-_ELEMENT_AT_SCRIPT = (
-    r"""
+# point that is off. A frame of another origin is as far as it goes: the element is the frame. Needs `dom`: the
+# scripts that hold it start with DOM_JS, once each (SAME_ELEMENT_SCRIPT carried two, and set the second up at each
+# of its two calls).
+_ELEMENT_AT_SCRIPT = r"""
 (x, y) => {
-  """
-    + DOM_JS
-    + r"""
   let root = document;
   let el = null;
   for (let frames = 0; frames <= 3; frames += 1) {
@@ -610,12 +608,14 @@ _ELEMENT_AT_SCRIPT = (
   return el;
 }
 """
-)
 # Runs in the isolated world: (arg, registry) => what the click would land on, or null. arg names the target as
 # the click does when it names no selector: {elementId} or {x, y}.
 CLICK_TARGET_SCRIPT = (
     r"""
 (arg, registry) => {
+  """
+    + DOM_JS
+    + r"""
   let el = null;
   if (arg.elementId) {
     const found = registry.find(arg.elementId);
