@@ -111,3 +111,15 @@ async def test_a_call_that_fails_as_its_caller_is_cancelled_leaves_nothing_for_a
         loop.set_exception_handler(previous)
 
     assert heard == [], heard
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0], ids=["none-left", "past"])
+async def test_a_call_given_no_time_is_the_bounds_error_whatever_it_answers(seconds: float) -> None:
+    # B1-fix1 item 26 (staged F05): _within with no time left (a take's read once the bound has passed: _left_until
+    # answers 0) still found a call that answers within its first step done, and handed its answer over, past the
+    # bound. No time is the bound's error, as _arrives_by's is.
+    async def call() -> str:
+        return "the page's answer"
+
+    with pytest.raises(TimeoutError):
+        await actions._within(call(), seconds)

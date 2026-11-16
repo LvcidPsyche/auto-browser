@@ -542,9 +542,13 @@ async def _within(call: Awaitable[Any], seconds: float) -> Any:
     """``call``'s answer within ``seconds``, else TimeoutError; the call is cancelled where it has not answered by
     then, or by a cancel of the caller, which is raised. asyncio.wait_for, but for the cancel: on Python 3.11, the
     image's, wait_for answered a caller cancelled in the loop turn its call answered with that answer, and the type
-    that was cancelled went on (a keystroke typed, a take read on). asyncio.wait raises the cancel as it comes."""
+    that was cancelled went on (a keystroke typed, a take read on). asyncio.wait raises the cancel as it comes.
+    No time (a take's read once its bound has passed) is the bound's error, as _arrives_by's is."""
     step = asyncio.ensure_future(call)
     try:
+        if seconds <= 0:
+            # asyncio.wait with none would still find a call that answers within its first step done.
+            raise TimeoutError
         done, _ = await asyncio.wait({step}, timeout=seconds)
     finally:
         if not step.done():
