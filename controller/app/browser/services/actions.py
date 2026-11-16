@@ -53,6 +53,7 @@ from ..click_target import (
 )
 from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import (
+    DOM_JS,
     ELEMENT_HAS_FOCUS_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
@@ -137,6 +138,9 @@ _step_clock = time.perf_counter
 # The way up from what the pointer hits goes by the slot a node is given to, as a click's event does: a label
 # slotted into a component's button is that button's. By its parents alone it was not, which only sent the
 # click to Playwright's placing while nothing asked the target after that; the same question is asked there now.
+# It reads the tree through the prototypes' own getters (element_scripts.DOM_JS), 256 steps at most, as click_target's
+# walks do: read as properties, a form's control named parentNode answered for the form's parent, and the walk went to
+# the control (a button so named, under a layer of the form's, found itself) or round the form and its control for good.
 # ``arrived``: the pointer is at (x, y) now, and the element, in a frame, is asked as well whether the pointer is
 # over it as the browser has it (:hover). The box that carries the point is Playwright's, and in a frame that is
 # in a process of its own (another site's, a sandboxed one) Playwright counts a box from the corner of the frame's
@@ -159,9 +163,13 @@ _step_clock = time.perf_counter
 # ``onlyFrames``, given only where it is true: that document saw no move, so the pointer is over another one, and only a
 # frame that is el or inside it (a video in a card) can be what the pointer finds there. Playwright's own check of a
 # click takes the pointer over a frame inside its target for the target.
-_RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide, onlyFrames]) => {
+_RECEIVES_POINTER_SCRIPT = (
+    """(el, [x, y, box, arrived, wide, onlyFrames]) => {
+  """
+    + DOM_JS
+    + """
   const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
-  const field = el.matches('input, textarea, select') || el.isContentEditable;
+  const field = el.matches('input, textarea, select') || dom.editable(el);
   const target = (wide && !field && el.closest('button, [role=button], a, [role=link]')) || el;
   if (window !== window.top && box !== true) {
     if (!box) return 'framed';
@@ -178,13 +186,14 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y, box, arrived, wide, onlyFrames]) => {
   }
   if (!hit) return false;
   if (onlyFrames && !hit.matches('iframe, frame, object, embed')) return false;
-  const label = hit.closest ? hit.closest('label') : null;
-  if (label && label.control === el) return over(label);
-  for (let node = hit; node; node = node.assignedSlot || node.parentNode || node.host) {
+  const label = dom.closest(hit, 'label');
+  if (label && dom.control(label) === el) return over(label);
+  for (let node = hit, steps = 0; node && steps < 256; node = dom.flatUp(node), steps += 1) {
     if (node === target) return over(target);
   }
   return false;
 }"""
+)
 
 # (el) => a record of the next move of the pointer that el's document sees: ``at`` is null until one comes, then
 # the point it came to, in that document's own viewport, and false where the document runs no script (a frame

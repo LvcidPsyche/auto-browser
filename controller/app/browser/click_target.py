@@ -62,6 +62,7 @@ from ..action_errors import BrowserActionError
 from ..models import ApprovalKind, BrowserActionDecision, RiskCategory
 from ..utils import error_text_for_log
 from .element_ids import target_element_id
+from .element_scripts import DOM_JS
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -439,10 +440,16 @@ _MAX_SKIPPED_TOKENS = 2
 
 # (el, limit) => what a click on el lands on, or null. The element counts as the button, input or link it sits in,
 # as a click on it is one on them, and a link as the button or menu item it sits in. Both reads below describe
-# their element with it, so they cannot drift apart.
-DESCRIBE_TARGET_SCRIPT = r"""
+# their element with it, so they cannot drift apart. The walks along the tree read it through the prototypes' own
+# getters and methods (element_scripts.DOM_JS): read as properties, a form's control named parentNode answered for the
+# form's parent, and the walk went on from the form to that control, a hidden input it took for the button.
+DESCRIBE_TARGET_SCRIPT = (
+    r"""
 (el, limit) => {
-  if (!el || el.nodeType !== 1) return null;
+"""
+    + DOM_JS
+    + r"""
+  if (!el || dom.type(el) !== 1) return null;
   // The button the element sits in, looked for along the tree as it is shown: out of a shadow root to its host
   // (the glyph of an icon component sits in the button its host sits in), and from what a page slots into a
   // component to the slot's place in that component's tree (a design system's button is a shadow button around
@@ -450,42 +457,43 @@ DESCRIBE_TARGET_SCRIPT = r"""
   // A role is its first token, whatever its case and the spaces around it, here as in the answer below: matched
   // as the attribute's whole text, the text inside role="menuitem button" was described itself, no button.
   const ROLES = ['button', 'menuitem'];
-  const roleOf = (node) => (node.getAttribute('role') || '').trim().split(/\s+/)[0].toLowerCase();
-  const isButton = (node) => node.matches('button, input, a[href]') || ROLES.includes(roleOf(node));
+  const roleOf = (node) => (dom.attr(node, 'role') || '').trim().split(/\s+/)[0].toLowerCase();
+  const isButton = (node) => dom.matches(node, 'button, input, a[href]') || ROLES.includes(roleOf(node));
   let target = null;
   let label = null;
   for (let node = el, steps = 0; node && steps < 256; steps += 1) {
-    if (node.nodeType === 1 && isButton(node)) { target = node; break; }
-    if (!label && node.nodeType === 1 && node.localName === 'label') label = node;
-    node = node.assignedSlot || node.parentNode || node.host || null;
+    if (dom.type(node) === 1 && isButton(node)) { target = node; break; }
+    if (!label && dom.type(node) === 1 && dom.tag(node) === 'LABEL') label = node;
+    node = dom.flatUp(node);
   }
   // A link in a button or in a menu item is that item's text (a menu whose items carry a URL), and a press on it
   // is one on the item: from a link the walk goes on to the button or the menu item around it, if there is one.
   if (target && target.localName === 'a' && !ROLES.includes(roleOf(target))) {
-    let node = target.assignedSlot || target.parentNode || target.host || null;
+    let node = dom.flatUp(target);
     for (let steps = 0; node && steps < 256; steps += 1) {
-      if (node.nodeType === 1 && (node.localName === 'button' || ROLES.includes(roleOf(node)))) {
+      if (dom.type(node) === 1 && (dom.tag(node) === 'BUTTON' || ROLES.includes(roleOf(node)))) {
         target = node;
         break;
       }
-      node = node.assignedSlot || node.parentNode || node.host || null;
+      node = dom.flatUp(node);
     }
   }
   // A press on a label is one on its control: a label for a button, or around one, is that button. The label is
   // looked for along the same walk: one that holds a component's glyph is outside the tree the glyph is in.
-  if (!target && label && label.control && label.control.matches('button, input')) target = label.control;
+  const control = label && dom.control(label);
+  if (!target && control && dom.matches(control, 'button, input')) target = control;
   // A component that is a button: all the page gives it sits, slotted, in one button of its own tree. Text given
   // to it with no element around is under the pointer as the component, and the walk above starts outside its tree.
   if (!target && el.shadowRoot) {
     const given = Array.from(el.childNodes).filter(
-      (child) => child.nodeType === 1 || (child.nodeType === 3 && child.nodeValue.trim() !== '')
+      (child) => dom.type(child) === 1 || (dom.type(child) === 3 && child.nodeValue.trim() !== '')
     );
     let inner = null;
     for (const child of given.length <= 64 ? given : []) {
       let found = null;
-      for (let node = child.assignedSlot, steps = 0; node && node.nodeType === 1 && steps < 256; steps += 1) {
+      for (let node = dom.slot(child), steps = 0; node && dom.type(node) === 1 && steps < 256; steps += 1) {
         if (isButton(node)) { found = node; break; }
-        node = node.assignedSlot || node.parentNode;
+        node = dom.flatUp(node);
       }
       if (!found || (inner && inner !== found)) { inner = null; break; }
       inner = found;
@@ -553,6 +561,7 @@ DESCRIBE_TARGET_SCRIPT = r"""
   return { tag, type, role, submits: Boolean(submits && target.form), labels };
 }
 """
+)
 # (x, y) => the element a press at that point lands on, or null: the innermost one, through open shadow roots
 # and into frames whose document the page's origin can reach (the same origin, srcdoc), up to three frames down.
 # A frame is an iframe, a frame, or an object or an embed that holds a document: a page's own document in one

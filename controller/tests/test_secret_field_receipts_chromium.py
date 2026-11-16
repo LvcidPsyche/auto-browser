@@ -422,15 +422,18 @@ async def test_a_release_by_selector_whose_read_throws_still_takes_its_listeners
 async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_back(tmp_path: Path) -> None:
     # The world's script took the hold out of the registry, read, and then released: a read that threw left the
     # listeners on the node with nothing to find them by. No page can make a read throw in the element ids' world,
-    # so the script is run as it is on a hold whose node is no node of a document.
+    # so the script is run as it is on a hold whose node is no node of a document: an EventTarget of its own, which
+    # the listeners go on and come off as they do a node's (EventTarget.prototype's methods), and which no read takes.
     async with browser_env(tmp_path, {"/blank": "<title>blank</title>"}) as env:
         session_id = await env.create("/blank")
 
         released = await env.manager.sessions[session_id].page.evaluate(
             f"""() => {{
-              const removed = [];
-              const node = {{ removeEventListener: (type) => removed.push(type) }};
-              const hold = {{ node, root: node, left: false, listener: () => {{}} }};
+              const heard = [];
+              const node = new EventTarget();
+              const listener = (event) => heard.push(event.type);
+              for (const type of ['blur', 'focus', 'focusin']) node.addEventListener(type, listener, true);
+              const hold = {{ node, root: node, left: false, listener }};
               const registry = {{ fieldHolds: new Map([['nonce', hold]]) }};
               let threw = false;
               try {{
@@ -438,12 +441,13 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
               }} catch (error) {{
                 threw = true;
               }}
-              return {{ threw, kept: registry.fieldHolds.size, removed }};
+              for (const type of ['blur', 'focus', 'focusin']) node.dispatchEvent(new Event(type));
+              return {{ threw, kept: registry.fieldHolds.size, heard }};
             }}"""
         )
 
-        # The node's two listeners, and the one on its shadow root (here the same stand-in).
-        assert released == {"threw": True, "kept": 0, "removed": ["blur", "focus", "focusin"]}
+        # The node's two listeners, and the one on its shadow root (here the same stand-in), are off: none hears.
+        assert released == {"threw": True, "kept": 0, "heard": []}
 
 
 def _assert_shown(records: list[Any], text: str) -> None:
@@ -594,19 +598,14 @@ async def test_a_type_by_selector_into_a_component_whose_shadow_root_has_a_host_
 ) -> None:
     # The focus walk read the root's `host` as a property, and the page's own null stopped it at the component: the
     # hold was of the component, which reads plain, and the preview kept what went to the password field inside. The
-    # walk now goes on to the field. The component itself is then refused or withheld, never typed with its preview
-    # kept: the walk up from the field to the component (`up`) still reads `host` as a property, so by selector it
-    # does not find the field in the component and refuses (focus_lost), where one by the field's own selector goes in.
+    # walk now goes on to the field. The walk up from the field to the component (`up`) read `host` as a property
+    # too, so by selector it did not find the field in the component and refused (focus_lost). Read through the
+    # prototype's getter there as well, the type goes in, its preview withheld.
     async with browser_env(tmp_path, {"/login": A_HOST_OF_ITS_OWN}) as env:
-        try:
-            session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
-        except BrowserActionError as refused:
-            assert refused.code == "focus_lost"
-            (session,) = env.manager.sessions.values()
-            assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == "", "a refused type typed nothing"
-        else:
-            assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == TEXT
-            _assert_withheld(records)
+        session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
+
+        assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == TEXT
+        _assert_withheld(records)
 
 
 async def test_a_type_by_element_id_is_the_same_where_a_shadow_root_has_a_host_of_its_own(tmp_path: Path) -> None:

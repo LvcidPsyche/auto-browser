@@ -11,16 +11,20 @@ from .element_world import ELEMENT_REGISTRY_SCRIPT
 
 MARKER_ATTRIBUTE = "data-auto-browser-target"
 
-# DOM reads through the prototypes' own getters and methods. A form's named
-# controls shadow the form's own properties, in this world too: in
-# <form><input name="parentNode"></form>, form.parentNode is that input, so a
-# walk up the tree that read it could be steered onto the element it was
-# looking for. A document's named elements shadow its properties likewise, in
-# the main world: with <img name="activeElement"> on the page,
-# document.activeElement is that img there. Defines `dom`. In the main world (a
-# selector target's focus check) a page may have replaced one of them: the
-# property is read as it is then.
-_DOM_JS = """const dom = (() => {
+# DOM reads through the prototypes' own getters and methods, taken as the script
+# sets itself up. A form's named controls shadow the form's own properties, in
+# this world too: in <form><input name="parentNode"></form>, form.parentNode is
+# that input, so a walk up the tree that read it could be steered onto the
+# element it was looking for, or sent round the form and its control for good.
+# Defines `dom`. Also run in the page's own world (a selector target's focus
+# check, hold and approval read, and the scripts of click_target.py and
+# actions.py that start with it), where more stands in for a property: a
+# document's named elements (with <img name="activeElement"> on the page,
+# document.activeElement is that img there, and not here), and what a page
+# defines on a node of its own (a shadow root's `host`, a label's `control`).
+# The getters answer for neither. A page that replaced a prototype's getter
+# before the script ran is not answered for: the getter taken then is the page's.
+DOM_JS = """const dom = (() => {
   const getter = (proto, name) => {
     const descriptor = Object.getOwnPropertyDescriptor(proto, name);
     if (descriptor && typeof descriptor.get === 'function') return descriptor.get;
@@ -39,13 +43,64 @@ _DOM_JS = """const dom = (() => {
   const nodeType = getter(Node.prototype, 'nodeType');
   const documentActive = getter(Document.prototype, 'activeElement');
   const shadowActive = getter(ShadowRoot.prototype, 'activeElement');
+  const host = getter(ShadowRoot.prototype, 'host');
+  const elementSlot = getter(Element.prototype, 'assignedSlot');
+  const textSlot = getter(Text.prototype, 'assignedSlot');
+  const control = getter(HTMLLabelElement.prototype, 'control');
+  const editable = getter(HTMLElement.prototype, 'isContentEditable');
+  const elementAll = method(Element.prototype, 'querySelectorAll');
+  const fragmentAll = method(DocumentFragment.prototype, 'querySelectorAll');
   const dom = {
     // The element above: the parent element, or the host of the shadow root the element is in.
     up(el) {
       const parent = parentNode.call(el);
-      if (parent && parent.nodeType === 11) return parent.host || null;
-      return parent && parent.nodeType === 1 ? parent : null;
+      if (!parent) return null;
+      const type = nodeType.call(parent);
+      if (type === 11) return dom.host(parent);
+      return type === 1 ? parent : null;
     },
+    // The node above in the tree as it is shown: the slot an element or a text is assigned to, else its parent; a
+    // shadow root's host; null above a document, or above a fragment that is no shadow root.
+    flatUp(node) {
+      if (nodeType.call(node) === 11) return dom.host(node);
+      return dom.slot(node) || parentNode.call(node);
+    },
+    // The slot an element or a text is assigned to: null for one in none, and for any other node.
+    slot(node) {
+      const type = nodeType.call(node);
+      if (type === 1) return elementSlot.call(node);
+      if (type === 3) return textSlot.call(node);
+      return null;
+    },
+    // A shadow root's host: null for any other node, for which the prototype's getter throws (see active()).
+    host(root) {
+      try {
+        return host.call(root);
+      } catch (error) {
+        return null;
+      }
+    },
+    type: (node) => nodeType.call(node),
+    // The control a label stands for: null for one that stands for none, and for what is no label.
+    control(label) {
+      try {
+        return control.call(label);
+      } catch (error) {
+        return null;
+      }
+    },
+    // Whether the element is editable (contenteditable, its own or what it is in): false for what is no HTML element.
+    editable(el) {
+      try {
+        return editable.call(el) === true;
+      } catch (error) {
+        return false;
+      }
+    },
+    // The elements under an element or a shadow root that match `css`.
+    all: (root, css) => (nodeType.call(root) === 11 ? fragmentAll : elementAll)(root, css),
+    listen: method(EventTarget.prototype, 'addEventListener'),
+    unlisten: method(EventTarget.prototype, 'removeEventListener'),
     // Whether `node` is `el` or inside it, through shadow roots.
     within(node, el) {
       for (let at = node; at; at = dom.up(at)) if (at === el) return true;
@@ -168,7 +223,7 @@ _IS_DISABLED_JS = (
   const INPUT_ROLES = { button: 'button', checkbox: 'checkbox', image: 'button', number: 'spinbutton', radio: 'radio',
     range: 'slider', reset: 'button', submit: 'button' };
   const closestAcrossShadows = (el, css) => {
-    for (let at = el; at; at = dom.root(at).host || null) {
+    for (let at = el; at; at = dom.host(dom.root(at))) {
       const found = dom.closest(at, css);
       if (found) return found;
     }
@@ -387,7 +442,7 @@ _SETTLING_JS = f"""() => {{
 # Answers { rect } (the pointer rect) or { refused: <code>, cover, early, scrolled }
 # with the last reason it waited on.
 ELEMENT_ACTIONABLE_SCRIPT = f"""async (el, options) => {{
-  {_DOM_JS}
+  {DOM_JS}
   const coverAt = {_COVER_AT_JS};
   const isDisabled = {_IS_DISABLED_JS};
   const visibleBox = {_VISIBLE_BOX_JS};
@@ -445,7 +500,7 @@ ELEMENT_POINTER_RECT_SCRIPT = f"""(el) => ({_POINTER_RECT_JS})(el)"""
 
 # What covers the element at (x, y), or null (see _COVER_AT_JS).
 ELEMENT_COVER_SCRIPT = f"""(el, [x, y]) => {{
-  {_DOM_JS}
+  {DOM_JS}
   return ({_COVER_AT_JS})(el, x, y);
 }}"""
 
@@ -458,7 +513,7 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # then go to the frame's document. Also run in the main world, on a locator, for
 # a selector target, without it.
 ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
-  {_DOM_JS}
+  {DOM_JS}
   let active = dom.active(dom.root(el));
   for (let root = active && dom.shadowRoot(active); root && dom.active(root); root = dom.shadowRoot(active)) {{
     active = dom.active(root);
@@ -492,8 +547,8 @@ _FIELD_ATTRIBUTES_JS = """(node) => {
 # nothing, so it says the same.
 # read(hold): the node's own attributes, as is_sensitive_field reads them, while it is still the innermost focused
 # element of its root and focus never left it; else null. One the page took out of its document is no root's
-# focused element. Run in the main world too, on a locator, for a selector target (see _DOM_JS).
-_HELD_FIELD_JS = f"""{_DOM_JS}
+# focused element. Run in the main world too, on a locator, for a selector target (see DOM_JS).
+_HELD_FIELD_JS = f"""{DOM_JS}
 const held = {{
   focused(from) {{
     let active = dom.active(dom.root(from));
@@ -511,8 +566,8 @@ const held = {{
     hold.node = active;
     hold.root = dom.shadowRoot(active);
     hold.listener = () => {{ hold.left = true; }};
-    for (const type of ['blur', 'focus']) active.addEventListener(type, hold.listener, true);
-    if (hold.root) hold.root.addEventListener('focusin', hold.listener, true);
+    for (const type of ['blur', 'focus']) dom.listen(active, type, hold.listener, true);
+    if (hold.root) dom.listen(hold.root, 'focusin', hold.listener, true);
     return hold;
   }},
   read(hold) {{
@@ -522,8 +577,8 @@ const held = {{
   }},
   release(hold) {{
     if (!hold.node) return;
-    for (const type of ['blur', 'focus']) hold.node.removeEventListener(type, hold.listener, true);
-    if (hold.root) hold.root.removeEventListener('focusin', hold.listener, true);
+    for (const type of ['blur', 'focus']) dom.unlisten(hold.node, type, hold.listener, true);
+    if (hold.root) dom.unlisten(hold.root, 'focusin', hold.listener, true);
   }},
 }};"""
 
@@ -577,9 +632,9 @@ ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
 # each such field, and whether a frame is among what is named (the element, or one inside it), whose document is
 # not read. An input no typed text goes into (a hidden one, a checkbox, a button) is no field: a form's hidden
 # token would say secret of the whole form. A closed shadow root shows no node past it. Run in the main world
-# too, on a selector's element (see _DOM_JS).
+# too, on a selector's element (see DOM_JS).
 NAMED_FIELDS_SCRIPT = f"""(el) => {{
-  {_DOM_JS}
+  {DOM_JS}
   const frames = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'];
   const noText = ['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color'];
   const takesText = (node) =>
@@ -592,21 +647,22 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     else if (takesText(node)) fields.add(node);
   }};
   const lookInside = (root) => {{
-    for (const node of root.querySelectorAll('*')) {{
+    for (const node of dom.all(root, '*')) {{
       look(node);
       const shadow = dom.shadowRoot(node);
       if (shadow) lookInside(shadow);
     }}
   }};
   const named = [el];
-  if (dom.tag(el) === 'LABEL' && el.control) named.push(el.control);
+  const control = dom.control(el);
+  if (control) named.push(control);
   for (const node of named) {{
     look(node);
     const shadow = dom.shadowRoot(node);
     if (shadow) lookInside(shadow);
     lookInside(node);
   }}
-  if (el.isContentEditable === true) fields.add(el);
+  if (dom.editable(el)) fields.add(el);
   return {{ fields: Array.from(fields, {_FIELD_ATTRIBUTES_JS}), frame }};
 }}"""
 
@@ -615,7 +671,7 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
 # one wanted (one for a single select), selects them and dispatches input then
 # change. Answers { values } or { refused }.
 ELEMENT_SELECT_SCRIPT = f"""async (el, {{ wanted, timeoutMs }}) => {{
-  {_DOM_JS}
+  {DOM_JS}
   const isDisabled = {_IS_DISABLED_JS};
   const visibleBox = {_VISIBLE_BOX_JS};
   const settling = ({_SETTLING_JS})();
@@ -673,7 +729,7 @@ ELEMENT_SELECT_SCRIPT = f"""async (el, {{ wanted, timeoutMs }}) => {{
 # the confirmation and the unmark all use that input. The listener is kept in
 # the record so the unmark can remove it.
 UPLOAD_MARK_SCRIPT = f"""(el, nonce, registry) => {{
-  {_DOM_JS}
+  {DOM_JS}
   const input = ({_FOLLOW_LABEL_JS})(el);
   if (input.localName !== 'input' || input.type !== 'file') return false;
   const record = {{ seen: [], listener: null, input }};
@@ -720,7 +776,7 @@ UPLOAD_LANDED_SCRIPT = """(el, [nonce, name, size], registry) => {
 # removes the mark's listeners. Closed shadow roots and frames are not walked. Runs whether or not the element is still
 # there, so it is a world function of its own, not an element script.
 UPLOAD_UNMARK_SCRIPT = f"""(elementId, nonce) => {{
-  {_DOM_JS}
+  {DOM_JS}
   const registry = {ELEMENT_REGISTRY_SCRIPT};
   const roots = [document];
   for (let index = 0; index < roots.length; index += 1) {{

@@ -29,6 +29,19 @@ All notable changes to auto-browser are documented here.
   showed it. The image now writes `/etc/codex/requirements.toml`, owned by root, mode 0644, holding
   `mcp_servers = {}`. Codex then lists such a server as `disabled: requirements (/etc/codex/requirements.toml)`, and
   `-c mcp_servers.<name>.enabled=true` does not turn it back on. No grant of the CLI sandbox reaches `/etc/codex`.
+- **A page no longer answers for the reads that decide where a type's text goes, what its approval shows and what a
+  click lands on.** These in-page scripts read the DOM through properties. A form's named controls answer for the
+  form's own properties in every JavaScript world (in `<form><input name="parentNode"></form>` the form's `parentNode`
+  is that input), and by selector, where the scripts run in the page's own world, so does what a page defines on its
+  own nodes. So by selector a shadow root that gave itself the element a type named for its `host` made focus in a
+  plain field of another component pass for focus in that element, and the text went into the plain field; and a
+  label given a plain field for its `control` made the approval of a type into the password field it stands for read
+  `plain` and show the text. By selector, element_id or point, a hidden input named `parentNode` in a form inside a
+  button made a click on the form's text read as a press on that input, so a click labelled `read` on a "Delete
+  account" button went on unclassified; and a control named `isContentEditable` kept an approval's read from counting
+  a form that is editable by what it is in, and so from reading the form's secret name. The reads now go through the
+  prototypes' own getters and methods, taken as each script starts. In the element ids' world no page script reaches
+  those; by selector, a page that replaces a prototype's getter before the script runs still answers for it.
 
 ### Fixed
 
@@ -85,6 +98,14 @@ All notable changes to auto-browser are documented here.
   (20 tools, measured on the image built from this release; `glama-image` checks the same on every change to what
   the image copies, and fails on 1.18.1's image). uvicorn's output there now goes to stderr: stdout is the
   bridge's, one MCP message a line, and uvicorn's access log put lines of its own among them.
+- **A type into a field in a form with a control named after a DOM property is no longer refused.** A control named
+  `nodeType` stopped the focus check's walk up from the field at the form, so focus in the field was not focus in the
+  element around it, and the type ended in `focus_lost`. Controls named `addEventListener` and `removeEventListener`
+  on a focused form failed the type's hold: by element_id the type failed, and by selector its preview was withheld.
+  One named `querySelectorAll` left an approval's read `unread`. By selector, a component whose shadow root defines a
+  `host` of its own was refused the same way. And the check before a press that the pointer finds its target no
+  longer runs on without end from a form with a control named `parentNode`, which it walked to and back from, holding
+  the page and the click: it reads the form's own parent, and stops at 256 steps as the click target's walks do.
 
 ### Changed
 
