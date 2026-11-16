@@ -930,6 +930,14 @@ async def _never(*_args: Any, **_kwargs: Any) -> Any:
     await asyncio.Event().wait()
 
 
+# The bound the bound tests below give a click's or a type's waits, and what they allow a wait that meets a page that
+# does not answer: three bounds, overhead and all, short of the five a bound five times as long takes (ten passed
+# for it, B1-fix1 item 7). A check made twice is allowed five.
+BOUND_MS = 200
+WITHIN_THREE_BOUNDS_S = 3 * BOUND_MS / 1000
+WITHIN_FIVE_BOUNDS_S = 5 * BOUND_MS / 1000
+
+
 @pytest.mark.parametrize("stalls", ["the target's box", "watch the pointer"])
 async def test_a_placed_click_in_a_frame_whose_target_does_not_answer_ends_at_its_budget(stalls: str) -> None:
     # The target's box and the watch set up on it were asked of its handle with no bound: a page that stopped
@@ -939,9 +947,9 @@ async def test_a_placed_click_in_a_frame_whose_target_does_not_answer_ends_at_it
         service, session, locator, watch, done = _framed_click(True, stalls=stalls)
         began = time.monotonic()
         with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError):
-            await asyncio.wait_for(service.click_as_playwright_places_it(session, locator, budget=_Budget(200)), 5)
+            await asyncio.wait_for(service.click_as_playwright_places_it(session, locator, budget=_Budget(BOUND_MS)), 5)
         took = time.monotonic() - began
-    assert took < 2, took
+    assert took < WITHIN_THREE_BOUNDS_S, took
     assert done[-2:] == [stalls, "give the target back"]
     service._receives_pointer_at.assert_not_awaited()
 
@@ -972,7 +980,7 @@ async def test_a_pointer_question_the_page_does_not_answer_ends_at_its_bound(sta
     # click was placed, the question raises its timeout (the page did not answer); before a human-like press it is
     # a no, which hands the click to Playwright's placing. The handles taken are given back.
     target, outer, locator = _frames_that_stall(stalls)
-    asking = BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=placed, timeout_ms=200)
+    asking = BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=placed, timeout_ms=BOUND_MS)
 
     began = time.monotonic()
     if placed:
@@ -982,7 +990,7 @@ async def test_a_pointer_question_the_page_does_not_answer_ends_at_its_bound(sta
         assert await asyncio.wait_for(asking, 5) is False
     took = time.monotonic() - began
 
-    assert took < 2, took
+    assert took < WITHIN_THREE_BOUNDS_S, took
     if stalls != "the-first-question":
         target.dispose.assert_awaited_once()
     assert outer.dispose.await_count == 0
@@ -994,12 +1002,12 @@ async def test_a_placed_clicks_watch_that_does_not_answer_its_stop_still_gives_t
     watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never), dispose=AsyncMock())
     target = SimpleNamespace(dispose=AsyncMock())
 
-    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", 200):
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
         began = time.monotonic()
         await asyncio.wait_for(BrowserActionService._give_back(watch, target), 5)
         took = time.monotonic() - began
 
-    assert took < 2, took
+    assert took < WITHIN_THREE_BOUNDS_S, took
     watch.dispose.assert_awaited_once()
     target.dispose.assert_awaited_once()
 
@@ -1011,14 +1019,15 @@ async def test_a_focus_check_the_page_does_not_answer_refuses_the_type_within_it
     service.focus_locator = AsyncMock()
     locator = SimpleNamespace(evaluate=AsyncMock(side_effect=_never), focus=AsyncMock())
 
-    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", 200):
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
         began = time.monotonic()
         with pytest.raises(BrowserActionError) as refused:
             await asyncio.wait_for(service.focus_verified(session, locator, action="type"), 5)
         took = time.monotonic() - began
 
     assert refused.value.code == "focus_lost"
-    assert took < 2, took
+    # Asked twice, after the focus click and after locator.focus(): five bounds.
+    assert took < WITHIN_FIVE_BOUNDS_S, took
     locator.focus.assert_awaited_once()
 
 

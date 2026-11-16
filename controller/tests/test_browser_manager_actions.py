@@ -44,6 +44,10 @@ def _settings(root: Path) -> Settings:
     )
 
 
+# The bound a key of a type's clear is given in the tests of that bound.
+CLEAR_KEY_BOUND_S = 0.2
+
+
 class FakeMouse:
     def __init__(self) -> None:
         self.move = AsyncMock()
@@ -799,7 +803,7 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
                 self.session.page.keyboard.press = AsyncMock(side_effect=press)
                 with (
                     patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
-                    patch.object(actions, "HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.2),
+                    patch.object(actions, "HUMAN_TYPING_STEP_FLOOR_SECONDS", CLEAR_KEY_BOUND_S),
                     self.assertRaises(BrowserActionError) as ended,
                 ):
                     began = time.monotonic()
@@ -808,7 +812,8 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual((ended.exception.code, ended.exception.retryable), ("typing_timeout", False))
                 self.assertIn(key, ended.exception.message)
-                self.assertLess(took, 2)
+                # Three bounds, overhead and all: a key bounded five times as long does not pass (B1-fix1 item 7).
+                self.assertLess(took, 3 * CLEAR_KEY_BOUND_S)
                 self.session.page.keyboard.type.assert_not_awaited()
 
 
