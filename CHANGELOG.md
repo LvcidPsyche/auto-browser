@@ -8,7 +8,8 @@ All notable changes to auto-browser are documented here.
 
 - **Rebuild an image built with `INSTALL_AGENT_CLIS=true`.** Its codex now comes from Codex's GitHub release, not
   from npm (see Fixed); an image built before keeps the npm package's codex, whose own sandbox cannot run under the
-  CLI sandbox, until it is built again (`docker compose build controller` with the same `.env`). With
+  CLI sandbox, until it is built again (`docker compose build controller` with the same `.env`). In the rebuilt
+  image Codex's model runs its commands again, beneath both sandboxes (see Fixed). With
   `INSTALL_AGENT_CLIS=true` the build now stops on an architecture other than amd64 and arm64, for which no codex
   build is pinned.
 - **If you start uvicorn yourself, add `--lifespan on`** (`docs/deployment.md` gives the whole command). Without it a
@@ -30,7 +31,10 @@ All notable changes to auto-browser are documented here.
   file in `/data` and a write outside the sandbox's roots. A new workflow, `agent-cli-image`, builds that image on
   both architectures and checks the same whenever the install, the CLI sandbox or Codex's adapter changes. A
   controller run on the host with the npm package's codex keeps the limit (`docs/deployment.md`, "Codex's own
-  sandbox").
+  sandbox"). So Codex's model can again run the commands it asks for, as it could before 1.18.0, and now beneath the
+  CLI sandbox as well: under the default `CODEX_SANDBOX_MODE=read-only` such a command can read what the CLI sandbox
+  leaves readable (what lies outside `/data`) and write nothing; under `workspace-write` it can also write where
+  both sandboxes allow.
 - **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image
   does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
   release published that hour. No workflow built it: `agent-cli-image` now does, whenever its Dockerfile, its
