@@ -654,12 +654,19 @@ What the sandbox does not stop, and what does not work under it:
 - **A tool that builds its own mount namespace.** Landlock refuses mounting or unmounting to every process it
   restricts.
 - **Codex's own sandbox.** Codex wraps each command its model asks for in a sandbox of its own, whose helper opens
-  `/` for reading before it makes its rules. This sandbox refuses that open (`/` itself has no rule, and a rule there
-  would make every name under `/data` listable), the helper goes on without its rule on `/`, and the command ends with
-  `Failed to execvp sh: Permission denied`. So with the CLI sandbox on, Codex (measured with codex-cli 0.114.0)
-  cannot run a command of its model's, in any `CODEX_SANDBOX_MODE`. The decision the controller asks Codex for needs
-  none: the page goes in on stdin, the screenshot as `--image`. Claude Code's and Gemini's own sandboxes are not
-  tested under this one.
+  `/` with `O_PATH` before it makes its rules. The image's codex, the glibc build of codex-cli 0.114.0 from Codex's
+  GitHub release, runs that sandbox beneath this one: `codex sandbox linux -- sh -c "echo nested-ok"` prints
+  `nested-ok`, and under the two a read of a file in `/data` and a write outside the roots this sandbox gives are
+  both refused (measured 2026-11-16 on GitHub's amd64 and arm64 runners; the `agent-cli-image` workflow checks it
+  again whenever the install or this sandbox changes). The npm package's codex is the musl build, where Rust's
+  standard library drops `O_PATH` from the open: it reaches the kernel as an open of `/` for reading, which this
+  sandbox refuses (`/` itself has no rule, and a rule there would make every name under `/data` listable), and the
+  command ends with `Failed to execvp sh: Permission denied`. So a controller run on the host with that codex still
+  cannot run a command of its model's, in any `CODEX_SANDBOX_MODE`; it needs the release's glibc build. The decision the
+  controller asks Codex for needs none: the page goes in on stdin, the screenshot as `--image`. A pin of codex-cli
+  0.115.0 or later needs a different design: from that release the helper defaults to bubblewrap, which builds its
+  own mount namespace, and Landlock refuses mounting (inferred, not measured). Claude Code's and Gemini's own
+  sandboxes are not tested under this one.
 - **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
   part of it, is mounted at a second path of the container too, what is mounted there is open to the CLI: to read
   like anything else beside `/data`, and to write as well where that path lies in a directory a CLI may write (inside

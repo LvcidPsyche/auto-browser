@@ -4,6 +4,31 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Rebuild an image built with `INSTALL_AGENT_CLIS=true`.** Its codex now comes from Codex's GitHub release, not
+  from npm (see Fixed); an image built before keeps the npm package's codex, whose own sandbox cannot run under the
+  CLI sandbox, until it is built again (`docker compose build controller` with the same `.env`). With
+  `INSTALL_AGENT_CLIS=true` the build now stops on an architecture other than amd64 and arm64, for which no codex
+  build is pinned.
+
+### Fixed
+
+- **Codex's own sandbox now runs beneath the CLI sandbox, in an image built with `INSTALL_AGENT_CLIS=true`.** The
+  image installed codex-cli 0.114.0 from npm, whose binary is the musl build. Its sandbox helper opens `/` with
+  `O_PATH`, which Rust's standard library drops on musl, so the open reached the kernel as an open of `/` for
+  reading, the CLI sandbox refused it, and every command Codex's model asked for ended with `Failed to execvp sh:
+  Permission denied`, in any `CODEX_SANDBOX_MODE`. The decision the controller asks Codex for needs no command, so
+  nothing was given away. The image now installs the glibc build of the same release from Codex's GitHub release
+  (`rust-v0.114.0`, for amd64 and arm64): it checks the tarball, and then the binary in it, against pinned sha256s
+  (the binaries verified first against the release's sigstore bundles) and installs it as `/usr/local/bin/codex`,
+  owned by root, mode 0755. npm installs only the Claude and Gemini CLIs. Measured on GitHub's amd64 and arm64
+  runners: under the CLI sandbox, Codex's sandbox runs a command, and the two together still refuse a read of a
+  file in `/data` and a write outside the sandbox's roots. A new workflow, `agent-cli-image`, builds that image on
+  both architectures and checks the same whenever the install, the CLI sandbox or Codex's adapter changes. A
+  controller run on the host with the npm package's codex keeps the limit (`docs/deployment.md`, "Codex's own
+  sandbox").
+
 ## [1.18.1] — 2026-11-15
 
 A security patch over 1.18.0, from the findings the reviews of 1.18.0 left open. Codex works again under
