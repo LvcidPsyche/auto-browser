@@ -157,10 +157,12 @@ TAKES_TEXT_AS_THE_BROWSER_HAS_IT = {
         '<input type="checkbox" name="otp_ok"></div>',
         "plain",
     ),
-    # An element whose contenteditable says inherit, in nothing editable: it takes no text.
+    # An element whose contenteditable says inherit, in nothing editable: it takes no text. Named as a secret beside
+    # a plain field, so that counting it at all, as a field that takes text now or as one that could later, reads
+    # otherwise than plain (B1-fix1 item 30, staged F15).
     "an-element-whose-contenteditable-is-inherit": (
-        '<div id="named"><span contenteditable="inherit">x</span></div>',
-        "unread",
+        '<div id="named"><textarea></textarea><span contenteditable="inherit" aria-label="Password">x</span></div>',
+        "plain",
     ),
 }
 
