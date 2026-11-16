@@ -42,15 +42,27 @@ fi
 API_BIND_SCOPE=loopback \
 SESSION_ISOLATION_MODE=glama_inspect \
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5 --lifespan on &
+uvicorn=$!
 
-# Wait up to 60s for the server to become healthy
+# Wait up to 60s for the server to become healthy; the bridge starts only once it
+# is. A uvicorn that has exited by then (a failed start) ends this script with its
+# status, never 0, and one still not healthy at the end of the wait with 1: either
+# way the container stops, where it used to run a bridge with no server behind it.
 i=0
-while [ $i -lt 60 ]; do
-    if curl -sf http://127.0.0.1:8000/healthz > /dev/null 2>&1; then
-        break
+until curl -sf http://127.0.0.1:8000/healthz > /dev/null 2>&1; do
+    if ! kill -0 "$uvicorn" 2>/dev/null; then
+        wait "$uvicorn"
+        status=$?
+        echo "glama_entrypoint: uvicorn exited (status $status) before it was healthy" >&2
+        [ "$status" -ne 0 ] || status=1
+        exit "$status"
+    fi
+    i=$((i + 1))
+    if [ "$i" -ge 60 ]; then
+        echo "glama_entrypoint: uvicorn was not healthy after 60s" >&2
+        exit 1
     fi
     sleep 1
-    i=$((i + 1))
 done
 
 # Run the stdio ↔ HTTP MCP bridge (replaces this shell process). With no

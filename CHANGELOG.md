@@ -69,6 +69,10 @@ All notable changes to auto-browser are documented here.
   `ASGI 'lifespan' protocol appears unsupported.` at INFO and served, the controller's own startup never ran, and
   `GET /healthz` answered 500. The image's command and the root image's entrypoint now pass `--lifespan on`, so
   uvicorn logs the error and exits (status 3) without serving.
+- **The root (Glama) image's entrypoint starts its stdio bridge only once uvicorn answers `/healthz`.** It polled
+  for 60 seconds and then started the bridge whatever the answer, so a uvicorn that had already exited left the
+  bridge talking to nothing and the container running. It now ends with uvicorn's status (1 where that is 0) when
+  uvicorn exits before it is healthy, and with 1 when the 60 seconds run out.
 
 ### Changed
 
