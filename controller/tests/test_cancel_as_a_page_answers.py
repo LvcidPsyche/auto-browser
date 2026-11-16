@@ -9,11 +9,13 @@ controller-tests job does.
 from __future__ import annotations
 
 import asyncio
+import gc
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from app.browser.element_scripts import FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_TAKE_SCRIPT
 from app.browser.services import actions
@@ -77,3 +79,35 @@ async def test_a_take_raises_a_cancel_that_lands_as_its_read_is_answered() -> No
         await _TypedField(None, SimpleNamespace(element_handle=element_handle)).take()
 
     await _cancelled_as_it_answers(take, {"type": "text", "name": "note"})
+
+
+async def test_a_call_that_fails_as_its_caller_is_cancelled_leaves_nothing_for_asyncio_to_report() -> None:
+    # B1-fix1 item 6 (Codex B1-6, Opus F1): _within read the end of a call it gave up on only where the call had not
+    # ended, so a call that failed in the turn its caller was cancelled left its failure, the page's text in it, for
+    # asyncio to report as "Task exception was never retrieved". Its end is read on every way out now.
+    loop = asyncio.get_running_loop()
+    heard: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: heard.append(context["message"]))
+    try:
+        answered = loop.create_future()
+        asked = asyncio.Event()
+
+        async def call() -> Any:
+            asked.set()
+            return await answered
+
+        task = asyncio.create_task(actions._answered_soon(call()))
+        await asyncio.wait_for(asked.wait(), 5)
+        # Both in this turn: the call's failure, then the cancel of the task waiting for it.
+        answered.set_exception(PlaywrightError("the page failed the read"))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert heard == [], heard

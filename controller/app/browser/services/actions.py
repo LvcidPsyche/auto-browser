@@ -43,6 +43,7 @@ from ..click_target import (
     CLICK_LABEL_PHRASES,
     TARGET_READ_ACTIONS,
     PressNeedsApproval,
+    _outcome_left_behind,
     classified_reason,
     classified_risk,
     press_is_read,
@@ -525,8 +526,9 @@ async def _within(call: Awaitable[Any], seconds: float) -> Any:
     finally:
         if not step.done():
             step.cancel()
-            # Its end is nobody's to read now: read here, as wait_for's own cancel would have awaited it.
-            step.add_done_callback(lambda ended: ended.cancelled() or ended.exception())
+        # On every way out, an ended call too: its end is nobody's to read once the caller is gone, and a call that
+        # failed in the turn its caller was cancelled left the failure, the page's text in it, for asyncio to report.
+        step.add_done_callback(_outcome_left_behind)
     if not done:
         raise TimeoutError
     return step.result()
