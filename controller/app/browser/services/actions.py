@@ -690,8 +690,8 @@ class _TypedField:
     the type names (element_scripts._HELD_FIELD_JS).
 
     ``not_secret`` says whether the text's preview may be shown: the node read as not secret through the hold when it
-    was taken, once the type's clear was done (read_after_the_clear) and as it was given back, and kept focus in
-    between. Read by the type's selector or element_id
+    was taken, once the type's clear was done (read_after_the_clear) and as it was given back, and kept focus, and
+    every attribute it is read by, in between. Read by the type's selector or element_id
     instead, the field was found anew each time: a key of the text that sent focus on to a password field left the
     rest of the text there unread, and by selector a field turned secret and then replaced read as its replacement.
 

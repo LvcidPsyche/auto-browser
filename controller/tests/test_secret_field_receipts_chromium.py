@@ -397,6 +397,50 @@ async def test_a_field_secret_only_between_the_clear_and_the_last_key_keeps_no_p
         _assert_withheld(records)
 
 
+# A plain field the text's first key makes a password field, and its last key plain again: plain at the take, once
+# the clear is done and at the release, a password field for all but one key of the text (the Opus probe's page).
+SECRET_WHILE_THE_TEXT_GOES_IN = (
+    '<title>note</title><input id="f" aria-label="Note" onkeydown="if (event.key.length === 1 && !event.ctrlKey'
+    f" && this.value.length === 0) this.type = 'password'; else if (event.key.length === 1 && this.value.length"
+    f" === {len(TEXT) - 1}) this.type = 'text';\">"
+)
+# A plain field whose page sets attributes the hold does not read as each key goes in (a framework's class, its
+# aria-invalid and the value attribute).
+RESTYLED_WHILE_THE_TEXT_GOES_IN = (
+    '<title>note</title><input id="f" aria-label="Note" oninput="this.className = `n` + this.value.length;'
+    " this.setAttribute(`aria-invalid`, String(this.value.length % 2 === 0)); this.setAttribute(`value`,"
+    ' this.value);">'
+)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_secret_only_while_the_text_goes_in_keeps_no_preview(tmp_path: Path, by: str) -> None:
+    # B1-fix2 item 7 (the Opus correctness read, F11; pre-existing): the hold heard focus moves alone, and read the
+    # field plain at each of its reads, so the preview of a text 13 of whose 14 keys went into a password field was
+    # kept. A change of an attribute the hold reads, from its take on, makes every later read say secret.
+    async with browser_env(tmp_path, {"/note": SECRET_WHILE_THE_TEXT_GOES_IN}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#f", TEXT)
+
+        assert await session.page.evaluate("() => [f.value, f.type]") == [TEXT, "text"]
+        _assert_withheld(records)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_whose_page_sets_other_attributes_while_the_text_goes_in_shows_its_preview(
+    tmp_path: Path, by: str
+) -> None:
+    # The control for item 7: only the attributes is_sensitive_field reads are heard.
+    async with browser_env(tmp_path, {"/note": RESTYLED_WHILE_THE_TEXT_GOES_IN}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#f", TEXT)
+
+        assert await session.page.evaluate("() => [f.value, f.getAttribute('value'), f.className]") == [
+            TEXT,
+            TEXT,
+            f"n{len(TEXT)}",
+        ]
+        _assert_shown(records, TEXT)
+
+
 # A wrapper the type names, around a plain field and a frame of its own, whose field the plain field's select-all
 # sends focus to.
 MOVES_FOCUS_INTO_A_FRAME_IN_THE_CLEAR = (
@@ -549,6 +593,8 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
     # listeners on the node with nothing to find them by. No page can make a read throw in the element ids' world,
     # so the script is run as it is on a hold whose node is no node of a document: an EventTarget of its own, which
     # the listeners go on and come off as they do a node's (EventTarget.prototype's methods), and which no read takes.
+    # The hold is as a take makes it, with an observer that has heard nothing (B1-fix2 item 7), so the read goes on
+    # to the node, and throws.
     async with browser_env(tmp_path, {"/blank": "<title>blank</title>"}) as env:
         session_id = await env.create("/blank")
 
@@ -558,7 +604,8 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
               const node = new EventTarget();
               const listener = (event) => heard.push(event.type);
               for (const type of ['blur', 'focus', 'focusin']) node.addEventListener(type, listener, true);
-              const hold = {{ node, root: node, left: false, listener }};
+              const observer = new MutationObserver(() => {{}});
+              const hold = {{ node, root: node, left: false, listener, observer, renamed: false }};
               const registry = {{ fieldHolds: new Map([['nonce', hold]]) }};
               let threw = false;
               try {{

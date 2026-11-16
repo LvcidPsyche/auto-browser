@@ -103,6 +103,15 @@ All notable changes to auto-browser are documented here.
   selector, the clear's checks also took focus in a frame inside the named element for focus in it, as by
   `element_id` they do not, and the clear's keys and the text went to the frame's document: the type is now refused
   there (`focus_lost`), unless focus was already in the frame as the type began.
+- **A field the page makes a password field while the text goes in keeps no preview.** The hold on the field a
+  type's text goes to heard only focus moves, and read the field's attributes as it was taken, once the clear was
+  done and as it was given back: a field the text's first key made a password field and its last key a plain one
+  again read plain at each, and the preview of a text 13 of whose 14 keys went into a password field was kept, by
+  selector and by `element_id` (as in 1.18.1). The hold now hears a change of any attribute it reads (`type`,
+  `name`, `id`, `placeholder`, `aria-label`, `autocomplete`) from its take on, and a type during which the page
+  changed one withholds its preview, though the attribute came back. That is the cost: a field whose page changes
+  its placeholder or its name as the text goes in loses its preview. A page that changes other attributes of the
+  field (a class, `aria-invalid`, the `value` attribute) changes nothing.
 
 ### Fixed
 

@@ -550,18 +550,15 @@ ELEMENT_FOCUS_PLACE_SCRIPT = f"""(el) => {{
   return ({_FOCUS_PLACE_JS})(el);
 }}"""
 
-# A field's own attributes, as is_sensitive_field reads them. Needs `dom`.
-_FIELD_ATTRIBUTES_JS = """(node) => {
-    const read = (name) => dom.attr(node, name) || '';
-    return {
-      type: read('type'),
-      name: read('name'),
-      id: read('id'),
-      placeholder: read('placeholder'),
-      'aria-label': read('aria-label'),
-      autocomplete: read('autocomplete'),
-    };
-  }"""
+# A field's own attributes, as is_sensitive_field reads them. Needs `dom`. The names are the hold's too, which hears
+# a change of any of them (_HELD_FIELD_JS). An object literal, whose properties are its own whatever a page has
+# defined on Object.prototype.
+_FIELD_ATTRIBUTE_NAMES = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
+_FIELD_ATTRIBUTES_JS = (
+    "(node) => {\n    const read = (name) => dom.attr(node, name) || '';\n    return {\n"
+    + "".join(f"      '{name}': read('{name}'),\n" for name in _FIELD_ATTRIBUTE_NAMES)
+    + "    };\n  }"
+)
 # The same attributes of a field on its own, for the TOTP autofill's look at a field it might type a code into
 # (actions._find_one_time_code_field). It runs in the page's own world, on a locator, by Element.prototype's
 # getAttribute (see DOM_JS): a copy of its own read them through the field's, which a page can define on the field.
@@ -583,9 +580,18 @@ FIELD_ATTRIBUTES_SCRIPT = f"""(el) => {{
 # left on the node, and as it came off left those after it. A hold one of whose listeners did not go on cannot hear
 # every move, and says focus left; a release whose removal of one threw takes the others off and then throws.
 # read(hold): the node's own attributes, as is_sensitive_field reads them, while it is still the innermost focused
-# element of its root and focus never left it; else null. One the page took out of its document is no root's
-# focused element. Run in the main world too, on a locator, for a selector target (see DOM_JS).
+# element of its root, focus never left it and the page changed none of those attributes; else null. One the page
+# took out of its document is no root's focused element. A change of one is heard by an observer taken with the
+# hold (bound as the script sets itself up, as DOM_JS is), and each read takes its pending records first: a field
+# made a password field by the text's first key and plain again by its last read plain at every read, and its
+# preview was kept. A change heard says secret from then on, though the attribute came back; an observer that cannot
+# be put on or asked says the same, and the release takes it off with the listeners. Run in the main world too, on a
+# locator, for a selector target (see DOM_JS).
 _HELD_FIELD_JS = f"""{DOM_JS}
+const Observer = MutationObserver;
+const observe = Observer.prototype.observe;
+const takeRecords = Observer.prototype.takeRecords;
+const disconnect = Observer.prototype.disconnect;
 const held = {{
   focused(from) {{
     let active = dom.active(dom.root(from));
@@ -595,7 +601,7 @@ const held = {{
     return active || null;
   }},
   take(el) {{
-    const hold = {{ node: null, root: null, target: el, left: false, listener: null }};
+    const hold = {{ node: null, root: null, target: el, left: false, listener: null, observer: null, renamed: false }};
     const active = held.focused(el);
     if (!active || !dom.within(active, el) || dom.frame(active)) {{
       return hold;
@@ -610,6 +616,12 @@ const held = {{
         hold.left = true;
       }}
     }}
+    try {{
+      hold.observer = new Observer(() => {{ hold.renamed = true; }});
+      observe.call(hold.observer, active, {{ attributes: true, attributeFilter: {list(_FIELD_ATTRIBUTE_NAMES)!r} }});
+    }} catch (error) {{
+      hold.renamed = true;
+    }}
     return hold;
   }},
   // The nodes the hold's listeners go on, each with its event: the node's blur and focus, its shadow root's focusin.
@@ -620,8 +632,19 @@ const held = {{
   }},
   read(hold) {{
     const node = hold.node;
-    if (!node || hold.left || dom.shadowRoot(node) !== hold.root || held.focused(node) !== node) return null;
+    if (!node || hold.left || held.wasRenamed(hold)) return null;
+    if (dom.shadowRoot(node) !== hold.root || held.focused(node) !== node) return null;
     return ({_FIELD_ATTRIBUTES_JS})(node);
+  }},
+  // Whether the page changed one of the attributes read since the take: heard, or still in the observer's queue.
+  wasRenamed(hold) {{
+    if (hold.renamed) return true;
+    try {{
+      hold.renamed = takeRecords.call(hold.observer).length > 0;
+    }} catch (error) {{
+      hold.renamed = true;
+    }}
+    return hold.renamed;
   }},
   release(hold) {{
     if (!hold.node) return;
@@ -629,6 +652,13 @@ const held = {{
     for (const [node, type] of held.listened(hold)) {{
       try {{
         dom.unlisten(node, type, hold.listener, true);
+      }} catch (error) {{
+        failures.push(error);
+      }}
+    }}
+    if (hold.observer) {{
+      try {{
+        disconnect.call(hold.observer);
       }} catch (error) {{
         failures.push(error);
       }}
