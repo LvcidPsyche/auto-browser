@@ -149,6 +149,14 @@ TAKES_TEXT_AS_THE_BROWSER_HAS_IT = {
         '<div id="named" contenteditable><div role="textbox" aria-label="Password">x</div></div>',
         "secret",
     ),
+    # B1-fix1 item 9 (orchestrator probe, Opus F15): inputs in an editor that take no text, a hidden token and a
+    # checkbox, with names a secret's words are in. Every input in an editor is editable, and the editable test ran
+    # before the input's type, so they read secret (1.18.1: plain). An input is a field by its type alone.
+    "inputs-that-take-no-text-in-an-editor": (
+        '<div id="named" contenteditable aria-label="Note"><p>x</p><input type="hidden" name="csrf_token">'
+        '<input type="checkbox" name="otp_ok"></div>',
+        "plain",
+    ),
     # An element whose contenteditable says inherit, in nothing editable: it takes no text.
     "an-element-whose-contenteditable-is-inherit": (
         '<div id="named"><span contenteditable="inherit">x</span></div>',

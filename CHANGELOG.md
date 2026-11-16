@@ -47,8 +47,9 @@ All notable changes to auto-browser are documented here.
   no field, and one named as a secret beside a plain field read `plain` and the approval showed the text. And it
   counted an element as editable by its `contenteditable` attribute, so a text box named as a secret and editable by
   what it is in was not counted (the same), while one whose attribute says `inherit`, in nothing editable, was,
-  though it takes no text. It now goes by the type the browser has and by `isContentEditable`, and answers fields
-  alike in every attribute once: counted one by one, the 20,000 paragraphs of an editor took 2.9 s, past the read's
+  though it takes no text. It now takes a form control by the type the browser has, and anything else by
+  `isContentEditable` (a hidden input or a checkbox in an editor is still no field), and answers fields alike in
+  every attribute once: counted one by one, the 20,000 paragraphs of an editor took 2.9 s, past the read's
   bound of a second, and now take 0.16 s (measured).
 - **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
   plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a

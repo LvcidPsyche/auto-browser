@@ -692,9 +692,12 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
       return '';
     }}
   }};
+  // A form control takes text by what it is alone: every input in an editor is editable, a hidden one or a checkbox
+  // too. What is no form control takes text where it is editable.
   const takesText = (node) =>
-    dom.editable(node) ||
-    (dom.matches(node, 'input, textarea, select') && (dom.tag(node) !== 'INPUT' || !noText.includes(inputType(node))));
+    dom.matches(node, 'input, textarea, select')
+      ? dom.tag(node) !== 'INPUT' || !noText.includes(inputType(node))
+      : dom.editable(node);
   const fields = new Set();
   let frame = false;
   const look = (node) => {{
