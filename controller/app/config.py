@@ -278,6 +278,9 @@ class Settings(BaseSettings):
     pre_request_blocking: bool = Field(True, alias="PRE_REQUEST_BLOCKING")
     default_viewport_width: int = Field(1280, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(800, alias="DEFAULT_VIEWPORT_HEIGHT")
+    # False: the controller starts without connecting to the shared browser-node, and the first call that needs the
+    # browser connects (the root image's MCP inspection, which runs no browser-node).
+    connect_at_startup: bool = Field(True, alias="CONNECT_AT_STARTUP")
     connect_retries: int = Field(60, alias="CONNECT_RETRIES")
     connect_retry_delay_seconds: float = Field(1.0, alias="CONNECT_RETRY_DELAY_SECONDS")
     max_sessions: int = Field(1, alias="MAX_SESSIONS")

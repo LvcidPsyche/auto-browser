@@ -76,6 +76,14 @@ All notable changes to auto-browser are documented here.
   for 60 seconds and then started the bridge whatever the answer, so a uvicorn that had already exited left the
   bridge talking to nothing and the container running. It now ends with uvicorn's status (1 where that is 0) when
   uvicorn exits before it is healthy, and with 1 when the 60 seconds run out.
+- **The root (Glama) image starts again; it had failed at every start since 1.15.0.** Its entrypoint set
+  `SESSION_ISOLATION_MODE=glama_inspect`, a mode no code named, which skipped the startup connect to a browser-node
+  only because it was not `shared_browser_node`; 1.15.0 refuses an unknown mode, so the server failed at import and
+  the bridge started with nothing behind it. A new setting, `CONNECT_AT_STARTUP` (default `true`), says what the
+  image needs: with it `false` the controller starts without connecting to the shared browser-node, and the first
+  call that needs the browser connects. The image sets it, and it answers MCP's `initialize` and `tools/list` again
+  (20 tools, measured on the image built from this release). uvicorn's output there now goes to stderr: stdout is the
+  bridge's, one MCP message a line, and uvicorn's access log put lines of its own among them.
 
 ### Changed
 
