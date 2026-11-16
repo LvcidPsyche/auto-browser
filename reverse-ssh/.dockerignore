@@ -1,0 +1,8 @@
+# Kept out of what this image's build is sent: the history, virtualenvs, node_modules, bytecode, data and .env
+# files. The image copies entrypoint.sh.
+.git
+**/.venv*
+**/node_modules
+**/__pycache__
+data
+**/.env*
