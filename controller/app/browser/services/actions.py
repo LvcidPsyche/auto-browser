@@ -38,12 +38,12 @@ from ...models import (
 from ...utils import error_text, error_text_for_log, spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
+from ..call_bounds import within as _within
 from ..click_target import (
     CHECKED_LABELS,
     CLICK_LABEL_PHRASES,
     TARGET_READ_ACTIONS,
     PressNeedsApproval,
-    _outcome_left_behind,
     classified_reason,
     classified_risk,
     press_is_read,
@@ -532,29 +532,6 @@ async def _answered_soon(call: Awaitable[Any]) -> Any:
     one end (a take's, through _arrives_by and _left_until); steps bounded one by one can take the bound each (a
     give-back's)."""
     return await _within(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
-
-
-async def _within(call: Awaitable[Any], seconds: float) -> Any:
-    """``call``'s answer within ``seconds``, else TimeoutError; the call is cancelled where it has not answered by
-    then, or by a cancel of the caller, which is raised. asyncio.wait_for, but for the cancel: on Python 3.11, the
-    image's, wait_for answered a caller cancelled in the loop turn its call answered with that answer, and the type
-    that was cancelled went on (a keystroke typed, a take read on). asyncio.wait raises the cancel as it comes.
-    No time (a take's read once its bound has passed) is the bound's error, as _arrives_by's is."""
-    step = asyncio.ensure_future(call)
-    try:
-        if seconds <= 0:
-            # asyncio.wait with none would still find a call that answers within its first step done.
-            raise TimeoutError
-        done, _ = await asyncio.wait({step}, timeout=seconds)
-    finally:
-        if not step.done():
-            step.cancel()
-        # On every way out, an ended call too: its end is nobody's to read once the caller is gone, and a call that
-        # failed in the turn its caller was cancelled left the failure, the page's text in it, for asyncio to report.
-        step.add_done_callback(_outcome_left_behind)
-    if not done:
-        raise TimeoutError
-    return step.result()
 
 
 def _left_until(ends: float) -> float:

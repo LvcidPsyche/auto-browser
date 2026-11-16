@@ -47,7 +47,6 @@ keeps its list the table's (tests/test_click_target_doc.py).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import string
@@ -61,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 from ..action_errors import BrowserActionError
 from ..models import ApprovalKind, BrowserActionDecision, RiskCategory
 from ..utils import error_text_for_log
+from .call_bounds import within
 from .element_ids import target_element_id
 from .element_scripts import DOM_JS
 
@@ -1048,23 +1048,8 @@ async def _read_selected(page: Page, selector: str) -> Any:
     for the element, not a page too busy to answer, so the whole call is bounded here too; past the bound it is
     cancelled and left behind, not waited for.
     """
-    call = asyncio.ensure_future(
-        page.locator(selector).first.evaluate(DESCRIBE_TARGET_SCRIPT, _LABEL_CUT, timeout=READ_TIMEOUT_MS)
-    )
+    reading = page.locator(selector).first.evaluate(DESCRIBE_TARGET_SCRIPT, _LABEL_CUT, timeout=READ_TIMEOUT_MS)
     try:
-        done, _ = await asyncio.wait({call}, timeout=READ_TIMEOUT_MS / 1000)
-    finally:
-        if not call.done():
-            call.cancel()
-        # On every way out, an ended read too: a click cancelled just as its read failed left the failure, the
-        # page's text in it, for asyncio to report.
-        call.add_done_callback(_outcome_left_behind)
-    if not done:
-        raise TimeoutError(f"the element did not answer within {READ_TIMEOUT_MS} ms")
-    return call.result()
-
-
-def _outcome_left_behind(call: asyncio.Future[Any]) -> None:
-    """Retrieve what a read ended with, so asyncio does not report it as never retrieved."""
-    if not call.cancelled():
-        call.exception()
+        return await within(reading, READ_TIMEOUT_MS / 1000)
+    except TimeoutError:
+        raise TimeoutError(f"the element did not answer within {READ_TIMEOUT_MS} ms") from None
