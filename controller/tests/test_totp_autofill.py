@@ -153,11 +153,14 @@ LEAVES_ON_A_KEY = f"""<!doctype html>
          onkeydown="location.href='https://{OTHER_HOST}/collect'">
 </form>"""
 # A named host's one-time-code field that cannot be filled (read-only: Playwright's fill waits for it to take text
-# until its timeout), whose focus sends the page to another host a moment later; that host's field has focus and holds
-# text of its own, and the autofill's selector does not match it.
+# until its timeout, 3 s here), whose focus sends the page to another host a second later; that host's field has focus
+# and holds text of its own, and the autofill's selector does not match it. Nothing the page hears marks the fill's
+# wait, so the departure is timed into it: a second after the focus, well past the checks that follow the focus
+# click, and well inside the fill's 3 s. The fill began 161 to 225 ms after the focus in 8 runs measured (B1-fix1
+# item 32, staged F17): at 300 ms, a slow run could leave before the last check, and test that check instead.
 LEAVES_AS_ITS_FILL_WAITS = f"""<!doctype html>
 <input name="otp" autocomplete="one-time-code" readonly
-       onfocus="setTimeout(() => {{ location.href = 'https://{OTHER_HOST}/keep'; }}, 300)">"""
+       onfocus="setTimeout(() => {{ location.href = 'https://{OTHER_HOST}/keep'; }}, 1000)">"""
 KEEPS = '<!doctype html><input name="otp" value="kept" autofocus>'
 
 
