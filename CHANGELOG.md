@@ -73,10 +73,12 @@ All notable changes to auto-browser are documented here.
 - **A type that clears its field takes its hold on the field before the clear, not after it.** Taken after, the hold
   heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a
   plain one in the same element the type named kept the preview of the text meant for the password field, and a
-  move away and back between the clear's checks passed them both. Its preview is now withheld. By selector, the
-  clear's checks also took focus in a frame inside the named element for focus in it, as by `element_id` they do
-  not, and the clear's keys and the text went to the frame's document: the type is now refused there (`focus_lost`),
-  unless focus was already in the frame as the type began.
+  move away and back between the clear's checks passed them both. Its preview is now withheld. The hold reads the
+  field once the clear is done as well, as the hold taken then did: a field the clear's Delete makes a password field
+  keeps no preview however it reads once the text is in. By selector, the clear's checks also took focus in a frame
+  inside the named element for focus in it, as by `element_id` they do not, and the clear's keys and the text went to
+  the frame's document: the type is now refused there (`focus_lost`), unless focus was already in the frame as the
+  type began.
 
 ### Fixed
 

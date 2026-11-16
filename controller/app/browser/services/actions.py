@@ -646,7 +646,8 @@ class _TypedField:
     the type names (element_scripts._HELD_FIELD_JS).
 
     ``not_secret`` says whether the text's preview may be shown: the node read as not secret through the hold when it
-    was taken and again as it was given back, and kept focus in between. Read by the type's selector or element_id
+    was taken, once the type's clear was done (read_after_the_clear) and as it was given back, and kept focus in
+    between. Read by the type's selector or element_id
     instead, the field was found anew each time: a key of the text that sent focus on to a password field left the
     rest of the text there unread, and by selector a field turned secret and then replaced read as its replacement.
 
@@ -736,6 +737,23 @@ class _TypedField:
             self.not_secret = _reads_not_secret(await _within(read, _left_until(ends)))
         except Exception:
             self.not_secret = False
+
+    async def read_after_the_clear(self) -> None:
+        """Read the held node once more, as the clear is done and before the text: plain only where this read is too.
+        Read at the take and at the release alone, a field plain at both and a password field between them (made one
+        as it was emptied, and plain again as the last key of the text went in) kept the preview of a text typed into
+        a password field. A read that fails or does not answer says secret."""
+        if not self.not_secret:
+            return
+        try:
+            if self._element is not None:
+                # A take under the nonce it was taken with reads the hold that take made (ELEMENT_FIELD_HOLD_SCRIPT).
+                attributes = await self._element.hold_field(self._nonce)
+            else:
+                attributes = await _answered_soon(self._handle.evaluate(FIELD_HOLD_READ_SCRIPT))
+        except Exception:
+            attributes = None
+        self.not_secret = _reads_not_secret(attributes)
 
     async def release(self) -> None:
         """Read the node once more and give the hold back, whatever ended the type: each step on its own, and a
@@ -952,15 +970,15 @@ class BrowserActionService:
                     # Before any key: a find that found nothing pressed select-all into whatever had focus, and was
                     # refused only then.
                     await require_focus(" before select-all (nothing was cleared)")
-                # Read as the clear begins (just before the first keystroke where there is none), and again once the
-                # text is in: a page can make the field a password field as it is focused or cleared (a login form
-                # that does so as it is focused), or as the text goes in. Read before the focus, a field turned so
-                # kept the preview of the text typed into it. Both reads are of the node that has focus as the clear
-                # begins, held from then until the text is in (_TypedField): a key of the clear or of the text can
-                # send focus on to another field, which takes the rest. Taken once the clear was done, the hold heard
-                # nothing of a move during it: from a password field to a plain one in the same named wrapper, which
-                # the clear's checks take for focus in what the type named, the preview kept the text meant for the
-                # password field; and a move away and back between the checks passed them both.
+                # Read as the clear begins (just before the first keystroke where there is none), once the clear is
+                # done, and again once the text is in: a page can make the field a password field as it is focused or
+                # cleared (a login form that does so as it is focused), or as the text goes in. Read before the
+                # focus, a field turned so kept the preview of the text typed into it. Every read is of the node that
+                # has focus as the clear begins, held from then until the text is in (_TypedField): a key of the clear
+                # or of the text can send focus on to another field, which takes the rest. Taken once the clear was
+                # done, the hold heard nothing of a move during it: from a password field to a plain one in the same
+                # named wrapper, which the clear's checks take for focus in what the type named, the preview kept the
+                # text meant for the password field; and a move away and back between the checks passed them both.
                 await field.take()
                 if clear_first:
                     await self._clear_key(session.page, "Control+a")
@@ -971,6 +989,8 @@ class BrowserActionService:
                     await asyncio.sleep(0.05)
                     # A page can move focus once the clear has gone in, before the text does.
                     await require_focus(" through the clear")
+                    # And make the field a password field as it is emptied: read again before the text goes in.
+                    await field.read_after_the_clear()
                 await self.type_text_human_like(session.page, text)
             finally:
                 await field.release()

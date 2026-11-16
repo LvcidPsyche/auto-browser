@@ -377,6 +377,26 @@ async def test_a_focus_move_during_the_clear_keeps_no_preview(tmp_path: Path, mo
         _assert_withheld(records)
 
 
+# A plain field the clear's Delete makes a password field, and the text's last key makes plain again: plain where
+# the hold is taken and where it is given back, a password field while the text goes in.
+SECRET_ONLY_THROUGH_THE_TEXT = (
+    '<title>note</title><input id="f" aria-label="Note" onkeydown="if (event.key === \'Delete\') this.type ='
+    f" 'password'; else if (event.key.length === 1 && this.value.length === {len(TEXT) - 1}) this.type = 'text';\">"
+)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_secret_only_between_the_clear_and_the_last_key_keeps_no_preview(tmp_path: Path, by: str) -> None:
+    # B1-fix1 item 1 (Codex B1-1): with the hold taken before the clear, it was read at the take and at the release
+    # alone, both plain here, and the preview of a text typed into a password field was kept, where 1.18.1, reading
+    # once the clear was done, withheld it. The hold is read once more as the clear is done.
+    async with browser_env(tmp_path, {"/note": SECRET_ONLY_THROUGH_THE_TEXT}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#f", TEXT)
+
+        assert await session.page.evaluate("() => [f.value, f.type]") == [TEXT, "text"]
+        _assert_withheld(records)
+
+
 # A wrapper the type names, around a plain field and a frame of its own, whose field the plain field's select-all
 # sends focus to.
 MOVES_FOCUS_INTO_A_FRAME_IN_THE_CLEAR = (
