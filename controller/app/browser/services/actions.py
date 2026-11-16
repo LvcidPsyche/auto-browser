@@ -2321,7 +2321,13 @@ class BrowserActionService:
             for key in ("Control+a", "Delete"):
                 if not await self._has_focus(locator) or not self._may_fill_totp(session):
                     return None
-                await session.page.keyboard.press(key)
+                # Bounded as a type's clear is (_clear_key): a page that never acknowledged a key held the session.
+                # Past it no code is typed.
+                try:
+                    await _within(session.page.keyboard.press(key), HUMAN_TYPING_STEP_FLOOR_SECONDS)
+                except TimeoutError:
+                    logger.warning("TOTP autofill stopped: the page did not acknowledge the clear's %s in time", key)
+                    return None
         # And so did the clear: a field whose page an input or a key handler sends elsewhere as it is emptied.
         # And so does each key of the code: a key handler that sent the page to another host had the rest of the code
         # typed into whatever had focus there. Asked before each key, inside the one typing budget.

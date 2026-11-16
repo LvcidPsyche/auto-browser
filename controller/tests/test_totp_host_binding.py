@@ -9,6 +9,7 @@ show `<input name="code">` and receive a valid second factor for the account.
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -84,12 +85,14 @@ class TotpAutofillTests(unittest.TestCase):
         leaves_during: str | None = None,
         fill_fails: bool = False,
         focused: bool | list[bool] = True,
+        keys_take: float = 0.0,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
         "focus question" for the question whether focus is in the field, asked before each of them, "typing" for the
         code's keystrokes) during which the page goes to another host. ``focused``: what the field
-        answers when it is asked whether focus is in it, or a list of its answers in turn."""
+        answers when it is asked whether focus is in it, or a list of its answers in turn. ``keys_take``: how many
+        seconds the page takes to acknowledge each key of the clear by keys."""
         self.typed_keys: list[str] = []
 
         async def typing(_page: object, text: str, *, keeps_on: Callable[[], bool]) -> bool:
@@ -109,6 +112,7 @@ class TotpAutofillTests(unittest.TestCase):
                 raise PlaywrightError("Element is not an <input>, <textarea> or [contenteditable] element")
 
         async def press_key(_key: str) -> None:
+            await asyncio.sleep(keys_take)
             leave_during("clear by keys")
 
         answers = list(focused) if isinstance(focused, list) else None
@@ -272,6 +276,21 @@ class TotpAutofillTests(unittest.TestCase):
         self.assertIsNone(result)
         self.keys.assert_not_awaited()
         typed.assert_not_awaited()
+
+    def test_a_clear_by_keys_the_page_does_not_acknowledge_ends_the_autofill_with_no_code(self) -> None:
+        # B1-fix2 item 14 (the Opus correctness read, F14; pre-existing): the keys that empty a field whose fill failed
+        # waited for the page with no bound, unlike a type's clear (_clear_key). Each is bounded at
+        # HUMAN_TYPING_STEP_FLOOR_SECONDS, past which the autofill ends with no code typed.
+        with patch("app.browser.services.actions.HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.1):
+            began = time.monotonic()
+            result, typed = self.run_autofill(
+                "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, keys_take=1.0
+            )
+            took = time.monotonic() - began
+        self.assertIsNone(result)
+        typed.assert_not_awaited()
+        self.assertEqual(self.keys.await_args_list, [call("Control+a")])
+        self.assertLess(took, 0.6)
 
     def test_a_field_that_lost_focus_when_its_fill_failed_gets_no_keys(self) -> None:
         # The keys that empty a field whose fill failed go to whatever has focus: into another field of the page,
