@@ -20,8 +20,8 @@ from typing import Any
 import pytest
 
 from app.action_errors import BrowserActionError
-from app.browser.click_target import classified_risk, read_click_target
-from app.browser.services.actions import BrowserActionService
+from app.browser.click_target import classified_risk, read_click_target, same_element_at
+from app.browser.services.actions import _RECEIVES_POINTER_SCRIPT, BrowserActionService
 from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
 from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromium: that module's autouse browser
@@ -471,3 +471,45 @@ async def test_an_approval_reads_an_editor_whose_named_blocks_are_alike_within_i
     # E15: fields alike in every attribute are answered once. Each answered on its own, 20,000 took past the read's
     # bound of a second: unread.
     assert await _approval_read(tmp_path, AN_EDITOR_WHOSE_BLOCKS_ARE_NAMED_ALIKE) == _read_as("plain")
+
+
+# A button the page draws as a div, whose middle a frame of a kind the frame tags left out fills.
+A_BUTTON_A_FRAME_FILLS = {
+    tag: '<title>frame</title><div id="box" role="button" aria-label="Open" style="width: 300px; height: 150px">'
+    f'<{tag} style="display: block; width: 300px; height: 150px; border: 0"></{tag}></div>'
+    for tag in ("fencedframe", "portal")
+}
+
+
+@pytest.mark.parametrize("tag", list(A_BUTTON_A_FRAME_FILLS))
+async def test_two_points_on_a_fenced_frame_or_a_portal_are_never_taken_for_one_element(
+    tmp_path: Path, tag: str
+) -> None:
+    # B1-fix1 item 19 (Opus F9): SAME_ELEMENT_SCRIPT's frame tags were IFRAME, FRAME, OBJECT and EMBED, so two points
+    # on a fenced frame or a portal read as one element, and a click by coordinates there kept its jitter, though
+    # inside the frame two points may be two controls. It takes them as frames, as DOM_JS's dom.frame does.
+    async with browser_env(tmp_path, {"/frame": A_BUTTON_A_FRAME_FILLS[tag]}) as env:
+        session_id = await env.create("/frame")
+        page = env.manager.sessions[session_id].page
+        box = await page.locator("#box").bounding_box()
+        point = (box["x"] + 150, box["y"] + 75)
+
+        assert await same_element_at(env.manager.element_ids, page, point, (point[0] + 2, point[1] + 1)) is False
+
+
+@pytest.mark.parametrize("tag", list(A_BUTTON_A_FRAME_FILLS))
+async def test_a_pointer_a_fenced_frame_or_a_portal_in_the_target_holds_is_found_over_the_target(
+    tmp_path: Path, tag: str
+) -> None:
+    # B1-fix1 item 19 (Opus F9): where the target's document saw no move of the pointer arrive, the pointer must be
+    # over a frame inside the target (`onlyFrames`), and the frames it took were the four tags: one over a fenced
+    # frame or a portal in the target was a no. It takes them as frames, as dom.frame does.
+    async with browser_env(tmp_path, {"/frame": A_BUTTON_A_FRAME_FILLS[tag]}) as env:
+        session_id = await env.create("/frame")
+        locator = env.manager.sessions[session_id].page.locator("#box")
+        box = await locator.bounding_box()
+        point = [box["x"] + 150, box["y"] + 75]
+
+        found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [*point, True, False, False, True])
+
+        assert found is True

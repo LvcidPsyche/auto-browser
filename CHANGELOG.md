@@ -70,7 +70,9 @@ All notable changes to auto-browser are documented here.
   `frame`, `object` and `embed`, so a plain field beside a `<fencedframe>` made an approval read `plain` though the
   text can go into the frame's document; a click by element_id on a button a fenced frame filled went into the frame,
   where one an iframe fills is refused as covered; and by element_id focus in a fenced frame inside the target counted
-  as focus in the target. `<portal>` is on the list as well, though Chromium 156 has no such element.
+  as focus in the target. Two points on one were taken for one element, so a click by coordinates there landed off
+  its point, as on no iframe; and a placed click whose target holds one, where the pointer is over it, was refused.
+  `<portal>` is on the list as well, though Chromium 156 has no such element.
 - **The TOTP autofill reads a field's attributes as a type's hold does.** It read them with a copy of that script of
   its own, through the field's own `getAttribute`, which a page can define on the field: a promo-code field that said
   it took a one-time code had the code typed into it, and Enter submitted its form (on a checkout page, the order).

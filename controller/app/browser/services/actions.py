@@ -189,7 +189,7 @@ _RECEIVES_POINTER_SCRIPT = (
     hit = inner;
   }
   if (!hit) return false;
-  if (onlyFrames && !hit.matches('iframe, frame, object, embed')) return false;
+  if (onlyFrames && !dom.frame(hit)) return false;
   const label = dom.closest(hit, 'label');
   if (label && dom.control(label) === el) return over(label);
   for (let node = hit, steps = 0; node && steps < 256; node = dom.flatUp(node), steps += 1) {

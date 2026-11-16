@@ -572,8 +572,12 @@ DESCRIBE_TARGET_SCRIPT = (
 # a window, which on a page of 255 frames used up the half second the read before a press has.
 # The point is carried into a frame by its box, border and padding; a frame that CSS scales or turns is read at a
 # point that is off. A frame of another origin is as far as it goes: the element is the frame.
-_ELEMENT_AT_SCRIPT = r"""
+_ELEMENT_AT_SCRIPT = (
+    r"""
 (x, y) => {
+  """
+    + DOM_JS
+    + r"""
   let root = document;
   let el = null;
   for (let frames = 0; frames <= 3; frames += 1) {
@@ -585,7 +589,7 @@ _ELEMENT_AT_SCRIPT = r"""
     }
     if (!hit) break;
     el = hit;
-    if (!['iframe', 'frame', 'object', 'embed'].includes(el.localName)) break;
+    if (!dom.frame(el)) break;
     let inside = null;
     try { inside = el.contentDocument || null; } catch (error) { inside = null; }
     const held = el.localName === 'embed' ? el.ownerDocument.defaultView : null;
@@ -606,6 +610,7 @@ _ELEMENT_AT_SCRIPT = r"""
   return el;
 }
 """
+)
 # Runs in the isolated world: (arg, registry) => what the click would land on, or null. arg names the target as
 # the click does when it names no selector: {elementId} or {x, y}.
 CLICK_TARGET_SCRIPT = (
@@ -628,16 +633,19 @@ CLICK_TARGET_SCRIPT = (
 )
 # Runs in the isolated world: (arg) => whether a press at (otherX, otherY) lands on the very element one at (x, y)
 # does, found as the classifier finds a point's. Not where that cannot be told: nothing at the point, or a frame
-# or plugin the read stops at (another origin's, or a fourth frame down), inside which two points may be two
-# controls.
+# or plugin the read stops at (another origin's, a fenced frame or a portal, or a fourth frame down), inside which
+# two points may be two controls. A frame is what DOM_JS's dom.frame names: the four tags of before left out those two.
 SAME_ELEMENT_SCRIPT = (
     r"""
 (arg) => {
+  """
+    + DOM_JS
+    + r"""
   const elementAt = """
     + _ELEMENT_AT_SCRIPT
     + r""";
   const el = elementAt(arg.x, arg.y);
-  if (!el || ['iframe', 'frame', 'object', 'embed'].includes(el.localName)) return false;
+  if (!el || dom.frame(el)) return false;
   return el === elementAt(arg.otherX, arg.otherY);
 }
 """
