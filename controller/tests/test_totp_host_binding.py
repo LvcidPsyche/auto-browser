@@ -18,10 +18,20 @@ from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 
 from app.action_errors import BrowserActionError
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services.actions import BrowserActionService
 from app.models import CreateSessionRequest, resolve_totp_hosts, totp_host_allowed
 
 SECRET = "JBSWY3DPEHPK3PXP"
+# The code the success tests freeze, so that the keys typed are compared with it, in order.
+CODE = "492039"
+
+
+def _frozen_code() -> object:
+    """pyotp, as the autofill uses it, answering CODE."""
+    return patch(
+        "app.browser.services.actions.pyotp", SimpleNamespace(TOTP=lambda _secret: SimpleNamespace(now=lambda: CODE))
+    )
 
 
 class TotpHostResolutionTests(unittest.TestCase):
@@ -100,10 +110,15 @@ class TotpAutofillTests(unittest.TestCase):
         async def press_key(_key: str) -> None:
             leave_during("clear by keys")
 
+        answers = list(focused) if isinstance(focused, list) else None
+
+        async def asked(script: str, *_args: object, **_named: object) -> bool:
+            # The field answers the focus check's own script only (B1-fix1 item 29, staged F13).
+            assert script == ELEMENT_HAS_FOCUS_SCRIPT, script
+            return answers.pop(0) if answers is not None else focused
+
         locator = SimpleNamespace(
-            fill=AsyncMock(side_effect=clear),
-            press=AsyncMock(),
-            evaluate=AsyncMock(side_effect=focused if isinstance(focused, list) else lambda *_args, **_named: focused),
+            fill=AsyncMock(side_effect=clear), press=AsyncMock(), evaluate=AsyncMock(side_effect=asked)
         )
         manager = SimpleNamespace(
             _settle=AsyncMock(),
@@ -135,11 +150,13 @@ class TotpAutofillTests(unittest.TestCase):
         return asyncio.run(service.maybe_handle_totp(session)), typed
 
     def test_types_the_code_on_a_named_host(self) -> None:
-        result, typed = self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",))
+        with _frozen_code():
+            result, typed = self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",))
         self.assertEqual(result["code_length"], 6)
-        # One call of the typing code for the whole code, the host asked before each key (B1-fix1 item 4).
+        # One call of the typing code for the whole code, the host asked before each key (B1-fix1 item 4); the keys
+        # are the code's, in order (item 29, staged F14).
         typed.assert_awaited_once()
-        self.assertEqual(len(self.typed_keys), 6)
+        self.assertEqual("".join(self.typed_keys), CODE)
 
     def test_a_page_on_another_host_gets_nothing(self) -> None:
         for url in (
@@ -222,12 +239,23 @@ class TotpAutofillTests(unittest.TestCase):
 
     def test_a_field_emptied_by_keys_on_the_named_host_gets_the_code(self) -> None:
         # Where its fill fails the field is emptied by keys, and on the named host the code is typed as before.
-        result, typed = self.run_autofill(
-            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
-        )
+        with _frozen_code():
+            result, typed = self.run_autofill(
+                "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
+            )
         self.assertEqual(result["code_length"], 6)
-        self.assertEqual(len(self.typed_keys), 6)
+        self.assertEqual("".join(self.typed_keys), CODE)
         self.assertEqual(self.keys.await_args_list, [call("Control+a"), call("Delete")])
+
+    def test_a_focused_field_whose_page_leaves_as_its_fill_fails_gets_no_keys(self) -> None:
+        # B1-fix1 item 29 (staged F12): the host is asked before select-all on its own. Here the field keeps focus,
+        # so only the host's check keeps select-all and Delete off the page the failed fill left the named host for.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="clear", fill_fails=True
+        )
+        self.assertIsNone(result)
+        self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
 
     def test_a_field_that_lost_focus_when_its_fill_failed_gets_no_keys(self) -> None:
         # The keys that empty a field whose fill failed go to whatever has focus: into another field of the page,
