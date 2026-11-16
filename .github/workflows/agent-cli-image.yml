@@ -1,19 +1,22 @@
 name: agent-cli-image
 
 # The two images no other workflow builds: the root (Glama) image, and the controller with INSTALL_AGENT_CLIS=true.
-# In the second, Codex's own command sandbox must run beneath the controller's Landlock launcher, and the two together
-# must still refuse a read of a file in /data and a write outside the roots the launcher gives. The npm package's
-# musl codex could not run there (its helper's open of / reached the kernel without O_PATH and was refused); the
-# release's glibc build can (measured on these two runners, 2026-11-16). Landlock needs a Linux kernel, so this runs
-# on GitHub's runners, as root in the container, so that only the sandboxes refuse what is refused.
+# In the second, scripts/ci/codex_sandbox_check.sh runs Codex as the controller runs it (the CLI's uid, under the
+# launcher with the controller's grants) against a stand-in model that asks for one command, and fails unless each
+# CODEX_SANDBOX_MODE setting reaches what docs/deployment.md ("Codex's own sandbox") says and no more. Landlock needs
+# a Linux kernel, so this runs on GitHub's runners; the container has no network, and needs none.
 on:
   pull_request:
     paths:
       - "controller/Dockerfile"
+      - "controller/.dockerignore"
+      - "controller/entrypoint.sh"
       - "controller/app/cli_sandbox*.py"
-      - "controller/app/providers/openai_adapter.py"
-      - "controller/app/codex_sandbox.py"
+      - "controller/app/providers/base.py"
+      - "scripts/ci/codex_responses_mock.py"
+      - "scripts/ci/codex_sandbox_check.sh"
       - "Dockerfile"
+      - "scripts/glama_entrypoint.sh"
       - ".dockerignore"
       - "controller/requirements.txt"
       - "controller/constraints.txt"
@@ -23,10 +26,14 @@ on:
       - main
     paths:
       - "controller/Dockerfile"
+      - "controller/.dockerignore"
+      - "controller/entrypoint.sh"
       - "controller/app/cli_sandbox*.py"
-      - "controller/app/providers/openai_adapter.py"
-      - "controller/app/codex_sandbox.py"
+      - "controller/app/providers/base.py"
+      - "scripts/ci/codex_responses_mock.py"
+      - "scripts/ci/codex_sandbox_check.sh"
       - "Dockerfile"
+      - "scripts/glama_entrypoint.sh"
       - ".dockerignore"
       - "controller/requirements.txt"
       - "controller/constraints.txt"
@@ -57,32 +64,10 @@ jobs:
           persist-credentials: false
       - name: Build the controller image with the three CLIs
         run: docker build --build-arg INSTALL_AGENT_CLIS=true -t "$IMAGE" controller
-      - name: Codex's sandbox runs under the launcher, and the two refuse what they should
-        run: |
-          checks=$(cat <<'SCRIPT'
-          fail() { echo "FAIL: $*"; exit 1; }
-          command -v codex && codex --version
-          mkdir -p /data/cli-home && cd /data/cli-home || fail "no /data/cli-home"
-          launcher="python -I -S /app/app/cli_sandbox_launcher.py --protect /data --rw /data/cli-home --"
-          echo "=== codex sandbox linux, under the launcher"
-          out=$($launcher codex sandbox linux -- sh -c "echo nested-ok" 2>&1); status=$?
-          echo "$out"
-          [ "$status" -eq 0 ] && [ "$out" = nested-ok ] || fail "Codex's sandbox under the launcher: exit $status"
-          echo planted > /data/planted.txt
-          [ "$(cat /data/planted.txt)" = planted ] && touch /var/lib/control.txt || fail "root itself is refused"
-          for sandbox in "$launcher codex sandbox linux --" "$launcher"; do
-            echo "=== refused under: $sandbox"
-            out=$($sandbox sh -c "cat /data/planted.txt" 2>&1); status=$?
-            echo "$out"
-            [ "$status" -ne 0 ] && ! echo "$out" | grep -qx planted || fail "the file in /data was read"
-            $sandbox sh -c "echo x > /var/lib/written.txt"; status=$?
-            [ "$status" -ne 0 ] && [ ! -e /var/lib/written.txt ] || fail "/var/lib was written"
-          done
-          echo "=== all held"
-          SCRIPT
-          )
-          docker run --rm --user root --security-opt no-new-privileges:true -e HOME=/data/cli-home \
-            --entrypoint sh "$IMAGE" -c "$checks"
+      - name: What a command of Codex's model reaches under each sandbox setting
+        run: >-
+          docker run --rm --network none --user root --security-opt no-new-privileges:true
+          -v "$PWD/scripts/ci:/ci:ro" --entrypoint sh "$IMAGE" /ci/codex_sandbox_check.sh
 
   # The root (Glama) image, which no other workflow builds: its own Dockerfile, its .dockerignore and the two files
   # it installs from are in the paths above.

@@ -39,8 +39,9 @@ All notable changes to auto-browser are documented here.
   owned by root, mode 0755. npm installs only the Claude and Gemini CLIs. Measured on GitHub's amd64 and arm64
   runners: under the CLI sandbox, Codex's sandbox runs a command, and the two together still refuse a read of a
   file in `/data` and a write outside the sandbox's roots. A new workflow, `agent-cli-image`, builds that image on
-  both architectures and checks the same whenever the install, the CLI sandbox or Codex's adapter changes. A
-  controller run on the host with the npm package's codex keeps the limit (`docs/deployment.md`, "Codex's own
+  both architectures whenever the install or the CLI sandbox changes, and runs Codex there as the controller does,
+  against a stand-in model that asks for one command, failing unless each `CODEX_SANDBOX_MODE` setting reaches what
+  `docs/deployment.md` says. A controller run on the host with the npm package's codex keeps the limit (`docs/deployment.md`, "Codex's own
   sandbox"). So Codex's model can again run the commands it asks for, as it could before 1.18.0, and now beneath the
   CLI sandbox as well: under the default `CODEX_SANDBOX_MODE=read-only` such a command can read what the CLI sandbox
   leaves readable (what lies outside `/data`) and write nothing; under `workspace-write` it can also write where
