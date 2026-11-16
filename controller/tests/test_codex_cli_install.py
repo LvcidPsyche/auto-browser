@@ -63,11 +63,20 @@ def _args() -> dict[str, str]:
 @unittest.skipUnless(DOCKERFILE.is_file(), NOT_IN_THIS_TREE)
 class CodexComesFromItsReleaseTests(unittest.TestCase):
     def test_npm_installs_the_claude_and_gemini_clis_and_no_codex(self) -> None:
-        installs = re.findall(r"npm install -g ([^&;]*)", _dockerfile())
+        text = _dockerfile()
+        # Nowhere, in whatever form: npm i, npm add, --global, npx.
+        self.assertNotIn("@openai/codex", text)
+        installs = re.findall(r"npm (?:install|i|add) (?:-g|--global) ([^&;]*)", text)
         self.assertEqual(len(installs), 1, installs)
-        self.assertNotIn("@openai/codex", installs[0])
         self.assertIn("@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}", installs[0])
         self.assertIn("@google/gemini-cli@${GEMINI_CLI_VERSION}", installs[0])
+
+    def test_the_version_and_each_sum_are_set_once(self) -> None:
+        # A second ARG would hide from these tests the value an earlier RUN takes.
+        text = DOCKERFILE.read_text(encoding="utf-8")
+        for name in ["CODEX_CLI_VERSION", *SUM_ARGS]:
+            with self.subTest(arg=name):
+                self.assertEqual(len(re.findall(rf"^\s*ARG\s+{name}\b", text, re.M)), 1)
 
     def test_the_release_tarball_is_checked_extracted_and_its_checked_binary_installed(self) -> None:
         self.assertRegex(_dockerfile(), INSTALL_CHAIN)
@@ -75,8 +84,9 @@ class CodexComesFromItsReleaseTests(unittest.TestCase):
     def test_the_pin_is_older_than_the_release_whose_helper_defaults_to_bubblewrap(self) -> None:
         # From 0.115.0 Codex's helper defaults to bubblewrap, whose mounts Landlock refuses (inferred, not measured):
         # such a pin needs another design ("Codex's own sandbox" in docs/deployment.md), not only new sums.
-        version = tuple(int(part) for part in _args()["CODEX_CLI_VERSION"].split("."))
-        self.assertLess(version, (0, 115, 0))
+        pin = _args()["CODEX_CLI_VERSION"]
+        self.assertRegex(pin, r"^\d+\.\d+\.\d+$")  # "0.115" would compare below (0, 115, 0)
+        self.assertLess(tuple(int(part) for part in pin.split(".")), (0, 115, 0))
 
     def test_each_pinned_sha256_is_64_hex_characters(self) -> None:
         args = _args()
