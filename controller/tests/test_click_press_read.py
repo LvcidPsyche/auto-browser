@@ -33,6 +33,7 @@ from app.browser.click_target import (
     refuse_press_not_asked_about,
 )
 from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from app.browser.services import actions
 from app.browser.services.actions import (
     _PRESS_PLACE_SCRIPT,
     _RECEIVES_POINTER_SCRIPT,
@@ -808,13 +809,18 @@ async def test_a_watch_the_targets_document_cannot_read_is_a_no() -> None:
     target.dispose.assert_awaited_once()
 
 
-def _framed_click(framed: bool, box: Any = BOX) -> tuple[Any, Any, Any, SimpleNamespace, list[str]]:
-    """A read click Playwright places, on a target in a frame or not, whose handles note what is done with them."""
+def _framed_click(
+    framed: bool, box: Any = BOX, stalls: str | None = None
+) -> tuple[Any, Any, Any, SimpleNamespace, list[str]]:
+    """A read click Playwright places, on a target in a frame or not, whose handles note what is done with them. The
+    step ``stalls`` names is noted, and then never answers."""
     service, session, done = _service(CLOSE)
     locator = _locator(done, place={**PLACE, "framed": framed})
 
     async def note(what: str, value: Any = None) -> Any:
         done.append(what)
+        if what == stalls:
+            await _never()
         return value
 
     async def stop(script: str) -> None:
@@ -916,3 +922,100 @@ async def test_a_placed_click_in_a_frame_whose_target_has_no_box_sets_no_watch_u
     assert (ended.value.code, ended.value.retryable) == ("target_moved", True)
     assert done[-3:] == ["look for the target", "the target's box", "give the target back"]
     service._receives_pointer_at.assert_not_awaited()
+
+
+async def _never(*_args: Any, **_kwargs: Any) -> Any:
+    """A call to a page that does not answer."""
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("stalls", ["the target's box", "watch the pointer"])
+async def test_a_placed_click_in_a_frame_whose_target_does_not_answer_ends_at_its_budget(stalls: str) -> None:
+    # The target's box and the watch set up on it were asked of its handle with no bound: a page that stopped
+    # answering there held the click, and its session, past its budget. Each is asked within what the click has
+    # left, and past it the click ends as the timeout any of its waits ends with, the target given back.
+    with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        service, session, locator, watch, done = _framed_click(True, stalls=stalls)
+        began = time.monotonic()
+        with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError):
+            await asyncio.wait_for(service.click_as_playwright_places_it(session, locator, budget=_Budget(200)), 5)
+        took = time.monotonic() - began
+    assert took < 2, took
+    assert done[-2:] == [stalls, "give the target back"]
+    service._receives_pointer_at.assert_not_awaited()
+
+
+def _frames_that_stall(stalls: str) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
+    """A target in a frame, and the frame element above it, one of whose calls (``stalls``) never answers; and the
+    locator that finds the target."""
+    asked: list[tuple[str, list[Any]]] = []
+    outer = _framed_node("the frame", SimpleNamespace(parent_frame=None), asked)
+    up = SimpleNamespace(parent_frame=object(), frame_element=AsyncMock(return_value=outer))
+    target = _framed_node("the target", up, asked)
+    locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=AsyncMock(return_value=target))
+    if stalls == "the-first-question":
+        locator.evaluate = AsyncMock(side_effect=_never)
+    elif stalls == "frame_element":
+        up.frame_element = AsyncMock(side_effect=_never)
+    else:
+        setattr(target, stalls, _never if stalls == "evaluate" else AsyncMock(side_effect=_never))
+    return target, outer, locator
+
+
+@pytest.mark.parametrize("stalls", ["the-first-question", "bounding_box", "evaluate", "owner_frame", "frame_element"])
+@pytest.mark.parametrize("placed", [True, False], ids=["placed", "before-a-human-like-press"])
+async def test_a_pointer_question_the_page_does_not_answer_ends_at_its_bound(stalls: str, placed: bool) -> None:
+    # Locator.evaluate's timeout bounds only the wait for the element, and the handle calls of the walk up the frames
+    # (the target's box, the question, its frame, the frame's element) had no bound at all: a page that stopped
+    # answering held the click past its budget. Every call is asked within the question's bound. Past it, where the
+    # click was placed, the question raises its timeout (the page did not answer); before a human-like press it is
+    # a no, which hands the click to Playwright's placing. The handles taken are given back.
+    target, outer, locator = _frames_that_stall(stalls)
+    asking = BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=placed, timeout_ms=200)
+
+    began = time.monotonic()
+    if placed:
+        with pytest.raises(PlaywrightTimeoutError):
+            await asyncio.wait_for(asking, 5)
+    else:
+        assert await asyncio.wait_for(asking, 5) is False
+    took = time.monotonic() - began
+
+    assert took < 2, took
+    if stalls != "the-first-question":
+        target.dispose.assert_awaited_once()
+    assert outer.dispose.await_count == 0
+
+
+async def test_a_placed_clicks_watch_that_does_not_answer_its_stop_still_gives_the_target_back() -> None:
+    # Each give-back step waited for the page with no bound: a watch whose stop never answered held the click, and
+    # its session, with the target never given back. Each step has the bound a give-back has.
+    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never), dispose=AsyncMock())
+    target = SimpleNamespace(dispose=AsyncMock())
+
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", 200):
+        began = time.monotonic()
+        await asyncio.wait_for(BrowserActionService._give_back(watch, target), 5)
+        took = time.monotonic() - began
+
+    assert took < 2, took
+    watch.dispose.assert_awaited_once()
+    target.dispose.assert_awaited_once()
+
+
+async def test_a_focus_check_the_page_does_not_answer_refuses_the_type_within_its_bound() -> None:
+    # focus_verified asked the field whether focus was in it with no bound, so a page that stopped answering held the
+    # type. A check that does not answer within FIELD_RECHECK_TIMEOUT_MS says no, and the type is refused.
+    service, session, _done = _service(CLOSE)
+    service.focus_locator = AsyncMock()
+    locator = SimpleNamespace(evaluate=AsyncMock(side_effect=_never), focus=AsyncMock())
+
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", 200):
+        began = time.monotonic()
+        with pytest.raises(BrowserActionError) as refused:
+            await asyncio.wait_for(service.focus_verified(session, locator, action="type"), 5)
+        took = time.monotonic() - began
+
+    assert refused.value.code == "focus_lost"
+    assert took < 2, took
+    locator.focus.assert_awaited_once()

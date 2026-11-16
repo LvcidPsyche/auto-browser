@@ -133,6 +133,16 @@ All notable changes to auto-browser are documented here.
   made of those methods. One that threw as it went on ended the take with the listener before it left on the field
   for good, and one that threw as it came off left those after it. Each now goes on and comes off on its own, and a
   hold that could not put one on withholds the type's preview, as one whose field lost focus does.
+- **A page that stops answering no longer holds a click, or a type's focus check and clear, past their bounds.** A
+  click Playwright places asked its target's handle for the box and set the pointer watch up on it with no bound, and
+  the question whether the pointer finds the target asked each handle on its way up the frames with none: a
+  Locator's own `timeout` bounds only the look-up of the element. Each is now asked within what the click's budget
+  leaves (the question within its own second at most), past which the click ends as a timeout, as at any of its
+  other waits; the handles it took are given back, each within a second. By selector, a type's check that focus is
+  in its field answers within a second or refuses the type (`focus_lost`). The clear's select-all and Delete are
+  each bounded at 2 seconds, the least a keystroke is given, past which the type ends as `typing_timeout` with none
+  of its text typed. And a type whose field cannot be found again is refused before select-all, which was pressed
+  first, into whatever had focus. The pointer's moves and the press still wait for the page.
 
 ### Changed
 

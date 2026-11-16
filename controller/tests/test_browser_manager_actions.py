@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import json
 import tempfile
@@ -12,7 +13,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
-from app.browser.services import BrowserRemoteAccessService
+from app.browser.services import BrowserRemoteAccessService, actions
 from app.browser.services.actions import _Budget
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
 from app.config import Settings
@@ -750,6 +751,50 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tunneled["source"], "isolated_session_tunnel")
         self.assertEqual(tunneled["takeover_url"], "https://session-tunnel.example.com")
         self.assertEqual(self.manager._current_takeover_url(self.session), "https://session-tunnel.example.com")
+
+    async def test_a_type_by_selector_whose_element_is_not_found_presses_no_key(self) -> None:
+        # FX9R-3: the clear pressed select-all before it asked whether the element the selector found had focus, also
+        # where it found none: the keys went to whatever had focus, and only then was the type refused.
+        field = FakeLocator("#name")
+        field.element_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
+        self.session.page.locators["#name"] = field
+
+        with (
+            patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+            self.assertRaises(BrowserActionError) as refused,
+        ):
+            await self.manager.type("session-1", selector="#name", text="hello")
+
+        self.assertEqual(refused.exception.code, "focus_lost")
+        self.session.page.keyboard.press.assert_not_awaited()
+        self.session.page.keyboard.type.assert_not_awaited()
+
+    async def test_a_clear_key_the_page_does_not_acknowledge_ends_the_type_within_its_bound(self) -> None:
+        # The clear's select-all and Delete were pressed with no bound: a page that stopped answering held the type,
+        # and its session lock. Each is bounded as a keystroke is, and past it the type ends with nothing typed.
+        for key in ("Control+a", "Delete"):
+            with self.subTest(key=key):
+                self.session.page.locators["#name"] = FakeLocator("#name")
+                self.session.page.keyboard = FakeKeyboard()
+
+                async def press(pressed: str, stalls: str = key) -> None:
+                    if pressed == stalls:
+                        await asyncio.Event().wait()
+
+                self.session.page.keyboard.press = AsyncMock(side_effect=press)
+                with (
+                    patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+                    patch.object(actions, "HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.2),
+                    self.assertRaises(BrowserActionError) as ended,
+                ):
+                    began = time.monotonic()
+                    await asyncio.wait_for(self.manager.type("session-1", selector="#name", text="hello"), 5)
+                took = time.monotonic() - began
+
+                self.assertEqual((ended.exception.code, ended.exception.retryable), ("typing_timeout", False))
+                self.assertIn(key, ended.exception.message)
+                self.assertLess(took, 2)
+                self.session.page.keyboard.type.assert_not_awaited()
 
 
 if __name__ == "__main__":
