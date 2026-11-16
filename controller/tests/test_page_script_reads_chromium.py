@@ -137,6 +137,37 @@ async def test_an_approval_reads_the_fields_the_browser_has_whatever_the_page_an
     assert await _approval_read(tmp_path, page) == _read_as(read)
 
 
+# What an approval's read says where what takes text, as the browser has it, is not what the markup says.
+TAKES_TEXT_AS_THE_BROWSER_HAS_IT = {
+    # An input whose type has a space after it: a type the browser does not know, so a text field, named as a secret.
+    "an-input-whose-type-is-hidden-and-a-space": (
+        '<div id="named"><input type="hidden " name="password"><textarea></textarea></div>',
+        "secret",
+    ),
+    # A text box named as a secret, editable by what it is in.
+    "a-secret-text-box-editable-by-what-it-is-in": (
+        '<div id="named" contenteditable><div role="textbox" aria-label="Password">x</div></div>',
+        "secret",
+    ),
+    # An element whose contenteditable says inherit, in nothing editable: it takes no text.
+    "an-element-whose-contenteditable-is-inherit": (
+        '<div id="named"><span contenteditable="inherit">x</span></div>',
+        "unread",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(TAKES_TEXT_AS_THE_BROWSER_HAS_IT))
+async def test_an_approval_counts_the_fields_the_browser_takes_text_in(tmp_path: Path, case: str) -> None:
+    # NAMED_FIELDS_SCRIPT trimmed an input's type attribute before it looked the type up, so type="hidden " was no
+    # field, though the browser has it as a text field; and it counted what is editable by the attribute, so an
+    # element editable by what it is in was not counted, and one whose attribute says inherit, in nothing editable,
+    # was. The field test now goes by the input's own type and by isContentEditable.
+    page, read = TAKES_TEXT_AS_THE_BROWSER_HAS_IT[case]
+
+    assert await _approval_read(tmp_path, page) == _read_as(read)
+
+
 # A form the page lists as a text box, focusable, with controls named for the methods a hold puts its listeners on and
 # takes them off with.
 A_FORM_WITH_CONTROLS_NAMED_FOR_THE_LISTENER_METHODS = (

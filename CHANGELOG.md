@@ -42,6 +42,14 @@ All notable changes to auto-browser are documented here.
   a form that is editable by what it is in, and so from reading the form's secret name. The reads now go through the
   prototypes' own getters and methods, taken as each script starts. In the element ids' world no page script reaches
   those; by selector, a page that replaces a prototype's getter before the script runs still answers for it.
+- **An approval's read of the fields a type's text can go to counts them as the browser has them.** It looked an
+  input's type up from its `type` attribute trimmed, so `type="hidden "`, which the browser has as a text field, was
+  no field, and one named as a secret beside a plain field read `plain` and the approval showed the text. And it
+  counted an element as editable by its `contenteditable` attribute, so a text box named as a secret and editable by
+  what it is in was not counted (the same), while one whose attribute says `inherit`, in nothing editable, was,
+  though it takes no text. It now goes by the type the browser has and by `isContentEditable`, and answers fields
+  alike in every attribute once: counted one by one, the 20,000 paragraphs of an editor took 2.9 s, past the read's
+  bound of a second, and now take 0.16 s (measured).
 
 ### Fixed
 

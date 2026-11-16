@@ -631,15 +631,25 @@ ELEMENT_FIELD_RELEASE_SCRIPT = f"""(el, nonce, registry) => {{
 # label it is, or in a field inside either, through open shadow roots. All of it in one call: the attributes of
 # each such field, and whether a frame is among what is named (the element, or one inside it), whose document is
 # not read. An input no typed text goes into (a hidden one, a checkbox, a button) is no field: a form's hidden
-# token would say secret of the whole form. A closed shadow root shows no node past it. Run in the main world
-# too, on a selector's element (see DOM_JS).
+# token would say secret of the whole form. Its type is the one the browser has for it, where one it does not know
+# (type="hidden ", with a space) is text; and an element is editable where the browser says it is
+# (isContentEditable), by its own contenteditable or by what it is in, which contenteditable="inherit" alone is not.
+# A closed shadow root shows no node past it. Run in the main world too, on a selector's element (see DOM_JS).
 NAMED_FIELDS_SCRIPT = f"""(el) => {{
   {DOM_JS}
   const frames = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'];
   const noText = ['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color'];
+  const typeOf = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type').get;
+  const inputType = (node) => {{
+    try {{
+      return typeOf.call(node);
+    }} catch (error) {{
+      return '';
+    }}
+  }};
   const takesText = (node) =>
-    dom.matches(node, 'input, textarea, select, [contenteditable]:not([contenteditable="false" i])') &&
-    (dom.tag(node) !== 'INPUT' || !noText.includes((dom.attr(node, 'type') || '').trim().toLowerCase()));
+    dom.editable(node) ||
+    (dom.matches(node, 'input, textarea, select') && (dom.tag(node) !== 'INPUT' || !noText.includes(inputType(node))));
   const fields = new Set();
   let frame = false;
   const look = (node) => {{
@@ -662,8 +672,15 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     if (shadow) lookInside(shadow);
     lookInside(node);
   }}
-  if (dom.editable(el)) fields.add(el);
-  return {{ fields: Array.from(fields, {_FIELD_ATTRIBUTES_JS}), frame }};
+  // Fields alike in every attribute are answered once: what is read of them is the same, and each paragraph of an
+  // editor counts.
+  const read = new Map();
+  for (const node of fields) {{
+    const attributes = ({_FIELD_ATTRIBUTES_JS})(node);
+    const key = JSON.stringify(attributes);
+    if (!read.has(key)) read.set(key, attributes);
+  }}
+  return {{ fields: Array.from(read.values()), frame }};
 }}"""
 
 # Playwright's selectOptions, on the element: scrolls an enabled, visible
