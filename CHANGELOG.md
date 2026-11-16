@@ -161,7 +161,8 @@ All notable changes to auto-browser are documented here.
   One named `querySelectorAll` left an approval's read `unread`. By selector, a component whose shadow root defines a
   `host` of its own was refused the same way. And the check before a press that the pointer finds its target no
   longer runs on without end from a form with a control named `parentNode`, which it walked to and back from, holding
-  the page and the click: it reads the form's own parent, and stops at 256 steps as the click target's walks do.
+  the page and the click: it reads the form's own parent, and stops at 256 steps as the click target's walks do, so
+  a target more than 256 nodes above what the pointer finds is not found there (a no, and the click is refused).
 - **A page whose `addEventListener` or `removeEventListener` throws keeps no more of a type's listeners than the
   one that threw.** By selector the hold on the field a type's text goes to puts its listeners on in the page's own
   world, with what the page has made of those methods. One that threw as it went on ended the take with the listener
