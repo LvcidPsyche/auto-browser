@@ -539,6 +539,13 @@ _FIELD_ATTRIBUTES_JS = """(node) => {
       autocomplete: read('autocomplete'),
     };
   }"""
+# The same attributes of a field on its own, for the TOTP autofill's look at a field it might type a code into
+# (actions._find_one_time_code_field). It runs in the page's own world, on a locator, by Element.prototype's
+# getAttribute (see DOM_JS): a copy of its own read them through the field's, which a page can define on the field.
+FIELD_ATTRIBUTES_SCRIPT = f"""(el) => {{
+  {DOM_JS}
+  return ({_FIELD_ATTRIBUTES_JS})(el);
+}}"""
 
 # A type's hold on the node its text goes to. Defines `held`.
 # take(el): the node keys go to while focus is in the element: the innermost focused element from the element's

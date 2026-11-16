@@ -55,6 +55,7 @@ from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import (
     DOM_JS,
     ELEMENT_HAS_FOCUS_SCRIPT,
+    FIELD_ATTRIBUTES_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
     FIELD_HOLD_TAKE_SCRIPT,
@@ -424,14 +425,6 @@ _TEXT_PREVIEW_KEYS = ("text_preview", "text_truncated")
 # And how long the read of a type's field for its approval takes at most, before the approval is asked for
 # (_approval_field_read): one that has not answered by then leaves the field unread.
 FIELD_RECHECK_TIMEOUT_MS = 1000
-_FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
-  type: el.getAttribute('type') || '',
-  name: el.getAttribute('name') || '',
-  id: el.id || '',
-  placeholder: el.getAttribute('placeholder') || '',
-  'aria-label': el.getAttribute('aria-label') || '',
-  autocomplete: el.getAttribute('autocomplete') || '',
-})"""
 
 # What an action's result says of a tab the action opened (NAV-08): a page's new tab does not become the active one.
 NEW_TAB_MESSAGE = (
@@ -2021,7 +2014,7 @@ class BrowserActionService:
                 try:
                     if not await candidate.is_visible():
                         continue
-                    attributes = await candidate.evaluate(_FIELD_ATTRIBUTES_SCRIPT)
+                    attributes = await candidate.evaluate(FIELD_ATTRIBUTES_SCRIPT)
                 except PlaywrightError:
                     continue  # detached while we looked; the next candidate may still do
                 if is_one_time_code_field(attributes):

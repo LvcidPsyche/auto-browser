@@ -66,6 +66,14 @@ CHECKOUT = """<!doctype html>
   <button type="submit">Place order ($499)</button>
 </form>"""
 
+# The same checkout page, whose promo-code field answers for its own attributes in the page's world: it says it takes
+# a one-time code.
+CHECKOUT_THAT_ANSWERS_FOR_ITS_FIELD = (
+    CHECKOUT
+    + """<script>Object.defineProperty(document.querySelector('[name=promo_code]'), 'getAttribute',
+  {value: (name) => (name === 'autocomplete' ? 'one-time-code' : null)});</script>"""
+)
+
 CHECKOUT_THEN_OTP = """<!doctype html>
 <form onsubmit="event.preventDefault(); document.title='ORDER PLACED'">
   <input name="promo_code" placeholder="Promo code">
@@ -201,6 +209,18 @@ def test_a_page_that_leaves_the_named_host_as_its_field_is_pressed_gets_no_code(
 @requires_chromium
 def test_a_checkout_page_gets_no_code_and_no_click() -> None:
     outcome = _autofill(CHECKOUT)
+    assert outcome["result"] is None
+    assert outcome["title"] != "ORDER PLACED"
+    assert outcome["promo"] == ""
+
+
+@requires_chromium
+def test_a_field_that_answers_for_its_own_attributes_gets_no_code() -> None:
+    # The autofill read a candidate's attributes with a script of its own, a copy of the one the type's hold and the
+    # approval read them with, but through the field's own getAttribute, which a page can define on the field: the
+    # promo-code field said it took a one-time code, the code went in, and its Enter placed the order. One reading
+    # now, through Element.prototype's.
+    outcome = _autofill(CHECKOUT_THAT_ANSWERS_FOR_ITS_FIELD)
     assert outcome["result"] is None
     assert outcome["title"] != "ORDER PLACED"
     assert outcome["promo"] == ""
