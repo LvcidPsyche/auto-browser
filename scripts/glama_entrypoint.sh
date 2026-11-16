@@ -36,10 +36,12 @@ fi
 # (controller/Dockerfile says why). Here it is for parity with that command and
 # changes nothing: uvicorn is a background child of this shell, which becomes
 # the bridge (the exec below), so a container stop signals the bridge and never
-# uvicorn, which ends with the container.
+# uvicorn, which ends with the container. --lifespan on, as there too: a start
+# that fails (a malformed CONTROLLER_ALLOWED_HOSTS) ends uvicorn instead of
+# leaving it answering every request with a 500.
 API_BIND_SCOPE=loopback \
 SESSION_ISOLATION_MODE=glama_inspect \
-    uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5 &
+    uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5 --lifespan on &
 
 # Wait up to 60s for the server to become healthy
 i=0

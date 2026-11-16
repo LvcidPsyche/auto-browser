@@ -11,6 +11,9 @@ All notable changes to auto-browser are documented here.
   CLI sandbox, until it is built again (`docker compose build controller` with the same `.env`). With
   `INSTALL_AGENT_CLIS=true` the build now stops on an architecture other than amd64 and arm64, for which no codex
   build is pinned.
+- **If you start uvicorn yourself, add `--lifespan on`** (`docs/deployment.md` gives the whole command). Without it a
+  malformed `CONTROLLER_ALLOWED_HOSTS` still leaves the controller serving a 500 to every request (see Fixed). The
+  image's command and the root image's entrypoint pass it.
 
 ### Fixed
 
@@ -32,6 +35,13 @@ All notable changes to auto-browser are documented here.
   does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
   release published that hour. No workflow built it: `agent-cli-image` now does, whenever its Dockerfile, its
   `.dockerignore` or either file it installs from changes.
+- **A malformed `CONTROLLER_ALLOWED_HOSTS` now stops the start, where the controller served a 500 to every
+  request.** The Host check refuses a malformed entry (a wildcard written other than `*` or `*.example.com`, brackets
+  round anything but an IPv6 address) when the app's middleware is built, at its first call, the lifespan's startup.
+  Under uvicorn's default `--lifespan auto` a failure there reads as an app without a lifespan: uvicorn logged
+  `ASGI 'lifespan' protocol appears unsupported.` at INFO and served, the controller's own startup never ran, and
+  `GET /healthz` answered 500. The image's command and the root image's entrypoint now pass `--lifespan on`, so
+  uvicorn logs the error and exits (status 3) without serving.
 
 ### Changed
 

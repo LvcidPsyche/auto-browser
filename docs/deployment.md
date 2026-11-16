@@ -888,10 +888,12 @@ the limit is cancelled too, and for that one uvicorn logs `Exception in ASGI app
 in `CancelledError`.
 
 If you start uvicorn yourself (your own image or command, a process manager), give it the limit too, in seconds and
-well under what your supervisor waits before it kills the process:
-`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5`. Without it uvicorn waits for
-every open stream, so the cleanup runs only once each stream's client has gone, and never where the supervisor
-kills the process first.
+well under what your supervisor waits before it kills the process, and `--lifespan on`:
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5 --lifespan on`. Without the limit
+uvicorn waits for every open stream, so the cleanup runs only once each stream's client has gone, and never where
+the supervisor kills the process first. Without `--lifespan on` a start that fails before the app's startup runs (a
+malformed `CONTROLLER_ALLOWED_HOSTS`, which the Host check refuses when the app is built) reads to uvicorn as an app
+with no lifespan: it serves, the startup never runs, and every request gets a 500. With it uvicorn exits.
 
 ## What ALLOWED_HOSTS refuses, and what it does not
 
