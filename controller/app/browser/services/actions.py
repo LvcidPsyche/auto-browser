@@ -354,8 +354,8 @@ async def _given_back_together(steps: list[Callable[[], Awaitable[Any]]]) -> Non
             _, waiting = await asyncio.wait(waiting)
         except asyncio.CancelledError as exc:
             cancelled = cancelled or exc
-    for step in running:
-        _outcome_left_behind(step)
+    # Each step ends with its result or cancelled (_each_on_its_own lets every Exception go): none leaves an error
+    # unread for the loop to report.
     if cancelled is not None:
         raise cancelled
     # A step's own cancellation (_each_on_its_own raises it once the step is done), as _each_on_its_own raises one.
@@ -672,12 +672,33 @@ async def _disposed_soon(handle: Any) -> None:
         await _answered_soon(handle.dispose())
 
 
+async def _ended_and_disposed(handle: Any, script: str) -> None:
+    """End what a handle keeps on the page by ``script`` (a hold's release, a pointer watch's stop), then give the
+    handle back: each on its own, the two within one FIELD_RECHECK_TIMEOUT_MS. The disposal has what the script
+    left, and is not asked where the page did not answer the script within the bound, which a page that answers
+    nothing would not answer either (the handle goes with its document). With a bound each, a page that answered
+    neither held its caller two bounds (a placed click's give-back, B1-fix2 item 5). Asked with what was left, the
+    disposal of a script given up a timer's tick early ran on some machines and not on others."""
+    ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
+    unanswered = False
+
+    async def end() -> None:
+        nonlocal unanswered
+        try:
+            await _within(handle.evaluate(script), _left_until(ends))
+        except TimeoutError:
+            unanswered = True
+
+    async def dispose() -> None:
+        if not unanswered:
+            await _within(handle.dispose(), _left_until(ends))
+
+    await _each_on_its_own([end, dispose])
+
+
 async def _hold_released_soon(hold: Any) -> None:
-    """Give back a hold nothing reads any more: by its release script first, which takes its listeners off the node,
-    and then the handle, each within the bound and on its own."""
-    await _each_on_its_own(
-        [lambda: _answered_soon(hold.evaluate(FIELD_HOLD_RELEASE_SCRIPT)), lambda: _answered_soon(hold.dispose())]
-    )
+    """Give back a hold nothing reads any more: its release script takes its listeners and observer off the node."""
+    await _ended_and_disposed(hold, FIELD_HOLD_RELEASE_SCRIPT)
 
 
 class _TypedField:
@@ -824,7 +845,7 @@ class _TypedField:
             steps.append(read_again)
         for handle in (self._handle, self._found):
             if handle is not None:
-                steps.append(lambda handle=handle: _answered_soon(handle.dispose()))
+                steps.append(lambda handle=handle: _disposed_soon(handle))
         await _each_on_its_own(steps)
         self.not_secret = self.not_secret and still_not_secret
 
@@ -1919,7 +1940,8 @@ class BrowserActionService:
                 box = await budget.answered(target.bounding_box())
                 if box:
                     watch = await budget.answered(
-                        target.evaluate_handle(_POINTER_WATCH_SCRIPT), lambda late: self._give_back(late, None)
+                        target.evaluate_handle(_POINTER_WATCH_SCRIPT),
+                        lambda late: _ended_and_disposed(late, _POINTER_WATCH_STOP_SCRIPT),
                     )
             else:
                 box = await budget.answered(locator.bounding_box(timeout=budget.left_ms()))
@@ -1949,24 +1971,13 @@ class BrowserActionService:
         the frame's window until its next move. Each step answers within FIELD_RECHECK_TIMEOUT_MS or is let go, as
         any give-back's: a page that did not answer the stop held the click, and the target was never given back.
         The target goes back beside the watch, not after it (_given_back_together); the watch is stopped before it
-        is disposed of, the two within one bound: the disposal has what the stop left. A stop the page does not
-        answer uses the bound up and leaves the disposal undone, which a page that answers nothing would not answer
-        either (the watch goes with its document). With a bound each, a page that answered neither held the click
-        two bounds.
+        is disposed of, the two within one bound (_ended_and_disposed).
         """
         steps: list[Any] = []
         if watch is not None:
-            ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
-            steps.append(
-                lambda: _each_on_its_own(
-                    [
-                        lambda: _within(watch.evaluate(_POINTER_WATCH_STOP_SCRIPT), _left_until(ends)),
-                        lambda: _within(watch.dispose(), _left_until(ends)),
-                    ]
-                )
-            )
+            steps.append(lambda: _ended_and_disposed(watch, _POINTER_WATCH_STOP_SCRIPT))
         if target is not None:
-            steps.append(lambda: _answered_soon(target.dispose()))
+            steps.append(lambda: _disposed_soon(target))
         await _given_back_together(steps)
 
     @staticmethod
@@ -2114,7 +2125,7 @@ class BrowserActionService:
         except Exception:
             return False
         finally:
-            await _given_back_together([lambda handle=handle: _answered_soon(handle.dispose()) for handle in handles])
+            await _given_back_together([lambda handle=handle: _disposed_soon(handle) for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         # The box and the click within the focus click's one budget, as a click's steps share one: read with no bound,

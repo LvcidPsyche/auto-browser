@@ -56,6 +56,8 @@ class FoundField:
         self.asked = asyncio.Event()
         self.answers = asyncio.Event()
         self.scripts: list[str] = []
+        # The steps that stalled and were then given up on (cancelled).
+        self.cut: list[str] = []
         self.focused = True
         self.ended = {"hold": 0, "element": 0}
         self.hold = SimpleNamespace(
@@ -75,7 +77,11 @@ class FoundField:
         await asyncio.sleep(self.takes.get(name, 0.0))
         if name == self.stalls:
             self.asked.set()
-            await self.answers.wait()
+            try:
+                await self.answers.wait()
+            except asyncio.CancelledError:
+                self.cut.append(name)
+                raise
 
     async def _find(self, **_given: Any) -> Any:
         await self._step("finding-the-element")
@@ -243,9 +249,10 @@ async def test_a_handle_that_arrives_once_its_type_was_cancelled_is_given_back(s
 
 
 @pytest.mark.parametrize("arrives", ["in-time", "late"])
-async def test_a_hold_whose_release_does_not_answer_is_still_disposed_of_at_the_bound(arrives: str) -> None:
-    # Each step of a give-back is bounded on its own, the one made in the background for a hold that arrived late
-    # too: a page that does not answer the release read keeps neither the type nor the handle.
+async def test_a_hold_whose_release_does_not_answer_holds_nothing_past_its_bound(arrives: str) -> None:
+    # Each step of a give-back is bounded, the one made in the background for a hold that arrived late too: a page
+    # that does not answer the release read keeps neither the type nor the handle. The late give-back's release and
+    # disposal share one bound (B1-fix2 item 20), so a release the page does not answer leaves the disposal unasked.
     field = FoundField("releasing-the-hold" if arrives == "in-time" else "making-the-hold")
     typed = _TypedField(None, field.locator)
 
@@ -261,12 +268,15 @@ async def test_a_hold_whose_release_does_not_answer_is_still_disposed_of_at_the_
 
     assert took < WITHIN_THE_BOUND_S, took
     assert typed.not_secret is False
-    await _until(lambda: field.given_back() == (1, 1, 1))
-    if arrives == "late":
-        # The late give-back's own steps are bounded as well: timed from the hold's arrival to its disposal
-        # (B1-fix1 item 28, staged F10).
-        given_back = time.monotonic() - arrived
-        assert given_back < WITHIN_THE_BOUND_S, given_back
+    if arrives == "in-time":
+        await _until(lambda: field.given_back() == (1, 1, 1))
+        return
+    # The late give-back is bounded as well: timed from the hold's arrival to its release given up on (B1-fix1 item
+    # 28, staged F10).
+    await _until(lambda: "releasing-the-hold" in field.cut)
+    given_back = time.monotonic() - arrived
+    assert given_back < WITHIN_THE_BOUND_S, given_back
+    assert field.given_back() == (1, 0, 1)
 
 
 async def test_an_element_whose_disposal_does_not_answer_holds_no_type() -> None:
