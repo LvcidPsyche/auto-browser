@@ -59,9 +59,11 @@ All notable changes to auto-browser are documented here.
   an editor is a field, and an editor of 20,000 paragraphs took 2.9 s to read, over 3 s with an `id` on each, past
   the read's bound of a second: so of an editor it reads the editing host and, inside it, only what carries a
   field's name by an attribute other than `id` (a text box named as a secret), and it answers fields alike in every
-  attribute once. Such an editor now takes under a quarter of a second either way (measured). An editable element
-  at the top of a shadow root is an editing host though its host is editable: it takes focus and the text itself. A
-  block named by its `id` alone is not read, as in 1.18.1, unless it is the element the type names.
+  attribute once. Such an editor now takes under a quarter of a second either way (measured). Inside an editor, a
+  block in the light DOM is no editing host, a `contenteditable` of its own included (focus goes to the editor that
+  holds it, measured), and it is read only where it carries a field's name by an attribute other than `id`, or is
+  the element the type names; 1.18.1 read one with its own `contenteditable` by that attribute. An editable element
+  at the top of a shadow root is an editing host though its host is editable: it takes focus and the text itself.
 - **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
   plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
   text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
