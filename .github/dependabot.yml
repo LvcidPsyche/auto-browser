@@ -76,6 +76,12 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 3 # the 72-hour rule, as the pip entry says
+    ignore:
+      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: docker
     directory: /controller
@@ -86,6 +92,12 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 3 # the 72-hour rule, as the pip entry says
+    ignore:
+      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: docker
     directory: /browser-node
@@ -96,6 +108,12 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 3 # the 72-hour rule, as the pip entry says
+    ignore:
+      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: docker
     directory: /reverse-ssh
@@ -106,6 +124,12 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 3 # the 72-hour rule, as the pip entry says
+    ignore:
+      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: docker
     directory: /smoke/bastion
@@ -116,3 +140,9 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 3 # the 72-hour rule, as the pip entry says
+    ignore:
+      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor

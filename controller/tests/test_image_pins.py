@@ -45,6 +45,15 @@ class BaseImagesArePinnedTests(unittest.TestCase):
                 entry = entries.get(f"/{context}")
                 self.assertIsNotNone(entry, f"no docker entry for /{context} in .github/dependabot.yml")
                 self.assertGreaterEqual(entry.get("cooldown", {}).get("default-days", 0), 3)
+                # A new digest of the pinned tag, not a new tag: python:3.11-slim to 3.14-slim is a decision of its
+                # own, which a weekly pull request is not.
+                self.assertIn(
+                    {
+                        "dependency-name": "*",
+                        "update-types": ["version-update:semver-major", "version-update:semver-minor"],
+                    },
+                    entry.get("ignore", []),
+                )
 
     def test_the_root_image_installs_its_requirements_under_the_constraints(self) -> None:
         # The root (Glama) image installed requirements.txt alone, so each build resolved the tree afresh and could
