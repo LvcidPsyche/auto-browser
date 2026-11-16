@@ -705,14 +705,17 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     }}
   }};
   // A form control takes text by what it is alone: every input in an editor is editable, a hidden one or a checkbox
-  // too. What is no form control takes text where it is editable, and in an editor only its editing host (editable,
-  // in nothing editable) and what in it carries a field's name, by an attribute other than id, are read: counted
-  // each, the blocks of an editor with ids of their own (20,000 paragraphs) took 3.3 s, past the read's bound. A
-  // block named by its id alone is not read, as before 1.19.0, unless it is what the type names (`named`).
+  // too. What is no form control takes text where it is editable, and in an editor only its editing host and what in
+  // it carries a field's name, by an attribute other than id, are read: counted each, the blocks of an editor with
+  // ids of their own (20,000 paragraphs) took 3.3 s, past the read's bound. A block named by its id alone is not
+  // read, unless it is what the type names (`named`). An editing host is editable and its parent in its own tree is
+  // no editable element: an editor at the top of a shadow root is one, though the host it is in is editable (it
+  // takes focus and the text itself), where asked across the root it was not, and was not read.
   const naming = ['name', 'placeholder', 'aria-label', 'autocomplete', 'type', 'role'];
+  const parentOf = Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
   const editingHost = (node) => {{
-    const above = dom.up(node);
-    return !above || !dom.editable(above);
+    const parent = parentOf.call(node);
+    return !parent || dom.type(parent) !== 1 || !dom.editable(parent);
   }};
   const takesText = (node, named) =>
     dom.matches(node, 'input, textarea, select')

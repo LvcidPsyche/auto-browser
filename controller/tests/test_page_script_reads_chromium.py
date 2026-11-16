@@ -521,3 +521,28 @@ async def test_a_pointer_a_fenced_frame_or_a_portal_in_the_target_holds_is_found
         found = await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [*point, True, False, False, True])
 
         assert found is True
+
+
+# B1-fix2 items 1 to 3: an editor at the top of a shadow root inside an editor; plain fields a modal dialog makes inert,
+# or one that escapes an inert subtree; and an inert ancestor past the walk's 256 steps.
+A_COMPONENT = '<div tabindex="0" role="textbox" aria-label="Code"></div>'
+READS_AS_THE_BROWSER_TAKES_ITS_KEYS = {
+    # 1: the shadow root's own editor takes focus and the text (Chromium 156, measured): an editing host.
+    "an-editor-at-the-top-of-a-shadow-root-in-an-editor": (
+        '<div id="named" contenteditable aria-label="Note"><p>hi</p><x-host id="h"></x-host></div>'
+        "<script>h.attachShadow({mode: 'open'}).innerHTML ="
+        ' \'<div contenteditable id="password" style="min-height: 20px">s</div>\';</script>',
+        "secret",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(READS_AS_THE_BROWSER_TAKES_ITS_KEYS))
+async def test_an_approval_reads_the_fields_as_the_browser_gives_them_keys(tmp_path: Path, case: str) -> None:
+    # B1-fix2 items 1 to 3 (Codex round 2 #1, #2, #3). An editing host was one whose element above, across a shadow
+    # root, was not editable, so an editor at the top of a shadow root inside an editor, named by its id alone, was not
+    # read (335257c4 read it: secret). The inert walk knew only the inert attribute, so a field a modal dialog made
+    # inert counted as live, and one in a modal dialog that escaped an inert subtree as idle; and it said not inert
+    # once it ran out of steps.
+    page, read = READS_AS_THE_BROWSER_TAKES_ITS_KEYS[case]
+    assert await _approval_read(tmp_path, page) == _read_as(read)
