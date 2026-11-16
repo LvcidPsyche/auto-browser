@@ -50,6 +50,11 @@ All notable changes to auto-browser are documented here.
   though it takes no text. It now goes by the type the browser has and by `isContentEditable`, and answers fields
   alike in every attribute once: counted one by one, the 20,000 paragraphs of an editor took 2.9 s, past the read's
   bound of a second, and now take 0.16 s (measured).
+- **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
+  plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
+  text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
+  no longer makes the read `plain`; named as a secret, it still makes it `secret`, since a page can enable or show it
+  as the type focuses.
 
 ### Fixed
 

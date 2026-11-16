@@ -111,7 +111,7 @@ class FakeLocator:
         if script == ELEMENT_HAS_FOCUS_SCRIPT:
             return True
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
-        return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "frame": False}
+        return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "idle": [], "frame": False}
 
     @property
     def first(self) -> "FakeLocator":

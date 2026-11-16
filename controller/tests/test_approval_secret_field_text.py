@@ -174,10 +174,10 @@ def _post(by: str) -> BrowserActionDecision:
     return BrowserActionDecision(action="type", reason="r", text=TEXT, risk_category="post", **named)
 
 
-def _named(*fields: dict[str, str], frame: bool = False) -> dict[str, Any]:
+def _named(*fields: dict[str, str], idle: tuple[dict[str, str], ...] = (), frame: bool = False) -> dict[str, Any]:
     """What the approval's one read answers of what a type names (element_scripts.NAMED_FIELDS_SCRIPT): the fields
-    its text could go to from there, and whether a frame is among them."""
-    return {"fields": list(fields), "frame": frame}
+    its text could go to from there, those that cannot take text now, and whether a frame is among them."""
+    return {"fields": list(fields), "idle": list(idle), "frame": frame}
 
 
 def _field(manager: Any, by: str, attributes: dict[str, str]) -> AsyncMock:
@@ -385,6 +385,8 @@ PASSWORD = {**NOT_SECRET, "type": "password"}
         (_named(PLAIN, frame=True), "unread"),
         (_named(PASSWORD, frame=True), "secret"),
         (_named(frame=True), "unread"),
+        (_named(idle=(PLAIN,)), "unread"),
+        (_named(PLAIN, idle=(PASSWORD,)), "secret"),
         (None, "unread"),
         ({"fields": [None], "frame": False}, "unread"),
     ],
@@ -396,6 +398,8 @@ PASSWORD = {**NOT_SECRET, "type": "password"}
         "a-plain-field-and-a-frame",
         "a-password-field-and-a-frame",
         "a-frame-alone",
+        "a-plain-field-that-cannot-take-text-now-alone",
+        "a-password-field-that-cannot-take-text-now-beside-a-plain-one",
         "no-answer",
         "an-answer-of-another-shape",
     ],

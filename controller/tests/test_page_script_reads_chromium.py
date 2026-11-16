@@ -168,6 +168,33 @@ async def test_an_approval_counts_the_fields_the_browser_takes_text_in(tmp_path:
     assert await _approval_read(tmp_path, page) == _read_as(read)
 
 
+# What an approval's read says of fields that cannot take text now, beside what can.
+TAKES_NO_TEXT_NOW = {
+    # A disabled plain field beside a component the page lists as a text box, which takes its keys itself.
+    "a-disabled-field-beside-a-component-that-takes-its-keys": (
+        '<div id="named"><input disabled aria-label="Name"><div tabindex="0" role="textbox" aria-label="Code"></div>'
+        "</div>",
+        "unread",
+    ),
+    "a-read-only-field": ('<div id="named"><textarea readonly></textarea></div>', "unread"),
+    "a-field-not-shown": ('<div id="named"><input aria-label="Note" hidden></div>', "unread"),
+    # The control: a field that cannot take text now still says secret, for a page can enable it as the type focuses.
+    "a-disabled-password-field-beside-a-plain-one": (
+        '<div id="named"><input type="password" disabled><textarea></textarea></div>',
+        "secret",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(TAKES_NO_TEXT_NOW))
+async def test_an_approval_reads_plain_only_by_a_field_that_can_take_text_now(tmp_path: Path, case: str) -> None:
+    # A disabled, read-only or hidden field counted as a field the text could go to, so a plain one made the approval
+    # read plain and show the text, where the keys go to a component that takes them itself and names nothing.
+    page, read = TAKES_NO_TEXT_NOW[case]
+
+    assert await _approval_read(tmp_path, page) == _read_as(read)
+
+
 # A form the page lists as a text box, focusable, with controls named for the methods a hold puts its listeners on and
 # takes them off with.
 A_FORM_WITH_CONTROLS_NAMED_FOR_THE_LISTENER_METHODS = (

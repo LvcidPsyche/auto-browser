@@ -1356,18 +1356,20 @@ class BrowserActionService:
         webhook's, the SSE event's), what GET /approvals answers and its webhook carried the text whole. No node has
         focus for the text yet (the type reads the node it holds: _TypedField), so what is read is every field the
         text could go to from the element the selector or the element_id names, as they are now
-        (element_scripts.NAMED_FIELDS_SCRIPT): secret if one of them is, plain only where there is one and all are,
-        and unread where there is none or a frame is among them, whose document is not read. Read as the named
-        element's own attributes, a component, a label or a frame around a password field said plain, and the
-        approval showed the password. The whole read answers within FIELD_RECHECK_TIMEOUT_MS, the approval not yet
-        asked for: by selector it waited ACTION_TIMEOUT_MS for a field not on the page.
+        (element_scripts.NAMED_FIELDS_SCRIPT): secret if one of them is, plain only where there is one that can take
+        text now and all are plain, and unread where there is none or a frame is among them, whose document is not
+        read. A field that cannot take text now (disabled, read-only, not shown: ``idle``) still says secret; plain
+        by such fields alone, the approval showed the text where the keys went to a component that names nothing.
+        Read as the named element's own attributes, a component, a label or a frame around a password field said
+        plain, and the approval showed the password. The whole read answers within FIELD_RECHECK_TIMEOUT_MS, the
+        approval not yet asked for: by selector it waited ACTION_TIMEOUT_MS for a field not on the page.
         """
         if session is None or decision.action != "type" or decision.sensitive:
             return "unread"
         try:
             named = await _answered_soon(self._named_fields(session.page, decision))
             fields = named["fields"]
-            if any(self.is_sensitive_field(field) for field in fields):
+            if any(self.is_sensitive_field(field) for field in [*fields, *named["idle"]]):
                 return "secret"
             return "plain" if fields and not named["frame"] else "unread"
         except Exception:
