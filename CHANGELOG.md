@@ -75,10 +75,11 @@ All notable changes to auto-browser are documented here.
 - **Every image's base is pinned by digest, its tag kept for the reader.** The controller, browser-node and root
   (Glama) images build on `python:3.11-slim`, and reverse-ssh and the smoke bastion on `alpine:3.21`, each at the
   digest the tag has named since 2026-11-08; before, a build took whatever the tag named that day. Dependabot now
-  proposes each base's newer digest, with a docker entry for each Dockerfile's directory and the 3-day cooldown its
-  other entries have. Each build context has a `.dockerignore` that keeps out `.git`, virtualenvs, `node_modules`,
-  `__pycache__`, `data/` and `.env*`: a build of the root image was sent the whole checkout, `data/` and any `.env`
-  included, though it copies only a few paths of it.
+  proposes each base's newer digest, with one docker entry listing each Dockerfile's directory and the 3-day
+  cooldown its other entries have. Each build context has a `.dockerignore` that keeps out `.git`, virtualenvs,
+  `node_modules`, `__pycache__`, `data/` and `.env*`, with no exception and nothing its Dockerfile copies: a build of
+  the root image was sent the whole checkout, `data/` and any `.env` included, though it copies only a few paths of
+  it.
 
 ## [1.18.1] — 2026-11-15
 

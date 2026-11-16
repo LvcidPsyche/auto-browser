@@ -64,76 +64,17 @@ updates:
           - minor
           - patch
 
-  # Each Dockerfile's FROM is pinned by digest, which without these entries would freeze the base image's
-  # security patches: Dependabot proposes the tag's newer digest. They have the cooldown the other entries have
-  # (GitHub's docs list docker as taking default-days, and say nothing of a digest-only update). One entry per
-  # Dockerfile directory, which is also its build context.
+  # Each Dockerfile's FROM is pinned by digest, which without this entry would freeze the base image's security
+  # patches: Dependabot proposes the tag's newer digest. It has the cooldown the other entries have (GitHub's docs
+  # list docker as taking default-days, and say nothing of a digest-only update). One entry listing each Dockerfile
+  # directory, which is also its build context; its pull requests stay one per directory.
   - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:45"
-    open-pull-requests-limit: 5
-    cooldown:
-      default-days: 3 # the 72-hour rule, as the pip entry says
-    ignore:
-      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
-          - version-update:semver-minor
-
-  - package-ecosystem: docker
-    directory: /controller
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:45"
-    open-pull-requests-limit: 5
-    cooldown:
-      default-days: 3 # the 72-hour rule, as the pip entry says
-    ignore:
-      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
-          - version-update:semver-minor
-
-  - package-ecosystem: docker
-    directory: /browser-node
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:45"
-    open-pull-requests-limit: 5
-    cooldown:
-      default-days: 3 # the 72-hour rule, as the pip entry says
-    ignore:
-      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
-          - version-update:semver-minor
-
-  - package-ecosystem: docker
-    directory: /reverse-ssh
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:45"
-    open-pull-requests-limit: 5
-    cooldown:
-      default-days: 3 # the 72-hour rule, as the pip entry says
-    ignore:
-      # A newer digest of the pinned tag only: a new tag (python:3.11-slim to 3.14-slim) is a decision of its own.
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
-          - version-update:semver-minor
-
-  - package-ecosystem: docker
-    directory: /smoke/bastion
+    directories:
+      - /
+      - /controller
+      - /browser-node
+      - /reverse-ssh
+      - /smoke/bastion
     schedule:
       interval: weekly
       day: monday
