@@ -108,7 +108,7 @@ class FakeLocator:
         self.holds.append(FakeFieldHold(self.attributes))
         return self.holds[-1]
 
-    def _asked(self, script: str) -> object:
+    def _asked(self, script: str, *_args: object) -> object:
         if script == ELEMENT_HAS_FOCUS_SCRIPT:
             return True
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")

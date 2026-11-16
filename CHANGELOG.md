@@ -70,6 +70,13 @@ All notable changes to auto-browser are documented here.
   run measured). It now checks before each key. Where its fill of the field failed it pressed select-all and Delete
   into whatever had focus, on whatever page was there by then, which emptied another host's field: they are now
   pressed only where the page is still on a named host and focus is in the field.
+- **A type that clears its field takes its hold on the field before the clear, not after it.** Taken after, the hold
+  heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a
+  plain one in the same element the type named kept the preview of the text meant for the password field, and a
+  move away and back between the clear's checks passed them both. Its preview is now withheld. By selector, the
+  clear's checks also took focus in a frame inside the named element for focus in it, as by `element_id` they do
+  not, and the clear's keys and the text went to the frame's document: the type is now refused there (`focus_lost`),
+  unless focus was already in the frame as the type began.
 
 ### Fixed
 

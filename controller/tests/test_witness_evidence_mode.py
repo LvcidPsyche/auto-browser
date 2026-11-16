@@ -977,9 +977,10 @@ async def test_a_type_by_selector_whose_field_does_not_keep_focus_through_its_cl
     elif lost == "no-answer":
         field.element.evaluate = AsyncMock(side_effect=PlaywrightError("Execution context was destroyed"))
     else:
-        # What the element answers before the clear, after select-all and after the Delete, until one says no.
+        # What the element answers before the clear (asked again as one that may hold a frame where it says no),
+        # after select-all and after the Delete, until one says no.
         answers = {
-            "before-select-all": [False],
+            "before-select-all": [False, False],
             "after-select-all": [True, False],
             "through-the-clear": [True, True, False],
         }
@@ -996,8 +997,13 @@ async def test_a_type_by_selector_whose_field_does_not_keep_focus_through_its_cl
     assert refused.value.message == f"Keyboard focus would not stay in the target field{during}, so nothing was typed."
     assert [call.args[0] for call in page.keyboard.press.await_args_list] == pressed
     page.keyboard.type.assert_not_awaited()
-    # No hold was taken, and the element found is given back.
-    assert field.holds == []
+    # The hold is taken as the clear begins: refused before it, the type took none; refused during it, it gives back
+    # the one it took. The element found is given back.
+    if pressed:
+        (hold,) = field.holds
+        hold.dispose.assert_awaited_once()
+    else:
+        assert field.holds == []
     assert field.element.dispose.await_count == (0 if lost == "not-found-again" else 1)
 
 
@@ -1040,7 +1046,7 @@ async def test_the_focus_checks_through_a_clear_by_selector_ask_the_element_foun
         await manager.type("s1", selector="#note", text="note", clear_first=False)
 
     assert [call.args[0] for call in page.keyboard.press.await_args_list] == ["Control+a", "Delete"]
-    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT,)] * 3
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT, True)] * 3
     # One find for each type: the type that clears finds its element before the clear, and holds that one.
     assert field.element_handle.await_count == 2
     # The locator is asked as often with a clear as without: for the focus that precedes it, and no more.

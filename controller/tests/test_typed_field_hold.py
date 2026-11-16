@@ -66,7 +66,7 @@ class FoundField:
         await self._step("finding-the-element")
         return self.element
 
-    async def _has_focus(self, _script: str) -> bool:
+    async def _has_focus(self, _script: str, *_args: Any) -> bool:
         await self._step("asking-for-focus")
         return self.focused
 
@@ -272,7 +272,7 @@ async def test_the_checks_through_the_clear_and_the_hold_are_of_the_element_foun
     await typed.release()
 
     assert field.locator.element_handle.await_count == 1
-    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT,)] * 2
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT, True)] * 2
     assert typed.not_secret is True
     assert field.given_back() == (1, 1, 1)
 

@@ -577,8 +577,9 @@ async def _hold_released_soon(hold: Any) -> None:
 
 
 class _TypedField:
-    """A type's hold on the node its text goes to, taken just before the first keystroke and given back once the text
-    is in: the innermost focused element in the field the type names (element_scripts._HELD_FIELD_JS).
+    """A type's hold on the node its text goes to, taken as the type's clear begins (just before the first keystroke,
+    for a type that does not clear) and given back once the text is in: the innermost focused element in the field
+    the type names (element_scripts._HELD_FIELD_JS).
 
     ``not_secret`` says whether the text's preview may be shown: the node read as not secret through the hold when it
     was taken and again as it was given back, and kept focus in between. Read by the type's selector or element_id
@@ -596,8 +597,9 @@ class _TypedField:
     either path every call after the take answers within FIELD_RECHECK_TIMEOUT_MS or counts as failed.
 
     A type by selector that clears its field first finds the selector's element earlier, as soon as it has focus
-    (find, within a bound of its own; the take's two other calls then share the take's): its checks that focus stays
-    there through the clear (require_focus) are asked of that element, and the hold is then made on it. A locator
+    (find, within a bound of its own; the take's two other calls then share the take's): its checks that focus is
+    there before the clear and stays there through it (require_focus) are asked of that element, and the hold is made
+    on it between the first check and the clear's first key. A locator
     finds its element anew at each call, which is not the same check: by then the page can have made the selector
     match another node (a select-all handler that hands the field's id on).
     """
@@ -610,6 +612,8 @@ class _TypedField:
         # By selector: the handle of the element the selector found, and the hold made on it.
         self._found: Any = None
         self._handle: Any = None
+        # By selector: whether focus may be in a frame inside the element found, as it was at the first check.
+        self._in_a_frame: bool | None = None
         self.not_secret = False
 
     async def find(self) -> None:
@@ -627,11 +631,15 @@ class _TypedField:
     async def require_focus(self, during: str) -> None:
         """By selector, refuse the type unless keyboard focus is still in the element found (find), as
         ElementActions.require_focus does for an element_id. A check that cannot be made refuses too: no element
-        was found, or it does not answer within FIELD_RECHECK_TIMEOUT_MS."""
+        was found, or it does not answer within FIELD_RECHECK_TIMEOUT_MS.
+
+        Focus in a frame inside the element is focus in it only where it was in one at the first check (a selector
+        that names a frame's wrapper): taken for focus in it at every check, as by element_id it is not, a clear
+        that sent focus into a frame there had its keys and the text go to the frame's document."""
         focused = False
         if self._found is not None:
             with contextlib.suppress(Exception):
-                focused = bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT)))
+                focused = await self._focus_is_in_it()
         if not focused:
             raise BrowserActionError(
                 f"Keyboard focus would not stay in the target field{during}, so nothing was typed.",
@@ -639,6 +647,15 @@ class _TypedField:
                 code="focus_lost",
                 retryable=True,
             )
+
+    async def _focus_is_in_it(self) -> bool:
+        if self._in_a_frame is None:
+            if await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, True)):
+                self._in_a_frame = False
+                return True
+            self._in_a_frame = bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, False)))
+            return self._in_a_frame
+        return bool(await _answered_soon(self._found.evaluate(ELEMENT_HAS_FOCUS_SCRIPT, not self._in_a_frame)))
 
     async def take(self) -> None:
         if self._element is not None:
@@ -666,8 +683,9 @@ class _TypedField:
         The page's side goes with the release script, which takes the hold's listeners off the node and, by
         element_id, the hold out of the world's fieldHolds. Where that script never runs (a page that does not
         answer it), the node keeps the listeners, and the world its entry, until the document goes. Nothing reads
-        such a hold: each type takes its own, by its own handle or under its own nonce. A type refused at its
-        clear took no hold: by selector the element it found is given back, and by element_id nothing was taken.
+        such a hold: each type takes its own, by its own handle or under its own nonce. A type refused before its
+        clear took no hold: by selector the element it found is given back, and by element_id nothing was taken. One
+        refused during its clear gives back the hold it took.
         """
         still_not_secret = False
 
@@ -870,6 +888,17 @@ class BrowserActionService:
                     # Before any key: a find that found nothing pressed select-all into whatever had focus, and was
                     # refused only then.
                     await require_focus(" before select-all (nothing was cleared)")
+                # Read as the clear begins (just before the first keystroke where there is none), and again once the
+                # text is in: a page can make the field a password field as it is focused or cleared (a login form
+                # that does so as it is focused), or as the text goes in. Read before the focus, a field turned so
+                # kept the preview of the text typed into it. Both reads are of the node that has focus as the clear
+                # begins, held from then until the text is in (_TypedField): a key of the clear or of the text can
+                # send focus on to another field, which takes the rest. Taken once the clear was done, the hold heard
+                # nothing of a move during it: from a password field to a plain one in the same named wrapper, which
+                # the clear's checks take for focus in what the type named, the preview kept the text meant for the
+                # password field; and a move away and back between the checks passed them both.
+                await field.take()
+                if clear_first:
                     await self._clear_key(session.page, "Control+a")
                     await asyncio.sleep(0.03)
                     # A select-all handler can move focus and select another field, which Delete would empty.
@@ -878,12 +907,6 @@ class BrowserActionService:
                     await asyncio.sleep(0.05)
                     # A page can move focus once the clear has gone in, before the text does.
                     await require_focus(" through the clear")
-                # Read just before the first keystroke, and again once the text is in: a page can make the field a
-                # password field as it is focused or cleared (a login form that does so as it is focused), or as the
-                # text goes in. Read before the focus, a field turned so kept the preview of the text typed into it.
-                # Both reads are of the node that has focus as the text begins, held from then until the text is in
-                # (_TypedField): a key of the text can send focus on to another field, which takes the rest.
-                await field.take()
                 await self.type_text_human_like(session.page, text)
             finally:
                 await field.release()

@@ -319,6 +319,12 @@ AROUND_THE_FIELD = {
         "style='position: fixed; left: 0; top: 0; width: 100%; height: 100%'>\"></iframe>",
         "() => document.getElementById('named').contentDocument.querySelector('input').value",
     ),
+    # Focus is in the frame as the type begins: its clear's checks take it for focus in what the type names.
+    "frame-in-a-wrapper": (
+        '<title>login</title><div id="named" style="display: inline-block"><iframe id="inner" srcdoc="<input '
+        "type=password style='position: fixed; left: 0; top: 0; width: 100%; height: 100%'>\"></iframe></div>",
+        "() => inner.contentDocument.querySelector('input').value",
+    ),
 }
 
 
@@ -336,6 +342,66 @@ async def test_a_type_by_a_selector_that_names_what_is_around_a_password_field_k
 
         assert await session.page.evaluate(value) == TEXT
         _assert_withheld(records)
+
+
+# What a type's clear meets: a wrapper the type names, around a password field the type's focus click lands on and a
+# plain field of its own, to which the password field's select-all sends focus; and a plain field whose select-all
+# sends focus to a password field and straight back, before the clear's check after it.
+MOVES_FOCUS_IN_THE_CLEAR = {
+    "to-a-plain-field-in-the-wrapper": (
+        '<title>login</title><div id="named" style="display: inline-block"><input id="pw" type="password"'
+        ' onkeydown="if (event.ctrlKey) plain.focus()"><input id="plain" aria-label="Note"'
+        ' style="position: absolute; left: -1000px"></div>',
+        "() => plain.value",
+    ),
+    "away-and-back": (
+        '<title>note</title><input id="pw" type="password"><div id="named" style="display: inline-block">'
+        '<input id="plain" aria-label="Note"'
+        ' onkeydown="if (event.ctrlKey) { pw.focus(); setTimeout(() => plain.focus(), 5); }"></div>',
+        "() => plain.value",
+    ),
+}
+
+
+@pytest.mark.parametrize("moves", list(MOVES_FOCUS_IN_THE_CLEAR))
+async def test_a_focus_move_during_the_clear_keeps_no_preview(tmp_path: Path, moves: str) -> None:
+    # The hold was taken after the clear, so a move of focus during it was heard by nothing: from the password field
+    # to a plain field in the same named wrapper, where the clear's checks still found focus, the hold was of the
+    # plain field and the preview kept the text meant for the password field; and a move away and back within the
+    # clear's sleeps passed both checks. The hold is taken before the clear now, of the node focus is in as it begins.
+    page, value = MOVES_FOCUS_IN_THE_CLEAR[moves]
+    async with browser_env(tmp_path, {"/login": page}) as env:
+        session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
+
+        assert await session.page.evaluate(value) == TEXT
+        _assert_withheld(records)
+
+
+# A wrapper the type names, around a plain field and a frame of its own, whose field the plain field's select-all
+# sends focus to.
+MOVES_FOCUS_INTO_A_FRAME_IN_THE_CLEAR = (
+    '<title>note</title><div id="named" style="display: inline-block"><input id="plain" aria-label="Note"'
+    " onkeydown=\"if (event.ctrlKey) inner.contentDocument.querySelector('input').focus()\">"
+    '<iframe id="inner" srcdoc="<input>" style="position: absolute; left: -1000px"></iframe></div>'
+)
+
+
+async def test_a_type_by_selector_whose_clear_sends_focus_into_a_frame_inside_the_field_is_refused(
+    tmp_path: Path,
+) -> None:
+    # By selector the clear's checks took focus in a frame inside the named element for focus in it, where by
+    # element_id it is refused: the keys went to the frame's document, and the text into its field. A frame is refused
+    # now unless focus was in one as the element was found (a selector that names a frame's wrapper).
+    async with browser_env(tmp_path, {"/note": MOVES_FOCUS_INTO_A_FRAME_IN_THE_CLEAR}) as env:
+        session_id = await env.create("/note")
+        session = env.manager.sessions[session_id]
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.type(session_id, selector="#named", text=TEXT)
+
+        assert refused.value.code == "focus_lost"
+        framed = "() => inner.contentDocument.querySelector('input').value"
+        assert await session.page.evaluate(framed) == ""
 
 
 @pytest.mark.parametrize("by", ["selector", "element_id"])

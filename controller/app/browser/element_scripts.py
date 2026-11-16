@@ -514,8 +514,9 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # Focus behind an open shadow root shows as its host, so the check follows it
 # down to the innermost focused element first. With refuseFrames (an element_id
 # target), focus in a frame inside the element is not focus in it: keys sent
-# then go to the frame's document. Also run in the main world, on a locator, for
-# a selector target, without it.
+# then go to the frame's document. Also run in the main world for a selector
+# target: on a locator without it, and on the element a type's clear found with
+# it, unless focus was in a frame there at the clear's first check.
 ELEMENT_HAS_FOCUS_SCRIPT = f"""(el, refuseFrames) => {{
   {DOM_JS}
   let active = dom.active(dom.root(el));
