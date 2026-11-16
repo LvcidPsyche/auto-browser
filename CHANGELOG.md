@@ -160,6 +160,10 @@ All notable changes to auto-browser are documented here.
   The press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or
   while the page had not yet answered the button going down, skipped the up: whatever ran next on the page began
   with the button held. It is let go as a drag's is, within 5 seconds, and the cancel then goes on.
+- **A type cancelled as the page answered one of its calls no longer goes on, on the image's Python 3.11.** There,
+  `asyncio.wait_for` answered a caller cancelled in the loop turn its call answered with that answer, so the cancel
+  was lost: the next keystroke was typed, a key of the clear pressed, or a take read on. The bounds of a type's
+  questions to its field, of its take's read, and of each keystroke and key of the clear now raise the cancel.
 
 ### Changed
 

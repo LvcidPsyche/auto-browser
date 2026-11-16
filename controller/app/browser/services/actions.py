@@ -510,7 +510,25 @@ async def _answered_soon(call: Awaitable[Any]) -> Any:
     approval's read of the fields its text could go to, _named_fields: finding the element and asking it) or share
     one end (a take's, through _arrives_by and _left_until); steps bounded one by one can take the bound each (a
     give-back's)."""
-    return await asyncio.wait_for(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
+    return await _within(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
+
+
+async def _within(call: Awaitable[Any], seconds: float) -> Any:
+    """``call``'s answer within ``seconds``, else TimeoutError; the call is cancelled where it has not answered by
+    then, or by a cancel of the caller, which is raised. asyncio.wait_for, but for the cancel: on Python 3.11, the
+    image's, wait_for answered a caller cancelled in the loop turn its call answered with that answer, and the type
+    that was cancelled went on (a keystroke typed, a take read on). asyncio.wait raises the cancel as it comes."""
+    step = asyncio.ensure_future(call)
+    try:
+        done, _ = await asyncio.wait({step}, timeout=seconds)
+    finally:
+        if not step.done():
+            step.cancel()
+            # Its end is nobody's to read now: read here, as wait_for's own cancel would have awaited it.
+            step.add_done_callback(lambda ended: ended.cancelled() or ended.exception())
+    if not done:
+        raise TimeoutError
+    return step.result()
 
 
 def _left_until(ends: float) -> float:
@@ -715,7 +733,7 @@ class _TypedField:
             holding = self._found.evaluate_handle(FIELD_HOLD_TAKE_SCRIPT)
             self._handle = await _arrives_by(holding, ends, _hold_released_soon)
             read = self._handle.evaluate(FIELD_HOLD_READ_SCRIPT)
-            self.not_secret = _reads_not_secret(await asyncio.wait_for(read, _left_until(ends)))
+            self.not_secret = _reads_not_secret(await _within(read, _left_until(ends)))
         except Exception:
             self.not_secret = False
 
@@ -2119,7 +2137,7 @@ class BrowserActionService:
         bound, a page that never acknowledged it held the type, and its session lock. Past it the type ends with none
         of its text typed, though the key may have gone in."""
         try:
-            await asyncio.wait_for(page.keyboard.press(key), HUMAN_TYPING_STEP_FLOOR_SECONDS)
+            await _within(page.keyboard.press(key), HUMAN_TYPING_STEP_FLOOR_SECONDS)
         except TimeoutError:
             raise BrowserActionError(
                 f"Typing stopped: the page did not acknowledge the clear's {key} in time, so nothing was typed. The "
@@ -2134,7 +2152,7 @@ class BrowserActionService:
     async def _typing_step(cls, step: Any, timeout: float) -> None:
         """One keystroke or the insert, bounded: a page that never acknowledges input would hold the session lock."""
         try:
-            await asyncio.wait_for(step, timeout)
+            await _within(step, timeout)
         except TimeoutError:
             raise cls._typing_timeout() from None
 
