@@ -1021,13 +1021,14 @@ async def _ended_within(call: Awaitable[Any], seconds: float) -> Any:
     return ending.result()
 
 
-@pytest.mark.parametrize("stalls", ["the watch's stop", "the watch's stop and its disposal", "the target's disposal"])
+@pytest.mark.parametrize("stalls", ["the watch's stop", "the watch's disposal", "the target's disposal"])
 async def test_a_placed_clicks_give_back_the_page_does_not_answer_still_gives_each_handle_back(stalls: str) -> None:
     # Each give-back step waited for the page with no bound: a watch whose stop never answered held the click, and
     # its session, with the target never given back. Each step has the bound a give-back has: the target's disposal
-    # too (B1-fix1 item 17, A25), and the watch's (item 28, staged F11).
-    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never if stalls.startswith("the watch's stop") else None))
-    watch.dispose = AsyncMock(side_effect=_never if stalls.endswith("and its disposal") else None)
+    # too (B1-fix1 item 17, A25), and the watch's (item 28, staged F11). A stop that does not answer uses up the
+    # bound it shares with the watch's disposal, which is then not asked (B1-fix2 item 5).
+    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never if stalls == "the watch's stop" else None))
+    watch.dispose = AsyncMock(side_effect=_never if stalls == "the watch's disposal" else None)
     target = SimpleNamespace(dispose=AsyncMock(side_effect=_never if stalls == "the target's disposal" else None))
 
     with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
@@ -1036,7 +1037,7 @@ async def test_a_placed_clicks_give_back_the_page_does_not_answer_still_gives_ea
         took = time.monotonic() - began
 
     assert took < WITHIN_THREE_BOUNDS_S, took
-    watch.dispose.assert_awaited_once()
+    assert watch.dispose.await_count == (0 if stalls == "the watch's stop" else 1)
     target.dispose.assert_awaited_once()
 
 
@@ -1524,3 +1525,24 @@ async def test_a_human_like_clicks_pointer_check_leaves_its_fallback_the_rest_of
         )
 
     assert left_to_the_fallback and left_to_the_fallback[0] > budget_ms / 2, left_to_the_fallback
+
+
+# A give-back's bound, long enough beside the image's slower fakes that one bound and two are told apart.
+GIVE_BACK_BOUND_MS = 500
+
+
+async def test_a_placed_clicks_give_back_the_page_answers_nothing_of_takes_about_one_bound() -> None:
+    # B1-fix2 item 5 (Codex round 2 #5): the watch's stop and then its disposal had a bound each, beside the target's
+    # disposal, so a page that answered none of the three held the click two bounds. The stop and the disposal share
+    # one bound: the disposal has what the stop left, and none where the stop did not answer.
+    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never), dispose=AsyncMock(side_effect=_never))
+    target = SimpleNamespace(dispose=AsyncMock(side_effect=_never))
+
+    with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", GIVE_BACK_BOUND_MS):
+        began = time.monotonic()
+        await _ended_within(BrowserActionService._give_back(watch, target), 5)
+        took = time.monotonic() - began
+
+    assert took < 1.5 * GIVE_BACK_BOUND_MS / 1000, took
+    watch.evaluate.assert_awaited_once()
+    target.dispose.assert_awaited_once()

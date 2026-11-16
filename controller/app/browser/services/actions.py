@@ -1952,15 +1952,19 @@ class BrowserActionService:
         the frame's window until its next move. Each step answers within FIELD_RECHECK_TIMEOUT_MS or is let go, as
         any give-back's: a page that did not answer the stop held the click, and the target was never given back.
         The target goes back beside the watch, not after it (_given_back_together); the watch is stopped before it
-        is disposed of.
+        is disposed of, the two within one bound: the disposal has what the stop left. A stop the page does not
+        answer uses the bound up and leaves the disposal undone, which a page that answers nothing would not answer
+        either (the watch goes with its document). With a bound each, a page that answered neither held the click
+        two bounds.
         """
         steps: list[Any] = []
         if watch is not None:
+            ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
             steps.append(
                 lambda: _each_on_its_own(
                     [
-                        lambda: _answered_soon(watch.evaluate(_POINTER_WATCH_STOP_SCRIPT)),
-                        lambda: _answered_soon(watch.dispose()),
+                        lambda: _within(watch.evaluate(_POINTER_WATCH_STOP_SCRIPT), _left_until(ends)),
+                        lambda: _within(watch.dispose(), _left_until(ends)),
                     ]
                 )
             )
