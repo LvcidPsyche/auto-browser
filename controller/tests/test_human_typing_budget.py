@@ -51,6 +51,20 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         page.keyboard.insert_text.assert_not_awaited()
         return sleeps
 
+    async def test_a_text_whose_caller_says_no_before_a_key_stops_there(self) -> None:
+        # B1-fix1 item 4: keeps_on is asked before each key, and a no ends the typing there, False to the caller.
+        settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
+        service = BrowserActionService(SimpleNamespace(settings=settings))
+        page = SimpleNamespace(keyboard=SimpleNamespace(type=AsyncMock(), insert_text=AsyncMock()))
+        answers = iter([True, True, False])
+
+        with _on_a_stand_in_clock([]):
+            typed_all = await service.type_text_human_like(page, "123456", keeps_on=lambda: next(answers))
+
+        self.assertIs(typed_all, False)
+        self.assertEqual([call.args[0] for call in page.keyboard.type.await_args_list], ["1", "2"])
+        page.keyboard.insert_text.assert_not_awaited()
+
     async def test_a_long_text_finishes_within_the_budget(self) -> None:
         sleeps = await self._type("x" * 5000)
 

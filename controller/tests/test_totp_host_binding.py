@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
@@ -78,7 +79,18 @@ class TotpAutofillTests(unittest.TestCase):
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
         "typing" for the code's keystrokes) during which the page goes to another host. ``focused``: what the field
         answers when it is asked whether focus is in it, or a list of its answers in turn."""
-        typed = AsyncMock(side_effect=lambda *_args: leave_during("typing"))
+        self.typed_keys: list[str] = []
+
+        async def typing(_page: object, text: str, *, keeps_on: Callable[[], bool]) -> bool:
+            # The typing code's own: keeps_on asked before each key, which goes in, the typing stopped at a no.
+            for key in text:
+                if not keeps_on():
+                    return False
+                self.typed_keys.append(key)
+                leave_during("typing")
+            return True
+
+        typed = AsyncMock(side_effect=typing)
 
         async def clear(_value: str) -> None:
             leave_during("clear")
@@ -125,8 +137,9 @@ class TotpAutofillTests(unittest.TestCase):
     def test_types_the_code_on_a_named_host(self) -> None:
         result, typed = self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",))
         self.assertEqual(result["code_length"], 6)
-        # A key at a time, the host checked before each.
-        self.assertEqual([len(call.args[1]) for call in typed.await_args_list], [1] * 6)
+        # One call of the typing code for the whole code, the host asked before each key (B1-fix1 item 4).
+        typed.assert_awaited_once()
+        self.assertEqual(len(self.typed_keys), 6)
 
     def test_a_page_on_another_host_gets_nothing(self) -> None:
         for url in (
@@ -191,7 +204,7 @@ class TotpAutofillTests(unittest.TestCase):
                     fill_fails=fill_fails,
                 )
                 self.assertIsNone(result)
-                typed.assert_not_awaited()
+                self.assertEqual(self.typed_keys, [])
                 self.pressed.assert_not_awaited()
                 # The page left as select-all went in: no Delete into the page it went to (B1-fix1 item 3, Opus A12c).
                 if step == "clear by keys":
@@ -213,7 +226,7 @@ class TotpAutofillTests(unittest.TestCase):
             "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
         )
         self.assertEqual(result["code_length"], 6)
-        self.assertEqual(len(typed.await_args_list), 6)
+        self.assertEqual(len(self.typed_keys), 6)
         self.assertEqual(self.keys.await_args_list, [call("Control+a"), call("Delete")])
 
     def test_a_field_that_lost_focus_when_its_fill_failed_gets_no_keys(self) -> None:
@@ -248,6 +261,63 @@ class TotpAutofillTests(unittest.TestCase):
         result, typed = self.run_autofill("https://login.example.com/2fa", hosts=())
         self.assertIsNone(result)
         typed.assert_not_awaited()
+
+
+class SlowKeyboard:
+    """A page that acknowledges each key after ``ack`` seconds; what it acknowledged, in order."""
+
+    def __init__(self, ack: float) -> None:
+        self.ack = ack
+        self.acknowledged: list[str] = []
+
+    async def _key(self, key: str) -> None:
+        await asyncio.sleep(self.ack)
+        self.acknowledged.append(key)
+
+    async def type(self, char: str) -> None:
+        await self._key(char)
+
+    async def insert_text(self, text: str) -> None:
+        await self._key(text)
+
+    async def press(self, key: str) -> None:
+        await self._key(key)
+
+
+class TotpTypingBudgetTests(unittest.TestCase):
+    def test_the_code_is_typed_within_one_typing_budget(self) -> None:
+        # B1-fix1 item 4 (Codex B1-4, Opus F4): b090cb82 typed the code a digit per call of the typing code, each call
+        # with a deadline and a scaling of its own, so a slow page on a named host held the session six budgets (with
+        # the budget at 0.5 s and the page answering each key in 0.4 s, all six went in and Enter after it). One call
+        # types the code now, the host checked before each key: past the budget the type ends as typing_timeout.
+        keyboard = SlowKeyboard(ack=0.4)
+        settings = SimpleNamespace(human_typing_min_delay_ms=1, human_typing_max_delay_ms=2)
+        manager = SimpleNamespace(
+            settings=settings, _settle=AsyncMock(), _page_refused=lambda _page: False, _shown_url=lambda page: page.url
+        )
+        service = BrowserActionService(manager)
+        locator = SimpleNamespace(fill=AsyncMock(), press=AsyncMock())
+        session = SimpleNamespace(
+            page=SimpleNamespace(url="https://login.example.com/2fa", keyboard=keyboard),
+            totp_secret=SECRET,
+            totp_hosts=("login.example.com",),
+        )
+
+        async def find_the_field(_page: object) -> tuple[object, str]:
+            return locator, 'input[name*="code" i]'
+
+        service._find_one_time_code_field = find_the_field
+        service.focus_verified = AsyncMock()
+        with (
+            patch("app.browser.services.actions.HUMAN_TYPING_BUDGET_SECONDS", 0.5),
+            patch("app.browser.services.actions.HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.1),
+            self.assertRaises(BrowserActionError) as ended,
+        ):
+            asyncio.run(service.maybe_handle_totp(session))
+
+        self.assertEqual(ended.exception.code, "typing_timeout")
+        self.assertEqual(len(keyboard.acknowledged), 1, keyboard.acknowledged)
+        locator.press.assert_not_awaited()
 
 
 if __name__ == "__main__":
