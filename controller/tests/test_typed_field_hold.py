@@ -253,12 +253,18 @@ async def test_a_hold_whose_release_does_not_answer_is_still_disposed_of_at_the_
     took = time.monotonic() - began
     if arrives == "late":
         field.stalls = "releasing-the-hold"
+        arrived = time.monotonic()
         field.answers.set()
         field.answers = asyncio.Event()
 
     assert took < WITHIN_THE_BOUND_S, took
     assert typed.not_secret is False
     await _until(lambda: field.given_back() == (1, 1, 1))
+    if arrives == "late":
+        # The late give-back's own steps are bounded as well: timed from the hold's arrival to its disposal
+        # (B1-fix1 item 28, staged F10).
+        given_back = time.monotonic() - arrived
+        assert given_back < WITHIN_THE_BOUND_S, given_back
 
 
 async def test_an_element_whose_disposal_does_not_answer_holds_no_type() -> None:

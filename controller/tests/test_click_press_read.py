@@ -1021,13 +1021,13 @@ async def _ended_within(call: Awaitable[Any], seconds: float) -> Any:
     return ending.result()
 
 
-@pytest.mark.parametrize("stalls", ["the watch's stop", "the target's disposal"])
+@pytest.mark.parametrize("stalls", ["the watch's stop", "the watch's stop and its disposal", "the target's disposal"])
 async def test_a_placed_clicks_give_back_the_page_does_not_answer_still_gives_each_handle_back(stalls: str) -> None:
     # Each give-back step waited for the page with no bound: a watch whose stop never answered held the click, and
     # its session, with the target never given back. Each step has the bound a give-back has: the target's disposal
-    # too (B1-fix1 item 17, A25).
-    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never if stalls == "the watch's stop" else None))
-    watch.dispose = AsyncMock()
+    # too (B1-fix1 item 17, A25), and the watch's (item 28, staged F11).
+    watch = SimpleNamespace(evaluate=AsyncMock(side_effect=_never if stalls.startswith("the watch's stop") else None))
+    watch.dispose = AsyncMock(side_effect=_never if stalls.endswith("and its disposal") else None)
     target = SimpleNamespace(dispose=AsyncMock(side_effect=_never if stalls == "the target's disposal" else None))
 
     with patch.object(actions, "FIELD_RECHECK_TIMEOUT_MS", BOUND_MS):
