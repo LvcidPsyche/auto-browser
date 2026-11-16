@@ -118,6 +118,40 @@ async def test_many_small_entries_count_their_overhead_against_the_bound(tmp_pat
     assert len(every["storage"]) < MANY_ENTRIES and every["truncated"] is True
 
 
+# Characters the tool's answer escapes (json.dumps): a quote, a backslash and a newline take two characters there, a
+# NUL or a vertical tab six. A value of this many of one of them is within the bound by its length, and past it as
+# the answer writes it.
+ESCAPED_LENGTH = MAX_TOOL_RESULT_CHARS // 2 + 10
+
+
+@pytest.mark.parametrize("code", [34, 92, 10, 0, 11])
+async def test_a_value_the_answer_escapes_counts_as_the_answer_writes_it(tmp_path: Path, code: int) -> None:
+    # #274's review: the bound counted .length, so 200,000 NULs went out as 1,200,000 characters, truncated: false.
+    page = (
+        "<title>escaped</title><script>"
+        f"localStorage.setItem('v', String.fromCharCode({code}).repeat({ESCAPED_LENGTH}));"
+        "</script>"
+    )
+    one = await _read(tmp_path, page, "local", key="v")
+    every = await _read(tmp_path, page, "local")
+
+    for entries, truncated in (({"v": one["value"]}, one["truncated"]), (every["storage"], every["truncated"])):
+        written = _answer_chars(entries)
+        assert MAX_TOOL_RESULT_CHARS - 6 < written <= MAX_TOOL_RESULT_CHARS and truncated is True, written
+    assert one["value"] == chr(code) * len(one["value"]) and every["storage"]["v"] == one["value"]
+
+
+async def test_a_key_the_answer_escapes_past_the_bound_is_left_out(tmp_path: Path) -> None:
+    page = (
+        "<title>escaped key</title><script>"
+        f"localStorage.setItem(String.fromCharCode(34).repeat({ESCAPED_LENGTH}), '1');"
+        "</script>"
+    )
+    every = await _read(tmp_path, page, "local")
+
+    assert every["storage"] == {} and every["truncated"] is True
+
+
 async def test_a_storage_the_document_may_not_use_is_reported_as_the_browser_says(tmp_path: Path) -> None:
     """about:blank has no origin to keep storage for. The isolated world reports a script that threw with a hint
     about elements ("Observe again before acting on this element."); the read reports the browser's own reason."""

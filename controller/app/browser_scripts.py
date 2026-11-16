@@ -801,11 +801,28 @@ FIND_ELEMENTS_SELECTOR_SCRIPT = _with_find_fields(
 # browser.get_local_storage: one key, or every key when `key` is null. Run in the controller's isolated world
 # (element_ids.evaluate), where a page that replaced Storage.prototype.getItem, or window.localStorage itself, is not
 # what answers. What a store natively holds can be megabytes all the same, a key as long as a value, so the answer is
-# bounded: each entry's key, its value and `overhead` count against `budget`, and the entry that reaches it ends the
-# answer with truncated: true, with its value cut to what is left, or left out when its key does not fit.
+# bounded: each entry's key, its value and `overhead` count against `budget` as the tool's answer writes them
+# (json.dumps, where a quote, a backslash and \b \t \n \f \r take two characters and any other control character six),
+# and the entry that reaches it ends the answer with truncated: true, with its value cut to what is left, or left out
+# when its key does not fit.
 STORAGE_READ_SCRIPT = with_ab_cap(
     r"""([kind, key, budget, overhead], _elementIds) => {
 /*__AB_CAP__*/
+    const written = (code) => code === 34 || code === 92 || code === 8 || code === 9 || code === 10 || code === 12
+        || code === 13 ? 2 : code < 32 ? 6 : 1;
+    const length = (text) => {
+        let total = 0;
+        for (let i = 0; i < text.length; i++) total += written(text.charCodeAt(i));
+        return total;
+    };
+    // The longest start of `text` the answer writes in `room` characters, never ending inside a surrogate pair.
+    const cut = (text, room) => {
+        let end = 0;
+        for (let used = 0; end < text.length && used + written(text.charCodeAt(end)) <= room; end++) {
+            used += written(text.charCodeAt(end));
+        }
+        return abSlice(text, end);
+    };
     let storage;
     try {
         storage = kind === 'session' ? window.sessionStorage : window.localStorage;
@@ -819,14 +836,15 @@ STORAGE_READ_SCRIPT = with_ab_cap(
     const count = key === null ? storage.length : 1;
     for (let i = 0; i < count; i++) {
         const name = key === null ? storage.key(i) : key;
-        left -= name.length + overhead;
+        left -= length(name) + overhead;
         if (left < 0) return {entries, truncated: true};
         const value = storage.getItem(name);
-        if (value !== null && value.length > left) {
-            entries.push([name, abSlice(value, left)]);
+        const size = value === null ? 0 : length(value);
+        if (size > left) {
+            entries.push([name, cut(value, left)]);
             return {entries, truncated: true};
         }
-        left -= value === null ? 0 : value.length;
+        left -= size;
         entries.push([name, value]);
     }
     return {entries, truncated: false};

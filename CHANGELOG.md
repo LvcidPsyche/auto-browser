@@ -186,9 +186,10 @@ GHSA-9qq7-x8h7-87fv and GHSA-363m-96wq-fxmg, fixed in this release.
   The read now runs in the controller's isolated world, as `browser.get_html` with `text_only` and
   `browser.find_elements` do, where the page's own JavaScript does not answer for its storage. A store can hold
   megabytes by itself all the same, and a key as long as a value, so the answer is bounded too: its keys and values,
-  with eight characters more for each entry, come to at most 1,000,000 characters, the most any tool's `max_chars`
-  accepts, and an answer cut there says `truncated: true`. The tool is in the `storage` pack, which the default
-  profile leaves out.
+  counted as the answer writes them (a quote, a backslash or a line break takes two characters there, any other
+  control character six), with eight characters more for each entry, come to at most 1,000,000 characters, the most
+  any tool's `max_chars` accepts, and an answer cut there says `truncated: true`. The tool is in the `storage` pack,
+  which the default profile leaves out.
 
 ### Fixed
 
