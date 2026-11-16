@@ -1909,7 +1909,7 @@ class BrowserActionService:
         target = watch = None
         try:
             if place["framed"]:
-                target = await locator.element_handle(timeout=budget.left_ms())
+                target = await budget.answered(locator.element_handle(timeout=budget.left_ms()), _disposed_soon)
                 box = await budget.answered(target.bounding_box())
                 if box:
                     watch = await budget.answered(
@@ -2063,7 +2063,9 @@ class BrowserActionService:
                     return found is True
             # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
             # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
-            node = await locator.element_handle(timeout=bound.left_ms(POINTER_CHECK_TIMEOUT_MS))
+            node = await answered(
+                locator.element_handle(timeout=bound.left_ms(POINTER_CHECK_TIMEOUT_MS)), _disposed_soon
+            )
             handles.append(node)
             # Where the target's document saw the pointer arrive: a point there, None for no move, False for a
             # document that runs no script, and for no watch (the two boxes carry the point, as before).

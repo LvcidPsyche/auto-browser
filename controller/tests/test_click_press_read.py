@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -1246,6 +1247,56 @@ async def test_a_types_focus_click_reads_its_targets_box_within_its_bound() -> N
 
     assert took < WITHIN_THREE_BOUNDS_S, took
     service.click_as_playwright_places_it.assert_awaited_once()
+
+
+def _handle_the_page_makes_late() -> tuple[asyncio.Future[Any], asyncio.Event, Callable[..., Awaitable[Any]], Any]:
+    """An element_handle whose page makes the handle whatever its caller does (a cancelled call does not stop the
+    page): the future the page answers by, an event set once it is asked, the call, and the handle it makes."""
+    made: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    asked = asyncio.Event()
+    handle = SimpleNamespace(dispose=AsyncMock())
+
+    async def element_handle(**_given: Any) -> Any:
+        asked.set()
+        return await asyncio.shield(made)
+
+    return made, asked, element_handle, handle
+
+
+async def _until_given_back(handle: Any) -> None:
+    for _ in range(200):
+        if handle.dispose.await_count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the handle was not given back within 2 s")
+
+
+@pytest.mark.parametrize("by", ["the pointer question", "the placed click"])
+async def test_a_target_handle_that_arrives_once_its_click_was_cancelled_is_given_back(by: str) -> None:
+    # B1-fix1 item 15 (Opus F12): the click's own look-ups of its target's handle (the placed click's in a frame,
+    # and the pointer question's) were awaited as they are: a cancel while one was unanswered left the handle the
+    # page made with nobody to give it back. Each is asked as the click's other handle calls are, and a handle that
+    # arrives once it was given up on is given back as it arrives.
+    made, asked, element_handle, handle = _handle_the_page_makes_late()
+    with reading_presses("click", "read", None), patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
+        if by == "the pointer question":
+            locator = SimpleNamespace(evaluate=AsyncMock(return_value="framed"), element_handle=element_handle)
+            clicking = asyncio.ensure_future(
+                BrowserActionService._receives_pointer_at(locator, 5.0, 6.0, placed=True, timeout_ms=5000)
+            )
+        else:
+            service, session, locator, _watch, _done = _framed_click(True)
+            locator.element_handle = element_handle
+            clicking = asyncio.ensure_future(
+                service.click_as_playwright_places_it(session, locator, budget=_Budget(5000))
+            )
+        await asyncio.wait_for(asked.wait(), 5)
+        clicking.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(clicking, 5)
+    made.set_result(handle)
+
+    await _until_given_back(handle)
 
 
 def _frames_whose_handles_are_never_given_back(depth: int) -> tuple[SimpleNamespace, list[SimpleNamespace]]:
