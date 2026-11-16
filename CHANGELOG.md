@@ -64,6 +64,12 @@ All notable changes to auto-browser are documented here.
   its own, through the field's own `getAttribute`, which a page can define on the field: a promo-code field that said
   it took a one-time code had the code typed into it, and Enter submitted its form (on a checkout page, the order).
   It now reads them with the hold's script, through `Element.prototype`'s.
+- **The TOTP autofill types no more of the code into a page that left the named host while it typed.** It checked
+  the host before the typing and after it, before Enter, but not between the keys, so a key handler that sent the
+  page to another host had the rest of the code typed into whatever had focus there (four of the six digits, in one
+  run measured). It now checks before each key. Where its fill of the field failed it pressed select-all and Delete
+  into whatever had focus, on whatever page was there by then, which emptied another host's field: they are now
+  pressed only where the page is still on a named host and focus is in the field.
 
 ### Fixed
 

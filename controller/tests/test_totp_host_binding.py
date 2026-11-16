@@ -72,10 +72,12 @@ class TotpAutofillTests(unittest.TestCase):
         shown: str | None = None,
         leaves_during: str | None = None,
         fill_fails: bool = False,
+        focused: bool = True,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
-        "typing" for the code's keystrokes) during which the page goes to another host."""
+        "typing" for the code's keystrokes) during which the page goes to another host. ``focused``: what the field
+        answers when it is asked whether focus is in it."""
         typed = AsyncMock(side_effect=lambda *_args: leave_during("typing"))
 
         async def clear(_value: str) -> None:
@@ -86,7 +88,9 @@ class TotpAutofillTests(unittest.TestCase):
         async def press_key(_key: str) -> None:
             leave_during("clear by keys")
 
-        locator = SimpleNamespace(fill=AsyncMock(side_effect=clear), press=AsyncMock())
+        locator = SimpleNamespace(
+            fill=AsyncMock(side_effect=clear), press=AsyncMock(), evaluate=AsyncMock(return_value=focused)
+        )
         manager = SimpleNamespace(
             _settle=AsyncMock(),
             _page_refused=lambda page: refused,
@@ -119,7 +123,8 @@ class TotpAutofillTests(unittest.TestCase):
     def test_types_the_code_on_a_named_host(self) -> None:
         result, typed = self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",))
         self.assertEqual(result["code_length"], 6)
-        typed.assert_awaited_once()
+        # A key at a time, the host checked before each.
+        self.assertEqual([len(call.args[1]) for call in typed.await_args_list], [1] * 6)
 
     def test_a_page_on_another_host_gets_nothing(self) -> None:
         for url in (
@@ -203,8 +208,18 @@ class TotpAutofillTests(unittest.TestCase):
             "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
         )
         self.assertEqual(result["code_length"], 6)
-        typed.assert_awaited_once()
+        self.assertEqual(len(typed.await_args_list), 6)
         self.assertEqual(self.keys.await_args_list, [call("Control+a"), call("Delete")])
+
+    def test_a_field_that_lost_focus_when_its_fill_failed_gets_no_keys(self) -> None:
+        # The keys that empty a field whose fill failed go to whatever has focus: into another field of the page,
+        # which the Delete emptied and the code went into. They are pressed only where focus is in the field.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, focused=False
+        )
+        self.assertIsNone(result)
+        self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
 
     def test_totp_unavailable_names_the_page_as_it_is_shown(self) -> None:
         with patch("app.browser.services.actions.pyotp", None), self.assertRaises(BrowserActionError) as raised:
