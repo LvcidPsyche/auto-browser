@@ -2016,7 +2016,9 @@ async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed
     # gives the click to Playwright's placing. Asked once more where Playwright's hover had put the pointer, it
     # ran out the same way, and there a no ends the click: a read click on a button eight frames down failed
     # every time, where the click that is not read, Playwright's own, pressed it.
-    # Each walk that ran out also left one element handle behind, the last frame's, taken and never asked.
+    # Each walk that ran out also left one element handle behind, the last frame's, taken and never asked. Since
+    # B1-fix1 item 25 a walk that runs out takes no such handle: the target's and one for each frame it asked, depth
+    # in all, each given back.
     taken: list[Any] = []
     disposed: list[Any] = []
 
@@ -2042,7 +2044,7 @@ async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed
         else:
             await env.manager.execute_decision(session_id, _click("read", selector=selector))
         assert await _title(env, session_id) == "PRESSED"
-        assert len(taken) > depth and [handle for handle in taken if handle not in disposed] == []
+        assert len(taken) >= depth and [handle for handle in taken if handle not in disposed] == []
 
 
 @pytest.mark.parametrize(("depth", "by_playwright"), [(7, 0), (8, 1)])
