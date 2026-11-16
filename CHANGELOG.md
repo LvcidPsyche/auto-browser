@@ -63,8 +63,8 @@ All notable changes to auto-browser are documented here.
   `/etc/codex/requirements.toml`, so there the MCP servers its Codex home names load (the same section).
 - **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image
   does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
-  release published that hour. No workflow built it: `agent-cli-image` now does, whenever its Dockerfile, its
-  `.dockerignore` or either file it installs from changes.
+  release published that hour. No workflow built it: a new one, `glama-image`, builds it and drives it as an MCP
+  client (`initialize`, then `tools/list`) on any change to what the image copies, `controller/app` included.
 - **A malformed `CONTROLLER_ALLOWED_HOSTS` now stops the start, where the controller served a 500 to every
   request.** The Host check refuses a malformed entry (a wildcard written other than `*` or `*.example.com`, brackets
   round anything but an IPv6 address) when the app's middleware is built, at its first call, the lifespan's startup.
@@ -82,7 +82,8 @@ All notable changes to auto-browser are documented here.
   the bridge started with nothing behind it. A new setting, `CONNECT_AT_STARTUP` (default `true`), says what the
   image needs: with it `false` the controller starts without connecting to the shared browser-node, and the first
   call that needs the browser connects. The image sets it, and it answers MCP's `initialize` and `tools/list` again
-  (20 tools, measured on the image built from this release). uvicorn's output there now goes to stderr: stdout is the
+  (20 tools, measured on the image built from this release; `glama-image` checks the same on every change to what
+  the image copies, and fails on 1.18.1's image). uvicorn's output there now goes to stderr: stdout is the
   bridge's, one MCP message a line, and uvicorn's access log put lines of its own among them.
 
 ### Changed

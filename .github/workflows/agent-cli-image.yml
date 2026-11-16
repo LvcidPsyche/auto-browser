@@ -1,7 +1,7 @@
 name: agent-cli-image
 
-# The two images no other workflow builds: the root (Glama) image, and the controller with INSTALL_AGENT_CLIS=true.
-# In the second, scripts/ci/codex_sandbox_check.sh runs Codex as the controller runs it (the CLI's uid, under the
+# The controller image with INSTALL_AGENT_CLIS=true, which no other workflow builds (glama-image.yml builds the root
+# image). In it, scripts/ci/codex_sandbox_check.sh runs Codex as the controller runs it (the CLI's uid, under the
 # launcher with the controller's grants) against a stand-in model that asks for one command, and fails unless each
 # CODEX_SANDBOX_MODE setting reaches what docs/deployment.md ("Codex's own sandbox") says and no more. Landlock needs
 # a Linux kernel, so this runs on GitHub's runners; the container has no network, and needs none. It runs on a change
@@ -17,11 +17,6 @@ on:
       - "controller/app/providers/base.py"
       - "scripts/ci/codex_responses_mock.py"
       - "scripts/ci/codex_sandbox_check.sh"
-      - "Dockerfile"
-      - "scripts/glama_entrypoint.sh"
-      - ".dockerignore"
-      - "controller/requirements.txt"
-      - "controller/constraints.txt"
       - ".github/workflows/agent-cli-image.yml"
   push:
     branches:
@@ -34,11 +29,6 @@ on:
       - "controller/app/providers/base.py"
       - "scripts/ci/codex_responses_mock.py"
       - "scripts/ci/codex_sandbox_check.sh"
-      - "Dockerfile"
-      - "scripts/glama_entrypoint.sh"
-      - ".dockerignore"
-      - "controller/requirements.txt"
-      - "controller/constraints.txt"
       - ".github/workflows/agent-cli-image.yml"
   workflow_dispatch:
 
@@ -70,16 +60,3 @@ jobs:
         run: >-
           docker run --rm --network none --user root --security-opt no-new-privileges:true
           -v "$PWD/scripts/ci:/ci:ro" --entrypoint sh "$IMAGE" /ci/codex_sandbox_check.sh
-
-  # The root (Glama) image, which no other workflow builds: its own Dockerfile, its .dockerignore and the two files
-  # it installs from are in the paths above.
-  root-image:
-    name: The root (Glama) image builds
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build the root Dockerfile
-        run: docker build -t auto-browser-glama:ci .
