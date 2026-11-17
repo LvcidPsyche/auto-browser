@@ -118,9 +118,10 @@ All notable changes to auto-browser are documented here.
   again read plain at each, and the preview of a text 13 of whose 14 keys went into a password field was kept, by
   selector and by `element_id` (as in 1.18.1). The hold now hears a change of any attribute it reads (`type`,
   `name`, `id`, `placeholder`, `aria-label`, `autocomplete`) from its take on, and a type during which the page
-  changed one withholds its preview, though the attribute came back. That is the cost: a field whose page changes
-  its placeholder or its name as the text goes in loses its preview. A page that changes other attributes of the
-  field (a class, `aria-invalid`, the `value` attribute) changes nothing.
+  changed one withholds its preview, though the attribute came back. That is the cost: a field whose page sets one
+  of them as the text goes in, even to the value it had (a page that writes the same placeholder or `aria-label`
+  again at each input), loses its preview. A page that changes other attributes of the field (a class,
+  `aria-invalid`, the `value` attribute) changes nothing.
 
 ### Fixed
 
