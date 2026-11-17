@@ -1090,10 +1090,6 @@ async def test_a_press_cancelled_before_its_release_still_lets_the_button_go(can
     assert released == ["mouse up"]
 
 
-# What a press's tests give the mouse-up to answer in: the bound a release has, shortened.
-RELEASE_BOUND_S = 0.2
-
-
 def _press_session(down: Any, up: Any) -> tuple[BrowserActionService, SimpleNamespace]:
     """A service, and a session whose mouse goes down and up by ``down`` and ``up``."""
     mouse = SimpleNamespace(down=down, up=up)
@@ -1107,7 +1103,7 @@ async def test_a_press_whose_button_is_not_let_go_in_time_says_it_may_still_be_h
     # typed one now, not to be retried, and says the button went down and may still be held.
     service, session = _press_session(AsyncMock(), _never)
 
-    with patch.object(actions, "MOUSE_UP_TIMEOUT_SECONDS", RELEASE_BOUND_S), pytest.raises(BrowserActionError) as ended:
+    with patch.object(actions, "MOUSE_UP_TIMEOUT_SECONDS", BOUND_MS / 1000), pytest.raises(BrowserActionError) as ended:
         await asyncio.wait_for(service.press_mouse(session, 1.0, 2.0), 5)
 
     assert (ended.value.code, ended.value.status_code, ended.value.retryable) == ("mouse_not_released", 504, False)
@@ -1128,10 +1124,10 @@ async def test_a_mouse_up_whose_cancel_is_never_answered_still_ends_at_its_bound
             raise
 
     service, session = _press_session(AsyncMock(), up)
-    with patch.object(actions, "MOUSE_UP_TIMEOUT_SECONDS", RELEASE_BOUND_S):
+    with patch.object(actions, "MOUSE_UP_TIMEOUT_SECONDS", BOUND_MS / 1000):
         pressing = asyncio.ensure_future(service.press_mouse(session, 1.0, 2.0))
         try:
-            done, _ = await asyncio.wait({pressing}, timeout=3 * RELEASE_BOUND_S)
+            done, _ = await asyncio.wait({pressing}, timeout=WITHIN_THREE_BOUNDS_S)
         finally:
             aborted.set()
             with contextlib.suppress(BaseException):
