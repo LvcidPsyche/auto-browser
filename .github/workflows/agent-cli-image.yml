@@ -1,0 +1,62 @@
+name: agent-cli-image
+
+# The controller image with INSTALL_AGENT_CLIS=true, which no other workflow builds (glama-image.yml builds the root
+# image). In it, scripts/ci/codex_sandbox_check.sh runs Codex as the controller runs it (the CLI's uid, under the
+# launcher with the controller's grants) against a stand-in model that asks for one command, and fails unless each
+# CODEX_SANDBOX_MODE setting reaches what docs/deployment.md ("Codex's own sandbox") says and no more. Landlock needs
+# a Linux kernel, so this runs on GitHub's runners; the container has no network, and needs none. It runs on a change
+# to a path listed below, not on every change to the images' inputs (ci.yml builds the controller image on every
+# pull request and push to main, without the CLIs).
+on:
+  pull_request:
+    paths:
+      - "controller/Dockerfile"
+      - "controller/.dockerignore"
+      - "controller/entrypoint.sh"
+      - "controller/app/cli_sandbox*.py"
+      - "controller/app/providers/base.py"
+      - "scripts/ci/codex_responses_mock.py"
+      - "scripts/ci/codex_sandbox_check.sh"
+      - ".github/workflows/agent-cli-image.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "controller/Dockerfile"
+      - "controller/.dockerignore"
+      - "controller/entrypoint.sh"
+      - "controller/app/cli_sandbox*.py"
+      - "controller/app/providers/base.py"
+      - "scripts/ci/codex_responses_mock.py"
+      - "scripts/ci/codex_sandbox_check.sh"
+      - ".github/workflows/agent-cli-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-cli-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codex-sandbox:
+    name: Codex's sandbox under the launcher (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      IMAGE: auto-browser-controller:agent-clis
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the controller image with the three CLIs
+        run: docker build --build-arg INSTALL_AGENT_CLIS=true -t "$IMAGE" controller
+      - name: What a command of Codex's model reaches under each sandbox setting
+        run: >-
+          docker run --rm --network none --user root --security-opt no-new-privileges:true
+          -v "$PWD/scripts/ci:/ci:ro" --entrypoint sh "$IMAGE" /ci/codex_sandbox_check.sh

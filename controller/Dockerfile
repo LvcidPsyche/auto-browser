@@ -1,15 +1,27 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 # The codex, claude and gemini CLIs back the *_AUTH_MODE=cli providers
-# (subscription logins) and need Node.js; together they are about 750 MB that
+# (subscription logins), and the last two need Node.js; together they are about 750 MB that
 # an MCP-only or API-key deployment never runs. Build with
 # INSTALL_AGENT_CLIS=true to include them (docker-compose reads it from .env;
 # docker-compose.host-subscriptions.yml sets it).
 ARG INSTALL_AGENT_CLIS=false
+# codex is the glibc build from its own GitHub release, not the npm package: that one's binary is the musl build, whose
+# sandbox helper opens / without O_PATH (Rust std drops the flag on musl), which the controller's Landlock launcher
+# refuses, so under read-only and workspace-write no command of Codex's model ran. The sums are of
+# rust-v${CODEX_CLI_VERSION}'s codex-<arch>-unknown-linux-gnu.tar.gz and of the binary in it, which the release's
+# .sigstore bundle signs. A bump changes the version and all four sums in one commit (AGENTS.md says how to verify
+# them). Beside it goes /etc/codex/requirements.toml with mcp_servers = {}, so that no MCP server a CODEX_HOME
+# config.toml names loads: the adapter's -c mcp_servers={} clears none (Codex merges -c tables key by key), and no
+# grant of the CLI sandbox reaches /etc/codex.
 ARG CODEX_CLI_VERSION=0.114.0
+ARG CODEX_CLI_TARBALL_SHA256_AMD64=f18294d4da6756e9e5ad4dc62b3030b7a75a94e5e5022f3bfa4a21a7d3c52ae0
+ARG CODEX_CLI_BINARY_SHA256_AMD64=8bae8fa33887a8d829815fa0af85887cbac3658ac1b6147a4b1d3d54c5e015de
+ARG CODEX_CLI_TARBALL_SHA256_ARM64=c923ffd32c50b8d8f4c5f39e8623c8afab90ee984c65f3c73709b82cf63150bb
+ARG CODEX_CLI_BINARY_SHA256_ARM64=97c76fae7574d5db734685fe269885bfa2334070651a6ecdfca4024352f54ef0
 ARG CLAUDE_CLI_VERSION=2.1.72
 ARG GEMINI_CLI_VERSION=0.32.1
 # pytest, ruff, pip-audit and the rest of requirements-dev.txt are about 58 MB
@@ -22,12 +34,30 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends autossh openssh-client tesseract-ocr tesseract-ocr-eng \
     && if [ "$INSTALL_AGENT_CLIS" = "true" ]; then \
-        apt-get install -y --no-install-recommends nodejs npm \
+        apt-get install -y --no-install-recommends nodejs npm curl \
         && npm install -g \
-            @openai/codex@${CODEX_CLI_VERSION} \
             @anthropic-ai/claude-code@${CLAUDE_CLI_VERSION} \
             @google/gemini-cli@${GEMINI_CLI_VERSION} \
-        && npm cache clean --force; \
+        && npm cache clean --force \
+        && case "$(dpkg --print-architecture)" in \
+            amd64) codex_arch=x86_64 \
+                codex_tar_sum="$CODEX_CLI_TARBALL_SHA256_AMD64" codex_bin_sum="$CODEX_CLI_BINARY_SHA256_AMD64" ;; \
+            arm64) codex_arch=aarch64 \
+                codex_tar_sum="$CODEX_CLI_TARBALL_SHA256_ARM64" codex_bin_sum="$CODEX_CLI_BINARY_SHA256_ARM64" ;; \
+            *) echo "No codex-cli build is pinned for $(dpkg --print-architecture): build with INSTALL_AGENT_CLIS=false" >&2; \
+                exit 1 ;; \
+        esac \
+        && mkdir /tmp/codex-cli \
+        && curl -fsSL -o /tmp/codex-cli/codex.tar.gz \
+            "https://github.com/openai/codex/releases/download/rust-v${CODEX_CLI_VERSION}/codex-${codex_arch}-unknown-linux-gnu.tar.gz" \
+        && echo "${codex_tar_sum}  /tmp/codex-cli/codex.tar.gz" | sha256sum -c - \
+        && tar -xzf /tmp/codex-cli/codex.tar.gz -C /tmp/codex-cli \
+        && echo "${codex_bin_sum}  /tmp/codex-cli/codex-${codex_arch}-unknown-linux-gnu" | sha256sum -c - \
+        && install -m 0755 -o root -g root "/tmp/codex-cli/codex-${codex_arch}-unknown-linux-gnu" /usr/local/bin/codex \
+        && printf '%s\n' '# No MCP server loads, whatever a CODEX_HOME config.toml names: -c mcp_servers={} clears none.' \
+            'mcp_servers = {}' > /tmp/codex-cli/requirements.toml \
+        && install -D -m 0644 -o root -g root /tmp/codex-cli/requirements.toml /etc/codex/requirements.toml \
+        && rm -rf /tmp/codex-cli; \
     elif [ "$INSTALL_AGENT_CLIS" != "false" ]; then \
         echo "INSTALL_AGENT_CLIS must be true or false, got '$INSTALL_AGENT_CLIS'" >&2; exit 1; \
     fi \
@@ -77,4 +107,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 # holds open (GET /mcp, GET /sessions/{id}/events) never ends by itself: the cleanup never ran, and Docker killed the
 # process when its grace was over. 5 seconds lets an ordinary call in flight finish and leaves the cleanup 55 of the
 # 60 that docker-compose.yml's stop_grace_period gives; keep the two true of each other (a test reads both).
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]
+# --lifespan on: the app's middleware is built at its first call, the lifespan's startup, and under uvicorn's default
+# (auto) a failure there, such as a malformed CONTROLLER_ALLOWED_HOSTS, read as an app without a lifespan: uvicorn
+# served, the app's startup never ran, and every request got a 500. With it the start fails and uvicorn exits.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5", "--lifespan", "on"]

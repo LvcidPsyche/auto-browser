@@ -45,6 +45,14 @@ make release-audit   # launch-prep audit; run before any release PR
   call it (a test in `test_process_hardening.py` fails if `controller/app` names it). At every Playwright bump,
   re-check that `PipeTransport.connect` still starts the driver with `get_driver_env()` from
   `playwright._impl._transport` (`confine_playwright_driver_environment`).
+- **Codex pin:** with `INSTALL_AGENT_CLIS=true` the controller image installs codex-cli from Codex's GitHub release,
+  checked against four sha256 ARGs (each architecture's tarball and the binary in it). A Codex bump changes
+  `CODEX_CLI_VERSION` and all four sums in one commit, each binary first verified against the release's `.sigstore`
+  bundle: `cosign verify-blob --bundle codex-<triple>.sigstore --new-bundle-format=false --certificate-identity
+  https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v<version>
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com codex-<triple>`. From 0.115.0 Codex's helper
+  defaults to bubblewrap, so such a bump very likely needs more than new sums (inferred, not measured:
+  `docs/deployment.md`, "Codex's own sandbox").
 - Security-sensitive changes (auth, isolation, witness receipts, PII scrubbing) follow `SECURITY.md`.
 
 ## Releases

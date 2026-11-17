@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import json
 import tempfile
@@ -11,8 +12,14 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
-from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
-from app.browser.services import BrowserRemoteAccessService
+from app.browser.element_scripts import (
+    ELEMENT_FOCUS_PLACE_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+    NAMED_FIELDS_SCRIPT,
+)
+from app.browser.services import BrowserRemoteAccessService, actions
 from app.browser.services.actions import _Budget
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
 from app.config import Settings
@@ -37,6 +44,10 @@ def _settings(root: Path) -> Settings:
     )
 
 
+# The bound a key of a type's clear is given in the tests of that bound.
+CLEAR_KEY_BOUND_S = 0.2
+
+
 class FakeMouse:
     def __init__(self) -> None:
         self.move = AsyncMock()
@@ -54,15 +65,22 @@ class FakeKeyboard:
 class FakeFieldHold:
     """A type's hold on the node its text goes to (app.browser.services.actions._TypedField), taken on a FakeLocator:
     the field the locator named then, whose attributes it reads as they are now, for as long as the node has kept
-    focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away)."""
+    focus (``focused``: a test's to end, for a text whose key moves focus on or a page that takes the node away).
+    It answers the hold's read and release scripts only, and nothing once released: the release takes its
+    listeners off, so a hold first read with the release script reads as left when it is given back."""
 
     def __init__(self, attributes: dict[str, str]) -> None:
         self.attributes = attributes
         self.focused = True
+        self.released = False
         self.evaluate = AsyncMock(side_effect=self._read)
         self.dispose = AsyncMock()
 
-    def _read(self, _script: str) -> dict[str, str] | None:
+    def _read(self, script: str) -> dict[str, str] | None:
+        assert script in (FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT), script
+        if self.released:
+            return None
+        self.released = script == FIELD_HOLD_RELEASE_SCRIPT
         if not self.focused:
             return None
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
@@ -103,15 +121,17 @@ class FakeLocator:
         self.evaluate = AsyncMock(return_value=True)
         self.focus = AsyncMock()
 
-    def _hold(self, _script: str, **_given: object) -> FakeFieldHold:
+    def _hold(self, script: str, **_given: object) -> FakeFieldHold:
+        assert script == FIELD_HOLD_TAKE_SCRIPT, script
         self.holds.append(FakeFieldHold(self.attributes))
         return self.holds[-1]
 
     def _asked(self, script: str) -> object:
-        if script == ELEMENT_HAS_FOCUS_SCRIPT:
-            return True
+        if script == ELEMENT_FOCUS_PLACE_SCRIPT:
+            return "in"
+        assert script == NAMED_FIELDS_SCRIPT, script
         names = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
-        return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "frame": False}
+        return {"fields": [{name: self.attributes.get(name) or "" for name in names}], "idle": [], "frame": False}
 
     @property
     def first(self) -> "FakeLocator":
@@ -750,6 +770,55 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tunneled["source"], "isolated_session_tunnel")
         self.assertEqual(tunneled["takeover_url"], "https://session-tunnel.example.com")
         self.assertEqual(self.manager._current_takeover_url(self.session), "https://session-tunnel.example.com")
+
+    async def test_a_type_by_selector_whose_element_is_not_found_presses_no_key(self) -> None:
+        # FX9R-3: the clear pressed select-all before it asked whether the element the selector found had focus, also
+        # where it found none: the keys went to whatever had focus, and only then was the type refused.
+        field = FakeLocator("#name")
+        field.element_handle = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 1000ms exceeded."))
+        self.session.page.locators["#name"] = field
+
+        with (
+            patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+            self.assertRaises(BrowserActionError) as refused,
+        ):
+            await self.manager.type("session-1", selector="#name", text="hello")
+
+        self.assertEqual(refused.exception.code, "focus_lost")
+        self.session.page.keyboard.press.assert_not_awaited()
+        self.session.page.keyboard.type.assert_not_awaited()
+
+    async def test_a_clear_key_the_page_does_not_acknowledge_ends_the_type_within_its_bound(self) -> None:
+        # The clear's select-all and Delete were pressed with no bound: a page that stopped answering held the type,
+        # and its session lock. Each is bounded as a keystroke is, and past it the type ends with nothing typed.
+        for key in ("Control+a", "Delete"):
+            with self.subTest(key=key):
+                self.session.page.locators["#name"] = FakeLocator("#name")
+                self.session.page.keyboard = FakeKeyboard()
+
+                stalled_at: list[float] = []
+
+                async def press(pressed: str, stalls: str = key) -> None:
+                    if pressed == stalls:
+                        stalled_at.append(time.monotonic())
+                        await asyncio.Event().wait()
+
+                self.session.page.keyboard.press = AsyncMock(side_effect=press)
+                with (
+                    patch("app.browser_manager.asyncio.sleep", new=AsyncMock()),
+                    patch.object(actions, "HUMAN_TYPING_STEP_FLOOR_SECONDS", CLEAR_KEY_BOUND_S),
+                    self.assertRaises(BrowserActionError) as ended,
+                ):
+                    await asyncio.wait_for(self.manager.type("session-1", selector="#name", text="hello"), 5)
+                took = time.monotonic() - stalled_at[0]
+
+                self.assertEqual((ended.exception.code, ended.exception.retryable), ("typing_timeout", False))
+                self.assertIn(key, ended.exception.message)
+                # From the key that stalled to the type's end, within three bounds: a key bounded five times as long
+                # does not pass (B1-fix1 item 7). Timed from the type's start, the image's Python 3.11 spent most of
+                # a second on the fakes' calls before the clear, and the bound was not what was measured.
+                self.assertLess(took, 3 * CLEAR_KEY_BOUND_S)
+                self.session.page.keyboard.type.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -2,9 +2,10 @@
 # Start the Auto Browser HTTP server in the background, then run the stdio bridge.
 # Used by the root Dockerfile for Glama MCP inspection.
 #
-# SESSION_ISOLATION_MODE=glama_inspect skips the browser-node connection attempt
-# at startup (ensure_browser retries for 60s by default, which exceeds the
-# healthz timeout and prevents the server from becoming ready in time).
+# CONNECT_AT_STARTUP=false: this image runs no browser-node, and the startup
+# connect to one (60 tries a second apart by default) would fail the start.
+# It used to set SESSION_ISOLATION_MODE=glama_inspect, a mode no code named,
+# which 1.15.0 refuses, so the server failed at import.
 
 # Activate uv venv if present (Glama builds use uv venv /opt/venv)
 if [ -f /opt/venv/bin/activate ]; then
@@ -36,19 +37,35 @@ fi
 # (controller/Dockerfile says why). Here it is for parity with that command and
 # changes nothing: uvicorn is a background child of this shell, which becomes
 # the bridge (the exec below), so a container stop signals the bridge and never
-# uvicorn, which ends with the container.
+# uvicorn, which ends with the container. --lifespan on, as there too: a start
+# that fails (a malformed CONTROLLER_ALLOWED_HOSTS) ends uvicorn instead of
+# leaving it answering every request with a 500. Its output goes to stderr:
+# stdout is the bridge's, one MCP message a line, and uvicorn's access log
+# there put lines of its own among them.
 API_BIND_SCOPE=loopback \
-SESSION_ISOLATION_MODE=glama_inspect \
-    uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5 &
+CONNECT_AT_STARTUP=false \
+    uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5 --lifespan on >&2 &
+uvicorn=$!
 
-# Wait up to 60s for the server to become healthy
+# Wait up to 60s for the server to become healthy; the bridge starts only once it
+# is. A uvicorn that has exited by then (a failed start) ends this script with its
+# status, never 0, and one still not healthy at the end of the wait with 1: either
+# way the container stops, where it used to run a bridge with no server behind it.
 i=0
-while [ $i -lt 60 ]; do
-    if curl -sf http://127.0.0.1:8000/healthz > /dev/null 2>&1; then
-        break
+until curl -sf http://127.0.0.1:8000/healthz > /dev/null 2>&1; do
+    if ! kill -0 "$uvicorn" 2>/dev/null; then
+        wait "$uvicorn"
+        status=$?
+        echo "glama_entrypoint: uvicorn exited (status $status) before it was healthy" >&2
+        [ "$status" -ne 0 ] || status=1
+        exit "$status"
+    fi
+    i=$((i + 1))
+    if [ "$i" -ge 60 ]; then
+        echo "glama_entrypoint: uvicorn was not healthy after 60s" >&2
+        exit 1
     fi
     sleep 1
-    i=$((i + 1))
 done
 
 # Run the stdio ↔ HTTP MCP bridge (replaces this shell process). With no

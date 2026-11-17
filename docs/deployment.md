@@ -653,13 +653,40 @@ What the sandbox does not stop, and what does not work under it:
   so a file outside `/data` that the controller's user may write.
 - **A tool that builds its own mount namespace.** Landlock refuses mounting or unmounting to every process it
   restricts.
-- **Codex's own sandbox.** Codex wraps each command its model asks for in a sandbox of its own, whose helper opens
-  `/` for reading before it makes its rules. This sandbox refuses that open (`/` itself has no rule, and a rule there
-  would make every name under `/data` listable), the helper goes on without its rule on `/`, and the command ends with
-  `Failed to execvp sh: Permission denied`. So with the CLI sandbox on, Codex (measured with codex-cli 0.114.0)
-  cannot run a command of its model's, in any `CODEX_SANDBOX_MODE`. The decision the controller asks Codex for needs
-  none: the page goes in on stdin, the screenshot as `--image`. Claude Code's and Gemini's own sandboxes are not
-  tested under this one.
+- **Codex's own sandbox.** Under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write` Codex wraps
+  each command its model asks for in a sandbox of its own, whose helper opens `/` with `O_PATH` before it makes its
+  rules. Under `danger-full-access`, and with `CODEX_BRIDGE_ALLOW_HOST_EXEC=true` (which passes
+  `--dangerously-bypass-approvals-and-sandbox`), Codex runs the command with no sandbox of its own, beneath this one
+  alone. An image built with `INSTALL_AGENT_CLIS=true` has the glibc build of codex-cli 0.114.0 from Codex's GitHub
+  release, whose sandbox runs beneath this one. What a command of the model's reaches there, measured 2026-11-16 on
+  Docker Desktop with Codex run as the controller runs it (uid 10002, this sandbox's grants, a call directory in the
+  CLI home; the `agent-cli-image` workflow checks the same on GitHub's amd64 and arm64 runners on a change to the
+  controller's Dockerfile, `.dockerignore` or entrypoint, this sandbox's code, the CLI launch in
+  `providers/base.py` or the check's own scripts):
+  - `read-only`: it reads what this sandbox leaves readable, which inside `/data` is the CLI home (Codex's sign-in,
+    and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by this
+    sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes no file's
+    content ("Metadata, and names learnt by watching" and "Truncation, on a kernel older than 6.2" above
+    still apply), and a connect to 127.0.0.1 is refused.
+  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
+    home; the connect is refused.
+  - `danger-full-access` and the bypass: everything this sandbox allows, which includes writing the CLI home (and so
+    the configuration the next call reads) and connecting where the container can.
+
+  No setting reads or writes the rest of `/data`. The image also writes `/etc/codex/requirements.toml` with
+  `mcp_servers = {}`, which no grant of this sandbox reaches, so no MCP server the home's `config.toml` names loads:
+  `codex mcp list` shows such a server `disabled: requirements`. The controller's `-c mcp_servers={}` alone clears
+  none, as Codex merges `-c` tables key by key (measured). A controller run on the host has no such file, so there
+  the MCP servers its Codex home names load: give it a `CLI_HOME` of its own. The npm package's codex is the musl
+  build, where Rust's standard library drops `O_PATH` from the helper's open: it reaches the kernel as an open of `/`
+  for reading, which this sandbox refuses (`/` itself has no rule, and a rule there would make every name under
+  `/data` listable). Under `read-only` and `workspace-write` that helper fails (exit 101) and no command of the
+  model's runs, so a controller run on the host with that codex needs the release's glibc build for them; under
+  `danger-full-access` and the bypass its commands run as they do with the glibc build (measured in 1.18.1's
+  image). The decision the controller asks Codex for needs no command: the page goes in on stdin, the screenshot as
+  `--image`. A pin of codex-cli 0.115.0 or later needs a different design: from that release the helper defaults to
+  bubblewrap, a tool that builds its own mount namespace (above; inferred, not measured). Claude Code's and Gemini's
+  own sandboxes are not tested under this one.
 - **A second mount.** The ruleset closes what is mounted at `/data` by leaving it out. If the data directory, or a
   part of it, is mounted at a second path of the container too, what is mounted there is open to the CLI: to read
   like anything else beside `/data`, and to write as well where that path lies in a directory a CLI may write (inside
@@ -881,10 +908,12 @@ the limit is cancelled too, and for that one uvicorn logs `Exception in ASGI app
 in `CancelledError`.
 
 If you start uvicorn yourself (your own image or command, a process manager), give it the limit too, in seconds and
-well under what your supervisor waits before it kills the process:
-`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5`. Without it uvicorn waits for
-every open stream, so the cleanup runs only once each stream's client has gone, and never where the supervisor
-kills the process first.
+well under what your supervisor waits before it kills the process, and `--lifespan on`:
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5 --lifespan on`. Without the limit
+uvicorn waits for every open stream, so the cleanup runs only once each stream's client has gone, and never where
+the supervisor kills the process first. Without `--lifespan on` a start that fails before the app's startup runs (a
+malformed `CONTROLLER_ALLOWED_HOSTS`, which the Host check refuses when the app is built) reads to uvicorn as an app
+with no lifespan: it serves, the startup never runs, and every request gets a 500. With it uvicorn exits.
 
 ## What ALLOWED_HOSTS refuses, and what it does not
 

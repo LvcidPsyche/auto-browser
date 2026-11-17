@@ -9,6 +9,7 @@ show `<input name="code">` and receive a valid second factor for the account.
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
@@ -17,10 +18,20 @@ from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 
 from app.action_errors import BrowserActionError
+from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services.actions import BrowserActionService
 from app.models import CreateSessionRequest, resolve_totp_hosts, totp_host_allowed
 
 SECRET = "JBSWY3DPEHPK3PXP"
+# The code the success tests freeze, so that the keys typed are compared with it, in order.
+CODE = "492039"
+
+
+def _frozen_code() -> object:
+    """pyotp, as the autofill uses it, answering CODE."""
+    return patch(
+        "app.browser.services.actions.pyotp", SimpleNamespace(TOTP=lambda _secret: SimpleNamespace(now=lambda: CODE))
+    )
 
 
 class TotpHostResolutionTests(unittest.TestCase):
@@ -72,28 +83,60 @@ class TotpAutofillTests(unittest.TestCase):
         shown: str | None = None,
         leaves_during: str | None = None,
         fill_fails: bool = False,
+        focused: bool | list[bool] = True,
+        keys_take: float = 0.0,
+        queued_at_check: int | None = None,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
-        "typing" for the code's keystrokes) during which the page goes to another host."""
-        typed = AsyncMock(side_effect=lambda *_args: leave_during("typing"))
+        "focus question" for the question whether focus is in the field, asked before each of them, "typing" for the
+        code's keystrokes) during which the page goes to another host. ``focused``: what the field
+        answers when it is asked whether focus is in it, or a list of its answers in turn. ``keys_take``: how many
+        seconds the page takes to acknowledge each key of the clear by keys. ``queued_at_check``: the host check
+        (counted from 1) as which the page's navigation to another host is already queued in the controller, which
+        hears of it once the loop runs on. ``sent_on`` notes each key and the page's URL as the controller has it
+        when the key is sent (Playwright writes a key's message before its first wait)."""
+        self.typed_keys: list[str] = []
+        self.sent_on: list[tuple[str, str]] = []
+        checks = 0
+
+        async def type_key(key: str) -> None:
+            self.sent_on.append((key, session.page.url))
+            self.typed_keys.append(key)
+            leave_during("typing")
 
         async def clear(_value: str) -> None:
             leave_during("clear")
             if fill_fails:
                 raise PlaywrightError("Element is not an <input>, <textarea> or [contenteditable] element")
 
-        async def press_key(_key: str) -> None:
+        async def press_key(key: str) -> None:
+            self.sent_on.append((key, session.page.url))
+            await asyncio.sleep(keys_take)
             leave_during("clear by keys")
 
-        locator = SimpleNamespace(fill=AsyncMock(side_effect=clear), press=AsyncMock())
+        answers = list(focused) if isinstance(focused, list) else None
+
+        async def asked(script: str, *_args: object, **_named: object) -> bool:
+            # The field answers the focus check's own script only (B1-fix1 item 29, staged F13).
+            assert script == ELEMENT_HAS_FOCUS_SCRIPT, script
+            leave_during("focus question")
+            return answers.pop(0) if answers is not None else focused
+
+        locator = SimpleNamespace(
+            fill=AsyncMock(side_effect=clear), press=AsyncMock(), evaluate=AsyncMock(side_effect=asked)
+        )
         manager = SimpleNamespace(
+            settings=SimpleNamespace(human_typing_min_delay_ms=0, human_typing_max_delay_ms=0),
             _settle=AsyncMock(),
-            _page_refused=lambda page: refused,
+            _page_refused=lambda _page: checked(),
             _shown_url=lambda page: shown if shown is not None else page.url,
         )
         service = BrowserActionService(manager)
-        keyboard = SimpleNamespace(press=AsyncMock(side_effect=press_key))
+        # The typing code itself runs, with no pauses, over a keyboard that notes each key (B1-fix2 item 16): a copy
+        # of its loop here passed a typing code that asked the host after each key, not before it.
+        typed = AsyncMock(wraps=service.type_text_human_like)
+        keyboard = SimpleNamespace(press=AsyncMock(side_effect=press_key), type=AsyncMock(side_effect=type_key))
         session = SimpleNamespace(
             page=SimpleNamespace(url=url, keyboard=keyboard), totp_secret=SECRET, totp_hosts=hosts
         )
@@ -101,6 +144,14 @@ class TotpAutofillTests(unittest.TestCase):
         def leave_during(step: str) -> None:
             if leaves_during == step:
                 session.page.url = "https://evil.test/collect"
+
+        def checked() -> bool:
+            # Each host check asks the manager whether the page is refused first (_may_fill_totp).
+            nonlocal checks
+            checks += 1
+            if checks == queued_at_check:
+                asyncio.get_running_loop().call_soon(setattr, session.page, "url", "https://evil.test/collect")
+            return refused
 
         async def find_the_field(_page: object) -> tuple[object, str]:
             leave_during("search")
@@ -117,9 +168,13 @@ class TotpAutofillTests(unittest.TestCase):
         return asyncio.run(service.maybe_handle_totp(session)), typed
 
     def test_types_the_code_on_a_named_host(self) -> None:
-        result, typed = self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",))
+        with _frozen_code():
+            result, typed = self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",))
         self.assertEqual(result["code_length"], 6)
+        # One call of the typing code for the whole code, the host asked before each key (B1-fix1 item 4); the keys
+        # are the code's, in order (item 29, staged F14).
         typed.assert_awaited_once()
+        self.assertEqual("".join(self.typed_keys), CODE)
 
     def test_a_page_on_another_host_gets_nothing(self) -> None:
         for url in (
@@ -184,8 +239,11 @@ class TotpAutofillTests(unittest.TestCase):
                     fill_fails=fill_fails,
                 )
                 self.assertIsNone(result)
-                typed.assert_not_awaited()
+                self.assertEqual(self.typed_keys, [])
                 self.pressed.assert_not_awaited()
+                # The page left as select-all went in: no Delete into the page it went to (B1-fix1 item 3, Opus A12c).
+                if step == "clear by keys":
+                    self.assertEqual(self.keys.await_args_list, [call("Control+a")])
 
     def test_a_page_that_leaves_the_named_host_as_the_code_is_typed_gets_no_enter(self) -> None:
         # Typing the code awaits the page at each keystroke, after the last check: a page a key handler sent to
@@ -199,12 +257,99 @@ class TotpAutofillTests(unittest.TestCase):
 
     def test_a_field_emptied_by_keys_on_the_named_host_gets_the_code(self) -> None:
         # Where its fill fails the field is emptied by keys, and on the named host the code is typed as before.
-        result, typed = self.run_autofill(
-            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
-        )
+        with _frozen_code():
+            result, typed = self.run_autofill(
+                "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True
+            )
         self.assertEqual(result["code_length"], 6)
-        typed.assert_awaited_once()
+        self.assertEqual("".join(self.typed_keys), CODE)
         self.assertEqual(self.keys.await_args_list, [call("Control+a"), call("Delete")])
+
+    def test_a_focused_field_whose_page_leaves_as_its_fill_fails_gets_no_keys(self) -> None:
+        # B1-fix1 item 29 (staged F12): the host is asked before select-all on its own. Here the field keeps focus,
+        # so only the host's check keeps select-all and Delete off the page the failed fill left the named host for.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), leaves_during="clear", fill_fails=True
+        )
+        self.assertIsNone(result)
+        self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
+
+    def test_a_page_that_leaves_the_named_host_as_its_field_is_asked_for_focus_gets_no_keys(self) -> None:
+        # B1-fix2 item 8 (the Opus correctness read, F7): before each key the host was asked, then the field whether
+        # focus was in it, a round trip in which the page can leave, and select-all went to the page it left for. The
+        # host is asked once focus has answered, with nothing awaited between it and the key.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa",
+            hosts=("login.example.com",),
+            leaves_during="focus question",
+            fill_fails=True,
+        )
+        self.assertIsNone(result)
+        self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
+
+    def test_a_clear_by_keys_the_page_does_not_acknowledge_ends_the_autofill_with_no_code(self) -> None:
+        # B1-fix2 item 14 (the Opus correctness read, F14; pre-existing): the keys that empty a field whose fill failed
+        # waited for the page with no bound, unlike a type's clear (_clear_key). Each is bounded at
+        # HUMAN_TYPING_STEP_FLOOR_SECONDS, past which the autofill ends with no code typed.
+        with patch("app.browser.services.actions.HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.1):
+            began = time.monotonic()
+            result, typed = self.run_autofill(
+                "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, keys_take=1.0
+            )
+            took = time.monotonic() - began
+        self.assertIsNone(result)
+        typed.assert_not_awaited()
+        self.assertEqual(self.keys.await_args_list, [call("Control+a")])
+        self.assertLess(took, 0.6)
+
+    def test_no_clear_key_is_sent_once_the_controller_has_heard_the_page_left(self) -> None:
+        # B1-fix3 item 2 (Codex round 3 #1): the host was checked, and the key was then sent from a task of its own
+        # (_within), so a navigation the controller had already queued ran between: Delete went out with the
+        # controller knowing the page was on another host (Codex: "Control+a -> login.example.com; Delete ->
+        # other.example.com"). The check and the send are one step of one task: a key goes out only where the
+        # controller still has the page on a named host, and none once it has heard otherwise.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, queued_at_check=5
+        )
+        self.assertEqual(
+            self.sent_on, [("Control+a", "https://login.example.com/2fa"), ("Delete", "https://login.example.com/2fa")]
+        )
+        self.assertIsNone(result)
+        self.assertEqual(self.typed_keys, [])
+
+    def test_no_digit_of_the_code_is_sent_once_the_controller_has_heard_the_page_left(self) -> None:
+        # The same for the code's own digits, which the typing code checked and then sent from a task of its own
+        # (_typing_step), as 3.11's wait_for did before B1: a digit typed into another host's page is the worse case.
+        # The third digit's check (the sixth: three before the typing) has the navigation queued.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), queued_at_check=6
+        )
+        self.assertEqual([url for _key, url in self.sent_on], ["https://login.example.com/2fa"] * 3)
+        self.assertIsNone(result)
+        self.pressed.assert_not_awaited()
+
+    def test_a_field_that_lost_focus_when_its_fill_failed_gets_no_keys(self) -> None:
+        # The keys that empty a field whose fill failed go to whatever has focus: into another field of the page,
+        # which the Delete emptied and the code went into. They are pressed only where focus is in the field.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, focused=False
+        )
+        self.assertIsNone(result)
+        self.keys.assert_not_awaited()
+        typed.assert_not_awaited()
+
+    def test_a_field_whose_select_all_sends_focus_elsewhere_gets_no_delete(self) -> None:
+        # B1-fix1 item 3 (Codex B1-3, Opus F8): focus was asked before select-all only, so a select-all handler that
+        # sent focus to another field of the page had that field emptied by the Delete, and the code typed into it.
+        # Focus is asked before the Delete as well.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, focused=[True, False]
+        )
+        self.assertIsNone(result)
+        self.assertEqual(self.keys.await_args_list, [call("Control+a")])
+        typed.assert_not_awaited()
 
     def test_totp_unavailable_names_the_page_as_it_is_shown(self) -> None:
         with patch("app.browser.services.actions.pyotp", None), self.assertRaises(BrowserActionError) as raised:
@@ -217,6 +362,63 @@ class TotpAutofillTests(unittest.TestCase):
         result, typed = self.run_autofill("https://login.example.com/2fa", hosts=())
         self.assertIsNone(result)
         typed.assert_not_awaited()
+
+
+class SlowKeyboard:
+    """A page that acknowledges each key after ``ack`` seconds; what it acknowledged, in order."""
+
+    def __init__(self, ack: float) -> None:
+        self.ack = ack
+        self.acknowledged: list[str] = []
+
+    async def _key(self, key: str) -> None:
+        await asyncio.sleep(self.ack)
+        self.acknowledged.append(key)
+
+    async def type(self, char: str) -> None:
+        await self._key(char)
+
+    async def insert_text(self, text: str) -> None:
+        await self._key(text)
+
+    async def press(self, key: str) -> None:
+        await self._key(key)
+
+
+class TotpTypingBudgetTests(unittest.TestCase):
+    def test_the_code_is_typed_within_one_typing_budget(self) -> None:
+        # B1-fix1 item 4 (Codex B1-4, Opus F4): b090cb82 typed the code a digit per call of the typing code, each call
+        # with a deadline and a scaling of its own, so a slow page on a named host held the session six budgets (with
+        # the budget at 0.5 s and the page answering each key in 0.4 s, all six went in and Enter after it). One call
+        # types the code now, the host checked before each key: past the budget the type ends as typing_timeout.
+        keyboard = SlowKeyboard(ack=0.4)
+        settings = SimpleNamespace(human_typing_min_delay_ms=1, human_typing_max_delay_ms=2)
+        manager = SimpleNamespace(
+            settings=settings, _settle=AsyncMock(), _page_refused=lambda _page: False, _shown_url=lambda page: page.url
+        )
+        service = BrowserActionService(manager)
+        locator = SimpleNamespace(fill=AsyncMock(), press=AsyncMock())
+        session = SimpleNamespace(
+            page=SimpleNamespace(url="https://login.example.com/2fa", keyboard=keyboard),
+            totp_secret=SECRET,
+            totp_hosts=("login.example.com",),
+        )
+
+        async def find_the_field(_page: object) -> tuple[object, str]:
+            return locator, 'input[name*="code" i]'
+
+        service._find_one_time_code_field = find_the_field
+        service.focus_verified = AsyncMock()
+        with (
+            patch("app.browser.services.actions.HUMAN_TYPING_BUDGET_SECONDS", 0.5),
+            patch("app.browser.services.actions.HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.1),
+            self.assertRaises(BrowserActionError) as ended,
+        ):
+            asyncio.run(service.maybe_handle_totp(session))
+
+        self.assertEqual(ended.exception.code, "typing_timeout")
+        self.assertEqual(len(keyboard.acknowledged), 1, keyboard.acknowledged)
+        locator.press.assert_not_awaited()
 
 
 if __name__ == "__main__":

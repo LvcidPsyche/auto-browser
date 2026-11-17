@@ -1,0 +1,10 @@
+# The root (Glama) image's build context is the whole checkout, and the image copies only controller/app,
+# controller/requirements.txt, controller/constraints.txt and scripts/glama_entrypoint.sh. Kept out of what the build
+# is sent: .git, .venv*, node_modules, __pycache__, the runtime data (data/ holds the API token and the keys) and
+# .env* files.
+.git
+**/.venv*
+**/node_modules
+**/__pycache__
+data
+**/.env*

@@ -22,7 +22,13 @@ import pytest
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
-from app.browser.element_scripts import ELEMENT_FIELD_RELEASE_SCRIPT, ELEMENT_HAS_FOCUS_SCRIPT
+from app.browser.element_scripts import (
+    ELEMENT_FIELD_RELEASE_SCRIPT,
+    ELEMENT_HAS_FOCUS_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+)
 from app.browser.element_world import READ
 from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
@@ -319,6 +325,12 @@ AROUND_THE_FIELD = {
         "style='position: fixed; left: 0; top: 0; width: 100%; height: 100%'>\"></iframe>",
         "() => document.getElementById('named').contentDocument.querySelector('input').value",
     ),
+    # Focus is in the frame as the type begins: its clear's checks take it for focus in what the type names.
+    "frame-in-a-wrapper": (
+        '<title>login</title><div id="named" style="display: inline-block"><iframe id="inner" srcdoc="<input '
+        "type=password style='position: fixed; left: 0; top: 0; width: 100%; height: 100%'>\"></iframe></div>",
+        "() => inner.contentDocument.querySelector('input').value",
+    ),
 }
 
 
@@ -336,6 +348,130 @@ async def test_a_type_by_a_selector_that_names_what_is_around_a_password_field_k
 
         assert await session.page.evaluate(value) == TEXT
         _assert_withheld(records)
+
+
+# What a type's clear meets: a wrapper the type names, around a password field the type's focus click lands on and a
+# plain field of its own, to which the password field's select-all sends focus; and a plain field whose select-all
+# sends focus to a password field and straight back, before the clear's check after it.
+MOVES_FOCUS_IN_THE_CLEAR = {
+    "to-a-plain-field-in-the-wrapper": (
+        '<title>login</title><div id="named" style="display: inline-block"><input id="pw" type="password"'
+        ' onkeydown="if (event.ctrlKey) plain.focus()"><input id="plain" aria-label="Note"'
+        ' style="position: absolute; left: -1000px"></div>',
+        "() => plain.value",
+    ),
+    "away-and-back": (
+        '<title>note</title><input id="pw" type="password"><div id="named" style="display: inline-block">'
+        '<input id="plain" aria-label="Note"'
+        ' onkeydown="if (event.ctrlKey) { pw.focus(); setTimeout(() => plain.focus(), 5); }"></div>',
+        "() => plain.value",
+    ),
+}
+
+
+@pytest.mark.parametrize("moves", list(MOVES_FOCUS_IN_THE_CLEAR))
+async def test_a_focus_move_during_the_clear_keeps_no_preview(tmp_path: Path, moves: str) -> None:
+    # The hold was taken after the clear, so a move of focus during it was heard by nothing: from the password field
+    # to a plain field in the same named wrapper, where the clear's checks still found focus, the hold was of the
+    # plain field and the preview kept the text meant for the password field; and a move away and back within the
+    # clear's sleeps passed both checks. The hold is taken before the clear now, of the node focus is in as it begins.
+    page, value = MOVES_FOCUS_IN_THE_CLEAR[moves]
+    async with browser_env(tmp_path, {"/login": page}) as env:
+        session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
+
+        assert await session.page.evaluate(value) == TEXT
+        _assert_withheld(records)
+
+
+# A plain field the clear's Delete makes a password field, and the text's last key makes plain again: plain where
+# the hold is taken and where it is given back, a password field while the text goes in.
+SECRET_ONLY_THROUGH_THE_TEXT = (
+    '<title>note</title><input id="f" aria-label="Note" onkeydown="if (event.key === \'Delete\') this.type ='
+    f" 'password'; else if (event.key.length === 1 && this.value.length === {len(TEXT) - 1}) this.type = 'text';\">"
+)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_secret_only_between_the_clear_and_the_last_key_keeps_no_preview(tmp_path: Path, by: str) -> None:
+    # B1-fix1 item 1 (Codex B1-1): with the hold taken before the clear, it was read at the take and at the release
+    # alone, both plain here, and the preview of a text typed into a password field was kept, where 1.18.1, reading
+    # once the clear was done, withheld it. The hold is read once more as the clear is done.
+    async with browser_env(tmp_path, {"/note": SECRET_ONLY_THROUGH_THE_TEXT}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#f", TEXT)
+
+        assert await session.page.evaluate("() => [f.value, f.type]") == [TEXT, "text"]
+        _assert_withheld(records)
+
+
+# A plain field the text's first key makes a password field, and its last key plain again: plain at the take, once
+# the clear is done and at the release, a password field for all but one key of the text (the Opus probe's page).
+SECRET_WHILE_THE_TEXT_GOES_IN = (
+    '<title>note</title><input id="f" aria-label="Note" onkeydown="if (event.key.length === 1 && !event.ctrlKey'
+    f" && this.value.length === 0) this.type = 'password'; else if (event.key.length === 1 && this.value.length"
+    f" === {len(TEXT) - 1}) this.type = 'text';\">"
+)
+# A plain field whose page sets attributes the hold does not read as each key goes in (a framework's class, its
+# aria-invalid and the value attribute).
+RESTYLED_WHILE_THE_TEXT_GOES_IN = (
+    '<title>note</title><input id="f" aria-label="Note" oninput="this.className = `n` + this.value.length;'
+    " this.setAttribute(`aria-invalid`, String(this.value.length % 2 === 0)); this.setAttribute(`value`,"
+    ' this.value);">'
+)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_secret_only_while_the_text_goes_in_keeps_no_preview(tmp_path: Path, by: str) -> None:
+    # B1-fix2 item 7 (the Opus correctness read, F11; pre-existing): the hold heard focus moves alone, and read the
+    # field plain at each of its reads, so the preview of a text 13 of whose 14 keys went into a password field was
+    # kept. A change of an attribute the hold reads, from its take on, makes every later read say secret.
+    async with browser_env(tmp_path, {"/note": SECRET_WHILE_THE_TEXT_GOES_IN}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#f", TEXT)
+
+        assert await session.page.evaluate("() => [f.value, f.type]") == [TEXT, "text"]
+        _assert_withheld(records)
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id"])
+async def test_a_field_whose_page_sets_other_attributes_while_the_text_goes_in_shows_its_preview(
+    tmp_path: Path, by: str
+) -> None:
+    # The control for item 7: only the attributes is_sensitive_field reads are heard.
+    async with browser_env(tmp_path, {"/note": RESTYLED_WHILE_THE_TEXT_GOES_IN}) as env:
+        session, records = await _typed_into(env, "/note", by, "Note", "#f", TEXT)
+
+        assert await session.page.evaluate("() => [f.value, f.getAttribute('value'), f.className]") == [
+            TEXT,
+            TEXT,
+            f"n{len(TEXT)}",
+        ]
+        _assert_shown(records, TEXT)
+
+
+# A wrapper the type names, around a plain field and a frame of its own, whose field the plain field's select-all
+# sends focus to.
+MOVES_FOCUS_INTO_A_FRAME_IN_THE_CLEAR = (
+    '<title>note</title><div id="named" style="display: inline-block"><input id="plain" aria-label="Note"'
+    " onkeydown=\"if (event.ctrlKey) inner.contentDocument.querySelector('input').focus()\">"
+    '<iframe id="inner" srcdoc="<input>" style="position: absolute; left: -1000px"></iframe></div>'
+)
+
+
+async def test_a_type_by_selector_whose_clear_sends_focus_into_a_frame_inside_the_field_is_refused(
+    tmp_path: Path,
+) -> None:
+    # By selector the clear's checks took focus in a frame inside the named element for focus in it, where by
+    # element_id it is refused: the keys went to the frame's document, and the text into its field. A frame is refused
+    # now unless focus was in one as the element was found (a selector that names a frame's wrapper).
+    async with browser_env(tmp_path, {"/note": MOVES_FOCUS_INTO_A_FRAME_IN_THE_CLEAR}) as env:
+        session_id = await env.create("/note")
+        session = env.manager.sessions[session_id]
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.type(session_id, selector="#named", text=TEXT)
+
+        assert refused.value.code == "focus_lost"
+        framed = "() => inner.contentDocument.querySelector('input').value"
+        assert await session.page.evaluate(framed) == ""
 
 
 @pytest.mark.parametrize("by", ["selector", "element_id"])
@@ -419,18 +555,63 @@ async def test_a_release_by_selector_whose_read_throws_still_takes_its_listeners
         assert await _listening(session) == 0
 
 
+def _listener_method_throws(method: str, event_type: str) -> str:
+    """A page whose EventTarget ``method`` (add or remove) throws for a capture listener of ``event_type``, and that
+    keeps the capture listeners for focus events its world has on its nodes, put on and not taken off (window.kept)."""
+    return (
+        "<script>const records = []; window.kept = () => records.length;"
+        "const realAdd = EventTarget.prototype.addEventListener;"
+        "const realRemove = EventTarget.prototype.removeEventListener;"
+        "EventTarget.prototype.addEventListener = function (type, listener, options) {"
+        f" if (options === true && `{method}` === `add` && type === `{event_type}`) throw new Error(`no`);"
+        " if (options === true && [`blur`, `focus`, `focusin`].includes(type)) records.push([this, type, listener]);"
+        " return realAdd.call(this, type, listener, options); };"
+        "EventTarget.prototype.removeEventListener = function (type, listener, options) {"
+        f" if (options === true && `{method}` === `remove` && type === `{event_type}`) throw new Error(`no`);"
+        " const at = records.findIndex(([node, kind, held]) => node === this && kind === type && held === listener);"
+        " if (at >= 0) records.splice(at, 1);"
+        " return realRemove.call(this, type, listener, options); };</script>"
+        '<title>note</title><textarea id="note" aria-label="Note"></textarea>'
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "event_type", "kept"), [("add", "focus", 0), ("remove", "blur", 1)], ids=["add", "remove"]
+)
+async def test_a_hold_whose_page_throws_for_one_listener_still_takes_the_others_off(
+    tmp_path: Path, method: str, event_type: str, kept: int
+) -> None:
+    # By selector the hold puts its listeners on in the page's own world, with what the page has made of
+    # EventTarget.prototype. One that threw as it was put on ended the take with the listener before it on the node
+    # and no hold to take it off; one that threw as it was taken off left those after it. Each goes on and comes off
+    # on its own: a hold that could not put one on says focus left (the preview is withheld), and only a listener
+    # whose own removal threw stays.
+    async with browser_env(tmp_path, {"/note": _listener_method_throws(method, event_type)}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_withheld(records)
+        assert await session.page.evaluate("() => window.kept()") == kept
+
+
 async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_back(tmp_path: Path) -> None:
     # The world's script took the hold out of the registry, read, and then released: a read that threw left the
     # listeners on the node with nothing to find them by. No page can make a read throw in the element ids' world,
-    # so the script is run as it is on a hold whose node is no node of a document.
+    # so the script is run as it is on a hold whose node is no node of a document: an EventTarget of its own, which
+    # the listeners go on and come off as they do a node's (EventTarget.prototype's methods), and which no read takes.
+    # The hold is as a take makes it, with an observer that has heard nothing (B1-fix2 item 7), so the read goes on
+    # to the node, and throws.
     async with browser_env(tmp_path, {"/blank": "<title>blank</title>"}) as env:
         session_id = await env.create("/blank")
 
         released = await env.manager.sessions[session_id].page.evaluate(
             f"""() => {{
-              const removed = [];
-              const node = {{ removeEventListener: (type) => removed.push(type) }};
-              const hold = {{ node, root: node, left: false, listener: () => {{}} }};
+              const heard = [];
+              const node = new EventTarget();
+              const listener = (event) => heard.push(event.type);
+              for (const type of ['blur', 'focus', 'focusin']) node.addEventListener(type, listener, true);
+              const observer = new MutationObserver(() => {{}});
+              const hold = {{ node, root: node, left: false, listener, observer, renamed: false }};
               const registry = {{ fieldHolds: new Map([['nonce', hold]]) }};
               let threw = false;
               try {{
@@ -438,12 +619,65 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
               }} catch (error) {{
                 threw = true;
               }}
-              return {{ threw, kept: registry.fieldHolds.size, removed }};
+              for (const type of ['blur', 'focus', 'focusin']) node.dispatchEvent(new Event(type));
+              return {{ threw, kept: registry.fieldHolds.size, heard }};
             }}"""
         )
 
-        # The node's two listeners, and the one on its shadow root (here the same stand-in).
-        assert released == {"threw": True, "kept": 0, "removed": ["blur", "focus", "focusin"]}
+        # The node's two listeners, and the one on its shadow root (here the same stand-in), are off: none hears.
+        assert released == {"threw": True, "kept": 0, "heard": []}
+
+
+# B1-fix3 item 6 (Opus round 3 #7): the parts of the hold's observer no test held. Each runs the selector's scripts
+# as the type does, in the page's own world, on a plain field with focus.
+A_FIELD_WITH_FOCUS = '<title>note</title><input id="f" aria-label="Name"><script>f.focus();</script>'
+HOLD_TAKEN = f"() => {{ window.hold = ({FIELD_HOLD_TAKE_SCRIPT})(f); return window.hold.node === f; }}"
+
+
+async def test_a_released_hold_leaves_no_observer_on_its_field(tmp_path: Path) -> None:
+    # The release takes the observer off with the listeners: kept on, it went on recording each change the page made
+    # of the field's naming attributes for as long as the page lived.
+    async with browser_env(tmp_path, {"/f": A_FIELD_WITH_FOCUS}) as env:
+        page = env.manager.sessions[await env.create("/f")].page
+        assert await page.evaluate(HOLD_TAKEN) is True
+        await page.evaluate(f"() => ({FIELD_HOLD_RELEASE_SCRIPT})(window.hold)")
+
+        recorded = await page.evaluate(
+            "() => { f.setAttribute('placeholder', 'Password'); return window.hold.observer.takeRecords().length; }"
+        )
+
+        assert recorded == 0
+
+
+async def test_a_hold_whose_observer_cannot_be_put_on_reads_secret(tmp_path: Path) -> None:
+    # By selector the observer is the page's MutationObserver: one whose observe throws hears no change, and a hold
+    # that cannot hear one cannot say the page changed none. The preview is withheld, as for a listener that cannot
+    # go on.
+    page = (
+        "<script>MutationObserver.prototype.observe = function () { throw new Error('no'); };</script>"
+        '<title>note</title><textarea id="note" aria-label="Note"></textarea>'
+    )
+    async with browser_env(tmp_path, {"/note": page}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_withheld(records)
+
+
+async def test_a_change_made_in_the_task_of_the_read_reads_secret(tmp_path: Path) -> None:
+    # The observer's callback runs once the task that made the change ends, so a change made in the same task as the
+    # read (a page's handler that runs just before it) is only in the observer's queue: the read takes it from there.
+    # Here the field is named a password field and plain again, which its attributes alone no longer show.
+    async with browser_env(tmp_path, {"/f": A_FIELD_WITH_FOCUS}) as env:
+        page = env.manager.sessions[await env.create("/f")].page
+        assert await page.evaluate(HOLD_TAKEN) is True
+
+        read = await page.evaluate(
+            "() => { f.setAttribute('aria-label', 'Password'); f.setAttribute('aria-label', 'Name');"
+            f" return ({FIELD_HOLD_READ_SCRIPT})(window.hold); }}"
+        )
+
+        assert read is None
 
 
 def _assert_shown(records: list[Any], text: str) -> None:
@@ -594,19 +828,14 @@ async def test_a_type_by_selector_into_a_component_whose_shadow_root_has_a_host_
 ) -> None:
     # The focus walk read the root's `host` as a property, and the page's own null stopped it at the component: the
     # hold was of the component, which reads plain, and the preview kept what went to the password field inside. The
-    # walk now goes on to the field. The component itself is then refused or withheld, never typed with its preview
-    # kept: the walk up from the field to the component (`up`) still reads `host` as a property, so by selector it
-    # does not find the field in the component and refuses (focus_lost), where one by the field's own selector goes in.
+    # walk now goes on to the field. The walk up from the field to the component (`up`) read `host` as a property
+    # too, so by selector it did not find the field in the component and refused (focus_lost). Read through the
+    # prototype's getter there as well, the type goes in, its preview withheld.
     async with browser_env(tmp_path, {"/login": A_HOST_OF_ITS_OWN}) as env:
-        try:
-            session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
-        except BrowserActionError as refused:
-            assert refused.code == "focus_lost"
-            (session,) = env.manager.sessions.values()
-            assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == "", "a refused type typed nothing"
-        else:
-            assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == TEXT
-            _assert_withheld(records)
+        session, records = await _typed_into(env, "/login", "selector", "", "#named", TEXT)
+
+        assert await session.page.evaluate(IN_THE_SHADOW_ROOT) == TEXT
+        _assert_withheld(records)
 
 
 async def test_a_type_by_element_id_is_the_same_where_a_shadow_root_has_a_host_of_its_own(tmp_path: Path) -> None:

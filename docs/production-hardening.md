@@ -342,8 +342,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
     then, whatever it reads as: only a retry of the action with its `approval_id` is read at the press.
   - A click by coordinates lands a little off its point, as a hand's does, only while the same element is under
     the moved point. Otherwise, or when that cannot be told (half a second to set the comparison up, half a
-    second to make it), it lands on the point itself. Two points inside a frame of another origin, or off the
-    page, are never taken for one element, unless the frame is in a closed shadow root: points are compared
+    second to make it), it lands on the point itself. Two points inside a frame the comparison cannot look into
+    (one of another origin, a fenced frame, a portal, or one four frames down), or off the page, are never taken
+    for one element, unless the frame is in a closed shadow root: points are compared
     through open shadow roots only, and in a closed one both find its host, so two of its controls, or two points
     in a frame inside it, are taken for one element.
   - A press holds the mouse button down for 20 to 80 ms, as a hand does, and the browser sends no click where the
