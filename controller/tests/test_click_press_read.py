@@ -1259,13 +1259,14 @@ async def test_each_call_of_a_pointer_question_has_its_own_bound_within_what_the
 async def test_a_types_focus_click_reads_its_targets_box_within_its_bound() -> None:
     # B1-fix1 item 13 (Opus F10): the focus click of a type read its target's box with no timeout, so the look-up
     # waited by Playwright's default and the box asked of the handle with no bound at all: a page that did not answer
-    # held the type. It is read within FOCUS_CLICK_TIMEOUT_MS; one not read by then is a click Playwright places.
+    # held the type. It is read within FOCUS_BOX_TIMEOUT_MS (B1-fix3 item 3: its own cap within the focus click's
+    # budget); one not read by then is a click Playwright places.
     service, session, _done = _service(CLOSE)
     service.click_as_playwright_places_it = AsyncMock()
     locator = SimpleNamespace(bounding_box=_never)
 
     with (
-        patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", BOUND_MS),
+        patch.object(actions, "FOCUS_BOX_TIMEOUT_MS", BOUND_MS),
         patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()),
     ):
         began = time.monotonic()
@@ -1560,15 +1561,19 @@ async def test_a_placed_clicks_give_back_the_page_answers_nothing_of_takes_about
     target.dispose.assert_awaited_once()
 
 
+# The focus click's bounds in its tests: the box read's cap and the click's, each.
+FOCUS_BOUND_MS = 500
+
+
 async def test_a_types_focus_click_ends_within_one_bound_in_all() -> None:
     # B1-fix2 item 17 (the Opus simplification read, S19): the focus click read its target's box within
-    # FOCUS_CLICK_TIMEOUT_MS and then gave the click a budget of its own of as much, so a box that answered late and a
-    # target never enabled held the type most of two bounds (Opus: 0.56 s of a 0.3 s bound). The box and the click
-    # share one budget, as a click's steps do.
+    # FOCUS_CLICK_TIMEOUT_MS and then gave the click a budget of its own of as much, as two bounds side by side, so a
+    # box that answered late and a target never enabled held the type more than either (Opus: 0.56 s of a 0.3 s
+    # bound). The two share one deadline, FOCUS_BOX_TIMEOUT_MS and FOCUS_CLICK_TIMEOUT_MS together (B1-fix3 item 3).
     service, session, _done = _service(CLOSE)
 
     async def late_box(**_given: Any) -> dict[str, float]:
-        await asyncio.sleep(0.75 * GIVE_BACK_BOUND_MS / 1000)
+        await asyncio.sleep(0.75 * FOCUS_BOUND_MS / 1000)
         return BOX
 
     async def never_enabled(**_given: Any) -> bool:
@@ -1576,11 +1581,54 @@ async def test_a_types_focus_click_ends_within_one_bound_in_all() -> None:
 
     locator = SimpleNamespace(bounding_box=late_box, is_enabled=never_enabled)
 
-    with patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", GIVE_BACK_BOUND_MS), pytest.raises(PlaywrightTimeoutError):
+    with (
+        patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", FOCUS_BOUND_MS),
+        patch.object(actions, "FOCUS_BOX_TIMEOUT_MS", FOCUS_BOUND_MS),
+        pytest.raises(PlaywrightTimeoutError),
+    ):
         began = time.monotonic()
         try:
             await asyncio.wait_for(service.focus_locator(session, locator), 5)
         finally:
             took = time.monotonic() - began
 
-    assert took < 1.4 * GIVE_BACK_BOUND_MS / 1000, took
+    assert took < 1.2 * 2 * FOCUS_BOUND_MS / 1000, took
+
+
+async def test_a_types_focus_click_whose_box_answers_late_still_has_its_whole_click() -> None:
+    # B1-fix3 item 3 (Codex round 3 #2): with the box read and the click in one FOCUS_CLICK_TIMEOUT_MS (B1-fix2 item
+    # 17), a box that took 600 ms left the human-like move (450 ms) and the pause the rest of the second, and the
+    # pointer check before the press none: the click went to Playwright's placing with 1 ms, nothing was pressed, and
+    # the type ended focus_lost, where a component that makes its editor on a click never opens. The click has
+    # FOCUS_CLICK_TIMEOUT_MS after the box read, as at 5a54d2c6, within one deadline for the two.
+    service, session, _done = _service(CLOSE)
+
+    async def late_box(**_given: Any) -> dict[str, float]:
+        await asyncio.sleep(0.6)
+        return BOX
+
+    async def soon(answer: Any) -> Any:
+        await asyncio.sleep(0.02)
+        return answer
+
+    async def move(*_args: Any) -> None:
+        await asyncio.sleep(0.45)
+
+    async def pause() -> None:
+        await asyncio.sleep(0.05)
+
+    locator = SimpleNamespace(
+        bounding_box=late_box,
+        is_enabled=lambda **_given: soon(True),
+        hover=lambda **_given: soon(None),
+        evaluate=lambda *_args, **_given: soon(True),
+    )
+    service.move_mouse_human_like = move
+    service.pause_before_press = pause
+    service.press_mouse = AsyncMock()
+    service.click_as_playwright_places_it = AsyncMock()
+
+    await asyncio.wait_for(service.focus_locator(session, locator), 5)
+
+    service.press_mouse.assert_awaited_once()
+    service.click_as_playwright_places_it.assert_not_awaited()
