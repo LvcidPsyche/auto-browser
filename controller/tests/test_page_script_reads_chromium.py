@@ -108,10 +108,16 @@ ANSWERED_FOR_BY_THE_PAGE = {
 }
 
 
-async def _approval_read(tmp_path: Path, page: str) -> tuple[str, str]:
-    """How the approval of a type by selector into #named on ``page`` reads its field, and the text it shows."""
+async def _approval_read(tmp_path: Path, page: str, *, fullscreen_by: str | None = None) -> tuple[str, str]:
+    """How the approval of a type by selector into #named on ``page`` reads its field, and the text it shows.
+    ``fullscreen_by``: the element clicked first, as an earlier click of the agent's, which the page answers by
+    making an element fullscreen (a page can do so only on a gesture)."""
     async with browser_env(tmp_path, {"/named": f"<title>named</title>{page}"}) as env:
         session_id = await env.create("/named")
+        if fullscreen_by is not None:
+            shown = env.manager.sessions[session_id].page
+            await shown.locator(fullscreen_by).click()
+            await shown.wait_for_function("() => document.fullscreenElement !== null", timeout=5000)
         change = BrowserActionDecision(
             action="type", reason="change it", selector="#named", text=TEXT, risk_category="post"
         )
@@ -557,6 +563,45 @@ READS_AS_THE_BROWSER_TAKES_ITS_KEYS = {
         "unread",
     ),
 }
+
+
+# B1-fix3 item 5: an element the page makes fullscreen (on #go) is modal, as an open modal dialog is.
+GOES_FULLSCREEN = "<button id='go' onclick=\"document.getElementById('full').requestFullscreen()\">Go</button>"
+IN_A_SHADOW_ROOT = (
+    "<script>h.attachShadow({mode: 'open'}).innerHTML = "
+    f'\'<div id="full" style="height: 60px">{A_COMPONENT}</div>\';</script>'
+    "<button id='go' onclick=\"h.shadowRoot.getElementById('full').requestFullscreen()\">Go</button>"
+)
+READS_AS_THE_BROWSER_TAKES_ITS_KEYS_IN_FULLSCREEN = {
+    # A plain field outside the fullscreen element takes no focus, and the component inside it does (Chromium 156).
+    "a-plain-field-outside-a-fullscreen-element": (
+        f'<div id="named"><input aria-label="Name"><div id="full" style="height: 60px">{A_COMPONENT}</div></div>'
+        + GOES_FULLSCREEN,
+        "unread",
+    ),
+    # A fullscreen element escapes the inert subtree it is in, and a plain field in it takes focus.
+    "a-plain-field-in-a-fullscreen-element-in-an-inert-subtree": (
+        '<div inert><div id="full"><div id="named"><input aria-label="Name"></div></div></div>' + GOES_FULLSCREEN,
+        "plain",
+    ),
+    # One in a shadow root is not found by the document's query: the host the document names fullscreen stands in.
+    "a-plain-field-outside-the-host-of-a-fullscreen-element-in-a-shadow-root": (
+        '<div id="named"><input aria-label="Name"><x-host id="h"></x-host></div>' + IN_A_SHADOW_ROOT,
+        "unread",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(READS_AS_THE_BROWSER_TAKES_ITS_KEYS_IN_FULLSCREEN))
+async def test_an_approval_reads_the_fields_as_the_browser_gives_them_keys_in_fullscreen(
+    tmp_path: Path, case: str
+) -> None:
+    # B1-fix3 item 5 (Opus round 3 #1, reproduced by the orchestrator, S/b1/orch3/probe_fs.py). The read took a
+    # modal dialog for what is modal, where Chromium has a fullscreen element so too (:modal): beside a component in
+    # it, a plain decoy outside, which takes no keys, read plain (2a's bypass again, the text shown), and a plain
+    # field in a fullscreen element in an inert subtree read idle.
+    page, read = READS_AS_THE_BROWSER_TAKES_ITS_KEYS_IN_FULLSCREEN[case]
+    assert await _approval_read(tmp_path, page, fullscreen_by="#go") == _read_as(read)
 
 
 @pytest.mark.parametrize("case", list(READS_AS_THE_BROWSER_TAKES_ITS_KEYS))
