@@ -320,8 +320,8 @@ _NOT_ATTACHED = "Element is not attached to the DOM"
 # enabled.
 POINTER_CHECK_FRAMES = 8
 POINTER_CHECK_TIMEOUT_MS = 1000
-# How long a type's focus click reads its target's box at most (focus_locator). The click has FOCUS_CLICK_TIMEOUT_MS
-# after it, whatever the read took: the two are one deadline, this and that together.
+# How long a type's focus click reads its target's box at most (focus_locator). The click then has its own
+# FOCUS_CLICK_TIMEOUT_MS, whatever the read took.
 FOCUS_BOX_TIMEOUT_MS = 1000
 # How far the target's box of a placed click in a frame may have moved or changed its size, each way, between the
 # placing and the question, for the record of where the pointer arrived to be taken (_receives_pointer_at's
@@ -2122,17 +2122,16 @@ class BrowserActionService:
             await _given_back_together([lambda handle=handle: _disposed_soon(handle) for handle in handles])
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
-        # The box and the click within one budget, as a click's steps share one: read with no bound, a page that did
-        # not answer held the type, and with a bound of its own beside the click's, two bounds. The box read is capped
-        # at FOCUS_BOX_TIMEOUT_MS and the click has the rest, so it never has less than FOCUS_CLICK_TIMEOUT_MS: with
-        # the two in one FOCUS_CLICK_TIMEOUT_MS, a box that answered late left the human-like move and the pause the
-        # rest, the press none, and a component that makes its editor on a click never opened (B1-fix3 item 3).
-        budget = _Budget(FOCUS_BOX_TIMEOUT_MS + FOCUS_CLICK_TIMEOUT_MS)
-        coords = await self.locator_center(locator, timeout_ms=budget.left_ms(FOCUS_BOX_TIMEOUT_MS))
+        # The box within FOCUS_BOX_TIMEOUT_MS (read with no bound, a page that did not answer held the type), then the
+        # click within its own FOCUS_CLICK_TIMEOUT_MS. With the two in one FOCUS_CLICK_TIMEOUT_MS, a box that answered
+        # late left the human-like move and the pause the rest, the press none, and a component that makes its editor
+        # on a click never opened (B1-fix3 item 3); with one deadline for both bounds, the click had what the read
+        # left, two seconds where the box answered at once (B1-fix4 item 3).
+        coords = await self.locator_center(locator, timeout_ms=FOCUS_BOX_TIMEOUT_MS)
         if coords is None:
             await self.click_as_playwright_places_it(session, locator)
         else:
-            await self.click_locator_human_like(session, locator, coords, budget=budget)
+            await self.click_locator_human_like(session, locator, coords, budget=_Budget(FOCUS_CLICK_TIMEOUT_MS))
         await asyncio.sleep(0.05 + random.random() * 0.1)
 
     async def focus_verified(self, session: "BrowserSession", locator: Any, *, action: str) -> None:

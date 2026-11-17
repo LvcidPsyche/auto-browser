@@ -206,12 +206,12 @@ All notable changes to auto-browser are documented here.
   back together, the question's within about a second and the click's own within about another (in turn, a page
   that answered no disposal held the click a second a handle). By selector, a type's check that focus is in its
   field answers within a second or refuses the type (`focus_lost`), and its focus click reads its target's box within
-  a second and makes its human-like click within two seconds in all, never with less than a second for the click
-  (a box not read by then makes the click one Playwright places, and a click that runs out of it gives way, as
-  before, to focusing the field by script). The clear's select-all and Delete are each bounded at 2 seconds, the
-  least a keystroke is given, past which the type ends as `typing_timeout` with none of its text typed. And a type
-  whose field cannot be found again is refused before select-all, which was pressed first, into whatever had focus.
-  The pointer's moves and the press still wait for the page.
+  a second, then has a second for its human-like click (a box not read by then makes the click one Playwright
+  places, and a click that runs out of it gives way, as before, to focusing the field by script). The clear's
+  select-all and Delete are each bounded at 2 seconds, the least a keystroke is given, past which the type ends as
+  `typing_timeout` with none of its text typed. And a type whose field cannot be found again is refused before
+  select-all, which was pressed first, into whatever had focus. The pointer's moves and the press still wait for the
+  page.
 - **A click cancelled between pressing the mouse button and letting it go no longer leaves the button pressed.**
   The press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or
   while the page had not yet answered the button going down, skipped the up: whatever ran next on the page began

@@ -1565,21 +1565,20 @@ async def test_a_placed_clicks_give_back_the_page_answers_nothing_of_takes_about
 FOCUS_BOUND_MS = 500
 
 
-async def test_a_types_focus_click_ends_within_one_bound_in_all() -> None:
-    # B1-fix2 item 17 (the Opus simplification read, S19): the focus click read its target's box within
-    # FOCUS_CLICK_TIMEOUT_MS and then gave the click a budget of its own of as much, as two bounds side by side, so a
-    # box that answered late and a target never enabled held the type more than either (Opus: 0.56 s of a 0.3 s
-    # bound). The two share one deadline, FOCUS_BOX_TIMEOUT_MS and FOCUS_CLICK_TIMEOUT_MS together (B1-fix3 item 3).
+async def _focus_click_on_a_target_never_enabled(box_takes: float) -> float:
+    """How long a type's focus click on a target that is never enabled, whose box answers after ``box_takes``
+    seconds, holds the type, with FOCUS_BOX_TIMEOUT_MS and FOCUS_CLICK_TIMEOUT_MS each FOCUS_BOUND_MS. It ends as the
+    click's timeout."""
     service, session, _done = _service(CLOSE)
 
-    async def late_box(**_given: Any) -> dict[str, float]:
-        await asyncio.sleep(0.75 * FOCUS_BOUND_MS / 1000)
+    async def box(**_given: Any) -> dict[str, float]:
+        await asyncio.sleep(box_takes)
         return BOX
 
     async def never_enabled(**_given: Any) -> bool:
         return False
 
-    locator = SimpleNamespace(bounding_box=late_box, is_enabled=never_enabled)
+    locator = SimpleNamespace(bounding_box=box, is_enabled=never_enabled)
 
     with (
         patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", FOCUS_BOUND_MS),
@@ -1591,8 +1590,25 @@ async def test_a_types_focus_click_ends_within_one_bound_in_all() -> None:
             await asyncio.wait_for(service.focus_locator(session, locator), 5)
         finally:
             took = time.monotonic() - began
+    return took
+
+
+async def test_a_types_focus_click_ends_within_the_boxs_bound_and_the_clicks() -> None:
+    # B1-fix2 item 17 (the Opus simplification read, S19): the box read and the click are bounded, the read by
+    # FOCUS_BOX_TIMEOUT_MS and the click by FOCUS_CLICK_TIMEOUT_MS of its own after it (B1-fix4 item 3): a box that
+    # answers late and a target never enabled hold the type within the two together.
+    took = await _focus_click_on_a_target_never_enabled(0.75 * FOCUS_BOUND_MS / 1000)
 
     assert took < 1.2 * 2 * FOCUS_BOUND_MS / 1000, took
+
+
+async def test_a_types_focus_click_whose_box_answers_at_once_ends_within_the_clicks_own_bound() -> None:
+    # B1-fix4 item 3 (Opus round 4 F4, measured by the orchestrator): one deadline for the box read and the click
+    # (B1-fix3 item 3) gave the click whatever the read left of the two bounds, so a box answered at once and a target
+    # never enabled held the type two seconds where it had been one (2.016 s at 135ac7bf, about 1.0 s at 787c377f).
+    took = await _focus_click_on_a_target_never_enabled(0.0)
+
+    assert took < 1.4 * FOCUS_BOUND_MS / 1000, took
 
 
 async def test_a_types_focus_click_whose_box_answers_late_still_has_its_whole_click() -> None:
