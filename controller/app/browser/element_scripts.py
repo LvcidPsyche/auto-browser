@@ -101,6 +101,8 @@ DOM_JS = """const dom = (() => {
       }
     },
     type: (node) => nodeType.call(node),
+    // The node's parent in its own tree (the shadow root, for what is at the top of one): null for a root.
+    parent: (node) => parentNode.call(node),
     // The control a label stands for: null for one that stands for none, and for what is no label.
     control(label) {
       try {
@@ -757,9 +759,8 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // no editable element: an editor at the top of a shadow root is one, though the host it is in is editable (it
   // takes focus and the text itself), where asked across the root it was not, and was not read.
   const naming = {json.dumps(_NAMING_ATTRIBUTES)};
-  const parentOf = Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
   const editingHost = (node) => {{
-    const parent = parentOf.call(node);
+    const parent = dom.parent(node);
     return !parent || dom.type(parent) !== 1 || !dom.editable(parent);
   }};
   const takesText = (node, itself) =>
@@ -826,8 +827,10 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     }}
     return Array.from(read.values());
   }};
-  const found = Array.from(fields);
-  return {{ fields: answer(found.filter(live)), idle: answer(found.filter((node) => !live(node))), frame }};
+  const liveFields = [];
+  const idleFields = [];
+  for (const node of fields) (live(node) ? liveFields : idleFields).push(node);
+  return {{ fields: answer(liveFields), idle: answer(idleFields), frame }};
 }}"""
 
 # Playwright's selectOptions, on the element: scrolls an enabled, visible
