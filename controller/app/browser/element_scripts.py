@@ -567,9 +567,11 @@ ELEMENT_FOCUS_PLACE_SCRIPT = f"""(el) => {{
 }}"""
 
 # A field's own attributes, as is_sensitive_field reads them. Needs `dom`. The names are the hold's too, which hears
-# a change of any of them (_HELD_FIELD_JS). An object literal, whose properties are its own whatever a page has
+# a change of any of them (_HELD_FIELD_JS), and but for id the approval's, which reads an editor's block that carries
+# one of them, or a role (NAMED_FIELDS_SCRIPT). An object literal, whose properties are its own whatever a page has
 # defined on Object.prototype.
 _FIELD_ATTRIBUTE_NAMES = ("type", "name", "id", "placeholder", "aria-label", "autocomplete")
+_NAMING_ATTRIBUTES = [*(name for name in _FIELD_ATTRIBUTE_NAMES if name != "id"), "role"]
 _FIELD_ATTRIBUTES_JS = (
     "(node) => {\n    const read = (name) => dom.attr(node, name) || '';\n    return {\n"
     + "".join(f"      '{name}': read('{name}'),\n" for name in _FIELD_ATTRIBUTE_NAMES)
@@ -750,7 +752,7 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // read, unless it is what the type names (`itself`). An editing host is editable and its parent in its own tree is
   // no editable element: an editor at the top of a shadow root is one, though the host it is in is editable (it
   // takes focus and the text itself), where asked across the root it was not, and was not read.
-  const naming = ['name', 'placeholder', 'aria-label', 'autocomplete', 'type', 'role'];
+  const naming = {_NAMING_ATTRIBUTES!r};
   const parentOf = Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
   const editingHost = (node) => {{
     const parent = parentOf.call(node);
