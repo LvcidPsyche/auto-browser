@@ -167,11 +167,12 @@ def _locator(
     enabled: tuple[Any, ...] = (True,),
     each_step_takes: float = 0.0,
     under_the_pointer: Any = True,
+    pointer_takes: float = 0.0,
 ) -> SimpleNamespace:
     """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds (an
     exception is raised), the last one for good; ``each_step_takes`` is the time a step holds the click for (the
     clock is the real one); ``under_the_pointer`` is what the page answers when asked whether the pointer finds
-    the target (an exception is raised)."""
+    the target (an exception is raised), after ``pointer_takes`` seconds more."""
     budgets: dict[str, Any] = {}
     looks = list(enabled)
 
@@ -202,6 +203,7 @@ def _locator(
     async def evaluate(script: str, *_args: Any, **given: Any) -> Any:
         if script == _RECEIVES_POINTER_SCRIPT:
             given_budget("pointer", given)
+            time.sleep(pointer_takes)
             done.append(ASKED)
             if isinstance(under_the_pointer, BaseException):
                 raise under_the_pointer
@@ -317,12 +319,17 @@ async def test_the_steps_of_a_placed_click_share_the_clicks_budget() -> None:
         # Never more than the step before had (a clock may not move in 20 ms), and the last has less than the first.
         assert given == sorted(given, reverse=True) and 0 < given[-1] < given[0] <= 250, given
 
-        # With nothing left a step has a millisecond, never 0: Playwright reads 0 as no limit at all.
+        # With nothing left a step has a millisecond, never 0: Playwright reads 0 as no limit at all. Held where it
+        # is decided, and at the click by what holds however the loop runs: every step asked once the budget had run
+        # out was given 1 (from the third on, 20 ms each under 30), and the click ends done or as the timeout it is.
+        # Not which: a step asked with 1 ms left can find none by the time it is sent (B1-fix3 item 1: the image's
+        # whole-file run ended this click as the budget's timeout one run in eight).
+        assert [_Budget(0).left_ms(), _Budget(0).left_ms(500), _Budget(0, each_at_most=200).left_ms()] == [1, 1, 1]
         service, session, done = _service(CLOSE)
         locator = _locator(done, each_step_takes=0.02)
-        with reading_presses("click", "read", None):
+        with reading_presses("click", "read", None), contextlib.suppress(PlaywrightTimeoutError):
             await service.click_as_playwright_places_it(session, locator, budget=_Budget(30))
-        assert (locator.budgets["box again"], locator.budgets["pointer"]) == (1, 1), locator.budgets
+        assert all(given == 1 for given in list(locator.budgets.values())[2:]), locator.budgets
 
         # No budget named: the session's own (ACTION_TIMEOUT_MS), which is what Playwright gives a step left to
         # itself, and one deadline for the steps as well. The question has its own bound within that.
@@ -348,16 +355,22 @@ async def test_a_placed_clicks_last_question_unanswered_in_its_time_ends_the_cli
     # went unanswered read as a no: the caller was told the target had moved (target_moved, "the pointer does not
     # find the target"), where the page had not answered, as any step before the question would have said. Told
     # apart by the click's time alone, that held only where the time was spent; a page busy at the question with
-    # more than a second of the click left ended as target_moved after its second.
+    # more than a second of the click left ended as target_moved after its second. Where the time is spent, it runs
+    # out while the question is asked (asked with what is left, under a second), and either timeout, the page's or
+    # the budget's, is the click's end. With the budget spent before it, a question asked with 1 ms left could find
+    # none by the time it was sent: B1-fix3 item 1, one whole-file image run in eight.
     with patch("app.browser.services.actions.asyncio.sleep", new=AsyncMock()):
         service, session, done = _service(CLOSE)
         unanswered = PlaywrightTimeoutError("Locator.evaluate: Timeout 1000ms exceeded.")
-        late = _locator(done, each_step_takes=0.0 if time_left else 0.02, under_the_pointer=unanswered)
+        late = _locator(done, under_the_pointer=unanswered, pointer_takes=0.0 if time_left else 0.8)
         with reading_presses("click", "read", None), pytest.raises(PlaywrightTimeoutError) as ended:
-            await service.click_as_playwright_places_it(session, late, budget=_Budget(5000 if time_left else 30))
-        assert ended.value is unanswered
+            await service.click_as_playwright_places_it(session, late, budget=_Budget(5000 if time_left else 600))
+        if time_left:
+            assert ended.value is unanswered
+            assert late.budgets["pointer"] == POINTER_CHECK_TIMEOUT_MS, late.budgets
+        else:
+            assert late.budgets["pointer"] < POINTER_CHECK_TIMEOUT_MS, late.budgets
         assert done[-1] == ASKED and "mouse down" not in done, done
-        assert late.budgets["pointer"] == (POINTER_CHECK_TIMEOUT_MS if time_left else 1), late.budgets
         service.manager.element_ids.evaluate.assert_not_awaited()
 
 
