@@ -22,7 +22,13 @@ import pytest
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
-from app.browser.element_scripts import ELEMENT_FIELD_RELEASE_SCRIPT, ELEMENT_HAS_FOCUS_SCRIPT
+from app.browser.element_scripts import (
+    ELEMENT_FIELD_RELEASE_SCRIPT,
+    ELEMENT_HAS_FOCUS_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+)
 from app.browser.element_world import READ
 from app.models import BrowserActionDecision
 from tests._chromium import requires_chromium
@@ -620,6 +626,58 @@ async def test_a_release_by_element_id_whose_read_throws_still_gives_the_hold_ba
 
         # The node's two listeners, and the one on its shadow root (here the same stand-in), are off: none hears.
         assert released == {"threw": True, "kept": 0, "heard": []}
+
+
+# B1-fix3 item 6 (Opus round 3 #7): the parts of the hold's observer no test held. Each runs the selector's scripts
+# as the type does, in the page's own world, on a plain field with focus.
+A_FIELD_WITH_FOCUS = '<title>note</title><input id="f" aria-label="Name"><script>f.focus();</script>'
+HOLD_TAKEN = f"() => {{ window.hold = ({FIELD_HOLD_TAKE_SCRIPT})(f); return window.hold.node === f; }}"
+
+
+async def test_a_released_hold_leaves_no_observer_on_its_field(tmp_path: Path) -> None:
+    # The release takes the observer off with the listeners: kept on, it went on recording each change the page made
+    # of the field's naming attributes for as long as the page lived.
+    async with browser_env(tmp_path, {"/f": A_FIELD_WITH_FOCUS}) as env:
+        page = env.manager.sessions[await env.create("/f")].page
+        assert await page.evaluate(HOLD_TAKEN) is True
+        await page.evaluate(f"() => ({FIELD_HOLD_RELEASE_SCRIPT})(window.hold)")
+
+        recorded = await page.evaluate(
+            "() => { f.setAttribute('placeholder', 'Password'); return window.hold.observer.takeRecords().length; }"
+        )
+
+        assert recorded == 0
+
+
+async def test_a_hold_whose_observer_cannot_be_put_on_reads_secret(tmp_path: Path) -> None:
+    # By selector the observer is the page's MutationObserver: one whose observe throws hears no change, and a hold
+    # that cannot hear one cannot say the page changed none. The preview is withheld, as for a listener that cannot
+    # go on.
+    page = (
+        "<script>MutationObserver.prototype.observe = function () { throw new Error('no'); };</script>"
+        '<title>note</title><textarea id="note" aria-label="Note"></textarea>'
+    )
+    async with browser_env(tmp_path, {"/note": page}) as env:
+        session, records = await _typed_into(env, "/note", "selector", "Note", "#note", "ordinary note text")
+
+        assert await session.page.input_value("#note") == "ordinary note text"
+        _assert_withheld(records)
+
+
+async def test_a_change_made_in_the_task_of_the_read_reads_secret(tmp_path: Path) -> None:
+    # The observer's callback runs once the task that made the change ends, so a change made in the same task as the
+    # read (a page's handler that runs just before it) is only in the observer's queue: the read takes it from there.
+    # Here the field is named a password field and plain again, which its attributes alone no longer show.
+    async with browser_env(tmp_path, {"/f": A_FIELD_WITH_FOCUS}) as env:
+        page = env.manager.sessions[await env.create("/f")].page
+        assert await page.evaluate(HOLD_TAKEN) is True
+
+        read = await page.evaluate(
+            "() => { f.setAttribute('aria-label', 'Password'); f.setAttribute('aria-label', 'Name');"
+            f" return ({FIELD_HOLD_READ_SCRIPT})(window.hold); }}"
+        )
+
+        assert read is None
 
 
 def _assert_shown(records: list[Any], text: str) -> None:
