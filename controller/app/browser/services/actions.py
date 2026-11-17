@@ -528,8 +528,8 @@ def _tab_count(snapshot: dict[str, Any]) -> int | None:
 
 
 def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
-    """Whether a read through a type's hold says its node is not secret; None is no read (no node held, or one that
-    did not keep focus)."""
+    """Whether a read through a type's hold says its node is not secret; None is no read (no node held, one that
+    did not keep focus, or one whose page changed one of the attributes read since the take)."""
     return attributes is not None and not BrowserActionService.is_sensitive_field(attributes)
 
 
@@ -824,12 +824,12 @@ class _TypedField:
         not answer leaves the read's answer as it was.
 
         What the controller holds is given back whatever the page does: by selector both handles are disposed of.
-        The page's side goes with the release script, which takes the hold's listeners off the node and, by
-        element_id, the hold out of the world's fieldHolds. Where that script never runs (a page that does not
-        answer it), the node keeps the listeners, and the world its entry, until the document goes. Nothing reads
-        such a hold: each type takes its own, by its own handle or under its own nonce. A type refused before its
-        clear took no hold: by selector the element it found is given back, and by element_id nothing was taken. One
-        refused during its clear gives back the hold it took.
+        The page's side goes with the release script, which takes the hold's listeners and its observer off the
+        node and, by element_id, the hold out of the world's fieldHolds. Where that script never runs (a page that
+        does not answer it), the node keeps the listeners and the observer, and the world its entry, until the
+        document goes. Nothing reads such a hold: each type takes its own, by its own handle or under its own nonce.
+        A type refused before its clear took no hold: by selector the element it found is given back, and by
+        element_id nothing was taken. One refused during its clear gives back the hold it took.
         """
         still_not_secret = False
 

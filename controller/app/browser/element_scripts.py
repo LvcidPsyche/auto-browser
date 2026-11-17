@@ -547,8 +547,10 @@ ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
 # Focus behind an open shadow root shows as its host, so the check follows it
 # down to the innermost focused element first. With refuseFrames (an element_id
 # target), focus in a frame inside the element is not focus in it: keys sent
-# then go to the frame's document. Also run in the main world, on a locator, for
-# a selector target, without it. _FOCUS_PLACE_JS is that walk (needs `dom`).
+# then go to the frame's document. Also run in the main world for a selector
+# target, without it: on its locator (_has_focus), and ELEMENT_FOCUS_PLACE_SCRIPT
+# on the handle of the element a type found. _FOCUS_PLACE_JS is that walk (needs
+# `dom`).
 _FOCUS_PLACE_JS = """(el) => {
     const active = dom.focused(el);
     if (!active || !dom.within(active, el)) return 'out';
@@ -605,8 +607,8 @@ FIELD_ATTRIBUTES_SCRIPT = f"""(el) => {{
 # hold (bound as the script sets itself up, as DOM_JS is), and each read takes its pending records first: a field
 # made a password field by the text's first key and plain again by its last read plain at every read, and its
 # preview was kept. A change heard says secret from then on, though the attribute came back; an observer that cannot
-# be put on or asked says the same, and the release takes it off with the listeners. Run in the main world too, on a
-# locator, for a selector target (see DOM_JS).
+# be put on or asked says the same, and the release takes it off with the listeners. Run in the main world too, for
+# a selector target, on handles: the take on the element's, the read and the release on the hold's (see DOM_JS).
 _HELD_FIELD_JS = f"""{DOM_JS}
 const Observer = MutationObserver;
 const observe = Observer.prototype.observe;
