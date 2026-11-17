@@ -562,6 +562,29 @@ READS_AS_THE_BROWSER_TAKES_ITS_KEYS = {
         f" n.innerHTML = '<input aria-label=Name>{A_COMPONENT}'; at.appendChild(n);</script>",
         "unread",
     ),
+    # B1-fix5 item 1 (Codex round 5 #1, Opus round 5 F1): only the top open modal dialog escapes an inert subtree.
+    # A bottom one (opened first) under [inert] in the top one: its plain field takes no focus, the component beside
+    # it does (Chromium 156, measured).
+    "a-plain-field-in-a-bottom-modal-dialog-under-inert-in-the-top-one": (
+        f"<dialog id='outer'><div id='named'><div inert><dialog id='inner'><input aria-label='Name'></dialog></div>"
+        f"{A_COMPONENT}</div></dialog><script>document.getElementById('inner').showModal();"
+        " document.getElementById('outer').showModal();</script>",
+        "unread",
+    ),
+    # The top one nested in the bottom one, no inert: its field takes focus.
+    "a-plain-field-in-a-top-modal-dialog-nested-in-the-bottom-one": (
+        "<dialog id='d1'><dialog id='d2'><div id='named'><input aria-label='Name'></div></dialog></dialog>"
+        "<script>document.getElementById('d1').showModal(); document.getElementById('d2').showModal();</script>",
+        "plain",
+    ),
+    # A shadow root's modal dialog (opened first) under [inert] in a light one opened last: its field takes no focus.
+    "a-plain-field-in-a-shadow-roots-modal-dialog-under-inert-in-the-top-one": (
+        f"<dialog id='d2'><div id='named'><div inert><x-host id='h'></x-host></div>{A_COMPONENT}</div></dialog>"
+        "<script>const r = document.getElementById('h').attachShadow({mode: 'open'});"
+        ' r.innerHTML = \'<dialog id="d1"><input aria-label="Name"></dialog>\';'
+        " r.getElementById('d1').showModal(); document.getElementById('d2').showModal();</script>",
+        "unread",
+    ),
 }
 
 
