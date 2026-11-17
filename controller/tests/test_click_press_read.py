@@ -369,7 +369,8 @@ async def test_a_placed_clicks_last_question_unanswered_in_its_time_ends_the_cli
             assert ended.value is unanswered
             assert late.budgets["pointer"] == POINTER_CHECK_TIMEOUT_MS, late.budgets
         else:
-            assert late.budgets["pointer"] < POINTER_CHECK_TIMEOUT_MS, late.budgets
+            # Asked before the budget ran out (more than the 1 ms a spent budget gives), with less than its own cap.
+            assert 1 < late.budgets["pointer"] < POINTER_CHECK_TIMEOUT_MS, late.budgets
         assert done[-1] == ASKED and "mouse down" not in done, done
         service.manager.element_ids.evaluate.assert_not_awaited()
 
