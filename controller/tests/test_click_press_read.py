@@ -1260,8 +1260,8 @@ async def test_each_call_of_a_pointer_question_has_its_own_bound_within_what_the
 async def test_a_types_focus_click_reads_its_targets_box_within_its_bound() -> None:
     # B1-fix1 item 13 (Opus F10): the focus click of a type read its target's box with no timeout, so the look-up
     # waited by Playwright's default and the box asked of the handle with no bound at all: a page that did not answer
-    # held the type. It is read within FOCUS_BOX_TIMEOUT_MS (B1-fix3 item 3: its own cap within the focus click's
-    # budget); one not read by then is a click Playwright places.
+    # held the type. It is read within FOCUS_BOX_TIMEOUT_MS, the box's own bound, before the click's own (B1-fix4
+    # item 3); one not read by then is a click Playwright places.
     service, session, _done = _service(CLOSE)
     service.click_as_playwright_places_it = AsyncMock()
     locator = SimpleNamespace(bounding_box=_never)
@@ -1616,8 +1616,8 @@ async def test_a_types_focus_click_whose_box_answers_late_still_has_its_whole_cl
     # B1-fix3 item 3 (Codex round 3 #2): with the box read and the click in one FOCUS_CLICK_TIMEOUT_MS (B1-fix2 item
     # 17), a box that took 600 ms left the human-like move (450 ms) and the pause the rest of the second, and the
     # pointer check before the press none: the click went to Playwright's placing with 1 ms, nothing was pressed, and
-    # the type ended focus_lost, where a component that makes its editor on a click never opens. The click has
-    # FOCUS_CLICK_TIMEOUT_MS after the box read, as at 5a54d2c6, within one deadline for the two.
+    # the type ended focus_lost, where a component that makes its editor on a click never opens. The box is read
+    # within its own bound, and then the click has its own FOCUS_CLICK_TIMEOUT_MS, as at 5a54d2c6 (B1-fix4 item 3).
     service, session, _done = _service(CLOSE)
 
     async def late_box(**_given: Any) -> dict[str, float]:
