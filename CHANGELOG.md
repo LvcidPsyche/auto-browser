@@ -70,16 +70,19 @@ All notable changes to auto-browser are documented here.
   plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
   text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
   (hidden by `hidden`, `display` or `visibility`, in an `inert` subtree, across shadow roots too, or outside what
-  the document has modal: an open modal dialog, or the fullscreen element) no longer makes the read `plain`; named
-  as a secret, it still makes it `secret`, since a page can enable or show it as the type focuses. A field in an
-  open modal dialog or the fullscreen element is not inert by an `inert` subtree either is in, as the browser has it,
-  and one whose walk up to the document runs past 256 steps counts as unable to take text. A modal dialog in a
-  shadow root is not seen: a field outside one still counts. Of a fullscreen element in a shadow root the document
-  names the host it is in, which stands in for it: a field outside that host is read as unable to take text, and
-  one inside the host but outside the fullscreen element still counts. A plain field that can take text, however
-  small or faint the page draws it, still makes a read beside such a component `plain`. And a plain field the page
-  shows only once what holds it is focused (a search box that opens on focus) is hidden when the approval reads it,
-  so that approval now reads `unread` and shows no text, where it read `plain`.
+  the document has modal) no longer makes the read `plain`; named as a secret, it still makes it `secret`, since a
+  page can enable or show it as the type focuses. What is modal is as the browser has it: while a modal dialog is
+  open, the open modal dialogs, and only while none is, the fullscreen element. What is modal is not made inert by an
+  `inert` subtree it is in, but a fullscreen element under `inert` in an open modal dialog is. A field whose walk up
+  to the document runs past 256 steps counts as unable to take text. A modal dialog in a shadow root is not seen: a
+  field outside one still counts. Of a fullscreen element in a shadow root the document names the host it is in,
+  which stands in for it: a field outside that host is read as unable to take text, and one inside the host but
+  outside the fullscreen element still counts. With two modal dialogs open the read cannot tell which is on top, so
+  a field in the top one counts as unable to take text too, though the browser gives it focus (the read fails
+  closed). A plain field that can take text, however small or faint the page draws it, still makes a read beside
+  such a component `plain`. And a plain field the page shows only once what holds it is focused (a search box that
+  opens on focus) is hidden when the approval reads it, so that approval now reads `unread` and shows no text, where
+  it read `plain`.
 - **A fenced frame is a frame to the in-page checks, as an iframe is.** The frame tags they knew were `iframe`,
   `frame`, `object` and `embed`, so a plain field beside a `<fencedframe>` made an approval read `plain` though the
   text can go into the frame's document; a click by element_id on a button a fenced frame filled went into the frame,

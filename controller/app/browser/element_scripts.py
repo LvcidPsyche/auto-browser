@@ -792,23 +792,28 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // Shown (visibility counts: a visibility:hidden field takes no keys) and in no inert subtree, which takes none either.
   // Inert reaches across shadow roots and slots, where closest() does not (an inert host's shadow content is inert),
   // so the walk is the tree as it is shown, bounded as the other walks: one that runs out of steps with nodes left
-  // cannot tell, and says inert, so that no field counts live by it. What is modal (an open modal dialog, or the
-  // fullscreen element: `:modal`, as Chromium has it) is not inert by what is above it (it takes focus inside an inert
-  // subtree), and the walk stops there; and while the document has one, what is not inside it takes no focus. A modal
-  // dialog in a shadow root is not found that way; of a fullscreen element in one, the document names the host it is
-  // in, which stands in for it, so a field inside that host and outside the element still counts. A select has no
-  // read-only state: it takes keys unless it is disabled.
+  // cannot tell, and says inert, so that no field counts live by it. What is modal decides as Chromium has it: while
+  // a modal dialog is open, the open modal dialogs alone, and otherwise the fullscreen element (`:modal`). What is
+  // modal is not inert by what is above it (it takes focus inside an inert subtree), and the walk stops there; and
+  // what is not inside it takes no focus. While a dialog is open a fullscreen element escapes no inert subtree, and
+  // what is outside it can still take focus. A modal dialog in a shadow root is not found that way; of a fullscreen
+  // element in one, the document names the host it is in, which stands in for it, so a field inside that host and
+  // outside the element still counts. With two modal dialogs open, which is on top is not told: a field in either is
+  // outside the other, and counts as unable to take text. A select has no read-only state: it takes keys unless it
+  // is disabled.
   const checkVisibility = Element.prototype.checkVisibility;
-  const modals = Array.from(Document.prototype.querySelectorAll.call(document, ':modal'));
+  const dialogs = Array.from(Document.prototype.querySelectorAll.call(document, 'dialog:modal'));
   const fullscreen = Object.getOwnPropertyDescriptor(Document.prototype, 'fullscreenElement');
   const fullscreenHost = fullscreen && fullscreen.get ? fullscreen.get.call(document) : null;
-  if (fullscreenHost && !modals.includes(fullscreenHost)) modals.push(fullscreenHost);
+  let modals = dialogs;
+  if (!dialogs.length && fullscreenHost) modals = [fullscreenHost];
+  const modalSelector = dialogs.length ? 'dialog:modal' : ':modal';
   const inert = (node) => {{
     for (let at = node, steps = 0; at; at = dom.flatUp(at), steps += 1) {{
       if (steps === dom.STEPS) return true;
       if (dom.type(at) !== 1) continue;
       if (dom.has(at, 'inert')) return true;
-      if (dom.matches(at, ':modal')) break;
+      if (dom.matches(at, modalSelector)) break;
     }}
     return modals.some((modal) => !dom.within(node, modal));
   }};

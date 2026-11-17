@@ -589,6 +589,30 @@ READS_AS_THE_BROWSER_TAKES_ITS_KEYS_IN_FULLSCREEN = {
         '<div id="named"><input aria-label="Name"><x-host id="h"></x-host></div>' + IN_A_SHADOW_ROOT,
         "unread",
     ),
+    # B1-fix4 item 2: while a modal dialog is open it alone decides, and the fullscreen element escapes no inert
+    # subtree. A plain field in a fullscreen element under [inert] in the dialog takes no focus; the component beside
+    # it does (the click that makes the element fullscreen is in the dialog, the page's only part that takes one).
+    "a-plain-field-in-a-fullscreen-element-under-inert-in-a-modal-dialog": (
+        "<dialog id='d'><button id='go' onclick=\"document.getElementById('full').requestFullscreen()\">Go</button>"
+        f'<div id="named"><div inert><div id="full" style="height: 60px"><input aria-label="Name"></div></div>'
+        f"{A_COMPONENT}</div></dialog><script>d.showModal();</script>",
+        "unread",
+    ),
+    # A plain field in a modal dialog, beside a fullscreen element in the dialog, takes focus.
+    "a-plain-field-in-a-modal-dialog-beside-a-fullscreen-element-in-it": (
+        "<dialog id='d'><div id=\"named\"><input aria-label=\"Name\"></div><div id='full' style='height: 60px'>v</div>"
+        "<button id='go' onclick=\"document.getElementById('full').requestFullscreen()\">Go</button></dialog>"
+        "<script>d.showModal();</script>",
+        "plain",
+    ),
+    # So does one in a modal dialog a page fullscreen on a container opens outside it.
+    "a-plain-field-in-a-modal-dialog-opened-outside-the-fullscreen-element": (
+        "<div id='full' style='height: 60px'>v</div><dialog id='d'><div id=\"named\"><input aria-label=\"Name\"></div>"
+        "</dialog>"
+        + GOES_FULLSCREEN
+        + "<script>full.addEventListener('fullscreenchange', () => d.showModal());</script>",
+        "plain",
+    ),
 }
 
 
