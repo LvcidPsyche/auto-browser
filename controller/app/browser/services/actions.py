@@ -541,6 +541,19 @@ async def _answered_soon(call: Awaitable[Any]) -> Any:
     return await _within(call, FIELD_RECHECK_TIMEOUT_MS / 1000)
 
 
+async def _sent_while(still: Callable[[], bool] | None, send: Callable[[], Awaitable[Any]]) -> bool:
+    """Send a key (``send`` makes the call) where ``still`` says it may go, the check and the send in one step of one
+    task: checked first and then sent from a task of its own (_within), the key went out a turn of the loop later,
+    after a navigation the controller had already queued, to a page it knew had left the host checked. Playwright
+    writes a call's message before its first wait (Connection._send_message_to_server), so nothing of the
+    controller's runs between the two. False, and no call made, where the check says no. A page whose navigation the
+    browser has begun and the controller not yet heard of still gets the key: that race is the browser's."""
+    if still is not None and not still():
+        return False
+    await send()
+    return True
+
+
 def _left_until(ends: float) -> float:
     """The seconds left until the loop's time ``ends``: none once it has passed."""
     return max(0.0, ends - asyncio.get_running_loop().time())
@@ -2157,10 +2170,10 @@ class BrowserActionService:
     async def type_text_human_like(
         self, page: "Page", text: str, *, keeps_on: Callable[[], bool] | None = None
     ) -> bool:
-        """Type ``text`` a key at a time, within HUMAN_TYPING_BUDGET_SECONDS. ``keeps_on`` is asked before each key (and
-        before the rest is inserted, past the budget): where it says no, the typing stops there, and this answers
-        False. One budget for the whole text: the TOTP autofill, which checks its host before each digit, gave each
-        digit a budget of its own by typing it in a call of its own."""
+        """Type ``text`` a key at a time, within HUMAN_TYPING_BUDGET_SECONDS. ``keeps_on`` is asked before each key, in
+        the key's own step (_sent_while), and before each part of the rest inserted past the budget: where it says
+        no, the typing stops there, and this answers False. One budget for the whole text: the TOTP autofill, which
+        checks its host before each digit, gave each digit a budget of its own by typing it in a call of its own."""
         delays_ms: list[int] = []
         for index in range(len(text)):
             delay_ms = random.randint(
@@ -2178,17 +2191,17 @@ class BrowserActionService:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
         for index, (char, delay_ms) in enumerate(zip(text, delays_ms)):
-            if keeps_on is not None and not keeps_on():
-                return False
             if loop.time() >= deadline:
-                await self._insert_rest(page, text[index:], deadline)
-                return True
+                return await self._insert_rest(page, text[index:], deadline, keeps_on)
             timeout = max(deadline - loop.time(), HUMAN_TYPING_STEP_FLOOR_SECONDS)
-            await self._typing_step(page.keyboard.type(char), timeout)
+            if not await self._typing_step(_sent_while(keeps_on, lambda char=char: page.keyboard.type(char)), timeout):
+                return False
             await asyncio.sleep(min(delay_ms * scale / 1000, max(deadline - loop.time(), 0)))
         return True
 
-    async def _insert_rest(self, page: "Page", rest: str, deadline: float) -> None:
+    async def _insert_rest(
+        self, page: "Page", rest: str, deadline: float, keeps_on: Callable[[], bool] | None = None
+    ) -> bool:
         """The text past the deadline: inserted as plain text, but a newline or a carriage return is still pressed
         as Enter.
 
@@ -2196,6 +2209,7 @@ class BrowserActionService:
         as the same text typed in time does (keyboard.type presses Enter for them). A tab stays in the text that is
         inserted, as keyboard.type puts it in: it has no key for a tab. Pressed as Tab, it moved focus on, and the
         rest of a text that took long went to the next field, where the same text typed in time stayed in its own.
+        ``keeps_on`` is asked as type_text_human_like asks it, before each part: False where it says no.
         """
         # One cutoff for every remaining step: a floor per step would let a text with many newlines run far past it.
         loop = asyncio.get_running_loop()
@@ -2206,10 +2220,14 @@ class BrowserActionService:
             left = cutoff - loop.time()
             if left <= 0:
                 raise self._typing_timeout()
-            if part in _CONTROL_KEYS:
-                await self._typing_step(page.keyboard.press(_CONTROL_KEYS[part]), left)
-            else:
-                await self._typing_step(page.keyboard.insert_text(part), left)
+            key = _CONTROL_KEYS.get(part)
+            sent = _sent_while(
+                keeps_on,
+                lambda key=key, part=part: page.keyboard.press(key) if key else page.keyboard.insert_text(part),
+            )
+            if not await self._typing_step(sent, left):
+                return False
+        return True
 
     @staticmethod
     def _typing_timeout() -> BrowserActionError:
@@ -2241,10 +2259,11 @@ class BrowserActionService:
             ) from None
 
     @classmethod
-    async def _typing_step(cls, step: Any, timeout: float) -> None:
-        """One keystroke or the insert, bounded: a page that never acknowledges input would hold the session lock."""
+    async def _typing_step(cls, step: Any, timeout: float) -> Any:
+        """One keystroke or the insert, bounded: a page that never acknowledges input would hold the session lock. Its
+        answer: whether the key was sent (_sent_while)."""
         try:
-            await _within(step, timeout)
+            return await _within(step, timeout)
         except TimeoutError:
             raise cls._typing_timeout() from None
 
@@ -2301,21 +2320,25 @@ class BrowserActionService:
             # Its own keys go to whatever has focus, on whatever page is there by now: they were pressed into another
             # host's field, which the Delete emptied. Only into the field, on a named host, asked before each: a
             # select-all handler can send focus on to another field, or the page to another host. The host is asked
-            # once focus has answered, with nothing awaited between it and the key: asked first, a page that left
-            # during the focus question had the key.
+            # once focus has answered, in the key's own step (_sent_while): asked first, a page that left during the
+            # focus question had the key, and asked before the key's task, one the controller heard of meanwhile.
             for key in ("Control+a", "Delete"):
-                if not await self._has_focus(locator) or not self._may_fill_totp(session):
+                if not await self._has_focus(locator):
                     return None
                 # Bounded as a type's clear is (_clear_key): a page that never acknowledged a key held the session.
                 # Past it no code is typed.
+                pressing = _sent_while(
+                    lambda: self._may_fill_totp(session), lambda key=key: session.page.keyboard.press(key)
+                )
                 try:
-                    await _within(session.page.keyboard.press(key), HUMAN_TYPING_STEP_FLOOR_SECONDS)
+                    if not await _within(pressing, HUMAN_TYPING_STEP_FLOOR_SECONDS):
+                        return None
                 except TimeoutError:
                     logger.warning("TOTP autofill stopped: the page did not acknowledge the clear's %s in time", key)
                     return None
         # And so did the clear: a field whose page an input or a key handler sends elsewhere as it is emptied.
         # And so does each key of the code: a key handler that sent the page to another host had the rest of the code
-        # typed into whatever had focus there. Asked before each key, inside the one typing budget.
+        # typed into whatever had focus there. Asked in each key's own step, inside the one typing budget.
         if not await self.type_text_human_like(session.page, code, keeps_on=lambda: self._may_fill_totp(session)):
             return None
         # And so did the typing, a keystroke at a time: no Enter for a page a key handler sent elsewhere meanwhile.

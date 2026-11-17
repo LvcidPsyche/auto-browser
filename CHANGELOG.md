@@ -89,12 +89,14 @@ All notable changes to auto-browser are documented here.
 - **The TOTP autofill stops typing the code once it finds the page has left the named host.** It checked the host
   before the typing and after it, before Enter, but not between the keys, so a key handler that sent the page to
   another host had the rest of the code typed into whatever had focus there (four of the six digits, in one run
-  measured). It now checks before each key, and types none after a check that finds the page gone; a page that
-  leaves between a check and its key still gets that key. Where its fill of the field failed it pressed select-all
-  and Delete into whatever had focus, on whatever page was there by then, which emptied another host's field: each
-  is now pressed only where the page is still on a named host and focus is in the field, asked before each key,
-  and each waits 2 seconds at most for the page, as a type's clear does, past which no code is typed: it waited with
-  no bound, and a page that never acknowledged one held the session.
+  measured). It now checks before each key, in the same step as the key is sent, and types none after a check that
+  finds the page gone: no key goes out once the controller has heard the page left, where a key sent from a task
+  of its own went out after a navigation the controller had already queued. A page whose navigation the browser
+  has begun and the controller not yet heard of still gets that key. Where its fill of the field failed it pressed
+  select-all and Delete into whatever had focus, on whatever page was there by then, which emptied another host's
+  field: each is now pressed only where the page is still on a named host and focus is in the field, asked before
+  each key as the code's are, and each waits 2 seconds at most for the page, as a type's clear does, past which no
+  code is typed: it waited with no bound, and a page that never acknowledged one held the session.
 - **A type that clears its field takes its hold on the field before the clear, not after it.** Taken after, the hold
   heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a
   plain one in the same element the type named kept the preview of the text meant for the password field, and a

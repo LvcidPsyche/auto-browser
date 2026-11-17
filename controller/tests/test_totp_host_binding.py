@@ -85,16 +85,23 @@ class TotpAutofillTests(unittest.TestCase):
         fill_fails: bool = False,
         focused: bool | list[bool] = True,
         keys_take: float = 0.0,
+        queued_at_check: int | None = None,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
         "focus question" for the question whether focus is in the field, asked before each of them, "typing" for the
         code's keystrokes) during which the page goes to another host. ``focused``: what the field
         answers when it is asked whether focus is in it, or a list of its answers in turn. ``keys_take``: how many
-        seconds the page takes to acknowledge each key of the clear by keys."""
+        seconds the page takes to acknowledge each key of the clear by keys. ``queued_at_check``: the host check
+        (counted from 1) as which the page's navigation to another host is already queued in the controller, which
+        hears of it once the loop runs on. ``sent_on`` notes each key and the page's URL as the controller has it
+        when the key is sent (Playwright writes a key's message before its first wait)."""
         self.typed_keys: list[str] = []
+        self.sent_on: list[tuple[str, str]] = []
+        checks = 0
 
         async def type_key(key: str) -> None:
+            self.sent_on.append((key, session.page.url))
             self.typed_keys.append(key)
             leave_during("typing")
 
@@ -103,7 +110,8 @@ class TotpAutofillTests(unittest.TestCase):
             if fill_fails:
                 raise PlaywrightError("Element is not an <input>, <textarea> or [contenteditable] element")
 
-        async def press_key(_key: str) -> None:
+        async def press_key(key: str) -> None:
+            self.sent_on.append((key, session.page.url))
             await asyncio.sleep(keys_take)
             leave_during("clear by keys")
 
@@ -121,7 +129,7 @@ class TotpAutofillTests(unittest.TestCase):
         manager = SimpleNamespace(
             settings=SimpleNamespace(human_typing_min_delay_ms=0, human_typing_max_delay_ms=0),
             _settle=AsyncMock(),
-            _page_refused=lambda page: refused,
+            _page_refused=lambda _page: checked(),
             _shown_url=lambda page: shown if shown is not None else page.url,
         )
         service = BrowserActionService(manager)
@@ -136,6 +144,14 @@ class TotpAutofillTests(unittest.TestCase):
         def leave_during(step: str) -> None:
             if leaves_during == step:
                 session.page.url = "https://evil.test/collect"
+
+        def checked() -> bool:
+            # Each host check asks the manager whether the page is refused first (_may_fill_totp).
+            nonlocal checks
+            checks += 1
+            if checks == queued_at_check:
+                asyncio.get_running_loop().call_soon(setattr, session.page, "url", "https://evil.test/collect")
+            return refused
 
         async def find_the_field(_page: object) -> tuple[object, str]:
             leave_during("search")
@@ -287,6 +303,32 @@ class TotpAutofillTests(unittest.TestCase):
         typed.assert_not_awaited()
         self.assertEqual(self.keys.await_args_list, [call("Control+a")])
         self.assertLess(took, 0.6)
+
+    def test_no_clear_key_is_sent_once_the_controller_has_heard_the_page_left(self) -> None:
+        # B1-fix3 item 2 (Codex round 3 #1): the host was checked, and the key was then sent from a task of its own
+        # (_within), so a navigation the controller had already queued ran between: Delete went out with the
+        # controller knowing the page was on another host (Codex: "Control+a -> login.example.com; Delete ->
+        # other.example.com"). The check and the send are one step of one task: a key goes out only where the
+        # controller still has the page on a named host, and none once it has heard otherwise.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), fill_fails=True, queued_at_check=5
+        )
+        self.assertEqual(
+            self.sent_on, [("Control+a", "https://login.example.com/2fa"), ("Delete", "https://login.example.com/2fa")]
+        )
+        self.assertIsNone(result)
+        self.assertEqual(self.typed_keys, [])
+
+    def test_no_digit_of_the_code_is_sent_once_the_controller_has_heard_the_page_left(self) -> None:
+        # The same for the code's own digits, which the typing code checked and then sent from a task of its own
+        # (_typing_step), as 3.11's wait_for did before B1: a digit typed into another host's page is the worse case.
+        # The third digit's check (the sixth: three before the typing) has the navigation queued.
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa", hosts=("login.example.com",), queued_at_check=6
+        )
+        self.assertEqual([url for _key, url in self.sent_on], ["https://login.example.com/2fa"] * 3)
+        self.assertIsNone(result)
+        self.pressed.assert_not_awaited()
 
     def test_a_field_that_lost_focus_when_its_fill_failed_gets_no_keys(self) -> None:
         # The keys that empty a field whose fill failed go to whatever has focus: into another field of the page,
