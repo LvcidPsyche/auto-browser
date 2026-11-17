@@ -17,6 +17,8 @@ what DOM_JS reads through the prototypes (its comment).
 
 from __future__ import annotations
 
+import json
+
 from .element_world import ELEMENT_REGISTRY_SCRIPT
 
 MARKER_ATTRIBUTE = "data-auto-browser-target"
@@ -629,7 +631,7 @@ const held = {{
     }}
     try {{
       hold.observer = new Observer(() => {{ hold.renamed = true; }});
-      observe.call(hold.observer, active, {{ attributes: true, attributeFilter: {list(_FIELD_ATTRIBUTE_NAMES)!r} }});
+      observe.call(hold.observer, active, {{ attributes: true, attributeFilter: {json.dumps(_FIELD_ATTRIBUTE_NAMES)} }});
     }} catch (error) {{
       hold.renamed = true;
     }}
@@ -752,7 +754,7 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // read, unless it is what the type names (`itself`). An editing host is editable and its parent in its own tree is
   // no editable element: an editor at the top of a shadow root is one, though the host it is in is editable (it
   // takes focus and the text itself), where asked across the root it was not, and was not read.
-  const naming = {_NAMING_ATTRIBUTES!r};
+  const naming = {json.dumps(_NAMING_ATTRIBUTES)};
   const parentOf = Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
   const editingHost = (node) => {{
     const parent = parentOf.call(node);
