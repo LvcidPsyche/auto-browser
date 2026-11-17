@@ -747,7 +747,7 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // too. What is no form control takes text where it is editable, and in an editor only its editing host and what in
   // it carries a field's name, by an attribute other than id, are read: counted each, the blocks of an editor with
   // ids of their own (20,000 paragraphs) took 3.3 s, past the read's bound. A block named by its id alone is not
-  // read, unless it is what the type names (`named`). An editing host is editable and its parent in its own tree is
+  // read, unless it is what the type names (`itself`). An editing host is editable and its parent in its own tree is
   // no editable element: an editor at the top of a shadow root is one, though the host it is in is editable (it
   // takes focus and the text itself), where asked across the root it was not, and was not read.
   const naming = ['name', 'placeholder', 'aria-label', 'autocomplete', 'type', 'role'];
@@ -756,15 +756,15 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     const parent = parentOf.call(node);
     return !parent || dom.type(parent) !== 1 || !dom.editable(parent);
   }};
-  const takesText = (node, named) =>
+  const takesText = (node, itself) =>
     dom.matches(node, 'input, textarea, select')
       ? dom.tag(node) !== 'INPUT' || !noText.includes(inputType(node))
-      : dom.editable(node) && (named || editingHost(node) || naming.some((name) => dom.has(node, name)));
+      : dom.editable(node) && (itself || editingHost(node) || naming.some((name) => dom.has(node, name)));
   const fields = new Set();
   let frame = false;
-  const look = (node, named = false) => {{
+  const look = (node, itself = false) => {{
     if (dom.frame(node)) frame = true;
-    else if (takesText(node, named)) fields.add(node);
+    else if (takesText(node, itself)) fields.add(node);
   }};
   const lookInside = (root) => {{
     for (const node of dom.all(root, '*')) {{

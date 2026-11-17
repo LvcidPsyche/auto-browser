@@ -313,9 +313,11 @@ PLACE_RECOUNTS = 2
 # What Playwright says of an element the page took out of the document while a step was waiting on it.
 _NOT_ATTACHED = "Element is not attached to the DOM"
 # The check that the pointer finds a target inside frames (_receives_pointer_at): how many documents it asks, the
-# target's own first, and how long it waits for the element it asks about. A target seven frames down is asked
-# all the way up. Deeper, the check before a human-like press cannot tell and gives the click to Playwright's own
+# target's own first, and the most each of its calls waits for the page. A target seven frames down is asked all
+# the way up. Deeper, the check before a human-like press cannot tell and gives the click to Playwright's own
 # placing; asked again where Playwright has placed the pointer, it goes by what the documents it asked have said.
+# Before a human-like press the check is given that much in all, and so is the look that the target is still
+# enabled.
 POINTER_CHECK_FRAMES = 8
 POINTER_CHECK_TIMEOUT_MS = 1000
 # How far the target's box of a placed click in a frame may have moved or changed its size, each way, between the
@@ -690,9 +692,9 @@ class _TypedField:
 
     ``not_secret`` says whether the text's preview may be shown: the node read as not secret through the hold when it
     was taken, once the type's clear was done (read_after_the_clear) and as it was given back, and kept focus, and
-    every attribute it is read by, in between. Read by the type's selector or element_id
-    instead, the field was found anew each time: a key of the text that sent focus on to a password field left the
-    rest of the text there unread, and by selector a field turned secret and then replaced read as its replacement.
+    every attribute it is read by, in between. Read by the type's selector or element_id instead, the field was
+    found anew each time: a key of the text that sent focus on to a password field left the rest of the text there
+    unread, and by selector a field turned secret and then replaced read as its replacement.
 
     By element_id the hold is the element ids' world's, under a nonce, and a take that fails raises, as the element's
     other steps do. By selector it is a handle of the page's, made on the handle of the element the selector finds
@@ -720,9 +722,9 @@ class _TypedField:
         # By selector: the handle of the element the selector found, and the hold made on it.
         self._found: Any = None
         self._handle: Any = None
-        # By selector: whether focus in a frame inside the element found is refused, as it is unless focus was in
-        # one at the first check. None until a first check found focus in the element.
-        self._refuse_frames: bool | None = None
+        # By selector: whether focus in a frame inside the element found counts as focus in it, as it does only
+        # where focus was in one at the first check. None until a first check found focus in the element.
+        self._frames_count: bool | None = None
         self.not_secret = False
 
     async def find(self) -> None:
@@ -760,9 +762,9 @@ class _TypedField:
     async def _focus_is_in_it(self) -> bool:
         # One question, so focus and frames are read at one moment (ELEMENT_FOCUS_PLACE_SCRIPT).
         place = await _answered_soon(self._found.evaluate(ELEMENT_FOCUS_PLACE_SCRIPT))
-        if self._refuse_frames is None and place != "out":
-            self._refuse_frames = place == "in"
-        return place == "in" or (place == "framed" and self._refuse_frames is False)
+        if self._frames_count is None and place != "out":
+            self._frames_count = place == "framed"
+        return place == "in" or (place == "framed" and self._frames_count is True)
 
     async def take(self) -> None:
         if self._element is not None:
@@ -785,6 +787,7 @@ class _TypedField:
         Read at the take and at the release alone, a field plain at both and a password field between them (made one
         as it was emptied, and plain again as the last key of the text went in) kept the preview of a text typed into
         a password field. A read that fails or does not answer says secret."""
+        # not_secret is true only after a take that read plain, so there is a hold to read.
         if not self.not_secret:
             return
         try:
@@ -794,9 +797,9 @@ class _TypedField:
                 attributes = await self._element.hold_field(self._nonce, within_ms=FIELD_RECHECK_TIMEOUT_MS)
             else:
                 attributes = await _answered_soon(self._handle.evaluate(FIELD_HOLD_READ_SCRIPT))
+            self.not_secret = _reads_not_secret(attributes)
         except Exception:
-            attributes = None
-        self.not_secret = _reads_not_secret(attributes)
+            self.not_secret = False
 
     async def release(self) -> None:
         """Read the node once more and give the hold back, whatever ended the type: each step on its own, and a
@@ -1792,9 +1795,8 @@ class BrowserActionService:
         await self.pause_before_press()
         # Bounded at POINTER_CHECK_TIMEOUT_MS in all: its no, or its timeout, hands the click to Playwright's placing,
         # which needs the rest (_receives_pointer_at).
-        if await self._receives_pointer_at(
-            locator, x, y, timeout_ms=budget.left_ms(POINTER_CHECK_TIMEOUT_MS)
-        ) and await self._is_enabled_now(locator, budget.left_ms(POINTER_CHECK_TIMEOUT_MS)):
+        receives = await self._receives_pointer_at(locator, x, y, timeout_ms=budget.left_ms(POINTER_CHECK_TIMEOUT_MS))
+        if receives and await self._is_enabled_now(locator, budget.left_ms(POINTER_CHECK_TIMEOUT_MS)):
             await self.press_mouse(session, x, y)
         else:
             await self.click_as_playwright_places_it(session, locator, budget=budget)
@@ -2037,18 +2039,18 @@ class BrowserActionService:
         is under the pointer, which click_target.py's "Not caught" lists; a guard of every frame's geometry read in
         the page's own world, which such a page can answer for itself, would not stop it.
 
-        ``timeout_ms`` bounds the whole question, the walk up the frames with it, and each call of it to the page
-        (the look-up of the element, its box, the question, its frame and the frame's element) answers within
-        POINTER_CHECK_TIMEOUT_MS, or what is left where that is less. Where the click was placed it is what the
-        click has left: bound as a whole by POINTER_CHECK_TIMEOUT_MS, a page that answered each call in 150 ms
-        ended a placed click on a target two frames down as a timeout. Before a human-like press it is
-        POINTER_CHECK_TIMEOUT_MS at most: its no, or its timeout, hands the click to Playwright's placing, and
-        given what the click had left, a page that answered each call just inside its bound left that none of it.
-        The first message had no bound given, so it waited by Playwright's default, a
-        whole ACTION_TIMEOUT_MS more, for a target that left once the click's checks had passed. Where the click
-        was placed, a call that runs past its bound raises its timeout: the page did not answer, which is no no.
-        Taken for one, it ended a click as target_moved where the page was busy, with the click's time not spent,
-        and every step before the question ends a click as the timeout it is.
+        ``timeout_ms`` bounds the whole question, the walk up the frames with it (both callers give one: the default is
+        the tests'), and each call of it to the page (the look-up of the element, its box, the question, its frame and
+        the frame's element) answers within POINTER_CHECK_TIMEOUT_MS, or what is left where that is less. Where the
+        click was placed it is what the click has left: bound as a whole by POINTER_CHECK_TIMEOUT_MS, a page that
+        answered each call in 150 ms ended a placed click on a target two frames down as a timeout. Before a human-like
+        press it is POINTER_CHECK_TIMEOUT_MS at most: its no, or its timeout, hands the click to Playwright's placing,
+        and given what the click had left, a page that answered each call just inside its bound left that none of it.
+        The first message had no bound given, so it waited by Playwright's default, a whole ACTION_TIMEOUT_MS more, for
+        a target that left once the click's checks had passed. Where the click was placed, a call that runs past its
+        bound raises its timeout: the page did not answer, which is no no. Taken for one, it ended a click as
+        target_moved where the page was busy, with the click's time not spent, and every step before the question ends a
+        click as the timeout it is.
         """
         bound = _Budget(timeout_ms, each_at_most=POINTER_CHECK_TIMEOUT_MS)
         handles: list[Any] = []
@@ -2063,8 +2065,8 @@ class BrowserActionService:
                 )
                 if found != "framed":
                     return found is True
-            # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, the
-            # one taken on the last turn of a walk that ran out of frames was kept by the page for good.
+            # Each handle is noted where it is taken, to be given back below: noted at the top of a turn, one
+            # taken just before a cancel or a failure that ended the walk was kept by the page for good.
             node = await bound.answered(locator.element_handle(timeout=bound.left_ms()), _disposed_soon)
             handles.append(node)
             # Where the target's document saw the pointer arrive: a point there, None for no move, False for a
