@@ -794,14 +794,16 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // so the walk is the tree as it is shown, bounded as the other walks: one that runs out of steps with nodes left
   // cannot tell, and says inert, so that no field counts live by it. What is modal decides as Chromium has it. While
   // a modal dialog is open, only the top one escapes an inert subtree it is in, and which is on top the page's world
-  // cannot tell: so the walk goes on past every open modal dialog the field is in (by identity), and an inert
-  // subtree between the field and the outermost of them counts; and a field outside any open modal dialog takes no
-  // focus. A field in a top dialog nested under inert in a lower one, or outside a lower sibling, so counts as unable
-  // to take text though the browser gives it focus (fails closed). With no modal dialog open, the fullscreen element
-  // (`:modal`) is not inert by what is above it, and the walk stops there; what is outside it takes no focus. While a
-  // dialog is open a fullscreen element escapes no inert subtree, and what is outside it can still take focus. A modal
-  // dialog in a shadow root is not found that way: a field outside one still counts, and while one in the light DOM
-  // is open it does not stop the walk (an inert subtree above it counts, though it be the top one: fails closed). Of a
+  // cannot tell: so the walk goes on past every open modal dialog of the light DOM the field is in (by identity), and
+  // an inert subtree between the field and the outermost of them counts; and a field outside any open modal dialog
+  // takes no focus. A field in a top dialog nested under inert in a lower one, or outside a lower sibling, so counts as
+  // unable to take text though the browser gives it focus (fails closed). With no modal dialog open, the fullscreen
+  // element (`:modal`) is not inert by what is above it, and the walk stops there; what is outside it takes no focus.
+  // While a dialog is open a fullscreen element escapes no inert subtree, and what is outside it can still take focus.
+  // A modal dialog in a shadow root is not found that way: a field outside one still counts, and while one in the
+  // light DOM is open it does not stop the walk (an inert subtree above it counts, though it be the top one: fails
+  // closed). With none open in the light DOM it stops the walk as the fullscreen element does (`:modal`), so of two
+  // there, nested with inert between, the bottom one's field still counts, though the browser gives it no focus. Of a
   // fullscreen element in a shadow root, the document names the host it is in, which stands in for it, so a field
   // inside that host and outside the element still counts. A select has no read-only state: it takes keys unless it
   // is disabled.
