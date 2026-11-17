@@ -585,6 +585,13 @@ READS_AS_THE_BROWSER_TAKES_ITS_KEYS = {
         " r.getElementById('d1').showModal(); document.getElementById('d2').showModal();</script>",
         "unread",
     ),
+    # B1-fix6 item 2 (the orchestrator's mutant M5-dialog-first): a modal dialog that is itself inert. Its plain field
+    # takes no focus (Chromium 156, measured): the walk reads the dialog's own inert before it counts the dialog.
+    "a-plain-field-in-a-modal-dialog-that-is-itself-inert": (
+        f"<dialog id='d' inert><div id='named'><input aria-label='Name'>{A_COMPONENT}</div></dialog>"
+        "<script>document.getElementById('d').showModal();</script>",
+        "unread",
+    ),
 }
 
 
