@@ -8,10 +8,11 @@ import pytest_asyncio
 from tests import _background
 
 # pytest registers a conftest's hooks by their names: these run one shard of the real-browser tests
-# (--real-browser-shard) and fail a run that skips one where a browser is required.
+# (--real-browser-shard), and fail each that does not run where they must.
 from tests._real_browser_shards import (  # noqa: F401
     pytest_addoption,
     pytest_collection_modifyitems,
+    pytest_make_collect_report,
     pytest_runtest_makereport,
 )
 

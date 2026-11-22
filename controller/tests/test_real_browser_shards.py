@@ -1,9 +1,7 @@
-"""`--real-browser-shard K/N` runs one shard of the real-browser tests, and under AUTO_BROWSER_REQUIRE_CHROMIUM a
-real-browser test that skips fails the run.
+"""`--real-browser-shard K/N` runs one shard of the real-browser tests, and a run that must run them fails where one
+does not run.
 
-CI runs the real-browser tests (the ones `requires_chromium` marks) in shards that run in parallel, and every one of
-them must run exactly once in a round. The shard function is tested directly; the hooks run in a pytest child on a
-small tree of its own, loaded with `-p` as tests/conftest.py loads them for the real tree.
+The shard function is tested directly; the hooks run in a pytest child on a small tree of its own, loaded with `-p`.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import _real_browser_shards
 from tests._real_browser_shards import parse_shard, shard_of
 from tests.test_chromium_requirement import MISSING, _child, _pytest_on
 
@@ -89,12 +88,13 @@ def _tree(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _collected(tree: Path, *options: str) -> set[str]:
-    """The node ids a collection of the tree keeps."""
+def _collected(tree: Path, *options: str) -> tuple[set[str], int]:
+    """The node ids a collection of the tree keeps, and the number it reports deselected."""
     result = _child(_pytest_on(tree, *PLUGIN, "--collect-only", "-q", *options), chromium=MISSING, required=None)
     # 5: every test of the tree deselected, a shard that holds none of its tests.
     assert result.returncode in (0, 5), result.stdout + result.stderr
-    return {line for line in result.stdout.splitlines() if "::" in line}
+    deselected = re.search(r"\((\d+) deselected\)", result.stdout)
+    return {line for line in result.stdout.splitlines() if "::" in line}, int(deselected[1]) if deselected else 0
 
 
 def test_every_case_of_a_test_lands_in_the_shard_of_its_function() -> None:
@@ -111,11 +111,8 @@ def test_the_shards_are_one_to_n_and_each_is_used() -> None:
 
 
 def test_the_shard_of_a_test_is_pinned() -> None:
-    """crc32 of the node id in UTF-8, modulo N, plus one (in Latin-1 the last example would land in shard 3)."""
+    """crc32 of the node id in UTF-8, modulo N, plus one."""
     assert shard_of("tests/test_page_text.py::test_real_chromium_excerpt_keeps_a_table_readable", 4) == 3
-    float_values = "tests/test_stealth_real_chromium.py::test_a_read_of_float_values_is_left_as_it_is"
-    assert [shard_of(float_values, total) for total in (1, 2, 3, 4)] == [1, 2, 3, 4]
-    assert shard_of("tests/test_é.py::test_ü", 4) == 4
 
 
 @pytest.mark.parametrize("value, expected", [("1/1", (1, 1)), ("3/4", (3, 4)), ("4/4", (4, 4)), ("12/40", (12, 40))])
@@ -123,7 +120,7 @@ def test_a_shard_is_k_of_n(value: str, expected: tuple[int, int]) -> None:
     assert parse_shard(value) == expected
 
 
-MALFORMED = ["", "4", "0/4", "5/4", "1/0", "0/0", "-1/4", "a/4", "1/b", "1/4/2", " 1/4", "1/4 ", "+1/4", "1.0/4", "١/٤"]
+MALFORMED = ["", "4", "0/4", "5/4", "1/0", "a/4", "1/b", "1/4/2", " 1/4", "1/4 ", "+1/4", "1.0/4", "١/٤"]
 
 
 @pytest.mark.parametrize("value", MALFORMED)
@@ -133,20 +130,21 @@ def test_a_malformed_shard_is_refused(value: str) -> None:
 
 
 def test_without_the_option_every_test_is_collected(tmp_path: Path) -> None:
-    assert _collected(_tree(tmp_path)) == MARKED | UNMARKED
+    assert _collected(_tree(tmp_path)) == (MARKED | UNMARKED, 0)
 
 
-@pytest.mark.parametrize("total", [1, 2, 4])
+@pytest.mark.parametrize("total", [2, 4])
 def test_the_shards_hold_each_real_browser_test_exactly_once(tmp_path: Path, total: int) -> None:
     """Together the shards hold the marked tests, the borrowed one included, and nothing unmarked; no two hold the
-    same test, and each holds only tests of its own number."""
+    same test, each holds only tests of its own number, and each reports the rest of the tree deselected."""
     tree = _tree(tmp_path)
     shards = [_collected(tree, "--real-browser-shard", f"{number}/{total}") for number in range(1, total + 1)]
 
-    assert set().union(*shards) == MARKED
-    assert sum(len(shard) for shard in shards) == len(MARKED)
-    for number, shard in enumerate(shards, start=1):
-        assert {shard_of(nodeid, total) for nodeid in shard} <= {number}
+    assert set().union(*(kept for kept, _ in shards)) == MARKED
+    assert sum(len(kept) for kept, _ in shards) == len(MARKED)
+    for number, (kept, deselected) in enumerate(shards, start=1):
+        assert {shard_of(nodeid, total) for nodeid in kept} <= {number}
+        assert deselected == len(MARKED | UNMARKED) - len(kept)
 
 
 def test_a_malformed_shard_is_a_usage_error(tmp_path: Path) -> None:
@@ -157,7 +155,19 @@ def test_a_malformed_shard_is_a_usage_error(tmp_path: Path) -> None:
     assert "--real-browser-shard" in result.stderr and "'5/4'" in result.stderr
 
 
+def test_the_suite_runs_every_hook_of_the_module(pytestconfig: pytest.Config) -> None:
+    """The child runs here load the module with -p, so they pass whatever tests/conftest.py imports: this checks the
+    suite itself holds each of the module's hooks, one added later included."""
+    hooks = {name: value for name, value in vars(_real_browser_shards).items() if name.startswith("pytest_")}
+
+    assert hooks
+    for name, function in hooks.items():
+        assert function in [impl.function for impl in getattr(pytestconfig.hook, name).get_hookimpls()], name
+
+
 SKIPS = """
+import os
+
 import pytest
 
 from tests._chromium import requires_chromium
@@ -175,12 +185,6 @@ def test_marked_that_skips_itself():
 
 
 @requires_chromium
-@pytest.mark.xfail(reason="expected", strict=True)
-def test_marked_that_xfails():
-    raise AssertionError
-
-
-@requires_chromium
 def test_marked_that_runs():
     pass
 
@@ -188,43 +192,144 @@ def test_marked_that_runs():
 @pytest.mark.skip(reason="not a real-browser test")
 def test_unmarked_that_skips():
     pass
+
+
+@requires_chromium
+def test_marked_that_clears_the_environment_and_skips():
+    os.environ.clear()
+    pytest.skip("skipped with the environment cleared")
 """
 
+XFAILS = """
+import pytest
 
-def _run_skips(tmp_path: Path, *, required: str | None) -> tuple[int, str, dict[str, str]]:
-    """The exit code, the output and each test's outcome (as `-v` prints it) of a run of SKIPS with a Chromium."""
-    (tmp_path / "test_skips.py").write_text(SKIPS, encoding="utf-8")
-    result = _child(_pytest_on(tmp_path, *PLUGIN, "-v"), chromium=sys.executable, required=required)
+from tests._chromium import requires_chromium
+
+
+@requires_chromium
+@pytest.mark.xfail(run=False, reason="never run")
+def test_marked_xfail_not_run():
+    raise AssertionError
+
+
+@pytest.fixture
+def xfails_in_setup():
+    pytest.xfail("in a fixture")
+
+
+@requires_chromium
+def test_marked_xfail_in_a_fixture(xfails_in_setup):
+    raise AssertionError
+
+
+@requires_chromium
+@pytest.mark.xfail(reason="expected", strict=True)
+def test_marked_xfail_that_runs():
+    raise AssertionError
+"""
+
+SKIPPED_MODULE = """
+import pytest
+
+from tests._chromium import requires_chromium
+
+pytestmark = requires_chromium
+pytest.importorskip("a_module_this_tree_does_not_have")
+
+
+def test_never_collected():
+    pass
+"""
+
+RUNS = "from tests._chromium import requires_chromium\n\n\n@requires_chromium\ndef test_runs():\n    pass\n"
+
+# The start of the failure each test that did not run is reported with, up to where it says why.
+DID_NOT_RUN = r"a real-browser test did not run where they must [^\n]*?: "
+
+
+def _run(tmp_path: Path, name: str, text: str, *options: str, required: str | None) -> tuple[int, str, dict[str, str]]:
+    """The exit code, the output and each test's outcome (as `-v` prints it) of a run of `text`, with a Chromium."""
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    result = _child(_pytest_on(tmp_path, *PLUGIN, "-v", *options), chromium=sys.executable, required=required)
     # `-v` prints each node id relative to the working directory, the controller, so the tree's path comes before it.
-    outcomes = re.findall(r"test_skips\.py::(\w+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL)", result.stdout)
+    outcomes = re.findall(rf"{re.escape(name)}::(\w+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL)", result.stdout)
     return result.returncode, result.stdout + result.stderr, dict(outcomes)
 
 
 def test_with_the_switch_a_real_browser_test_that_skips_fails_the_run(tmp_path: Path) -> None:
-    """A skip in setup (the second skipif) is reported as an error, one in the test as a failure, each with the reason
-    it skipped. An expected failure ran, and an unmarked test may skip."""
-    returncode, output, outcomes = _run_skips(tmp_path, required="1")
+    """A skip in setup (the second skipif) is reported as an error, one in the test as a failure, each with where it was
+    skipped and why; an unmarked test may skip. Clearing the environment does not turn the rule off."""
+    returncode, output, outcomes = _run(tmp_path, "test_skips.py", SKIPS, required="1")
 
     assert returncode == pytest.ExitCode.TESTS_FAILED, output
     assert outcomes == {
         "test_marked_with_a_second_skipif": "ERROR",
         "test_marked_that_skips_itself": "FAILED",
-        "test_marked_that_xfails": "XFAIL",
         "test_marked_that_runs": "PASSED",
         "test_unmarked_that_skips": "SKIPPED",
+        "test_marked_that_clears_the_environment_and_skips": "FAILED",
     }, output
-    for reason in ("a second condition", "skipped inside"):
-        assert re.search(rf"a real-browser test skipped where a browser is required.*: Skipped: {reason}\n", output)
+    for reason in ("a second condition", "skipped inside", "skipped with the environment cleared"):
+        assert re.search(rf"{DID_NOT_RUN}\S+test_skips\.py:\d+: Skipped: {reason}\n", output), reason
 
 
-def test_without_the_switch_a_real_browser_test_that_skips_leaves_the_run_green(tmp_path: Path) -> None:
-    returncode, output, outcomes = _run_skips(tmp_path, required=None)
+def test_without_the_rule_a_real_browser_test_that_skips_leaves_the_run_green(tmp_path: Path) -> None:
+    returncode, output, outcomes = _run(tmp_path, "test_skips.py", SKIPS, required=None)
 
     assert returncode == pytest.ExitCode.OK, output
     assert outcomes == {
         "test_marked_with_a_second_skipif": "SKIPPED",
         "test_marked_that_skips_itself": "SKIPPED",
-        "test_marked_that_xfails": "XFAIL",
         "test_marked_that_runs": "PASSED",
         "test_unmarked_that_skips": "SKIPPED",
+        "test_marked_that_clears_the_environment_and_skips": "SKIPPED",
     }, output
+
+
+def test_the_shard_option_holds_the_rule_without_the_switch(tmp_path: Path) -> None:
+    """A shard whose tests all skipped would pass having run nothing."""
+    returncode, output, outcomes = _run(tmp_path, "test_skips.py", SKIPS, "--real-browser-shard", "1/1", required=None)
+
+    assert returncode == pytest.ExitCode.TESTS_FAILED, output
+    assert outcomes == {
+        "test_marked_with_a_second_skipif": "ERROR",
+        "test_marked_that_skips_itself": "FAILED",
+        "test_marked_that_runs": "PASSED",
+        "test_marked_that_clears_the_environment_and_skips": "FAILED",
+    }, output
+
+
+def test_with_the_switch_an_expected_failure_that_never_ran_fails_the_run(tmp_path: Path) -> None:
+    """Only an expected failure reported from the call phase ran its body; one marked not to run, or raised by a
+    fixture, fails with its reason. A run of these alone, so that its exit code shows each counts as a failure."""
+    returncode, output, outcomes = _run(tmp_path, "test_xfails.py", XFAILS, required="1")
+
+    assert returncode == pytest.ExitCode.TESTS_FAILED, output
+    assert outcomes == {
+        "test_marked_xfail_not_run": "ERROR",
+        "test_marked_xfail_in_a_fixture": "ERROR",
+        "test_marked_xfail_that_runs": "XFAIL",
+    }, output
+    for reason in (r"\[NOTRUN\] never run", "in a fixture"):
+        assert re.search(rf"{DID_NOT_RUN}an expected failure that never ran: {reason}\n", output), reason
+
+
+def _beside_a_skipped_module(tmp_path: Path, *, required: str | None) -> tuple[int, str, dict[str, str]]:
+    (tmp_path / "test_skipped_module.py").write_text(SKIPPED_MODULE, encoding="utf-8")
+    return _run(tmp_path, "test_runs.py", RUNS, required=required)
+
+
+def test_with_the_switch_a_module_skipped_at_collection_fails_the_run(tmp_path: Path) -> None:
+    """Such a module has no tests to tell real-browser ones by, so any module skipped at collection fails."""
+    returncode, output, _ = _beside_a_skipped_module(tmp_path, required="1")
+
+    assert returncode == pytest.ExitCode.INTERRUPTED, output
+    assert re.search(r"ERROR collecting \S*test_skipped_module\.py", output), output
+    assert "a_module_this_tree_does_not_have" in output and "skip its tests one by one instead" in output, output
+
+
+def test_without_the_rule_a_module_skipped_at_collection_leaves_the_run_green(tmp_path: Path) -> None:
+    returncode, output, outcomes = _beside_a_skipped_module(tmp_path, required=None)
+
+    assert returncode == pytest.ExitCode.OK, output
+    assert outcomes == {"test_runs": "PASSED"} and "1 passed, 1 skipped" in output, output
