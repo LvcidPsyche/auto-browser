@@ -1,17 +1,15 @@
 """AUTO_BROWSER_REQUIRE_CHROMIUM turns "no Chromium" from a skip into a failure.
 
-`requires_chromium` only skips, so a CI leg that installs Chromium could lose it (a failed
+`requires_chromium` only skips, so a CI job that installs Chromium could lose it (a failed
 install, a moved browser root) and stay green while the real-browser test files skipped. The
-leg that installs Chromium sets the variable, and a missing browser then fails collection.
+real-browser-tests job, which installs Chromium, sets the variable, and a missing browser then
+fails collection. Under the switch a real-browser test that skips for any other reason fails
+the run too (tests/_real_browser_shards.py, tested in test_real_browser_shards.py).
 
 The helper tests pass the executable in explicitly and never start a browser. Importing
 `tests._chromium` still runs its one real lookup (it globs the Playwright browser roots), so a
 test that imports it runs in a child process with AUTO_BROWSER_TEST_CHROMIUM set, which makes
 that lookup answer from the variable alone.
-
-Known limit: the switch checks only that some Chromium resolves. Tests with their own extra
-skip conditions (for example the ones that skip when only chrome-headless-shell is found) still
-skip silently under it, and nothing counts how many real-browser tests actually ran.
 """
 
 from __future__ import annotations
@@ -104,28 +102,74 @@ def test_a_real_browser_test_skips_without_a_chromium_and_runs_with_one(tmp_path
     assert ran.returncode == 0 and "1 passed" in ran.stdout, ran.stdout + ran.stderr
 
 
-@pytest.mark.skipif(not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)")
-def test_ci_installs_chromium_on_the_leg_that_requires_it() -> None:
-    """One matrix flag drives both the install step and the switch, so they cannot drift apart."""
+needs_the_workflow = pytest.mark.skipif(
+    not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)"
+)
+
+
+def _ci_job(name: str) -> str:
+    """The body of one job in ci.yml, up to the next job."""
     text = CI_WORKFLOW.read_text(encoding="utf-8")
-    job = re.search(r"^  host-tests:\n(.*?)^  [a-z][a-z-]*:\n", text, flags=re.M | re.S)
-    assert job, "no host-tests job in ci.yml"
-    body = job.group(1)
-
-    assert re.search(r'include:\n(?:\s+#.*\n)*\s+- python-version: "3\.11"\n\s+real_browser: true\n', body)
-    install = re.search(r"- name: Install Chromium for the real-browser tests\n\s+if: (.+)\n", body)
-    assert install and install.group(1).strip() == "matrix.real_browser"
-    switch = re.search(r"AUTO_BROWSER_REQUIRE_CHROMIUM: (.+)\n", body)
-    assert switch and switch.group(1).strip() == "${{ matrix.real_browser && '1' || '' }}"
-    assert "python-version == " not in body
+    job = re.search(rf"^  {re.escape(name)}:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)", text, flags=re.M | re.S)
+    assert job, f"no {name} job in ci.yml"
+    return job.group(1)
 
 
-@pytest.mark.skipif(not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)")
+@needs_the_workflow
+def test_host_tests_run_without_a_browser() -> None:
+    """The real-browser tests have a job of their own: host-tests installs no Chromium and does not require one, so on
+    both of its legs they skip."""
+    body = _ci_job("host-tests")
+
+    assert "playwright install" not in body
+    assert "AUTO_BROWSER_REQUIRE_CHROMIUM" not in body
+    assert "real_browser" not in body
+
+
+@needs_the_workflow
 def test_ci_keeps_the_required_check_names_of_host_tests() -> None:
-    """An `include` value joins the default job name ("host-tests (3.11, true)"), and branch protection requires
-    "host-tests (3.11)" and "host-tests (3.14)": the job names itself from the Python version only. (The other
-    matrix job, langchain-tests, has no include, so its default name is already "langchain-tests (<version>)".)"""
+    """Branch protection requires "host-tests (3.11)" and "host-tests (3.14)": the job names itself from the Python
+    version only, since a matrix value added later would join the default name (an `include` once made it
+    "host-tests (3.11, true)"). The other matrix job, langchain-tests, keeps its default name, "langchain-tests
+    (<version>)"."""
+    assert "    name: host-tests (${{ matrix.python-version }})\n" in _ci_job("host-tests")
+
+
+@needs_the_workflow
+def test_the_real_browser_job_installs_chromium_requires_it_and_runs_one_shard() -> None:
+    """Chromium is installed with no condition, the switch is on (a missing browser, or a real-browser test that skips,
+    fails the shard), and the shard count comes from the matrix, the one place it is written. No coverage gate: one
+    shard runs a part of the suite, and the host-tests legs keep the gate."""
+    body = _ci_job("real-browser-tests")
+
+    assert "if:" not in body
+    assert "run: python -m playwright install --with-deps chromium\n" in body
+    switch = re.search(r"AUTO_BROWSER_REQUIRE_CHROMIUM: (.+)\n", body)
+    assert switch and switch.group(1).strip() == '"1"'
+    assert "cd controller\n" in body
+    assert 'python -m pytest tests/ --real-browser-shard "${{ matrix.shard }}/${{ strategy.job-total }}"' in body
+    assert "--cov" not in body
+
+
+@needs_the_workflow
+def test_one_check_passes_only_when_every_shard_passed() -> None:
+    """Branch protection can require one name however many shards there are. The job runs always: one skipped because
+    a job it needs failed reports success, and would pass the check."""
+    body = _ci_job("real-browser-tests-done")
+
+    assert re.search(r"^    if: always\(\)\n", body, flags=re.M)
+    assert re.search(r"^    needs: real-browser-tests\n", body, flags=re.M)
+    assert 'run: test "${{ needs.real-browser-tests.result }}" = success\n' in body
+
+
+@needs_the_workflow
+def test_compose_smoke_needs_the_real_browser_tests_and_the_new_jobs_come_before_it() -> None:
+    """compose-smoke needs the real-browser tests as it needs host-tests. The new jobs come before it, since tests read
+    ci.yml from `  compose-smoke:` to the end of the file as that one job."""
     text = CI_WORKFLOW.read_text(encoding="utf-8")
-    job = re.search(r"^  host-tests:\n(.*?)^  [a-z][a-z-]*:\n", text, flags=re.M | re.S)
-    assert job, "no host-tests job in ci.yml"
-    assert "    name: host-tests (${{ matrix.python-version }})\n" in job.group(1)
+    needs = re.search(r"^    needs: \[(.*)\]\n", _ci_job("compose-smoke"), flags=re.M)
+
+    assert needs and "real-browser-tests" in [name.strip() for name in needs.group(1).split(",")]
+    smoke = text.index("\n  compose-smoke:\n")
+    assert text.index("\n  real-browser-tests:\n") < smoke
+    assert text.index("\n  real-browser-tests-done:\n") < smoke

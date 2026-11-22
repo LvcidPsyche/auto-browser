@@ -45,21 +45,18 @@ jobs:
         run: python scripts/fixture_eval.py
 
   host-tests:
-    # A fixed name: the include value below would otherwise make the 3.11 check "host-tests (3.11, true)", and
-    # branch protection requires "host-tests (3.11)".
+    # A fixed name: branch protection requires "host-tests (3.11)" and "host-tests (3.14)", and a matrix value added
+    # later would join the default name (an include once made the 3.11 check "host-tests (3.11, true)").
     name: host-tests (${{ matrix.python-version }})
-    # The limit is for a run that hangs. The 3.11 leg, which runs the real-Chromium tests too, takes over 45 minutes.
-    timeout-minutes: 75
+    # The limit is for a run that hangs. Neither leg installs a browser, so the real-Chromium tests skip here; they run
+    # in real-browser-tests below.
+    timeout-minutes: 20
     needs: lint
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.14"]
-        include:
-          # The one leg that installs Chromium and requires it: both steps below read this flag.
-          - python-version: "3.11"
-            real_browser: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.1.0
@@ -72,17 +69,8 @@ jobs:
           python -m pip install uv==0.13.7
           uv pip install --system --exclude-newer "$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
             -e ./controller[dev] -c controller/constraints.txt
-      # The real-Chromium tests (page text, element naming, overlays, TOTP, the
-      # dashboard) skip when no browser is installed, and until now none was, so
-      # they never ran in CI. One leg is enough: they test the page, not Python.
-      - name: Install Chromium for the real-browser tests
-        if: matrix.real_browser
-        run: python -m playwright install --with-deps chromium
       - name: Run controller tests on host Python
-        # The leg that installed Chromium must run its tests: with this set, a missing
-        # browser fails the run instead of skipping the real-browser tests.
-        env:
-          AUTO_BROWSER_REQUIRE_CHROMIUM: ${{ matrix.real_browser && '1' || '' }}
+        # The whole suite, with the coverage gate: the real-browser tests in it skip, since no browser is installed.
         run: |
           cd controller
           python -m pytest tests/ \
@@ -90,6 +78,54 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=80 \
             -v
+
+  real-browser-tests:
+    # The real-Chromium tests (page text, element naming, overlays, TOTP, the dashboard), split into shards that run
+    # in parallel: in host-tests they made one leg take over 45 minutes. One Python is enough: they test the page, not
+    # Python. The matrix list is the one place the number of shards is written; strategy.job-total passes it on.
+    name: real-browser-tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    # The limit is for a run that hangs.
+    timeout-minutes: 30
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install host test dependencies
+        # As host-tests installs them: controller/constraints.txt pins the whole tree, and uv's --exclude-newer holds
+        # the build backend the editable install builds with (R5C-14).
+        run: |
+          python -m pip install uv==0.13.7
+          uv pip install --system --exclude-newer "$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
+            -e ./controller[dev] -c controller/constraints.txt
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Run this shard of the real-browser tests
+        # --real-browser-shard keeps the real-browser tests of this shard and deselects the rest of the suite
+        # (controller/tests/_real_browser_shards.py); together the shards run each of them once. With
+        # AUTO_BROWSER_REQUIRE_CHROMIUM set, a missing browser fails the run, and so does a real-browser test that
+        # skips for any other reason. No coverage gate: a shard runs a part of the suite, and host-tests keeps the gate.
+        env:
+          AUTO_BROWSER_REQUIRE_CHROMIUM: "1"
+        run: |
+          cd controller
+          python -m pytest tests/ --real-browser-shard "${{ matrix.shard }}/${{ strategy.job-total }}" -v
+
+  real-browser-tests-done:
+    # One check for branch protection to require, whatever the number of shards: it passes only if every shard passed.
+    # always(), because a job skipped when a job it needs failed reports success, and would pass the check.
+    if: always()
+    needs: real-browser-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard of the real-browser tests passed
+        run: test "${{ needs.real-browser-tests.result }}" = success
 
   langchain-tests:
     needs: lint
@@ -277,7 +313,7 @@ jobs:
 
   compose-smoke:
     runs-on: ubuntu-latest
-    needs: [host-tests, client-tests, langchain-tests, dependency-audit, package-build, controller-tests]
+    needs: [host-tests, real-browser-tests, client-tests, langchain-tests, dependency-audit, package-build, controller-tests]
     timeout-minutes: 25
     env:
       # A fixed, CI-only password: it guards nothing real. With it set, both browser-node
