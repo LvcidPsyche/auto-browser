@@ -43,6 +43,14 @@ def _child(
     return subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=120, env=env, cwd=cwd)
 
 
+def _pytest_on(tree: Path, *options: str) -> list[str]:
+    """A pytest child's arguments to run the tests in `tree`. The pytest.ini written there makes the tree its own
+    rootdir: without one the rootdir was the common ancestor of the controller and the temp folder (the home folder on
+    a developer machine), and collection walked every folder in between, which another process may be removing."""
+    (tree / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    return ["-m", "pytest", "-p", "no:cacheprovider", *options, str(tree)]
+
+
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", " 1 "])
 def test_the_switch_is_on_for_truthy_values(value: str) -> None:
     assert chromium_required({"AUTO_BROWSER_REQUIRE_CHROMIUM": value}) is True
@@ -87,7 +95,7 @@ def test_a_real_browser_test_skips_without_a_chromium_and_runs_with_one(tmp_path
         "from tests._chromium import requires_chromium\n\n\n@requires_chromium\ndef test_probe():\n    pass\n",
         encoding="utf-8",
     )
-    args = ["-m", "pytest", "-p", "no:cacheprovider", "-q", str(test_file)]
+    args = _pytest_on(tmp_path, "-q")
 
     skipped = _child(args, chromium=MISSING, required=None)
     ran = _child(args, chromium=sys.executable, required="1")
