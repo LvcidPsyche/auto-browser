@@ -5,12 +5,14 @@ import base64
 import email.utils
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
 import socket
 import stat
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -745,6 +747,8 @@ class BaseProviderAdapter(ABC):
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         image_path: str | None = None,
+        deadline: float = math.inf,
+        stdout_in_error: bool = True,
     ) -> CLIResult:
         """Run a provider CLI to its end, in a process group of its own, and return what it printed.
 
@@ -752,9 +756,17 @@ class BaseProviderAdapter(ABC):
         directory it can open its home and what CLI_SANDBOX_WRITABLE names there, and ``image_path`` to read (the
         screenshot its command names, if any). The launcher execs the CLI, so the child is one process either way.
 
+        The run times out MODEL_REQUEST_TIMEOUT_SECONDS after its start or at ``deadline`` (a time.monotonic() value),
+        whichever comes first: one budget for the runs of one call. The deadline is first read once the launch command
+        is built, which can wait on the CLI sandbox's one probe (bounded by its own timeout); where it has passed then,
+        no child is started and the run fails as a timed-out one does.
+
         Stdout past CLI_STDOUT_LIMIT_BYTES is an error and the start of stderr is kept (CLI_STDERR_KEEP_BYTES). On a
         timeout, on that error and on a cancel the whole group is killed and the child reaped, bounded by the drain of
         its pipes (process_tree.kill_and_drain): what it started that holds them does not keep this call.
+
+        A CLI that exits non-zero is an error whose text is its stderr, else its stdout, else its exit code; with
+        ``stdout_in_error`` false, its stderr, else its exit code.
         """
         # Encoded before the child exists: a prompt that cannot be (a page's lone surrogate) must leave none behind.
         stdin_bytes = input_text.encode("utf-8") if input_text is not None else None
@@ -764,6 +776,8 @@ class BaseProviderAdapter(ABC):
             spawned = await launch_command(self.settings, command, cli_home=home, image_path=image_path, env=child_env)
         except SandboxRequired as exc:
             raise ProviderAPIError(provider=self.provider, message=REQUIRED_MESSAGE, retryable=False) from exc
+        if deadline <= time.monotonic():
+            raise self._cli_timed_out()
         process = await asyncio.create_subprocess_exec(
             *spawned,
             stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
@@ -774,18 +788,15 @@ class BaseProviderAdapter(ABC):
             **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
         label = f"{self.provider} CLI"
+        timeout = min(self.settings.model_request_timeout_seconds, deadline - time.monotonic())
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 exchange(process, stdin_bytes, stdout_limit=CLI_STDOUT_LIMIT_BYTES, stderr_keep=CLI_STDERR_KEEP_BYTES),
-                timeout=self.settings.model_request_timeout_seconds,
+                timeout=timeout,
             )
         except asyncio.TimeoutError as exc:
             await kill_and_drain(process, label=label)
-            raise ProviderAPIError(
-                provider=self.provider,
-                message=f"CLI command timed out after {self.settings.model_request_timeout_seconds:.0f}s",
-                retryable=True,
-            ) from exc
+            raise self._cli_timed_out() from exc
         except OutputTooLarge as exc:
             await kill_and_drain(process, label=label)
             raise ProviderAPIError(
@@ -810,13 +821,21 @@ class BaseProviderAdapter(ABC):
             )
             raise ProviderAPIError(provider=self.provider, message=NOT_APPLIED_MESSAGE, retryable=False)
         if process.returncode != 0:
-            detail = stderr.strip() or stdout.strip() or f"CLI exited with code {process.returncode}"
+            shown = stdout.strip() if stdout_in_error else ""
+            detail = stderr.strip() or shown or f"CLI exited with code {process.returncode}"
             raise ProviderAPIError(
                 provider=self.provider,
                 message=detail[:1200],
                 retryable=False,
             )
         return CLIResult(command=command, stdout=stdout, stderr=stderr, returncode=process.returncode)
+
+    def _cli_timed_out(self) -> ProviderAPIError:
+        return ProviderAPIError(
+            provider=self.provider,
+            message=f"CLI command timed out after {self.settings.model_request_timeout_seconds:.0f}s",
+            retryable=True,
+        )
 
     def parse_decision_text(self, text: str) -> BrowserActionDecision:
         text = text.strip()

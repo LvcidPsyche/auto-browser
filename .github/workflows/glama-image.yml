@@ -1,0 +1,51 @@
+name: glama-image
+
+# The root (Glama) image, which no other workflow builds or runs: it is built and then driven as an MCP client
+# (initialize, tools/list) by scripts/ci/glama_mcp_probe.py. From 1.15.0 to 1.18.1 every start of it failed at import,
+# after a change to controller/app/config.py that nothing here ran against, so it runs on any change to what the image
+# copies, not only on its Dockerfile.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "controller/app/**"
+      - "controller/requirements.txt"
+      - "controller/constraints.txt"
+      - "scripts/glama_entrypoint.sh"
+      - "scripts/ci/glama_mcp_probe.py"
+      - ".github/workflows/glama-image.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "controller/app/**"
+      - "controller/requirements.txt"
+      - "controller/constraints.txt"
+      - "scripts/glama_entrypoint.sh"
+      - "scripts/ci/glama_mcp_probe.py"
+      - ".github/workflows/glama-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: glama-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  root-image:
+    name: The root (Glama) image starts and lists its tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the root Dockerfile
+        run: docker build -t auto-browser-glama:ci .
+      - name: Answer MCP's initialize and tools/list over stdio
+        run: python3 scripts/ci/glama_mcp_probe.py auto-browser-glama:ci

@@ -8,36 +8,17 @@ cli_env_names), plus each ``--pass-env NAME``.
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import os
-import socketserver
 import sys
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "codex_host_bridge.py"
+from tests._codex_bridge import BRIDGE_SCRIPT, load_bridge
 
-
-def _load_bridge():
-    """Load the script under a private name; UnixStreamServer is missing on Windows (import only)."""
-    shimmed = not hasattr(socketserver, "UnixStreamServer")
-    if shimmed:
-        socketserver.UnixStreamServer = socketserver.TCPServer
-    try:
-        spec = importlib.util.spec_from_file_location("codex_host_bridge_env_under_test", _SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        if shimmed:
-            del socketserver.UnixStreamServer
-
-
-bridge = _load_bridge() if _SCRIPT.is_file() else None
+bridge = load_bridge("codex_host_bridge_env_under_test") if BRIDGE_SCRIPT.is_file() else None
 API_KEY = "sk-sentinel-openai-key"
 UNRELATED = "sentinel-unrelated-secret"
 
@@ -63,7 +44,9 @@ class CodexEnvironmentTests(unittest.TestCase):
 
     def _env_given(self, service, environ: dict[str, str]) -> dict[str, str]:
         with patch.dict(os.environ, environ, clear=True), patch.object(bridge.subprocess, "Popen", _RecordingPopen):
-            service._run_codex(["codex", "exec", "-"], b"prompt")
+            service._run_codex(
+                ["codex", "exec", "-"], b"prompt", timeout=service.request_timeout_seconds, cwd=os.curdir
+            )
         self.assertEqual(len(_RecordingPopen.calls), 1)
         env = _RecordingPopen.calls[0].get("env")
         self.assertIsInstance(env, dict)
@@ -176,7 +159,7 @@ class PassEnvOptionTests(unittest.TestCase):
         self.assertIn("docs/deployment.md", text)
 
     def test_w2_34_the_deployment_docs_list_every_name_that_passes(self) -> None:
-        docs = _SCRIPT.parents[1] / "docs" / "deployment.md"
+        docs = BRIDGE_SCRIPT.parents[1] / "docs" / "deployment.md"
         text = docs.read_text(encoding="utf-8")
         start = text.index("The bridge starts Codex with an allowlisted environment")
         section = text[start : start + 3000]

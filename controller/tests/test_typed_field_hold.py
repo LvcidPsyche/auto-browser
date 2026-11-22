@@ -24,11 +24,21 @@ from playwright._impl._locator import Locator
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
-from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT, FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT
+from app.browser.element_scripts import (
+    ELEMENT_FIELD_HOLD_SCRIPT,
+    ELEMENT_FOCUS_PLACE_SCRIPT,
+    FIELD_HOLD_READ_SCRIPT,
+    FIELD_HOLD_RELEASE_SCRIPT,
+    FIELD_HOLD_TAKE_SCRIPT,
+)
+from app.browser.element_target import ElementTarget
 from app.browser.services import actions
 from app.browser.services.actions import _arrives_by, _TypedField
 
 BOUND_MS = 200
+# How long a step bounded at BOUND_MS may hold its caller, overhead and all: three bounds, short of the 1,000 ms a
+# bound five times as long takes, which passed for it under a limit of two seconds.
+WITHIN_THE_BOUND_S = 3 * BOUND_MS / 1000
 PLAIN = {"type": "text", "name": "note", "id": "note", "placeholder": "", "aria-label": "", "autocomplete": ""}
 
 
@@ -36,7 +46,9 @@ class FoundField:
     """What Playwright's Locator finds for a type by selector: the field's element, and the hold made on it. One step
     (``stalls``) does not answer until the test lets it (``answers``); ``asked`` says it was reached. ``takes`` says
     how many seconds a step takes to answer, by its name. ``focused`` is what the element answers when asked whether
-    focus is in it, a test's to change."""
+    focus is in it, a test's to change. Each answers only the script it is asked with by the code under test, and
+    fails for any other: a fake that answers any script alike passes a take made, read or released with the wrong
+    one. ``ended`` counts the disposals that answered, where a mock's await_count counts those begun."""
 
     def __init__(self, stalls: str | None = None, *, takes: dict[str, float] | None = None) -> None:
         self.stalls = stalls
@@ -44,8 +56,13 @@ class FoundField:
         self.asked = asyncio.Event()
         self.answers = asyncio.Event()
         self.scripts: list[str] = []
+        # The steps that stalled and were then given up on (cancelled).
+        self.cut: list[str] = []
         self.focused = True
-        self.hold = SimpleNamespace(evaluate=AsyncMock(side_effect=self._run), dispose=AsyncMock())
+        self.ended = {"hold": 0, "element": 0}
+        self.hold = SimpleNamespace(
+            evaluate=AsyncMock(side_effect=self._run), dispose=AsyncMock(side_effect=self._hold_given_back)
+        )
         self.element = SimpleNamespace(
             evaluate=AsyncMock(side_effect=self._has_focus),
             evaluate_handle=AsyncMock(side_effect=self._hold),
@@ -60,34 +77,45 @@ class FoundField:
         await asyncio.sleep(self.takes.get(name, 0.0))
         if name == self.stalls:
             self.asked.set()
-            await self.answers.wait()
+            try:
+                await self.answers.wait()
+            except asyncio.CancelledError:
+                self.cut.append(name)
+                raise
 
     async def _find(self, **_given: Any) -> Any:
         await self._step("finding-the-element")
         return self.element
 
-    async def _has_focus(self, _script: str) -> bool:
+    async def _has_focus(self, script: str) -> str:
+        assert script == ELEMENT_FOCUS_PLACE_SCRIPT, script
         await self._step("asking-for-focus")
-        return self.focused
+        return "in" if self.focused else "out"
 
-    async def _hold(self, *_script: Any) -> Any:
+    async def _hold(self, script: str) -> Any:
+        assert script == FIELD_HOLD_TAKE_SCRIPT, script
         await self._step("making-the-hold")
         return self.hold
 
     async def _give_back(self) -> None:
         await self._step("giving-the-element-back")
+        self.ended["element"] += 1
+
+    async def _hold_given_back(self) -> None:
+        self.ended["hold"] += 1
 
     async def _run(self, script: str) -> dict[str, str]:
+        assert script in (FIELD_HOLD_READ_SCRIPT, FIELD_HOLD_RELEASE_SCRIPT), script
         self.scripts.append(script)
         await self._step("releasing-the-hold" if script == FIELD_HOLD_RELEASE_SCRIPT else "reading-the-hold")
         return PLAIN
 
     def given_back(self) -> tuple[int, int, int]:
-        """How often the hold's release script ran, the hold was disposed of, and the element was."""
+        """How often the hold's release script ran, and the hold's and the element's disposals answered."""
         return (
             self.scripts.count(FIELD_HOLD_RELEASE_SCRIPT),
-            self.hold.dispose.await_count,
-            self.element.dispose.await_count,
+            self.ended["hold"],
+            self.ended["element"],
         )
 
 
@@ -139,7 +167,7 @@ async def test_a_take_the_page_does_not_answer_is_given_up_at_its_bound(stalls: 
     field.answers.set()
 
     assert typed.not_secret is False
-    assert took < 2, took
+    assert took < WITHIN_THE_BOUND_S, took
     if stalls == "finding-the-element":
         assert released == (0, 0, 0)
         await _until(lambda: field.given_back() == (0, 0, 1))
@@ -197,7 +225,9 @@ async def test_a_type_cancelled_once_its_hold_was_made_gives_the_hold_back() -> 
 
     await _cancelled_at(field)
 
-    assert field.given_back() == (1, 1, 1)
+    # The hold is given back; the element's disposal was asked for, and the cancel came as it waited.
+    assert field.given_back() == (1, 1, 0)
+    field.element.dispose.assert_awaited_once()
 
 
 @pytest.mark.parametrize("stalls", ["finding-the-element", "making-the-hold"])
@@ -219,9 +249,10 @@ async def test_a_handle_that_arrives_once_its_type_was_cancelled_is_given_back(s
 
 
 @pytest.mark.parametrize("arrives", ["in-time", "late"])
-async def test_a_hold_whose_release_does_not_answer_is_still_disposed_of_at_the_bound(arrives: str) -> None:
-    # Each step of a give-back is bounded on its own, the one made in the background for a hold that arrived late
-    # too: a page that does not answer the release read keeps neither the type nor the handle.
+async def test_a_hold_whose_release_does_not_answer_holds_nothing_past_its_bound(arrives: str) -> None:
+    # Each step of a give-back is bounded, the one made in the background for a hold that arrived late too: a page
+    # that does not answer the release read keeps neither the type nor the handle. The late give-back's release and
+    # disposal share one bound (B1-fix2 item 20), so a release the page does not answer leaves the disposal unasked.
     field = FoundField("releasing-the-hold" if arrives == "in-time" else "making-the-hold")
     typed = _TypedField(None, field.locator)
 
@@ -231,12 +262,21 @@ async def test_a_hold_whose_release_does_not_answer_is_still_disposed_of_at_the_
     took = time.monotonic() - began
     if arrives == "late":
         field.stalls = "releasing-the-hold"
+        arrived = time.monotonic()
         field.answers.set()
         field.answers = asyncio.Event()
 
-    assert took < 2, took
+    assert took < WITHIN_THE_BOUND_S, took
     assert typed.not_secret is False
-    await _until(lambda: field.given_back() == (1, 1, 1))
+    if arrives == "in-time":
+        await _until(lambda: field.given_back() == (1, 1, 1))
+        return
+    # The late give-back is bounded as well: timed from the hold's arrival to its release given up on (B1-fix1 item
+    # 28, staged F10).
+    await _until(lambda: "releasing-the-hold" in field.cut)
+    given_back = time.monotonic() - arrived
+    assert given_back < WITHIN_THE_BOUND_S, given_back
+    assert field.given_back() == (1, 0, 1)
 
 
 async def test_an_element_whose_disposal_does_not_answer_holds_no_type() -> None:
@@ -248,33 +288,62 @@ async def test_an_element_whose_disposal_does_not_answer_holds_no_type() -> None
     await asyncio.wait_for(typed.release(), 5)
     took = time.monotonic() - began
 
-    assert took < 2, took
+    assert took < WITHIN_THE_BOUND_S, took
     assert typed.not_secret is True
-    assert field.given_back() == (1, 1, 1)
+    # Asked of the page, and given up on at the bound: the element's disposal never answered.
+    assert field.given_back() == (1, 1, 0)
+    field.element.dispose.assert_awaited_once()
 
 
 # The checks through the clear: a type by selector that clears its field first.
+BEFORE_SELECT_ALL = " before select-all (nothing was cleared)"
 AFTER_SELECT_ALL = " after select-all (nothing was cleared)"
 THROUGH_THE_CLEAR = " through the clear"
 
 
 async def test_the_checks_through_the_clear_and_the_hold_are_of_the_element_found_once() -> None:
     # FX9c4's staged review (15): by selector nothing asked whether focus stayed in the field through the clear. The
-    # element the selector names as the type focused it is found once, asked after each key of the clear, and held:
-    # found anew by the locator each time, it could be another element by then.
+    # element the selector names as the type focused it is found once, asked before the clear and after each of its
+    # keys, and held from the first key: found anew by the locator each time, it could be another element by then.
     field = FoundField()
     typed = _TypedField(None, field.locator)
 
     await typed.find()
+    await typed.require_focus(BEFORE_SELECT_ALL)
+    await typed.take()
     await typed.require_focus(AFTER_SELECT_ALL)
     await typed.require_focus(THROUGH_THE_CLEAR)
-    await typed.take()
     await typed.release()
 
     assert field.locator.element_handle.await_count == 1
-    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_HAS_FOCUS_SCRIPT,)] * 2
+    assert [call.args for call in field.element.evaluate.await_args_list] == [(ELEMENT_FOCUS_PLACE_SCRIPT,)] * 3
     assert typed.not_secret is True
     assert field.given_back() == (1, 1, 1)
+
+
+async def test_the_first_check_reads_focus_and_frames_at_one_moment() -> None:
+    # B1-fix1 item 2 (Codex B1-2): the first check asked the page twice, frames refused and then not, so focus outside
+    # the element at the first question and back in a plain field at the second passed the check and let frames in:
+    # a move into a frame inside the element then passed every check after it. One question now says whether focus
+    # is in the element, in a frame inside it, or out. The page's focus moves on at each question it is asked.
+    field = FoundField()
+    moves = iter(["out", "in", "framed", "framed"])
+
+    async def asked(_script: str, *refuse_frames: bool) -> Any:
+        place = next(moves)
+        if refuse_frames:  # the yes-or-no question, which the two asked at 13d7ae9d
+            return place == "in" or (place == "framed" and not refuse_frames[0])
+        return place
+
+    field.element.evaluate = AsyncMock(side_effect=asked)
+    typed = _TypedField(None, field.locator)
+    await typed.find()
+
+    with pytest.raises(BrowserActionError) as refused:
+        await typed.require_focus(BEFORE_SELECT_ALL)
+
+    assert refused.value.code == "focus_lost"
+    assert field.element.evaluate.await_count == 1
 
 
 @pytest.mark.parametrize("during", [AFTER_SELECT_ALL, THROUGH_THE_CLEAR])
@@ -310,7 +379,7 @@ async def test_a_check_through_the_clear_that_cannot_be_made_refuses_the_type_at
     field.answers.set()
 
     assert refused.value.code == "focus_lost"
-    assert took < 2, took
+    assert took < WITHIN_THE_BOUND_S, took
     await _until(lambda: field.given_back() == (0, 0, 1))
 
 
@@ -470,3 +539,33 @@ async def test_a_step_that_answered_by_its_bound_is_accepted_though_its_caller_h
     for _ in range(20):
         await asyncio.sleep(0)
     assert given_back == []
+
+
+async def test_the_read_after_the_clear_by_element_id_is_a_read_within_its_bound() -> None:
+    # B1-fix2 item 9 (the Opus correctness read, F12): by element_id the read once the clear was done was a take's
+    # call, bounded by the world's timeout (15 s), past which the world's session was reset: a page that stopped
+    # answering after the clear held the type that long. It is a read, within FIELD_RECHECK_TIMEOUT_MS, that keeps the
+    # page's session. The world here answers the take, and gives up on each later call at the bound it is given.
+    bounds: list[dict[str, Any]] = []
+
+    async def call(_page: Any, declaration: str, *_args: Any, effect: str, **given: Any) -> dict[str, Any]:
+        assert ELEMENT_FIELD_HOLD_SCRIPT in declaration
+        bounds.append(given)
+        if len(bounds) == 1:
+            return {"status": "ok", "tag": "t1", "value": PLAIN}
+        await asyncio.sleep(given["timeout_ms"] / 1000)
+        raise TimeoutError
+
+    field = _TypedField(ElementTarget(SimpleNamespace(call=call, timeout_ms=15_000), object(), "op-1"), None)
+    await field.take()
+    assert field.not_secret is True
+
+    began = time.monotonic()
+    reading = asyncio.ensure_future(field.read_after_the_clear())
+    done, _ = await asyncio.wait({reading}, timeout=5)
+    took = time.monotonic() - began
+    reading.cancel()
+
+    assert bounds[1] == {"timeout_ms": BOUND_MS, "setup_timeout_ms": BOUND_MS, "keep_session": True}, bounds
+    assert done and took < WITHIN_THE_BOUND_S, took
+    assert field.not_secret is False

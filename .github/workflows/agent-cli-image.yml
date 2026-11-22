@@ -1,0 +1,101 @@
+name: agent-cli-image
+
+# The controller image with INSTALL_AGENT_CLIS=true, which no other workflow builds (glama-image.yml builds the root
+# image). In it, scripts/ci/codex_sandbox_check.sh runs Codex as the controller runs it (the CLI's uid, under the
+# launcher with the controller's grants) against a stand-in model that asks for one command, and fails unless each
+# CODEX_SANDBOX_MODE setting reaches what docs/deployment.md ("Codex's own sandbox") says where probed; last, it plants
+# an MCP server in the home's config.toml and runs Codex as the CLI's uid alone, where the server, with the image's
+# /etc/codex/requirements.toml moved aside, starts and has its tool offered to the model, and with the file in place
+# never starts while the model is asked and is offered no MCP tool. With MCP servers planted where each CLI reads them,
+# scripts/ci/codex_bridge_mcp_check.py has the Codex host bridge make decisions, and scripts/ci/codex_adapter_check.py
+# and claude_adapter_check.py have the controller's own Codex and Claude calls make them (CLI mode, the image's code,
+# the CLI's uid under the launcher). Each check first has a control, the call without its MCP settings, start the
+# planted servers (the Codex controls each but the home's one whose name codex-cli 0.114.0 lists and does not start) and
+# offer their tools to the model; then it fails unless each decision starts no server, offers its model exactly the
+# tools the check names (Codex's own update_plan, request_user_input and view_image; Claude's structured-output one),
+# runs, sends and passes on nothing planted, and comes back, and the adapter checks also unless each decision, and each
+# call the Codex adapter check must see refused, started exactly its commands, each under the launcher. The Codex
+# adapter check also fails unless each decision with a setting of its call taken out shows what its table names for that
+# setting. In each case but the requirements file's, the two Codex checks move the image's /etc/codex/requirements.toml
+# aside for the case's control and calls, and they make the calls of the first case, the features case, the zsh_path
+# case and each case from the managed server case on again with the file in place. They also make calls that must be
+# refused before any exec: with a server the managed configuration keeps on, and with features the call's look at `codex
+# features list` reads turned on in a selected profile, in the managed configuration, under an older name in the home
+# config's [features] table and in a [features] table they write into /etc/codex/requirements.toml (and put back after);
+# each such call must be refused (for a feature, naming what the look found on) and run no exec. Each of those feature
+# cases but the profile's one-feature-at-a-time calls has a control, the call without the look (and, for the profile and
+# the managed configuration, without its feature settings), which must be offered a tool the planting turns on; the
+# managed server case's control, the call without its MCP settings, must start that server. Last, they name a model of
+# codex-cli's own catalog as the home config's model, which brings Codex's file-edit tool, apply_patch, and the stand-in
+# model sends a patch for a file in the call's directory and one in the temp directory: a control under workspace-write
+# writes both, and each decision under the default sandbox mode is offered apply_patch beside Codex's own three tools
+# and writes neither.
+# Landlock needs a Linux kernel, so this runs on GitHub's runners; the container has no network, and needs none. It
+# runs on a change to a path listed below, not on every change to the images' inputs (ci.yml builds the controller
+# image on every pull request and push to main, without the CLIs).
+on:
+  pull_request:
+    paths:
+      - "controller/Dockerfile"
+      - "controller/.dockerignore"
+      - "controller/entrypoint.sh"
+      - "controller/app/**"
+      - "scripts/codex_host_bridge.py"
+      - "scripts/ci/**"
+      - ".github/workflows/agent-cli-image.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "controller/Dockerfile"
+      - "controller/.dockerignore"
+      - "controller/entrypoint.sh"
+      - "controller/app/**"
+      - "scripts/codex_host_bridge.py"
+      - "scripts/ci/**"
+      - ".github/workflows/agent-cli-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-cli-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codex-sandbox:
+    name: Codex's sandbox under the launcher (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      IMAGE: auto-browser-controller:agent-clis
+      # Each check's container: no network, root, no new privileges. Left unquoted where used: one word per flag;
+      # a step fails where it is unset or empty (${DOCKER_RUN_FLAGS:?}).
+      DOCKER_RUN_FLAGS: --rm --network none --user root --security-opt no-new-privileges:true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the controller image with the three CLIs
+        run: docker build --build-arg INSTALL_AGENT_CLIS=true -t "$IMAGE" controller
+      - name: What a command of Codex's model reaches under each sandbox setting; requirements.toml keeps a server off
+        run: >-
+          docker run ${DOCKER_RUN_FLAGS:?}
+          -v "$PWD/scripts/ci:/ci:ro" --entrypoint sh "$IMAGE" /ci/codex_sandbox_check.sh
+      - name: The Codex host bridge's call starts no MCP server, offers only Codex's own tools, or is refused, no exec
+        run: >-
+          docker run ${DOCKER_RUN_FLAGS:?}
+          -v "$PWD/scripts:/scripts:ro" --entrypoint python3 "$IMAGE" /scripts/ci/codex_bridge_mcp_check.py
+      - name: The controller's Codex call starts no MCP server, offers only Codex's own tools, or is refused, no exec
+        run: >-
+          docker run ${DOCKER_RUN_FLAGS:?}
+          -v "$PWD/scripts:/scripts:ro" --entrypoint python3 "$IMAGE" /scripts/ci/codex_adapter_check.py
+      - name: The controller's Claude call loads no MCP server, and has no tool but the structured-output one
+        run: >-
+          docker run ${DOCKER_RUN_FLAGS:?}
+          -v "$PWD/scripts:/scripts:ro" --entrypoint python3 "$IMAGE" /scripts/ci/claude_adapter_check.py

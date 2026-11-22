@@ -6,6 +6,8 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .browser.element_scripts import DOM_JS
+
 # Injected before every page load via add_init_script().
 # Removes automation signals, mocks realistic browser properties.
 # add_init_script runs the source as written, so this is an invoked function
@@ -334,6 +336,13 @@ def with_ab_cap(source: str) -> str:
 # image alt text, visible text, title, then placeholder, name and id. Every
 # script that includes it takes the element-id registry as `elementIds`.
 #
+# It starts with DOM_JS, and so does each script that includes it. Where a form is an element a script lists or
+# reports as focused, one the page summary lists, or what an aria-labelledby names, what the scripts read of its own
+# properties (those of its prototypes: its tag, id, attributes, text, editability, box, closest, querySelector and
+# querySelectorAll) goes through DOM_JS's getters and methods: a form's named controls answer for its own properties in
+# this world too (in <form><input name="getAttribute"></form>, form.getAttribute is that input), and for those it does
+# not have, which are read only on a kind of element that has them (an element's labels, disabled and href).
+#
 # A field's *value* is never used as its name. The previous fallback chain did,
 # so a password typed into a field with no placeholder became that field's
 # "label" in every later observation — in the interactables, the active element
@@ -343,7 +352,8 @@ def with_ab_cap(source: str) -> str:
 # The same holds for contenteditable editors and textbox-like ARIA widgets,
 # whose text content is what was typed into them.
 _ELEMENT_NAMING_JS = (
-    AB_CAP_JS
+    DOM_JS
+    + AB_CAP_JS
     + r"""
   function abClean(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
@@ -356,23 +366,21 @@ _ELEMENT_NAMING_JS = (
   }
 
   function abName(el) {
-    const tag = el.tagName.toLowerCase();
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    const labelledBy = (el.getAttribute('aria-labelledby') || '')
+    const tag = dom.tagName(el).toLowerCase();
+    const type = (dom.attr(el, 'type') || '').toLowerCase();
+    const labelledBy = (dom.attr(el, 'aria-labelledby') || '')
       .split(/\s+/)
       .filter(Boolean)
       .map((id) => document.getElementById(id))
       .filter(Boolean)
-      .map((node) => abClean(node.innerText || node.textContent))
+      .map((node) => abClean(dom.text(node) || dom.textContent(node)))
       .filter(Boolean)
       .join(' ');
     if (labelledBy) return labelledBy;
-    const aria = abClean(el.getAttribute('aria-label'));
+    const aria = abClean(dom.attr(el, 'aria-label'));
     if (aria) return aria;
-    if (el.labels && el.labels.length) {
-      const fromLabels = Array.from(el.labels).map(abLabelText).filter(Boolean).join(' ');
-      if (fromLabels) return fromLabels;
-    }
+    const fromLabels = dom.labels(el).map(abLabelText).filter(Boolean).join(' ');
+    if (fromLabels) return fromLabels;
     if (tag === 'input' && ['button', 'submit', 'reset'].includes(type)) {
       const caption = abClean(el.value);
       if (caption) return caption;
@@ -385,31 +393,31 @@ _ELEMENT_NAMING_JS = (
     // editors (contenteditable) and ARIA widgets whose content is their value
     // as well as native inputs: typed text into any of them must not come back
     // as the element's label.
-    const explicitRole = abClean(el.getAttribute('role')).split(' ')[0];
+    const explicitRole = abClean(dom.attr(el, 'role')).split(' ')[0];
     const isField = tag === 'input' || tag === 'textarea' || tag === 'select'
-      || el.isContentEditable
+      || dom.editable(el)
       || ['textbox', 'searchbox', 'combobox', 'spinbutton', 'slider'].includes(explicitRole);
     if (!isField) {
-      const text = abClean(el.innerText);
+      const text = abClean(dom.text(el));
       if (text) return text;
-      const image = el.querySelector ? el.querySelector('img[alt]') : null;
+      const image = dom.first(el, 'img[alt]');
       const alt = image ? abClean(image.getAttribute('alt')) : '';
       if (alt) return alt;
     }
     return abClean(
-      el.getAttribute('title')
-        || el.getAttribute('placeholder')
-        || el.getAttribute('name')
-        || el.id
+      dom.attr(el, 'title')
+        || dom.attr(el, 'placeholder')
+        || dom.attr(el, 'name')
+        || dom.id(el)
         || (tag === 'a' ? el.getAttribute('href') : '')
     );
   }
 
   function abRole(el) {
-    const explicit = abCap(abClean(el.getAttribute('role')).split(' ')[0], AB_ATTR_MAX);
+    const explicit = abCap(abClean(dom.attr(el, 'role')).split(' ')[0], AB_ATTR_MAX);
     if (explicit) return explicit;
-    const tag = el.tagName.toLowerCase();
-    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    const tag = dom.tagName(el).toLowerCase();
+    const type = (dom.attr(el, 'type') || 'text').toLowerCase();
     if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
     if (tag === 'button' || tag === 'summary') return 'button';
     if (tag === 'textarea') return 'textbox';
@@ -424,16 +432,18 @@ _ELEMENT_NAMING_JS = (
       if (type === 'file') return 'file';
       return 'textbox';
     }
-    if (el.isContentEditable) return 'textbox';
+    if (dom.editable(el)) return 'textbox';
     return tag;
   }
 
   function abChecked(el) {
-    const aria = el.getAttribute('aria-checked') || el.getAttribute('aria-pressed') || el.getAttribute('aria-selected');
+    const aria = dom.attr(el, 'aria-checked') || dom.attr(el, 'aria-pressed') || dom.attr(el, 'aria-selected');
     if (aria === 'true' || aria === 'mixed') return aria === 'true' ? true : 'mixed';
     if (aria === 'false') return false;
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    if (el.tagName.toLowerCase() === 'input' && (type === 'checkbox' || type === 'radio')) return Boolean(el.checked);
+    const type = (dom.attr(el, 'type') || '').toLowerCase();
+    if (dom.tagName(el).toLowerCase() === 'input' && (type === 'checkbox' || type === 'radio')) {
+      return Boolean(el.checked);
+    }
     return null;
   }
 
@@ -441,10 +451,10 @@ _ELEMENT_NAMING_JS = (
     const el = document.activeElement;
     if (!el) return null;
     return {
-      tag: el.tagName.toLowerCase(),
+      tag: dom.tagName(el).toLowerCase(),
       element_id: elementIds ? elementIds.idOf(el) : null,
-      name: abCap(el.getAttribute('name'), AB_ATTR_MAX),
-      id: abCap(el.id || null, AB_ATTR_MAX),
+      name: abCap(dom.attr(el, 'name'), AB_ATTR_MAX),
+      id: abCap(dom.id(el) || null, AB_ATTR_MAX),
       label: abSlice(abName(el), 120)
     };
   }
@@ -461,7 +471,7 @@ INTERACTABLES_SCRIPT = _with_element_naming(
 (limit, elementIds) => {
 /*__ELEMENT_NAMING__*/
   function isVisible(el) {
-    const rect = el.getBoundingClientRect();
+    const rect = dom.rect(el);
     const style = window.getComputedStyle(el);
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   }
@@ -489,24 +499,31 @@ INTERACTABLES_SCRIPT = _with_element_naming(
     '[tabindex]'
   ].join(',');
 
+  // The kinds of element that have a `disabled` and an `href` of their own, as the browser has them (156): each is read
+  // only on such a kind. A form has neither, and its named controls answer for both there.
+  const HAS_DISABLED = ['BUTTON', 'FIELDSET', 'INPUT', 'LINK', 'OPTGROUP', 'OPTION', 'SELECT', 'STYLE', 'TEXTAREA'];
+  const HAS_HREF = ['A', 'AREA', 'BASE', 'LINK', 'FEIMAGE', 'FILTER', 'IMAGE', 'LINEARGRADIENT', 'MPATH', 'PATTERN',
+    'RADIALGRADIENT', 'SCRIPT', 'TEXTPATH', 'USE'];
+
   const out = [];
   for (const el of document.querySelectorAll(selector)) {
-    if (!isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
+    if (!isVisible(el) || dom.closest(el, '[aria-hidden="true"]')) continue;
     // Nothing is written into the page: the id lives in the registry. The
     // hint keeps its old form, and the controller reads it as this element_id
     // when it comes back as a selector; no element carries that attribute.
     const elementId = elementIds ? elementIds.issue(el) : null;
-    const rect = el.getBoundingClientRect();
+    const rect = dom.rect(el);
+    const kind = dom.tag(el);
     out.push({
       element_id: elementId,
       selector_hint: elementId ? `[data-operator-id="${elementId}"]` : null,
-      tag: el.tagName.toLowerCase(),
-      type: abCap(el.getAttribute('type'), AB_ATTR_MAX),
+      tag: dom.tagName(el).toLowerCase(),
+      type: abCap(dom.attr(el, 'type'), AB_ATTR_MAX),
       role: abRole(el),
       label: abSlice(abName(el), 160),
       checked: abChecked(el),
-      disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-      href: abCapUrl(el.href || null),
+      disabled: Boolean((HAS_DISABLED.includes(kind) && el.disabled) || dom.attr(el, 'aria-disabled') === 'true'),
+      href: abCapUrl((HAS_HREF.includes(kind) && el.href) || null),
       bbox: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
@@ -572,9 +589,9 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   const forms = Array.from(document.forms)
     .slice(0, 3)
     .map((form) => ({
-      action: abCapUrl(form.getAttribute('action') || null),
-      method: abCap((form.getAttribute('method') || 'get').toLowerCase(), AB_ATTR_MAX),
-      fields: Array.from(form.querySelectorAll('input, textarea, select, button'))
+      action: abCapUrl(dom.attr(form, 'action') || null),
+      method: abCap((dom.attr(form, 'method') || 'get').toLowerCase(), AB_ATTR_MAX),
+      fields: Array.from(dom.all(form, 'input, textarea, select, button'))
         .slice(0, 8)
         .map((field) => ({
           tag: field.tagName.toLowerCase(),

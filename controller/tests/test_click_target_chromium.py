@@ -29,6 +29,7 @@ from app.browser.click_target import (
     READ_TIMEOUT_MS,
     same_element_at,
 )
+from app.browser.element_scripts import DOM_JS
 from app.browser.services import actions as actions_module
 from app.models import BrowserActionDecision
 from tests.test_element_ids import _shared_chromium, browser_env, pytestmark  # noqa: F401
@@ -316,7 +317,7 @@ NOT_ENTERED = {
 # frame element on the way]. Run where the page's script runs, with each window the page can reach marked
 # first; one of another origin cannot be asked at all.
 _READ_AT_AND_COUNT = (
-    "([x, y]) => { let asked = 0; "
+    "([x, y]) => { " + DOM_JS + " let asked = 0; "
     "for (let index = 0; index < window.length; index += 1) { try { const held = window[index]; "
     "const frame = held.frameElement; "
     "Object.defineProperty(held, 'frameElement', { get() { asked += 1; return frame; } }); "
@@ -1913,6 +1914,48 @@ async def test_a_placed_click_whose_page_is_busy_at_its_last_question_ends_as_a_
         assert await _title(env, session_id) == "start"
 
 
+# Element.prototype.getAttribute, in the page's own world, replaced by a function whose first call runs on for `ms`
+# milliseconds before it answers: the page answers nothing meanwhile.
+GET_ATTRIBUTE_THAT_RUNS_ON = """(ms) => {
+  const getAttribute = Element.prototype.getAttribute;
+  let ran = false;
+  Element.prototype.getAttribute = function (...args) {
+    if (!ran) {
+      ran = true;
+      const end = performance.now() + ms;
+      while (performance.now() < end) {}
+    }
+    return getAttribute.apply(this, args);
+  };
+}"""
+
+
+async def test_a_click_by_selector_whose_enabled_question_the_page_holds_ends_at_its_budget(tmp_path: Path) -> None:
+    # By selector the controller's enabled question runs in the page's own world, on Element.prototype.getAttribute as
+    # the page has it there, and Locator.evaluate's timeout bounds only the finding of the element: a page whose
+    # getAttribute ran on for four budgets held the click until it returned. The question is asked within the click's
+    # budget, and the click ends there as at any of its waits, with nothing pressed.
+    budget_ms = 1000
+    async with browser_env(tmp_path, {"/": TURNED_OFF}) as env:
+        session_id = await env.create("/")
+        env.manager.settings.action_timeout_ms = budget_ms
+        page = env.page(session_id)
+        locator = page.locator("#go").first
+        box = await locator.bounding_box()
+        assert box is not None
+        middle = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        await page.evaluate(GET_ATTRIBUTE_THAT_RUNS_ON, 4 * budget_ms)
+        clicking = env.manager.actions.click_locator_human_like(env.manager.sessions[session_id], locator, middle)
+
+        began = asyncio.get_running_loop().time()
+        with pytest.raises(PlaywrightTimeoutError):
+            await asyncio.wait_for(clicking, 10)
+        took = asyncio.get_running_loop().time() - began
+
+        assert took < 1.5 * budget_ms / 1000, took
+        assert await _title(env, session_id) == "start"
+
+
 async def test_only_a_placed_click_takes_its_target_for_the_button_or_link_it_is_in_and_never_a_field(
     tmp_path: Path,
 ) -> None:
@@ -2016,7 +2059,9 @@ async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed
     # gives the click to Playwright's placing. Asked once more where Playwright's hover had put the pointer, it
     # ran out the same way, and there a no ends the click: a read click on a button eight frames down failed
     # every time, where the click that is not read, Playwright's own, pressed it.
-    # Each walk that ran out also left one element handle behind, the last frame's, taken and never asked.
+    # Each walk that ran out also left one element handle behind, the last frame's, taken and never asked. Since
+    # B1-fix1 item 25 a walk that runs out takes no such handle: the target's and one for each frame it asked, depth
+    # in all, each given back.
     taken: list[Any] = []
     disposed: list[Any] = []
 
@@ -2042,7 +2087,7 @@ async def test_a_button_more_frames_down_than_the_check_goes_up_is_still_pressed
         else:
             await env.manager.execute_decision(session_id, _click("read", selector=selector))
         assert await _title(env, session_id) == "PRESSED"
-        assert len(taken) > depth and [handle for handle in taken if handle not in disposed] == []
+        assert len(taken) >= depth and [handle for handle in taken if handle not in disposed] == []
 
 
 @pytest.mark.parametrize(("depth", "by_playwright"), [(7, 0), (8, 1)])

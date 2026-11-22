@@ -5,33 +5,12 @@ A model of `--dangerously-bypass-approvals-and-sandbox` was handed to the CLI as
 
 from __future__ import annotations
 
-import importlib.util
-import socketserver
-import sys
 import unittest
-from pathlib import Path
 
 from app.models import MODEL_NAME_PATTERN
+from tests._codex_bridge import BRIDGE_SCRIPT, load_bridge
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "codex_host_bridge.py"
-
-
-def _load_bridge():
-    shimmed = not hasattr(socketserver, "UnixStreamServer")
-    if shimmed:
-        socketserver.UnixStreamServer = socketserver.TCPServer
-    try:
-        spec = importlib.util.spec_from_file_location("codex_host_bridge_model_under_test", _SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        if shimmed:
-            del socketserver.UnixStreamServer
-
-
-bridge = _load_bridge() if _SCRIPT.is_file() else None
+bridge = load_bridge("codex_host_bridge_model_under_test") if BRIDGE_SCRIPT.is_file() else None
 _PAYLOAD = {"prompt": "p", "schema": {"type": "object"}}
 
 

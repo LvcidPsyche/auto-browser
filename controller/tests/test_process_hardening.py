@@ -155,28 +155,7 @@ class NonDumpableFailureTests(unittest.TestCase):
 
 
 class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
-    async def test_the_lifespan_makes_the_controller_non_dumpable_before_anything_else(self) -> None:
-        from app import main
-
-        order: list[str] = []
-
-        class _Stop(Exception):
-            pass
-
-        def credential(_settings):
-            order.append("credential")
-            raise _Stop
-
-        with (
-            patch("app.process_hardening.make_non_dumpable", side_effect=lambda: order.append("dumpable")),
-            patch.object(main, "ensure_api_credential", side_effect=credential),
-        ):
-            with self.assertRaises(_Stop):
-                async with main.lifespan(main.app):
-                    pass
-        self.assertEqual(order, ["dumpable", "credential"])
-
-    async def test_the_lifespan_confines_tesseract_before_anything_can_run_ocr(self) -> None:
+    async def test_the_lifespan_makes_its_temp_directory_then_itself_non_dumpable_then_confines_tesseract(self) -> None:
         from app import main
 
         order: list[str] = []
@@ -191,6 +170,10 @@ class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("app.process_hardening.make_non_dumpable", side_effect=lambda: order.append("dumpable")),
             patch(
+                "app.process_hardening.use_private_temp_directory",
+                side_effect=lambda: order.append("temp"),
+            ),
+            patch(
                 "app.process_hardening.confine_tesseract_environment",
                 side_effect=lambda: order.append("tesseract"),
             ),
@@ -199,7 +182,7 @@ class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(_Stop):
                 async with main.lifespan(main.app):
                     pass
-        self.assertEqual(order, ["dumpable", "tesseract", "credential"])
+        self.assertEqual(order, ["temp", "dumpable", "tesseract", "credential"])
 
     @unittest.skipUnless(_BRIDGE.is_file(), "scripts/ is not shipped in the controller image")
     def test_the_bridge_main_makes_itself_non_dumpable_before_anything_else(self) -> None:
@@ -635,50 +618,55 @@ class RegexWorkerEnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(set(seen[0]), {"SYSTEMROOT"})
 
 
+async def _autossh_environment(env: dict[str, str]) -> dict[str, str]:
+    """The environment a tunnel's autossh is started with, ``env`` being the controller's."""
+    from app.session_tunnel import IsolatedSessionTunnelBroker
+
+    from .test_session_tunnel import FakeProcess
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        root = Path(tempdir)
+        (root / "id_ed25519").write_text("dummy", encoding="utf-8")
+        (root / "known_hosts").write_text("dummy", encoding="utf-8")
+        settings = Settings(
+            _env_file=None,
+            ISOLATED_TUNNEL_ENABLED="true",
+            ISOLATED_TUNNEL_HOST="bastion.example.com",
+            ISOLATED_TUNNEL_USER="tunnel",
+            ISOLATED_TUNNEL_KEY_PATH=str(root / "id_ed25519"),
+            ISOLATED_TUNNEL_KNOWN_HOSTS_PATH=str(root / "known_hosts"),
+            ISOLATED_TUNNEL_INFO_ROOT=str(root / "sessions"),
+            ISOLATED_TUNNEL_REMOTE_PORT_START=16181,
+            ISOLATED_TUNNEL_REMOTE_PORT_END=16181,
+            ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS=0,
+        )
+        broker = IsolatedSessionTunnelBroker(settings)
+        await broker.startup()
+        seen: list = []
+
+        async def fake_exec(*args, **kwargs):
+            seen.append(kwargs.get("env"))
+            return FakeProcess()
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
+        ):
+            tunnel = await broker.provision("session-env", local_host="browser-session-env", local_port=6080)
+        await broker.release(tunnel)
+    (started,) = seen
+    return started
+
+
 class AutosshEnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_autossh_gets_the_base_names_and_its_own_autossh_variables_only(self) -> None:
-        from app.session_tunnel import IsolatedSessionTunnelBroker
+        # B5-fix3 item 9 (C3-11): a HOME of the test's own, so that an environment that set the image's default
+        # (/home/controller) in place of the controller's own does not pass.
+        env = {"PATH": "/usr/bin", "HOME": "/srv/autossh-test-home-5b1e", "LC_ALL": "C", "AUTOSSH_POLL": "30"}
 
-        from .test_session_tunnel import FakeProcess
+        started = await _autossh_environment({**env, SENTINEL_NAME: SENTINEL})
 
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            (root / "id_ed25519").write_text("dummy", encoding="utf-8")
-            (root / "known_hosts").write_text("dummy", encoding="utf-8")
-            settings = Settings(
-                _env_file=None,
-                ISOLATED_TUNNEL_ENABLED="true",
-                ISOLATED_TUNNEL_HOST="bastion.example.com",
-                ISOLATED_TUNNEL_USER="tunnel",
-                ISOLATED_TUNNEL_KEY_PATH=str(root / "id_ed25519"),
-                ISOLATED_TUNNEL_KNOWN_HOSTS_PATH=str(root / "known_hosts"),
-                ISOLATED_TUNNEL_INFO_ROOT=str(root / "sessions"),
-                ISOLATED_TUNNEL_REMOTE_PORT_START=16181,
-                ISOLATED_TUNNEL_REMOTE_PORT_END=16181,
-                ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS=0,
-            )
-            broker = IsolatedSessionTunnelBroker(settings)
-            await broker.startup()
-            seen: list = []
-
-            async def fake_exec(*args, **kwargs):
-                seen.append(kwargs.get("env"))
-                return FakeProcess()
-
-            env = {
-                "PATH": "/usr/bin",
-                "HOME": str(root),
-                "LC_ALL": "C",
-                "AUTOSSH_POLL": "30",
-                SENTINEL_NAME: SENTINEL,
-            }
-            with (
-                patch.dict(os.environ, env, clear=True),
-                patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
-            ):
-                tunnel = await broker.provision("session-env", local_host="browser-session-env", local_port=6080)
-            await broker.release(tunnel)
-        self.assertEqual(seen, [{"PATH": "/usr/bin", "HOME": str(root), "LC_ALL": "C", "AUTOSSH_POLL": "30"}])
+        self.assertEqual(started, env)
 
 
 if __name__ == "__main__":

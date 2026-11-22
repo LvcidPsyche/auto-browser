@@ -9,6 +9,19 @@ from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderDecision
 # Current Claude models think on every request, and thinking counts against
 # max_tokens; 1024 could run out before the tool call was written.
 _MAX_TOKENS = 16_000
+# A CLI call's --settings value. What each key turns off:
+_CLI_SETTINGS = json.dumps(
+    {
+        # every hook of the user, project and local settings files and of the plugins
+        "disableAllHooks": True,
+        # each CLAUDE.md, CLAUDE.local.md and rules file: the home's .claude, the call's directory and its parents
+        "claudeMdExcludes": ["**"],
+        # the auto memory's MEMORY.md
+        "autoMemoryEnabled": False,
+        # the LSP tool a plugin's language servers add
+        "permissions": {"deny": ["LSP"]},
+    }
+)
 
 
 class ClaudeAdapter(BaseProviderAdapter):
@@ -180,6 +193,11 @@ class ClaudeAdapter(BaseProviderAdapter):
             "--tools",
             "",
             "--no-session-persistence",
+            # No MCP server: only those a --mcp-config names load, and none is given. A bare --mcp-config here would
+            # take every word after it, the prompt too.
+            "--strict-mcp-config",
+            "--settings",
+            _CLI_SETTINGS,
             prompt,
         ]
         if model:

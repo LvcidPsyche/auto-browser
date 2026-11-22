@@ -16,8 +16,10 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 
+from app.action_errors import BrowserActionError
 from app.browser.element_target import ElementTarget
 from app.browser.page_read import bounded
+from app.browser.services import actions as actions_module
 from app.browser.services import tabs as tabs_module
 from app.cdp.passthrough import CDPPassthrough
 from app.routes.extensions import cdp as cdp_routes
@@ -126,15 +128,17 @@ async def test_a_drag_cut_off_by_its_deadline_still_releases_the_button(tmp_path
 
 
 async def test_a_button_release_that_never_answers_is_bounded(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(drag_module, "MOUSE_UP_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(actions_module, "MOUSE_UP_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("app.browser.page_read.PAGE_READ_TIMEOUT_SECONDS", PAGE_BOUND_SECONDS)
     manager, session = still_session(tmp_path)
     session.page.mouse.up = hang
 
-    with pytest.raises(RuntimeError, match="not released"):
+    with pytest.raises(BrowserActionError) as ended:
         await asyncio.wait_for(gateway_for(manager)._drag_drop(drag_payload()), timeout=TEST_BOUND_SECONDS)
 
     assert not session.lock.locked()
+    # B1-fix1 item 5: a typed error, not to be retried: the drag went down and its button may still be held.
+    assert (ended.value.code, ended.value.status_code, ended.value.retryable) == ("mouse_not_released", 504, False)
 
 
 class Button:
@@ -489,3 +493,39 @@ def test_a_cdp_attach_or_detach_that_never_answers_is_504_and_lets_go_of_the_ses
 
     assert response.status_code == 504, response.text
     assert cdp.session.lock.held is False
+
+
+@pytest.mark.parametrize(
+    ("ended", "cancelled_at_the_release", "logged"),
+    [
+        ("failed", False, "after a press that failed"),
+        ("was cancelled", False, "after a press that was cancelled"),
+        ("failed", True, "after a press, with the action cancelled while it was let go"),
+    ],
+)
+async def test_a_release_that_fails_after_a_press_is_logged_as_what_happened(
+    caplog: pytest.LogCaptureFixture, ended: str, cancelled_at_the_release: bool, logged: str
+) -> None:
+    # B1-fix2 item 13 (the Opus correctness read, F13): a release that failed while a cancel came was logged as one
+    # "after a press that was cancelled", where the press had failed (or gone in) and the cancel came as the button
+    # was let go. Each log line says what happened.
+    up_started = asyncio.Event()
+
+    async def up() -> None:
+        up_started.set()
+        await asyncio.sleep(0.05)
+        raise PlaywrightError("Target page, context or browser has been closed")
+
+    page = SimpleNamespace(mouse=SimpleNamespace(up=up))
+    error = asyncio.CancelledError() if ended == "was cancelled" else PlaywrightError("mouse.down failed")
+
+    with caplog.at_level("WARNING", logger=actions_module.logger.name):
+        releasing = asyncio.ensure_future(actions_module.release_mouse_after_failure(page, "press", error))
+        await up_started.wait()
+        if cancelled_at_the_release:
+            releasing.cancel()
+        done, _ = await asyncio.wait({releasing}, timeout=TEST_BOUND_SECONDS)
+
+    assert done and releasing.cancelled() is cancelled_at_the_release
+    lines = [record.getMessage() for record in caplog.records if "could not release" in record.getMessage()]
+    assert [line.split("button ", 1)[1].split(": ", 1)[0] for line in lines] == [logged], lines

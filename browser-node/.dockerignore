@@ -1,0 +1,9 @@
+# Kept out of what the browser-node image's build is sent: .git, .venv*, the host's node_modules (the image runs
+# npm ci itself), __pycache__, data and .env* files. The image copies package.json, package-lock.json,
+# policies/, entrypoint.sh, server.mjs, sandbox.mjs, sandbox-report.mjs and novnc_origin.py.
+.git
+**/.venv*
+**/node_modules
+**/__pycache__
+data
+**/.env*

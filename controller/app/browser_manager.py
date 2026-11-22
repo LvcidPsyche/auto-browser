@@ -342,7 +342,7 @@ class BrowserManager:
         self.playwright = await async_playwright().start()
         await self.tunnel_broker.startup()
         await self.runtime_provisioner.startup()
-        if self.settings.session_isolation_mode == "shared_browser_node":
+        if self.settings.session_isolation_mode == "shared_browser_node" and self.settings.connect_at_startup:
             await self.ensure_browser()
 
     async def shutdown(self) -> None:

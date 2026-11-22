@@ -15,6 +15,7 @@ from app.providers.base import PAGE_DATA_NOTICE, CLIResult, ProviderAPIError
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
+from tests._codex_mcp_list import answers_mcp_list
 
 
 class HealthzUnixSocketServer:
@@ -98,11 +99,13 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         )
         adapter = OpenAIAdapter(settings)
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
+        @answers_mcp_list
+        async def fake_run_cli(*, command, input_text=None, **_):
             self.assertIn("exec", command)
             self.assertIn("-c", command)
             self.assertIn("agents={}", command)
-            self.assertIn("mcp_servers={}", command)
+            self.assertIn("project_root_markers=[]", command)
+            self.assertNotIn("mcp_servers={}", command)
             self.assertIn("--output-schema", command)
             self.assertIn("--output-last-message", command)
             self.assertIn("--image", command)
@@ -196,6 +199,31 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.model, "gemini-2.5-pro")
         self.assertEqual(result.decision.action, "done")
+
+    async def test_gemini_cli_allows_only_an_mcp_server_name_made_for_the_call(self) -> None:
+        # No MCP server loads: the one name allowed is made for each call, so none planted in the home, which the
+        # CLI writes, can have it.
+        adapter = GeminiAdapter(Settings(_env_file=None, GEMINI_AUTH_MODE="cli", GEMINI_CLI_PATH="gemini"))
+        fake_stdout = '{"decision":{"action":"done","reason":"complete","risk_category":"read"}}'
+        adapter.run_cli = AsyncMock(
+            return_value=CLIResult(command=["gemini"], stdout=fake_stdout, stderr="", returncode=0)
+        )
+        names: list[str] = []
+        for _ in range(2):
+            await adapter._decide(
+                goal="Finish the task",
+                observation=self.observation,
+                context_hints=None,
+                previous_steps=[],
+                model_override=None,
+            )
+            command = adapter.run_cli.await_args.kwargs["command"]
+            self.assertEqual(command.count("--allowed-mcp-server-names"), 1, command)
+            names.append(command[command.index("--allowed-mcp-server-names") + 1])
+
+        for name in names:
+            self.assertRegex(name, r"^ab-none-[0-9a-f]{32}$")
+        self.assertNotEqual(names[0], names[1])
 
     async def test_openai_host_bridge_mode_parses_response(self) -> None:
         settings = Settings(
@@ -311,6 +339,40 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 429)
         self.assertTrue(ctx.exception.retryable)
         self.assertIn("still limited", str(ctx.exception))
+
+    async def test_openai_host_bridge_refusal_is_requested_once_and_a_timeout_is_retried(self) -> None:
+        # A call the bridge refuses before its exec is answered 409 with its error; one that timed out, 504.
+        settings = Settings(
+            _env_file=None,
+            OPENAI_AUTH_MODE="host_bridge",
+            OPENAI_HOST_BRIDGE_SOCKET=str(Path(self.tempdir.name) / "codex.sock"),
+        )
+        settings.model_retry_backoff_seconds = 0
+        settings.model_max_retries = 1  # one retry: a 409 asked for twice, or a 504 not asked for again, fails
+        adapter = OpenAIAdapter(settings)
+        request = httpx.Request("POST", "http://host-bridge/openai/decide")
+        refusal = (
+            "the Codex configuration keeps on MCP servers that a decision call turns off, so the Codex call was not "
+            "made; see the bridge log"
+        )
+        decided = httpx.Response(200, request=request, json={"raw_text": "{}", "model": "codex-default"})
+
+        refused = FakeAsyncClient([httpx.Response(409, request=request, json={"error": refusal}), decided])
+        with patch("app.providers.openai_adapter.httpx.AsyncClient", return_value=refused):
+            with self.assertRaises(ProviderAPIError) as ctx:
+                await adapter._post_host_bridge_request({"demo": True})
+
+        self.assertEqual(refused.responses, [decided])  # requested once
+        self.assertEqual((ctx.exception.status_code, ctx.exception.retryable), (409, False))
+        self.assertEqual(ctx.exception.message, refusal)
+
+        timed_out = httpx.Response(504, request=request, json={"error": "codex timed out after 55s"})
+        retried = FakeAsyncClient([timed_out, decided])
+        with patch("app.providers.openai_adapter.httpx.AsyncClient", return_value=retried):
+            payload = await adapter._post_host_bridge_request({"demo": True})
+
+        self.assertEqual(retried.responses, [])
+        self.assertEqual(payload["model"], "codex-default")
 
     def test_cli_configured_checks_binary_path(self) -> None:
         self.touch(".codex/auth.json")

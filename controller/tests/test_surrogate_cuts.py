@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app import browser_scripts
+from tests.test_element_naming import FAKE_PROTOTYPES
 
 NODE = shutil.which("node")
 EMOJI = "\U0001f600"
@@ -65,7 +66,7 @@ def _run(**names: str) -> dict:
     }
     # The summary's text limit: the excerpt is the body cut at it.
     limit = 50
-    source = _RUNNER % {
+    source = FAKE_PROTOTYPES + _RUNNER % {
         "names": json.dumps({**cuts, **names}),
         "limit": limit,
         "interactables": browser_scripts.INTERACTABLES_SCRIPT,

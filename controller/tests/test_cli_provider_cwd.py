@@ -22,6 +22,7 @@ from app.providers.base import CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
+from tests._codex_mcp_list import answers_mcp_list
 
 # What the one error says, wherever the private CLI home failed; never a server path.
 UNUSABLE = "set CLI_HOME to a writable directory"
@@ -329,7 +330,8 @@ async def test_the_codex_per_call_directory_is_made_under_the_cli_home() -> None
         adapter = OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex"))
         seen: list[str | None] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
+        @answers_mcp_list
+        async def fake_run_cli(*, command, cwd=None, **_):
             seen.append(cwd)
             output = Path(command[command.index("--output-last-message") + 1])
             output.write_text('{"action":"done","reason":"x","risk_category":"read"}', encoding="utf-8")

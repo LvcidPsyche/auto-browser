@@ -23,6 +23,7 @@ from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
 from app.providers.openai_compatible import OPENAI_COMPATIBLE_PROFILES, OpenAICompatibleAdapter
+from tests._codex_mcp_list import answers_mcp_list, listing_no_servers
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -136,7 +137,8 @@ class AdaptersWithoutScreenshotTests(unittest.IsolatedAsyncioTestCase):
         adapter = OpenAIAdapter(_settings(OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex", CLI_HOME=cli_home))
         commands: list[list[str]] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
+        @answers_mcp_list
+        async def fake_run_cli(*, command, **_):
             commands.append(command)
             output_path = Path(command[command.index("--output-last-message") + 1])
             output_path.write_text('{"action":"done","reason":"x","risk_category":"read"}', encoding="utf-8")
@@ -186,7 +188,8 @@ class HostBridgeWithoutScreenshotTests(unittest.TestCase):
         self.module = codex_host_bridge
 
     def _run(self, payload: dict[str, Any]) -> list[str]:
-        """Run handle_openai_decide with codex faked at subprocess.Popen (the bridge's launcher); return its command."""
+        """Run handle_openai_decide with codex faked at subprocess.Popen (the bridge's launcher); return its exec's
+        command."""
         service = self.module.CodexBridgeService(codex_path="codex")
         seen: list[list[str]] = []
 
@@ -200,7 +203,7 @@ class HostBridgeWithoutScreenshotTests(unittest.TestCase):
             def communicate(self, input=None, timeout=None):
                 return b"", b""
 
-        with patch.object(self.module.subprocess, "Popen", FakeCodex):
+        with patch.object(self.module.subprocess, "Popen", listing_no_servers(FakeCodex)):
             service.handle_openai_decide(payload)
         return seen[0]
 

@@ -23,6 +23,11 @@ Landlock only allows, so the ruleset names what stays open:
 So outside ROOT a CLI reads, lists and runs what it did before, and writes only in the --rw directories: as root
 too, since the ruleset binds root as it binds anyone.
 
+Where the kernel has Landlock's scopes (ABI 6, Linux 6.12) the ruleset sets both: the CLI cannot signal a process
+outside its Landlock domain (the controller, another call's CLI) or connect to an abstract Unix socket that such a
+process made. What the CLI starts is in its domain: it still signals those processes and connects to their sockets.
+Below ABI 6 both stay open.
+
 No rule goes on ROOT or on a directory that holds it, so what is in ROOT and has no rule of its own is closed, to
 root as to anyone, and so is listing / itself. A symbolic link gets no rule: the place it names has one, or is in
 ROOT, or holds it. ROOT is read as it is written: one whose holding directory is reached through a link is refused,
@@ -34,7 +39,8 @@ It execs only with the ruleset on. The exit statuses that are its own, each with
 MARKER and names the call that failed:
 
 - 125 (EXIT_NOT_APPLIED): the ruleset is not on, and the CLI was not started. Wrong arguments, a grant that cannot
-  be made as asked, a kernel without Landlock, or a kernel call that failed.
+  be made as asked, a machine whose Landlock call numbers it does not know, a kernel without Landlock, or a kernel
+  call that failed.
 - 126 (EXIT_NOT_RUN): the ruleset is on, and the CLI was found and could not be run.
 - 127 (EXIT_NOT_FOUND): the ruleset is on, and there is no such CLI, or no such interpreter for its #! line (execve
   answers ENOENT for both).
@@ -76,11 +82,24 @@ FILE_RIGHTS = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV
 # What an entry beside the root keeps: to read, to list and to run, and nothing that writes. All three are the first
 # ABI's, so every ruleset handles them.
 READ_AND_RUN = EXECUTE | READ_FILE | READ_DIR
+# Landlock's scopes, by the bit each has in linux/landlock.h, and the ABI they came with.
+SCOPE_ABSTRACT_UNIX_SOCKET = 1 << 0
+SCOPE_SIGNAL = 1 << 1
+_SCOPES_SINCE_ABI = 6
 
-# The same numbers on x86-64 and arm64.
+# Landlock's calls have these numbers on every architecture but alpha, ia64 and MIPS (since Linux 5.1 a new call
+# takes one number everywhere else) and x32, which sets a bit in them. _MACHINES are the architectures, as
+# os.uname() names them, that the launcher runs on: the image's two, where the numbers are measured, and the others
+# whose kernels number the calls so. On any other machine the launcher makes no call by these numbers.
 _SYS_LANDLOCK_CREATE_RULESET = 444
 _SYS_LANDLOCK_ADD_RULE = 445
 _SYS_LANDLOCK_RESTRICT_SELF = 446
+_MACHINES = frozenset(
+    {"x86_64", "aarch64", "i386", "i486", "i586", "i686", "armv6l", "armv7l", "armv8l", "riscv64", "ppc64le", "s390x"}
+)
+# x32 runs on an x86-64 kernel, which os.uname() names x86_64: its processes have 4-byte pointers, as an i386
+# process on that kernel has, which cannot be told from it here.
+_POINTER_BYTES = struct.calcsize("P")
 _LANDLOCK_CREATE_RULESET_VERSION = 1
 _LANDLOCK_RULE_PATH_BENEATH = 1
 _PR_SET_NO_NEW_PRIVS = 38
@@ -109,6 +128,11 @@ def handled_rights(abi: int) -> int:
         if abi >= since:
             rights |= right
     return rights
+
+
+def handled_scopes(abi: int) -> int:
+    """The scopes a ruleset sets under Landlock ABI ``abi``: both from ABI 6, none below it."""
+    return SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL if abi >= _SCOPES_SINCE_ABI else 0
 
 
 def beside_the_root(root: str, listdir) -> list[str]:
@@ -181,13 +205,14 @@ def _grant(kernel, ruleset: int, option: str, path: str, rights: int, *, directo
 
 def apply(kernel, root: str, writable: list[str], readable_files: list[str]) -> None:
     """Restrict this process, for good: see the module's text for what stays open. NotApplied if any step fails."""
-    handled = handled_rights(kernel.abi())
+    abi = kernel.abi()
+    handled = handled_rights(abi)
     # The walk reads root as it is written. Where a directory that holds it is reached through a link, an entry
     # beside that link may be what really holds the root, and its rule would open it.
     holder = posixpath.dirname(root)
     if kernel.realpath(holder) != holder:
         raise NotApplied(f"--protect {root}", "a directory that holds it is reached through a link")
-    ruleset = kernel.create_ruleset(handled)
+    ruleset = kernel.create_ruleset(handled, handled_scopes(abi))
     try:
         for path in beside_the_root(root, kernel.listdir):
             _allow_beside(kernel, ruleset, path)
@@ -208,6 +233,9 @@ class _Linux:
     """The kernel, as apply() calls it. A call the kernel refuses is NotApplied, by the call's own name."""
 
     def __init__(self) -> None:
+        machine = os.uname().machine
+        if machine not in _MACHINES or (machine == "x86_64" and _POINTER_BYTES != 8):
+            raise NotApplied("machine", f"{machine}: its Landlock call numbers are not known")
         self._libc = ctypes.CDLL(None, use_errno=True)
         self._libc.syscall.restype = ctypes.c_long
 
@@ -224,10 +252,12 @@ class _Linux:
             "landlock_create_ruleset(version)", _SYS_LANDLOCK_CREATE_RULESET, None, ctypes.c_size_t(0), flags
         )
 
-    def create_ruleset(self, handled: int) -> int:
-        # The first, 8-byte form of struct landlock_ruleset_attr (handled_access_fs alone): every ABI takes it, and
-        # it handles no network right.
-        attribute = ctypes.c_uint64(handled)
+    def create_ruleset(self, handled: int, scoped: int) -> int:
+        # struct landlock_ruleset_attr is handled_access_fs, then handled_access_net (ABI 4), then scoped (ABI 6),
+        # 8 bytes each. Without scopes, its first 8-byte form, which every ABI takes; with them, all 24 bytes. Either
+        # way it handles no network right.
+        fields = (handled, 0, scoped) if scoped else (handled,)
+        attribute = (ctypes.c_uint64 * len(fields))(*fields)
         size = ctypes.c_size_t(ctypes.sizeof(attribute))
         return self._syscall(
             "landlock_create_ruleset", _SYS_LANDLOCK_CREATE_RULESET, ctypes.byref(attribute), size, ctypes.c_uint(0)

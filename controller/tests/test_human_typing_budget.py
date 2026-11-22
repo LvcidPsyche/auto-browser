@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 import time
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -51,6 +51,20 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         page.keyboard.insert_text.assert_not_awaited()
         return sleeps
 
+    async def test_a_text_whose_caller_says_no_before_a_key_stops_there(self) -> None:
+        # B1-fix1 item 4: keeps_on is asked before each key, and a no ends the typing there, False to the caller.
+        settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
+        service = BrowserActionService(SimpleNamespace(settings=settings))
+        page = SimpleNamespace(keyboard=SimpleNamespace(type=AsyncMock(), insert_text=AsyncMock()))
+        answers = iter([True, True, False])
+
+        with _on_a_stand_in_clock([]):
+            typed_all = await service.type_text_human_like(page, "123456", keeps_on=lambda: next(answers))
+
+        self.assertIs(typed_all, False)
+        self.assertEqual([call.args[0] for call in page.keyboard.type.await_args_list], ["1", "2"])
+        page.keyboard.insert_text.assert_not_awaited()
+
     async def test_a_long_text_finishes_within_the_budget(self) -> None:
         sleeps = await self._type("x" * 5000)
 
@@ -89,9 +103,14 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rest)
         self.assertEqual("".join(typed) + rest, text)
 
-    async def _type_past_the_deadline(self, text: str) -> list[tuple[str, str]]:
-        """Type `text` with the budget already spent, so all of it goes through the insert path; the calls made."""
+    async def _type_past_the_deadline(
+        self, text: str, keeps_on: Callable[[], bool] | None = None
+    ) -> list[tuple[str, str]]:
+        """Type `text` with the budget already spent, so all of it goes through the insert path; the calls made, in
+        order (kept as ``self.calls`` while it types, for a test to note what else happens between them). ``keeps_on``
+        is the typing's own (the TOTP autofill's host check); what the typing answers is kept as ``self.answered``."""
         calls: list[tuple[str, str]] = []
+        self.calls = calls
 
         async def record(kind: str, value: str) -> None:
             calls.append((kind, value))
@@ -107,10 +126,48 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         service = BrowserActionService(SimpleNamespace(settings=settings))
 
         with patch.object(actions_module, "HUMAN_TYPING_BUDGET_SECONDS", 0.0):
-            await service.type_text_human_like(SimpleNamespace(keyboard=keyboard), text)
+            self.answered = await service.type_text_human_like(
+                SimpleNamespace(keyboard=keyboard), text, keeps_on=keeps_on
+            )
 
         keyboard.type.assert_not_awaited()
         return calls
+
+    async def test_past_the_deadline_no_part_is_sent_once_keeps_on_says_no(self) -> None:
+        # B1-fix4 item 1 (Codex round 4 #1): the rest inserted past the deadline asks keeps_on before each part
+        # (B1-fix3 item 2), and no test held it: with the check left out, a page gone from the named host after the
+        # first part had Enter pressed and "34" inserted. A no from the start sends nothing; a no after the first part
+        # sends that part alone; and each answers False.
+        with self.subTest(keeps_on="no from the start"):
+            self.assertEqual(await self._type_past_the_deadline("12\n34", keeps_on=lambda: False), [])
+            self.assertIs(self.answered, False)
+        with self.subTest(keeps_on="no after the first part"):
+            answers = iter([True])
+            calls = await self._type_past_the_deadline("12\n34", keeps_on=lambda: next(answers, False))
+            self.assertEqual(calls, [("insert", "12")])
+            self.assertIs(self.answered, False)
+
+    async def test_past_the_deadline_a_part_goes_out_in_the_step_its_check_is_made(self) -> None:
+        # A departure the controller has queued as a part is checked (a navigation it hears of once the loop runs on)
+        # comes after that part is sent, as the check found the page, and before the next part's check: the part goes
+        # out under the state it was checked in, and nothing after it.
+        here = [True]
+
+        def left() -> None:
+            here[0] = False
+            self.calls.append(("left the host", ""))
+
+        checks = iter([True])
+
+        def keeps_on() -> bool:
+            if next(checks, False):
+                asyncio.get_running_loop().call_soon(left)
+            return here[0]
+
+        calls = await self._type_past_the_deadline("12\n34", keeps_on=keeps_on)
+
+        self.assertEqual(calls, [("insert", "12"), ("left the host", "")])
+        self.assertIs(self.answered, False)
 
     async def test_past_the_deadline_a_newline_is_still_pressed_as_enter_and_a_tab_goes_in_as_text(self) -> None:
         # insert_text of a newline into an <input> drops it, so a trailing newline that should submit would not. A

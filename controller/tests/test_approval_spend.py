@@ -27,6 +27,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError, ApprovalStore, held_for_execution
+from app.browser.element_scripts import ELEMENT_FOCUS_PLACE_SCRIPT
 from app.browser.services.actions import _PRESS_PLACE_SCRIPT
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
@@ -77,10 +78,13 @@ class FakeLocator:
     async def element_handle(self, **_given: Any) -> SimpleNamespace:
         # A type finds its field's element and makes its hold on it: the hold of a plain field that keeps focus.
         # Its approval asks the element for the fields the text could go to: this one, which says nothing secret.
-        # Its clear asks the element whether focus stayed in it: the one answer, which is not empty, says yes.
+        # Its clear asks the element where focus is (B1-fix1 item 2: focus and frames in one answer): in it.
+        async def evaluate(script: str = "", *_args: Any, **_given: Any) -> Any:
+            return "in" if script == ELEMENT_FOCUS_PLACE_SCRIPT else {"fields": [{}], "frame": False}
+
         return SimpleNamespace(
             evaluate_handle=AsyncMock(return_value=FakeFieldHold({})),
-            evaluate=AsyncMock(return_value={"fields": [{}], "frame": False}),
+            evaluate=AsyncMock(side_effect=evaluate),
             dispose=AsyncMock(),
         )
 
@@ -95,9 +99,8 @@ class FakeLocator:
                 "framed": False,
                 "counted": False,
             }
-        return True  # focus checks: the field has focus; the pointer check: the target is under it
-
-    async def is_enabled(self, **_: object) -> bool:
+        # The enabled check: the target is enabled; focus checks: the field has focus; the pointer check: the target
+        # is under it.
         return True
 
     async def hover(self, *, trial: bool = False, **_: object) -> None:

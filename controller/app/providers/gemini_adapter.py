@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import secrets
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from ..models import BrowserActionDecision, ResumeCheckpoint
 from .base import PAGE_DATA_NOTICE, BaseProviderAdapter, ProviderDecision
+
+# The start of the MCP server name a Gemini call allows, which no server has: random hex follows it.
+NO_MCP_SERVER_PREFIX = "ab-none-"
+# The system settings every Gemini CLI call is given (GEMINI_CLI_SYSTEM_SETTINGS_PATH), which declare no tool: no core
+# tool (`tools.core` is an allowlist), no skill, and none of the CLI's three agents, which have no allowlist. It ships
+# with the controller's code, which the CLI sandbox's check reports where a CLI may write it.
+SYSTEM_SETTINGS = Path(__file__).resolve().with_name("gemini_system_settings.json")
 
 
 class GeminiAdapter(BaseProviderAdapter):
@@ -18,6 +27,12 @@ class GeminiAdapter(BaseProviderAdapter):
         "GOOGLE_GENAI_USE_VERTEXAI",
         "GEMINI_CLI_HOME",
     )
+
+    def cli_environment(self) -> dict[str, str]:
+        env = super().cli_environment()
+        # The controller's own, over any passed through: the settings that declare no tool to the model.
+        env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(SYSTEM_SETTINGS)
+        return env
 
     @property
     def default_model(self) -> str:
@@ -159,6 +174,10 @@ class GeminiAdapter(BaseProviderAdapter):
             "json",
             "--approval-mode",
             "plan",
+            # No MCP server: the one name allowed is new for each call, so no server named in the home, which the CLI
+            # writes, can have it. The command line wins over every settings file.
+            "--allowed-mcp-server-names",
+            NO_MCP_SERVER_PREFIX + secrets.token_hex(16),
         ]
         if model:
             command.extend(["--model", model])

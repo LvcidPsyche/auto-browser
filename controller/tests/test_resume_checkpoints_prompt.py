@@ -30,6 +30,7 @@ from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
 from app.providers.openai_compatible import OPENAI_COMPATIBLE_PROFILES, OpenAICompatibleAdapter
+from tests._codex_mcp_list import answers_mcp_list
 
 OBSERVATION_LABEL = "Current observation:\n"
 # What a hostile page can put in a URL or a title: a line that reads as the operator's, and a fake section.
@@ -108,7 +109,8 @@ class ResumeCheckpointsPromptTests(unittest.IsolatedAsyncioTestCase):
     async def _cli_prompt(self, adapter: Any, pick, *, resume: bool) -> str:
         seen: list[Any] = []
 
-        async def fake_run_cli(*, command, input_text=None, env=None, cwd=None, image_path=None):
+        @answers_mcp_list
+        async def fake_run_cli(*, command, input_text=None, **_):
             seen.append(pick(command, input_text))
             if "--output-last-message" in command:
                 Path(command[command.index("--output-last-message") + 1]).write_text(_DECISION, encoding="utf-8")

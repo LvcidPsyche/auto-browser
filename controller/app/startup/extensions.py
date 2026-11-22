@@ -162,21 +162,34 @@ def _init_harness(app) -> None:
         app.state.harness_service = None
 
 
+# The HARNESS_VERIFIER modes, as _harness_verifier_mode reads the setting, whose verifier runs HARNESS_UV_COMMAND: the
+# one list _build_harness_verifier builds from, and the CLI sandbox reads (runs_uv_command), which judges the command
+# only where it runs.
+UV_COMMAND_MODES = ("uv", "ensemble")
+
+
+def _harness_verifier_mode(settings) -> str:
+    return str(getattr(settings, "harness_verifier", "") or "programmatic").lower()
+
+
+def runs_uv_command(settings) -> bool:
+    """Whether the harness's verifier runs HARNESS_UV_COMMAND: HARNESS_VERIFIER, lower-cased ("programmatic" where it
+    is unset or empty), is one of UV_COMMAND_MODES."""
+    return _harness_verifier_mode(settings) in UV_COMMAND_MODES
+
+
 def _build_harness_verifier(settings):
     from app.harness.verifier import EnsembleVerifier, ProgrammaticVerifier, UniversalVerifierAdapter
 
-    mode = str(getattr(settings, "harness_verifier", "") or "programmatic").lower()
     uv_command = str(getattr(settings, "harness_uv_command", "") or "")
     uv = UniversalVerifierAdapter(
         command=shlex.split(uv_command) if uv_command else None,
         env_passthrough=list(getattr(settings, "harness_uv_env_passthrough_names", []) or []),
     )
     programmatic = ProgrammaticVerifier()
-    if mode == "uv":
-        return uv
-    if mode == "ensemble":
-        return EnsembleVerifier([programmatic, uv])
-    return programmatic
+    if not runs_uv_command(settings):
+        return programmatic
+    return uv if _harness_verifier_mode(settings) == "uv" else EnsembleVerifier([programmatic, uv])
 
 
 def _harness_model_tiers(settings) -> dict[str, str]:

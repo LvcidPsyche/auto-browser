@@ -1,0 +1,9 @@
+# Kept out of what the controller image's build is sent: .git, .venv*, node_modules, __pycache__, data and .env*
+# files. The image copies app/, tests/ (the suite runs in the image), pyproject.toml, entrypoint.sh,
+# requirements.txt, requirements-dev.txt and constraints.txt: none of them may be ignored here.
+.git
+**/.venv*
+**/node_modules
+**/__pycache__
+data
+**/.env*

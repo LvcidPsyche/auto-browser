@@ -1,0 +1,48 @@
+apply_patch_freeform             under development  false
+apps                             experimental       false
+apps_mcp_gateway                 under development  false
+artifact                         under development  false
+child_agents_md                  under development  false
+code_mode                        under development  false
+codex_git_commit                 under development  false
+codex_hooks                      under development  false
+collaboration_modes              removed            true
+default_mode_request_user_input  under development  false
+elevated_windows_sandbox         removed            false
+enable_request_compression       stable             true
+experimental_windows_sandbox     removed            false
+fast_mode                        stable             true
+guardian_approval                experimental       false
+image_detail_original            under development  false
+image_generation                 under development  false
+js_repl                          experimental       false
+js_repl_tools_only               under development  false
+memories                         under development  false
+multi_agent                      experimental       false
+personality                      stable             true
+plugins                          under development  false
+powershell_utf8                  under development  false
+prevent_idle_sleep               experimental       false
+realtime_conversation            under development  false
+remote_models                    removed            false
+request_permissions              under development  false
+request_permissions_tool         under development  false
+request_rule                     removed            false
+responses_websockets             under development  false
+responses_websockets_v2          under development  false
+runtime_metrics                  under development  false
+search_tool                      removed            false
+shell_snapshot                   stable             false
+shell_tool                       stable             false
+shell_zsh_fork                   under development  false
+skill_env_var_dependency_prompt  under development  false
+skill_mcp_dependency_install     stable             true
+sqlite                           removed            true
+steer                            removed            true
+tool_call_mcp_elicitation        under development  false
+undo                             stable             false
+unified_exec                     stable             false
+use_linux_sandbox_bwrap          experimental       false
+voice_transcription              under development  false
+web_search_cached                deprecated         false
+web_search_request               deprecated         false
