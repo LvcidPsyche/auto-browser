@@ -46,10 +46,9 @@ jobs:
 
   host-tests:
     # A fixed name: branch protection requires "host-tests (3.11)" and "host-tests (3.14)", and a matrix value added
-    # later would join the default name (an include once made the 3.11 check "host-tests (3.11, true)").
+    # later would join the default name.
     name: host-tests (${{ matrix.python-version }})
-    # The limit is for a run that hangs. Neither leg installs a browser, so the real-Chromium tests skip here; they run
-    # in real-browser-tests below.
+    # The limit is for a run that hangs.
     timeout-minutes: 20
     needs: lint
     runs-on: ubuntu-latest
@@ -70,7 +69,8 @@ jobs:
           uv pip install --system --exclude-newer "$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
             -e ./controller[dev] -c controller/constraints.txt
       - name: Run controller tests on host Python
-        # The whole suite, with the coverage gate: the real-browser tests in it skip, since no browser is installed.
+        # The whole suite, with the coverage gate. No browser is installed, so the real-browser tests skip here; they
+        # run in real-browser-tests.
         run: |
           cd controller
           python -m pytest tests/ \
@@ -82,7 +82,7 @@ jobs:
   real-browser-tests:
     # The real-Chromium tests (page text, element naming, overlays, TOTP, the dashboard), split into shards that run
     # in parallel: in host-tests they made one leg take over 45 minutes. One Python is enough: they test the page, not
-    # Python. The matrix list is the one place the number of shards is written; strategy.job-total passes it on.
+    # Python.
     name: real-browser-tests (${{ matrix.shard }}/${{ strategy.job-total }})
     # The limit is for a run that hangs.
     timeout-minutes: 30
@@ -91,6 +91,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The legs and their names. Each leg runs the shard of its position (strategy.job-index), so N legs run shards
+        # 1 to N once each; a test holds this list at 1 to N, so that each leg's name gives its shard.
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
@@ -98,34 +100,47 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install host test dependencies
-        # As host-tests installs them: controller/constraints.txt pins the whole tree, and uv's --exclude-newer holds
-        # the build backend the editable install builds with (R5C-14).
+        # As host-tests installs them.
         run: |
           python -m pip install uv==0.13.7
           uv pip install --system --exclude-newer "$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
             -e ./controller[dev] -c controller/constraints.txt
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
-      - name: Run this shard of the real-browser tests
-        # --real-browser-shard keeps the real-browser tests of this shard and deselects the rest of the suite
-        # (controller/tests/_real_browser_shards.py); together the shards run each of them once. With
-        # AUTO_BROWSER_REQUIRE_CHROMIUM set, a missing browser fails the run, and so does a real-browser test that
-        # skips for any other reason. No coverage gate: a shard runs a part of the suite, and host-tests keeps the gate.
+      - name: Run this leg's shard of the real-browser tests
+        # --real-browser-shard keeps this shard's real-browser tests and deselects the rest of the suite; a
+        # real-browser test that does not run fails, and so does a test module skipped at collection
+        # (controller/tests/_real_browser_shards.py). AUTO_BROWSER_REQUIRE_CHROMIUM makes a missing browser fail as
+        # pytest starts, with the fix in its message. No coverage gate: a shard runs a part of the suite.
         env:
           AUTO_BROWSER_REQUIRE_CHROMIUM: "1"
         run: |
           cd controller
-          python -m pytest tests/ --real-browser-shard "${{ matrix.shard }}/${{ strategy.job-total }}" -v
+          python -m pytest tests/ --real-browser-shard "$(( ${{ strategy.job-index }} + 1 ))/${{ strategy.job-total }}" -v
 
   real-browser-tests-done:
-    # One check for branch protection to require, whatever the number of shards: it passes only if every shard passed.
-    # always(), because a job skipped when a job it needs failed reports success, and would pass the check.
+    # One check for branch protection to require, whatever the number of legs. It runs always(): a job whose needs
+    # failed is skipped, and a required check treats a skipped job as passed; with !cancelled() instead, a run
+    # cancelled after the host legs went green would leave this check skipped too. Besides the aggregate result it
+    # judges each leg's own conclusion, read from this run attempt's jobs, since a leg cancelled because no runner
+    # picked it up has been seen to leave the aggregate at success.
     if: always()
     needs: real-browser-tests
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
     steps:
-      - name: Every shard of the real-browser tests passed
-        run: test "${{ needs.real-browser-tests.result }}" = success
+      - name: Every leg of the real-browser tests passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '
+            [.jobs[] | select(.name | startswith("real-browser-tests ("))]
+            | if length == 0 then error("this run attempt has no real-browser-tests leg")
+              elif all(.conclusion == "success") then .[] | "\(.name): \(.conclusion)"
+              else error("not every real-browser-tests leg succeeded: \(map("\(.name): \(.conclusion)") | join(", "))")
+              end'
+          test "${{ needs.real-browser-tests.result }}" = success
 
   langchain-tests:
     needs: lint

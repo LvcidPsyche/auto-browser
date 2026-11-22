@@ -1,26 +1,24 @@
-"""AUTO_BROWSER_REQUIRE_CHROMIUM turns "no Chromium" from a skip into a failure.
+"""AUTO_BROWSER_REQUIRE_CHROMIUM turns "no Chromium" from a skip into a failure, and the CI
+workflow runs the real-browser tests where it is set.
 
 `requires_chromium` only skips, so a CI job that installs Chromium could lose it (a failed
-install, a moved browser root) and stay green while the real-browser test files skipped. The
-real-browser-tests job, which installs Chromium, sets the variable, and a missing browser then
-fails collection. Under the switch a real-browser test that skips for any other reason fails
-the run too (tests/_real_browser_shards.py, tested in test_real_browser_shards.py).
+install, a moved browser root) and stay green while the real-browser test files skipped.
 
-The helper tests pass the executable in explicitly and never start a browser. Importing
-`tests._chromium` still runs its one real lookup (it globs the Playwright browser roots), so a
-test that imports it runs in a child process with AUTO_BROWSER_TEST_CHROMIUM set, which makes
-that lookup answer from the variable alone.
+The helper tests pass the executable in explicitly and never start a browser. The module-level
+wiring runs once, when a process first imports `tests._chromium`, so the tests of it start a
+child process with the switch and AUTO_BROWSER_TEST_CHROMIUM set as each case needs.
 """
 
 from __future__ import annotations
 
 import os
-import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests._chromium import ChromiumRequiredError, chromium_required, requires_chromium_mark
 
@@ -106,70 +104,103 @@ needs_the_workflow = pytest.mark.skipif(
     not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)"
 )
 
+SHARD_OF_THE_LEG = "$(( ${{ strategy.job-index }} + 1 ))/${{ strategy.job-total }}"
+JOBS_OF_THIS_ATTEMPT = (
+    "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+)
 
-def _ci_job(name: str) -> str:
-    """The body of one job in ci.yml, up to the next job."""
-    text = CI_WORKFLOW.read_text(encoding="utf-8")
-    job = re.search(rf"^  {re.escape(name)}:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)", text, flags=re.M | re.S)
-    assert job, f"no {name} job in ci.yml"
-    return job.group(1)
+
+def _jobs() -> dict[str, dict]:
+    return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+
+
+def _step(job: dict, runs: str) -> dict:
+    """The one step of `job` whose run string holds `runs`."""
+    steps = [step for step in job["steps"] if runs in step.get("run", "")]
+    assert len(steps) == 1, f"{len(steps)} steps run {runs!r}"
+    return steps[0]
+
+
+def _words(run: str) -> list[str]:
+    """A run string's words as sh splits them (a backslash at the end of a line continues it)."""
+    return shlex.split(run.replace("\\\n", " "))
+
+
+def _holds(words: list[str], part: list[str]) -> bool:
+    return any(words[start : start + len(part)] == part for start in range(len(words)))
 
 
 @needs_the_workflow
-def test_host_tests_run_without_a_browser() -> None:
-    """The real-browser tests have a job of their own: host-tests installs no Chromium and does not require one, so on
-    both of its legs they skip."""
-    body = _ci_job("host-tests")
+def test_host_tests_run_the_suite_without_a_browser() -> None:
+    job = _jobs()["host-tests"]
 
-    assert "playwright install" not in body
-    assert "AUTO_BROWSER_REQUIRE_CHROMIUM" not in body
-    assert "real_browser" not in body
+    assert job["strategy"]["matrix"] == {"python-version": ["3.11", "3.14"]}
+    for scope in (job, *job["steps"]):
+        assert "AUTO_BROWSER_REQUIRE_CHROMIUM" not in scope.get("env", {}), scope
+    for step in job["steps"]:
+        assert "playwright install" not in step.get("run", ""), step
+        assert "AUTO_BROWSER_REQUIRE_CHROMIUM" not in step.get("run", ""), step
 
 
 @needs_the_workflow
 def test_ci_keeps_the_required_check_names_of_host_tests() -> None:
-    """Branch protection requires "host-tests (3.11)" and "host-tests (3.14)": the job names itself from the Python
-    version only, since a matrix value added later would join the default name (an `include` once made it
-    "host-tests (3.11, true)"). The other matrix job, langchain-tests, keeps its default name, "langchain-tests
-    (<version>)"."""
-    assert "    name: host-tests (${{ matrix.python-version }})\n" in _ci_job("host-tests")
+    """Branch protection requires "host-tests (3.11)" and "host-tests (3.14)"."""
+    assert _jobs()["host-tests"]["name"] == "host-tests (${{ matrix.python-version }})"
 
 
 @needs_the_workflow
-def test_the_real_browser_job_installs_chromium_requires_it_and_runs_one_shard() -> None:
-    """Chromium is installed with no condition, the switch is on (a missing browser, or a real-browser test that skips,
-    fails the shard), and the shard count comes from the matrix, the one place it is written. No coverage gate: one
-    shard runs a part of the suite, and the host-tests legs keep the gate."""
-    body = _ci_job("real-browser-tests")
+def test_each_real_browser_leg_runs_the_shard_of_its_position() -> None:
+    """The legs' list names them, so it must be 1 to N for the names to be true."""
+    job = _jobs()["real-browser-tests"]
+    legs = job["strategy"]["matrix"]
+    words = _words(_step(job, "--real-browser-shard")["run"])
 
-    assert "if:" not in body
-    assert "run: python -m playwright install --with-deps chromium\n" in body
-    switch = re.search(r"AUTO_BROWSER_REQUIRE_CHROMIUM: (.+)\n", body)
-    assert switch and switch.group(1).strip() == '"1"'
-    assert "cd controller\n" in body
-    assert 'python -m pytest tests/ --real-browser-shard "${{ matrix.shard }}/${{ strategy.job-total }}"' in body
-    assert "--cov" not in body
+    assert list(legs) == ["shard"] and legs["shard"] == list(range(1, len(legs["shard"]) + 1)) != []
+    assert words[:5] == ["cd", "controller", "python", "-m", "pytest"] and "tests/" in words
+    assert words[words.index("--real-browser-shard") + 1] == SHARD_OF_THE_LEG
+    assert not any(word.startswith("--cov") for word in words)
 
 
 @needs_the_workflow
-def test_one_check_passes_only_when_every_shard_passed() -> None:
-    """Branch protection can require one name however many shards there are. The job runs always: one skipped because
-    a job it needs failed reports success, and would pass the check."""
-    body = _ci_job("real-browser-tests-done")
+def test_every_real_browser_leg_installs_chromium_and_requires_it() -> None:
+    jobs = _jobs()
+    job = jobs["real-browser-tests"]
+    install = _step(job, "playwright install")
+    test = _step(job, "--real-browser-shard")
 
-    assert re.search(r"^    if: always\(\)\n", body, flags=re.M)
-    assert re.search(r"^    needs: real-browser-tests\n", body, flags=re.M)
-    assert 'run: test "${{ needs.real-browser-tests.result }}" = success\n' in body
+    for scope in (job, *job["steps"]):
+        assert "continue-on-error" not in scope, scope
+    for scope in (job, install, test):
+        assert "if" not in scope, scope
+    assert install["run"].strip() == "python -m playwright install --with-deps chromium"
+    switch = {**job.get("env", {}), **test.get("env", {})}.get("AUTO_BROWSER_REQUIRE_CHROMIUM")
+    assert chromium_required({"AUTO_BROWSER_REQUIRE_CHROMIUM": str(switch)}), switch
+    assert _step(job, "uv pip install")["run"] == _step(jobs["host-tests"], "uv pip install")["run"]
 
 
 @needs_the_workflow
-def test_compose_smoke_needs_the_real_browser_tests_and_the_new_jobs_come_before_it() -> None:
-    """compose-smoke needs the real-browser tests as it needs host-tests. The new jobs come before it, since tests read
-    ci.yml from `  compose-smoke:` to the end of the file as that one job."""
-    text = CI_WORKFLOW.read_text(encoding="utf-8")
-    needs = re.search(r"^    needs: \[(.*)\]\n", _ci_job("compose-smoke"), flags=re.M)
+def test_one_check_passes_only_when_every_leg_passed() -> None:
+    job = _jobs()["real-browser-tests-done"]
+    needs = job["needs"]
+    (step,) = job["steps"]
+    words = _words(step["run"])
 
-    assert needs and "real-browser-tests" in [name.strip() for name in needs.group(1).split(",")]
-    smoke = text.index("\n  compose-smoke:\n")
-    assert text.index("\n  real-browser-tests:\n") < smoke
-    assert text.index("\n  real-browser-tests-done:\n") < smoke
+    assert job["if"] == "always()"
+    assert "real-browser-tests" in ([needs] if isinstance(needs, str) else needs)
+    assert job["permissions"] == {"actions": "read"}
+    assert "continue-on-error" not in job and not {"if", "continue-on-error"} & set(step), step
+    assert _holds(words, ["test", "${{ needs.real-browser-tests.result }}", "=", "success"])
+    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert _holds(words, ["gh", "api", JOBS_OF_THIS_ATTEMPT, "--jq"])
+    judge = words[words.index("--jq") + 1]
+    assert 'startswith("real-browser-tests (")' in judge and 'all(.conclusion == "success")' in judge
+    assert "error(" in judge
+
+
+@needs_the_workflow
+def test_compose_smoke_needs_the_real_browser_tests_and_is_the_last_job() -> None:
+    """Tests read ci.yml from `  compose-smoke:` to the end of the file as that one job."""
+    jobs = _jobs()
+
+    assert "real-browser-tests" in jobs["compose-smoke"]["needs"]
+    assert list(jobs)[-1] == "compose-smoke"
