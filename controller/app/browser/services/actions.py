@@ -55,6 +55,7 @@ from ..click_target import (
 from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import (
     DOM_JS,
+    ELEMENT_ENABLED_SCRIPT,
     ELEMENT_FOCUS_PLACE_SCRIPT,
     ELEMENT_HAS_FOCUS_SCRIPT,
     FIELD_ATTRIBUTES_SCRIPT,
@@ -171,9 +172,9 @@ _RECEIVES_POINTER_SCRIPT = (
   """
     + DOM_JS
     + """
-  const over = (found) => !(arrived && window !== window.top) || found.matches(':is(:hover)');
-  const field = el.matches('input, textarea, select') || dom.editable(el);
-  const target = (wide && !field && el.closest('button, [role=button], a, [role=link]')) || el;
+  const over = (found) => !(arrived && window !== window.top) || dom.matches(found, ':is(:hover)');
+  const field = dom.matches(el, 'input, textarea, select') || dom.editable(el);
+  const target = (wide && !field && dom.closest(el, 'button, [role=button], a, [role=link]')) || el;
   if (window !== window.top && box !== true) {
     if (!box) return 'framed';
     const own = dom.rect(el);
@@ -207,8 +208,12 @@ _RECEIVES_POINTER_SCRIPT = (
 # stops the pointermove there (a pointermove has the point in fractions of a pixel, a mousemove in whole ones). The
 # listener takes one and goes, or goes when the record is read (_POINTER_SEEN_SCRIPT), or when the click ends
 # (_POINTER_WATCH_STOP_SCRIPT). Where no script runs, it is never called.
-_POINTER_WATCH_SCRIPT = """(el) => {
-  const view = el.ownerDocument.defaultView;
+_POINTER_WATCH_SCRIPT = (
+    """(el) => {
+  """
+    + DOM_JS
+    + """
+  const view = dom.view(el);
   const seen = { at: false };
   const probe = new EventTarget();
   probe.addEventListener('watch', () => { seen.at = null; });
@@ -223,6 +228,7 @@ _POINTER_WATCH_SCRIPT = """(el) => {
   moves.forEach((type) => view.addEventListener(type, note, true));
   return seen;
 }"""
+)
 
 # (el, seen) => the record of _POINTER_WATCH_SCRIPT, read in el's own document (the driver refuses a handle of
 # another), and the end of its watch.
@@ -265,13 +271,17 @@ _POINTER_WATCH_STOP_SCRIPT = "(seen) => seen.stop()"
 # its size).
 # ``boxless``: el has no box at all, so there is no corner to count from; ``contents``: because its children are
 # laid out in its place (display: contents), and not because it is not shown.
-_PRESS_PLACE_SCRIPT = """(el, screen) => {
-  const view = el.ownerDocument.defaultView;
+_PRESS_PLACE_SCRIPT = (
+    """(el, screen) => {
+  """
+    + DOM_JS
+    + """
+  const view = dom.view(el);
   const framed = view !== view.top;
   const style = view.getComputedStyle(el);
   const border = [parseInt(style.borderLeftWidth, 10) || 0, parseInt(style.borderTopWidth, 10) || 0];
-  const whole = el.getBoundingClientRect();
-  const boxes = Array.from(el.getClientRects());
+  const whole = dom.rect(el);
+  const boxes = Array.from(dom.rects(el));
   const [seen, size] = screen || [];
   let [left, top, right, bottom] = [0, 0, view.innerWidth, view.innerHeight];
   let [wider, taller] = [1, 1];
@@ -303,6 +313,7 @@ _PRESS_PLACE_SCRIPT = """(el, screen) => {
     counted,
   };
 }"""
+)
 
 # How long a click waits before it looks again at a target that is not enabled yet. Playwright's own click waits
 # 20 to 500 ms between its looks.
@@ -384,11 +395,10 @@ class _Budget:
 
     It bounds the click's waits for its target, and the questions the click asks of the page (``answered``): a
     question asked of a handle has no bound of its own, nor has one asked through a Locator once its element is
-    found (Locator.evaluate's and bounding_box's timeout bounds the look-up alone). The pointer's moves and the
-    press still wait for the page, with no bound to give them. Measured before the questions were bounded (which
-    wait held the click was not told apart): a page busy for 6 seconds once the checks had passed held a click for 7
-    under a budget of 3, and the click then ended as a timeout with nothing pressed; one busy for 7 seconds from the
-    mouse going down held it for 8, and the click pressed.
+    found (Locator.evaluate's and bounding_box's timeout bounds the look-up alone). Measured before the questions
+    were bounded (which wait held the click was not told apart): a page busy for 6 seconds once the checks had
+    passed held a click for 7 under a budget of 3, and the click then ended as a timeout with nothing pressed; one
+    busy for 7 seconds from the mouse going down held it for 8, and the click pressed.
     """
 
     def __init__(self, timeout_ms: float, *, each_at_most: int | None = None) -> None:
@@ -533,6 +543,17 @@ def _reads_not_secret(attributes: Mapping[str, Any] | None) -> bool:
     return attributes is not None and not BrowserActionService.is_sensitive_field(attributes)
 
 
+async def _is_enabled(locator: Any, budget: _Budget) -> bool:
+    """Whether the element ``locator`` finds is enabled, by the controller's own read (ELEMENT_ENABLED_SCRIPT), the one
+    an element_id target's wait makes, answered within ``budget`` (_Budget.answered). Playwright's own check read a
+    form's ``hasAttribute`` as a property: a control so named failed it, and a type by selector then focused the form
+    without the click that gives the field in it focus. The read runs in the page's own world, and Locator.evaluate's
+    timeout bounds the finding of the element, not the read: bounded by that alone, a page that had replaced
+    Element.prototype.getAttribute there with a function that ran on held the click, and its session, until it
+    returned."""
+    return await budget.answered(locator.evaluate(ELEMENT_ENABLED_SCRIPT, timeout=budget.left_ms())) is True
+
+
 async def _answered_soon(call: Awaitable[Any]) -> Any:
     """``call``'s answer, within FIELD_RECHECK_TIMEOUT_MS: a question asked of a handle has no bound of its own, and
     a page that stops answering would hold the type or the click that asks it, and its session, with it.
@@ -549,8 +570,7 @@ async def _sent_while(still: Callable[[], bool] | None, send: Callable[[], Await
     task: checked first and then sent from a task of its own (_within), the key went out a turn of the loop later,
     after a navigation the controller had already queued, to a page it knew had left the host checked. Playwright
     writes a call's message before its first wait (Connection._send_message_to_server), so nothing of the
-    controller's runs between the two. False, and no call made, where the check says no. A page whose navigation the
-    browser has begun and the controller not yet heard of still gets the key: that race is the browser's."""
+    controller's runs between the two. False, and no call made, where the check says no."""
     if still is not None and not still():
         return False
     await send()
@@ -677,7 +697,7 @@ async def _ended_and_disposed(handle: Any, script: str) -> None:
     handle back: each on its own, the two within one FIELD_RECHECK_TIMEOUT_MS. The disposal has what the script
     left, and is not asked where the page did not answer the script within the bound, which a page that answers
     nothing would not answer either (the handle goes with its document). With a bound each, a page that answered
-    neither held its caller two bounds (a placed click's give-back, B1-fix2 item 5). Asked with what was left, the
+    neither held its caller two bounds (a placed click's give-back). Asked with what was left, the
     disposal of a script given up a timer's tick early ran on some machines and not on others."""
     ends = asyncio.get_running_loop().time() + FIELD_RECHECK_TIMEOUT_MS / 1000
     unanswered = False
@@ -1780,12 +1800,13 @@ class BrowserActionService:
 
         Pressing the mouse at an element's centre sends the click to whatever is
         on top there: a transparent element over a "Save draft" button took the
-        click, while the approval and the audit trail named the button. Playwright's
-        own checks run first (visible, stable, enabled, receiving events at its
-        click point, frames included, but a frame CSS transforms, which Playwright
-        does not look through), and the point is checked again once the
-        pointer has arrived and the pause before the press is over, so a cover
-        put up during the move or the pause is caught as well. Enabled is asked
+        click, while the approval and the audit trail named the button. The checks
+        of a click run first (_checks_of_a_click: enabled, and Playwright's own
+        visible, stable, receiving events at its click point, frames included, but
+        a frame CSS transforms, which Playwright does not look through), and the
+        point is checked again once the pointer has arrived and the pause before
+        the press is over, so a cover put up during the move or the pause is
+        caught as well. Enabled is asked
         again with it: the move and the pause take about half a second, and a
         button the page turned off in that time got a mouse down that the browser
         gives to nobody, under an action that ended as done. When that last
@@ -1819,9 +1840,11 @@ class BrowserActionService:
 
     @staticmethod
     async def _is_enabled_now(locator: Any, timeout_ms: float) -> bool:
-        """Whether the target is enabled as its press is about to be made. What cannot be told is a no."""
+        """Whether the target is enabled as its press is about to be made (_is_enabled), answered within ``timeout_ms``
+        (POINTER_CHECK_TIMEOUT_MS at most, of what the click has left). What cannot be told, an answer not given by then
+        too, is a no."""
         try:
-            return bool(await locator.is_enabled(timeout=timeout_ms))
+            return await _is_enabled(locator, _Budget(timeout_ms))
         except Exception:
             return False
 
@@ -1853,7 +1876,8 @@ class BrowserActionService:
 
     @staticmethod
     async def _checks_of_a_click(locator: Any, budget: _Budget) -> None:
-        """Playwright's checks of a click on ``locator``, with nothing pressed.
+        """The checks of a click on ``locator``, with nothing pressed: Playwright's, but enabled, which is the
+        controller's own read (_is_enabled).
 
         Visible, enabled, stable, and the element is what the pointer finds at its click point, frames
         included. These were a trial click, and a trial click presses: Playwright sends the mouse down and up
@@ -1864,12 +1888,13 @@ class BrowserActionService:
         phase, saw them as well.
 
         A trial hover makes the same checks but one, and sends the pointer's move alone. That one, enabled, is
-        waited for first, as a click waits for it: by looking again, and each look finds the element the
-        selector names then. A wait on the one element found first ended at once when a page drew its disabled
-        button again ("Element is not attached to the DOM"), where a click had waited for the new one. The two
-        share the click's budget.
+        waited for first, as a click waits for it, by the controller's own read (_is_enabled): by looking again,
+        and each look finds the element the selector names then. A wait on the one element found first ended at
+        once when a page drew its disabled button again ("Element is not attached to the DOM"), where a click had
+        waited for the new one. The two share the click's budget, and a look the page does not answer within it ends
+        the click as any of its waits ends one.
         """
-        while not await locator.is_enabled(timeout=budget.left_ms()):
+        while not await _is_enabled(locator, budget):
             await asyncio.sleep(ENABLED_POLL_SECONDS)
             if budget.spent:
                 raise PlaywrightTimeoutError(
@@ -2125,8 +2150,8 @@ class BrowserActionService:
         # The box within FOCUS_BOX_TIMEOUT_MS (read with no bound, a page that did not answer held the type), then the
         # click within its own FOCUS_CLICK_TIMEOUT_MS. With the two in one FOCUS_CLICK_TIMEOUT_MS, a box that answered
         # late left the human-like move and the pause the rest, the press none, and a component that makes its editor
-        # on a click never opened (B1-fix3 item 3); with one deadline for both bounds, the click had what the read
-        # left, two seconds where the box answered at once (B1-fix4 item 3).
+        # on a click never opened; with one deadline for both bounds, the click had what the read
+        # left, two seconds where the box answered at once.
         coords = await self.locator_center(locator, timeout_ms=FOCUS_BOX_TIMEOUT_MS)
         if coords is None:
             await self.click_as_playwright_places_it(session, locator)

@@ -5,8 +5,8 @@ import json
 from shutil import which
 from typing import Any
 
+from ...process_hardening import child_environment
 from ...process_tree import GROUP_SPAWN_KWARGS, OutputTooLarge, exchange, kill_and_drain
-from ...providers.base import allowlisted_environment
 from ...utils import error_text, without_lone_surrogates
 from ..contracts import TaskContract
 from .base import VerificationResult
@@ -30,7 +30,7 @@ class UniversalVerifierAdapter:
     ):
         self.command = command
         self.timeout_seconds = timeout_seconds
-        # HARNESS_UV_ENV_PASSTHROUGH: names the command gets on top of the base ones (W2-27).
+        # HARNESS_UV_ENV_PASSTHROUGH: names the command gets on top of the base ones.
         self.env_passthrough = tuple(env_passthrough)
 
     @property
@@ -53,8 +53,9 @@ class UniversalVerifierAdapter:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            # The base names and HARNESS_UV_ENV_PASSTHROUGH, not the controller's tokens and keys (W2-27).
-            env=allowlisted_environment(self.env_passthrough),
+            # The base names and HARNESS_UV_ENV_PASSTHROUGH, not the controller's tokens and keys, and the
+            # controller's own temp directory, where no provider CLI reads or rewrites what it stages.
+            env=child_environment(self.env_passthrough),
             **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
         try:

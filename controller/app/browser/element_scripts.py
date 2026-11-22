@@ -4,13 +4,17 @@ By element_id a function here is sent through ``element_world.element_declaratio
 (or, for ``UPLOAD_UNMARK_SCRIPT``, as a world function of its own), so it runs in
 the page's isolated world, which the page's scripts cannot reach: nothing it calls
 can be replaced by them. By selector, ELEMENT_HAS_FOCUS_SCRIPT,
-ELEMENT_FOCUS_PLACE_SCRIPT, the FIELD_HOLD_* scripts and NAMED_FIELDS_SCRIPT run in
-the page's own world, on a locator or a handle of the element it found, and
+ELEMENT_FOCUS_PLACE_SCRIPT, ELEMENT_ENABLED_SCRIPT, the FIELD_HOLD_* scripts and
+NAMED_FIELDS_SCRIPT run in the page's own world, on a locator or a handle of the
+element it found, and
 FIELD_ATTRIBUTES_SCRIPT runs only there (the TOTP autofill's read of a candidate
-field); so do two scripts of other modules that start with DOM_JS,
+field); so do four scripts of other modules that start with DOM_JS,
 click_target.DESCRIBE_TARGET_SCRIPT (for a selector's target) and
-actions._RECEIVES_POINTER_SCRIPT. click_target's other scripts with DOM_JS in them
-(CLICK_TARGET_SCRIPT, SAME_ELEMENT_SCRIPT) run only in the isolated world. In the
+actions._RECEIVES_POINTER_SCRIPT, _PRESS_PLACE_SCRIPT and _POINTER_WATCH_SCRIPT.
+click_target's other scripts with DOM_JS in them
+(CLICK_TARGET_SCRIPT, SAME_ELEMENT_SCRIPT), and observe's list and page summary
+(browser_scripts, which start with it through their naming code), run only in the
+isolated world. In the
 page's world the page answers for what they read off a node or a document, but for
 what DOM_JS reads through the prototypes (its comment).
 """
@@ -29,8 +33,9 @@ MARKER_ATTRIBUTE = "data-auto-browser-target"
 # that input, so a walk up the tree that read it could be steered onto the
 # element it was looking for, or sent round the form and its control for good.
 # Defines `dom`. Also run in the page's own world (a selector target's focus
-# check, hold and approval read, a selector's click target, and the pointer
-# question: the module docstring names them), where more stands in for a property: a
+# check, enabled check, hold and approval read, the TOTP autofill's read of a candidate field, a selector's click
+# target, the pointer question, and a placed click's place and watch: the module docstring names them), where more
+# stands in for a property: a
 # document's named elements (with <img name="activeElement"> on the page,
 # document.activeElement is that img there, and not here), and what a page
 # defines on a node of its own (a shadow root's `host`, a label's `control`).
@@ -48,11 +53,20 @@ DOM_JS = """const dom = (() => {
     return (el, ...args) => el[name](...args);
   };
   const parentNode = getter(Node.prototype, 'parentNode');
+  const childNodes = getter(Node.prototype, 'childNodes');
   const shadowRoot = getter(Element.prototype, 'shadowRoot');
   const tagName = getter(Element.prototype, 'tagName');
+  const id = getter(Element.prototype, 'id');
+  const localName = getter(Element.prototype, 'localName');
   const isConnected = getter(Node.prototype, 'isConnected');
   const ownerDocument = getter(Node.prototype, 'ownerDocument');
+  const defaultView = getter(Document.prototype, 'defaultView');
   const nodeType = getter(Node.prototype, 'nodeType');
+  const innerText = getter(HTMLElement.prototype, 'innerText');
+  const textContent = getter(Node.prototype, 'textContent');
+  const checkVisibility = Element.prototype.checkVisibility;
+  const scrollIfNeeded = Element.prototype.scrollIntoViewIfNeeded;
+  const scrollInto = method(Element.prototype, 'scrollIntoView');
   const documentActive = getter(Document.prototype, 'activeElement');
   const shadowActive = getter(ShadowRoot.prototype, 'activeElement');
   const host = getter(ShadowRoot.prototype, 'host');
@@ -67,6 +81,9 @@ DOM_JS = """const dom = (() => {
   // What holds a document of its own, or is a plugin, whose inside this document cannot see: keys sent to one go
   // there. A portal is listed though the Chromium measured (156) has no such element: one so named is then the page's.
   const FRAME_TAGS = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'FENCEDFRAME', 'PORTAL'];
+  // The kinds of element that have label elements (`labels`), as the browser has them (156). A form has none, and its
+  // named controls answer for the property there.
+  const LABELABLE_TAGS = ['BUTTON', 'INPUT', 'METER', 'OUTPUT', 'PROGRESS', 'SELECT', 'TEXTAREA'];
   const dom = {
     // The most steps a walk along the tree takes: a page can make one go round for good (see above).
     STEPS: 256,
@@ -103,6 +120,21 @@ DOM_JS = """const dom = (() => {
     type: (node) => nodeType.call(node),
     // The node's parent in its own tree (the shadow root, for what is at the top of one): null for a root.
     parent: (node) => parentNode.call(node),
+    children: (node) => childNodes.call(node),
+    // The window of the node's document.
+    view: (node) => defaultView.call(ownerDocument.call(node)),
+    // The element's text as it is shown (innerText): undefined for what is no HTML element.
+    text(el) {
+      try {
+        return innerText.call(el);
+      } catch (error) {
+        return undefined;
+      }
+    },
+    // The node's text content, shown or not.
+    textContent: (node) => textContent.call(node),
+    // The label elements of an element of a kind that has them, else none.
+    labels: (el) => (LABELABLE_TAGS.includes(dom.tag(el)) && el.labels ? Array.from(el.labels) : []),
     // The control a label stands for: null for one that stands for none, and for what is no label.
     control(label) {
       try {
@@ -121,6 +153,8 @@ DOM_JS = """const dom = (() => {
     },
     // The elements under an element or a shadow root that match `css`.
     all: (root, css) => (nodeType.call(root) === 11 ? fragmentAll : elementAll)(root, css),
+    // The first element under an element that matches `css`, or null.
+    first: method(Element.prototype, 'querySelector'),
     listen: method(EventTarget.prototype, 'addEventListener'),
     unlisten: method(EventTarget.prototype, 'removeEventListener'),
     // Whether `node` is `el` or inside it, through shadow roots.
@@ -155,14 +189,30 @@ DOM_JS = """const dom = (() => {
     },
     shadowRoot: (el) => shadowRoot.call(el),
     tag: (el) => tagName.call(el).toUpperCase(),
+    // As the browser gives it: upper case for an HTML element, as written for another.
+    tagName: (el) => tagName.call(el),
+    id: (el) => id.call(el),
+    // As the markup has it: lower case for an HTML element, as written for another ('linearGradient').
+    localName: (el) => localName.call(el),
     // Attached, and to this document: one a same-origin frame adopted has the frame's box.
     here: (node) => isConnected.call(node) && ownerDocument.call(node) === document,
+    // Whether the browser shows the element (checkVisibility): true where it has no such method.
+    visible: (el) => typeof checkVisibility !== 'function' || checkVisibility.call(el),
+    // Into view, centred where it is out of view (scrollIntoViewIfNeeded); where the browser has no such method, as
+    // scrollIntoView centres it.
+    centre(el) {
+      if (typeof scrollIfNeeded === 'function') scrollIfNeeded.call(el, true);
+      else dom.align(el, 'center');
+    },
+    // Into view, aligned each way with the view's 'start', 'center', 'end' or 'nearest' edge (scrollIntoView).
+    align: (el, alignment) => scrollInto(el, { block: alignment, inline: alignment }),
     attr: method(Element.prototype, 'getAttribute'),
     has: method(Element.prototype, 'hasAttribute'),
     unset: method(Element.prototype, 'removeAttribute'),
     matches: method(Element.prototype, 'matches'),
     closest: method(Element.prototype, 'closest'),
     rect: method(Element.prototype, 'getBoundingClientRect'),
+    rects: method(Element.prototype, 'getClientRects'),
     // The element at (x, y) of a document or a shadow root, by the prototype's method: read off the document, an
     // element the page named elementFromPoint stood in for it.
     at: (root, x, y) => (nodeType.call(root) === 9 ? documentAt : shadowAt)(root, x, y),
@@ -216,11 +266,11 @@ _COVER_AT_JS = r"""(el, x, y) => {
 # Needs `dom`.
 _FOLLOW_LABEL_JS = """(el) => {
     let target = el;
-    if (!dom.matches(target, 'input, textarea, select') && !target.isContentEditable) {
+    if (!dom.matches(target, 'input, textarea, select') && !dom.editable(target)) {
       target = dom.closest(target, 'button, [role=button], [role=checkbox], [role=radio]') || target;
     }
     const control = 'a, input, textarea, button, select, [role=link], [role=button], [role=checkbox], [role=radio]';
-    if (!dom.matches(target, control) && !target.isContentEditable) {
+    if (!dom.matches(target, control) && !dom.editable(target)) {
       const label = dom.closest(target, 'label');
       if (label && label.control) target = label.control;
     }
@@ -382,11 +432,11 @@ _IS_DISABLED_JS = (
 })()"""
 )
 
-# The element's box while it is visible the way Playwright means it, else null.
+# The element's box while it is visible the way Playwright means it, else null. Needs `dom`.
 _VISIBLE_BOX_JS = """(el) => {
-  if (!el.isConnected || (el.checkVisibility && !el.checkVisibility())) return null;
+  if (!dom.here(el) || !dom.visible(el)) return null;
   if (getComputedStyle(el).visibility !== 'visible') return null;
-  const rect = el.getBoundingClientRect();
+  const rect = dom.rect(el);
   if (!(rect.width > 0 && rect.height > 0)) return null;
   return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
 }"""
@@ -395,9 +445,9 @@ _VISIBLE_BOX_JS = """(el) => {
 # that has area inside the viewport, clipped to it, else null. Its centre is
 # Playwright's clickable point (the middle of the first viewport-clipped content
 # quad); the centre of the whole box can be off screen, or between the lines of
-# a link that wraps.
+# a link that wraps. Needs `dom`.
 _POINTER_RECT_JS = """(el) => {
-  for (const rect of el.getClientRects()) {
+  for (const rect of dom.rects(el)) {
     const left = Math.max(rect.left, 0);
     const top = Math.max(rect.top, 0);
     const right = Math.min(rect.right, innerWidth);
@@ -495,8 +545,7 @@ ELEMENT_ACTIONABLE_SCRIPT = f"""async (el, options) => {{
     if (!dom.here(el)) return 'element_gone';
     if (!visibleBox(el)) return 'element_not_visible';
     if (options.enabled && isDisabled(el)) return 'element_disabled';
-    if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
-    else el.scrollIntoView({{ block: 'center', inline: 'center' }});
+    dom.centre(el);
     const box = visibleBox(el);
     if (!box) return 'element_not_visible';
     if (!settling.settled(box)) return 'element_not_stable';
@@ -509,7 +558,7 @@ ELEMENT_ACTIONABLE_SCRIPT = f"""async (el, options) => {{
         if (permanent && rescrolls >= alignments.length) return 'element_covered_for_good';
         const alignment = alignments[rescrolls % alignments.length];
         rescrolls += 1;
-        el.scrollIntoView({{ block: alignment, inline: alignment }});
+        dom.align(el, alignment);
         settling.forget();
         return 'element_covered';
       }}
@@ -535,12 +584,23 @@ ELEMENT_ACTIONABLE_SCRIPT = f"""async (el, options) => {{
 }}"""
 
 # The element's pointer rect now, without scrolling: null when no part of it is in the viewport.
-ELEMENT_POINTER_RECT_SCRIPT = f"""(el) => ({_POINTER_RECT_JS})(el)"""
+ELEMENT_POINTER_RECT_SCRIPT = f"""(el) => {{
+  {DOM_JS}
+  return ({_POINTER_RECT_JS})(el);
+}}"""
 
 # What covers the element at (x, y), or null (see _COVER_AT_JS).
 ELEMENT_COVER_SCRIPT = f"""(el, [x, y]) => {{
   {DOM_JS}
   return ({_COVER_AT_JS})(el, x, y);
+}}"""
+
+# Whether the element is enabled, as an element_id target's wait reads it (_IS_DISABLED_JS). For a selector target, in
+# the page's own world: Playwright's own enabled check reads the element's hasAttribute, getAttribute and closest as
+# properties, which a form's named controls answer for.
+ELEMENT_ENABLED_SCRIPT = f"""(el) => {{
+  {DOM_JS}
+  return !({_IS_DISABLED_JS})(el);
 }}"""
 
 ELEMENT_FOCUS_SCRIPT = "(el) => { el.focus(); }"
@@ -800,13 +860,10 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
   // unable to take text though the browser gives it focus (fails closed). With no modal dialog open, the fullscreen
   // element (`:modal`) is not inert by what is above it, and the walk stops there; what is outside it takes no focus.
   // While a dialog is open a fullscreen element escapes no inert subtree, and what is outside it can still take focus.
-  // A modal dialog in a shadow root is not found that way: a field outside one still counts, and while one in the
-  // light DOM is open it does not stop the walk (an inert subtree above it counts, though it be the top one: fails
-  // closed). With none open in the light DOM it stops the walk as the fullscreen element does (`:modal`), so of two
-  // there, nested with inert between, the bottom one's field still counts, though the browser gives it no focus. Of a
-  // fullscreen element in a shadow root, the document names the host it is in, which stands in for it, so a field
-  // inside that host and outside the element still counts. A select has no read-only state: it takes keys unless it
-  // is disabled.
+  // While a modal dialog in the light DOM is open, one in a shadow root does not stop the walk (an inert subtree above
+  // it counts, though it be the top one: fails closed). With none open in the light DOM it stops the walk as the
+  // fullscreen element does (`:modal`). Of a fullscreen element in a shadow root, the document names the host it is
+  // in, which stands in for it. A select has no read-only state: it takes keys unless it is disabled.
   const checkVisibility = Element.prototype.checkVisibility;
   const dialogs = Array.from(Document.prototype.querySelectorAll.call(document, 'dialog:modal'));
   const fullscreen = Object.getOwnPropertyDescriptor(Document.prototype, 'fullscreenElement');
@@ -833,15 +890,21 @@ NAMED_FIELDS_SCRIPT = f"""(el) => {{
     !inert(node) &&
     (dom.tag(node) === 'SELECT' ? !dom.matches(node, ':disabled') : dom.matches(node, ':read-write'));
   // Fields alike in every attribute are answered once: what is read of them is the same, and each paragraph of an
-  // editor counts.
+  // editor that carries a naming attribute counts. Their key is the values, each after its length, joined by string
+  // concatenation (not JSON.stringify, nor a Map), so a page whose JSON.stringify answers the same for every value
+  // does not make two fields one; it is kept on an object with no prototype.
   const answer = (nodes) => {{
-    const read = new Map();
+    const read = {{ __proto__: null }};
+    const answered = [];
     for (const node of nodes) {{
       const attributes = ({_FIELD_ATTRIBUTES_JS})(node);
-      const key = JSON.stringify(attributes);
-      if (!read.has(key)) read.set(key, attributes);
+      let key = '';
+      for (const name of {json.dumps(_FIELD_ATTRIBUTE_NAMES)}) key += attributes[name].length + ':' + attributes[name];
+      if (key in read) continue;
+      read[key] = true;
+      answered.push(attributes);
     }}
-    return Array.from(read.values());
+    return answered;
   }};
   const liveFields = [];
   const idleFields = [];

@@ -6,246 +6,498 @@ All notable changes to auto-browser are documented here.
 
 ### Upgrade notes
 
-- **Rebuild an image built with `INSTALL_AGENT_CLIS=true`.** Its codex now comes from Codex's GitHub release, not
-  from npm (see Fixed); an image built before keeps the npm package's codex, whose own sandbox cannot run under the
-  CLI sandbox, until it is built again with the compose files and `.env` you run it with. Under
+- **Rebuild an image built with `INSTALL_AGENT_CLIS=true`.** Its codex now comes from Codex's GitHub release, not from
+  npm (see Fixed); an image built before keeps the npm package's codex, whose own sandbox cannot run under the CLI
+  sandbox, until it is built again with the compose files and `.env` you run it with. Under
   `docker-compose.host-subscriptions.yml` that is
   `docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up -d --build`: the overlay sets
-  `INSTALL_AGENT_CLIS=true`, and `docker compose build controller` without it builds an image with no CLI unless
-  `.env` sets it. In the rebuilt image the commands Codex's model asks for run again under `read-only` and
-  `workspace-write`, and the image disables the MCP servers a Codex home names (see Security). With
-  `INSTALL_AGENT_CLIS=true` the build now stops on an architecture other than amd64 and arm64, for which no codex
-  build is pinned.
+  `INSTALL_AGENT_CLIS=true`, and `docker compose build controller` without it builds an image with no CLI unless `.env`
+  or the shell's environment sets it. In the rebuilt image Codex's own sandbox runs beneath the CLI sandbox under
+  `read-only` and `workspace-write`, and the image disables the MCP servers a Codex home names (see Security). With
+  `INSTALL_AGENT_CLIS=true` the build now stops on an architecture other than amd64 and arm64, for which no codex build
+  is pinned.
 - **If you start uvicorn yourself, add `--lifespan on`** (`docs/deployment.md` gives the whole command). Without it a
   malformed `CONTROLLER_ALLOWED_HOSTS` still leaves the controller serving a 500 to every request (see Fixed). The
   image's command and the root image's entrypoint pass it.
+- **If you run the controller on a host with the CLI sandbox, start it from its own directory.** The sandbox now judges
+  the controller's whole import path (see Security), and `uvicorn` and `python -m uvicorn` put the working directory
+  first on it: started from `/` (a systemd system service's default `WorkingDirectory=`), the provider CLI calls are
+  reported (one warning), and with `CLI_SANDBOX_REQUIRED=true` none runs, though no CLI can write a module there. Start
+  it from `controller/`, as the image does from `/app`, or set the service's `WorkingDirectory=` to it.
+- **Run one controller on a `/data`.** At its start the controller now empties its own temp directory,
+  `/data/controller-tmp` (see Security), so a second controller that the same user starts on the same `/data` removes
+  the temp files the first is using: the screenshot of an OCR in progress, and the profile and downloads of a browser
+  Playwright launched for it.
+- **The Codex host bridge's unit names its checkout `/path/to/auto-browser`, a placeholder: install it again to take up
+  what changed.** It named one developer's checkout in your home, in `WorkingDirectory=` and in the option's commented
+  `InaccessiblePaths=` lines (see Changed). A copy installed before keeps that path, or the one you put there, and none
+  of this. To take up the new unit, in this order, so that the bridge never runs without the lines you changed:
+  1. keep a copy of the one installed:
+     `cp ~/.config/systemd/user/codex-host-bridge.service ~/codex-host-bridge.service.kept`;
+  2. stop the bridge: `systemctl --user stop codex-host-bridge.service`;
+  3. from your checkout's root, run the steps `docs/deployment.md` gives (the Codex host bridge's user-service
+     template), which put the checkout's path in place of the placeholder, enable the unit without starting it, and
+     refuse, before they make or write anything, a path the unit cannot take (a space, a quote, or one of `&`, `|`, `\`,
+     `%`) or a run from a directory that does not hold `ops/systemd/codex-host-bridge.service`;
+  4. where you had turned the option on, take the comment marks off the new copy's `PrivateUsers=`, `InaccessiblePaths=`
+     and `ExecStartPre=` lines and add any path you had added to its lists; carry over from the kept copy any other line
+     you changed;
+  5. `systemctl --user daemon-reload`;
+  6. start it: `systemctl --user start codex-host-bridge.service`.
+
+  A copy made with `cp` alone and not edited does not start: systemd cannot change to its `WorkingDirectory=`.
+- **A Codex decision call asks Codex two questions before it runs, and is not made where an answer is not the call's.**
+  Before each `codex exec` the controller (`OPENAI_AUTH_MODE=cli`) and the Codex host bridge now run
+  `codex <the call's -c flags> features list` (the look) and `codex <the call's -c flags> mcp list --json` (see
+  Security), and the list once more where it names a server that is on: two short Codex commands before each call, or
+  three. The bridge uses the host's own Codex, the one `--codex-path` names (`codex` by default), which has to answer
+  both. The call is not made, and the agent step fails once, with no retry, as `502` (`Provider request failed`), where:
+  - a feature the call turns off still reads on in the look (each but `unified_exec`, which on its own brings the model
+    no tool). A profile the configuration selects, the managed configuration, a `[features]` table in
+    `/etc/codex/requirements.toml` or an older name for the feature in the home config's `[features]` table can turn one
+    back on against the command line. The controller's log names the feature, and the bridge's does for a call through
+    the bridge: turn it off in the place that turns it on.
+  - a server is still listed as on under the call's table, which sets `enabled=false` for it: codex-cli 0.114.0 keeps on
+    one that `/etc/codex/managed_config.toml` names with `enabled = true`, where there is no
+    `/etc/codex/requirements.toml`. The controller's log names the server, or the bridge's for a call through the
+    bridge: take it out of `/etc/codex/managed_config.toml`.
+  - Codex fails either command: it exits non-zero or prints no list, as on a `config.toml` Codex cannot read or parse.
+    Where it exited non-zero, the controller's log has what it printed on its standard error, up to a length, or the
+    bridge's log for a call through the bridge.
+
+  Either command that does not answer within the call's timeout ends the call as a `codex exec` that times out does.
+  Measured with codex-cli 0.114.0, the version the controller image installs.
 
 ### Security
 
+- **A Codex call starts no MCP server from the system, managed, home or project configuration.** codex-cli 0.114.0
+  starts the MCP servers named in the home's `config.toml` (`CODEX_HOME`, else `~/.codex`), `/etc/codex/config.toml`,
+  `/etc/codex/managed_config.toml` and a trusted project root's `.codex/config.toml`, found from `--cd` up to a `.git`,
+  and a `-c mcp_servers={}` turns off none of them. Each Codex call, the controller's (`OPENAI_AUTH_MODE=cli`) and the
+  Codex host bridge's, now runs `codex <its -c flags> mcp list --json` in the call's own directory, with the exec's
+  environment and within the call's timeout, then passes the exec `-c project_root_markers=[]`, which makes the call's
+  own directory the project root, and one `-c mcp_servers={"<name>"={enabled=false},...}` that sets `enabled=false` for
+  each server listed. Where the list names a server that is not already off, the list is run once more with that table,
+  and no `codex exec` is made while a server is still listed as on: codex-cli 0.114.0 keeps on a server that
+  `/etc/codex/managed_config.toml` names with `enabled = true`, against that table (measured, where there is no
+  `/etc/codex/requirements.toml`). A list that exits non-zero (as on a `config.toml` Codex cannot read or parse, where
+  `codex exec` refuses to run too) or prints no list ends the call before any exec too, and one that does not answer
+  within the call's timeout ends it as a `codex exec` that times out does. `codex mcp list --json` prints each server's
+  environment and header values on its standard output, so nothing of that output goes into a log or an error, on the
+  controller or the bridge, but its length and the names of servers it lists. A running bridge answers a call that ends
+  so before its exec (a server still on, or a list that exits non-zero or prints no list) with 409, a refusal the
+  controller does not retry, and a list out of time with 504. Measured with a server planted in each layer: none
+  started, the model was offered no MCP tool, and the decision came back, with and without the image's
+  `/etc/codex/requirements.toml`; and with a server the managed configuration keeps on, the call was refused with no
+  exec where that file is moved aside, and no server started where it is in place. The `agent-cli-image` workflow checks
+  the bridge and the controller's call so.
+- **A Codex decision call turns Codex's command tools off, and is not made where Codex still lists one as on.**
+  Under the controller's Codex command and the bridge's, codex-cli 0.114.0 offered the model `exec_command` and
+  `write_stdin`, and where Codex could run a command (see Fixed), one the model asked for ran without approval. Both now
+  pass `-c features.shell_tool=false -c features.unified_exec=false` on every call: the model is offered `update_plan`,
+  `request_user_input` and `view_image`, and `apply_patch` where the model's own catalog entry brings it, and the
+  decision comes back (measured under `read-only` and `workspace-write`). Codex rejects a file edit the model asks for
+  under `read-only`, the default: the `agent-cli-image` workflow sends one for a new file in the call's directory and
+  one in the temp directory, and neither is written. Before each call the controller and the bridge also run
+  `codex <the same flags> features list` (the look), and make no call where a feature the call turns off still reads on
+  (each but `unified_exec`, which on its own brings the model no tool): a profile the configuration selects, the managed
+  configuration, a `[features]` table in `/etc/codex/requirements.toml` or an older name for the feature in the home
+  config's `[features]` table can turn one back on against the command line. The refusal names the feature in the log.
+  The workflow turns at least one feature on in each of those four places: the call is refused in each, and its
+  controls, run without the look (and, for the profile and the managed configuration, without the call's feature
+  settings), are offered the tools those features bring. A look that exits non-zero, or whose output is not the rows of
+  a features list (an empty one, or a line whose first word is not shaped like a feature's name), ends the call as well.
+  The decision needs no command: the page goes in on stdin, the screenshot as `--image`.
+- **A Claude Code call loads no MCP server.** Claude Code 2.1.72 started the servers of `~/.claude.json` (user and local
+  scope) and of the home's `.mcp.json` (the CLI's working directory is its home), and `--tools ""` left them. Each call
+  now passes `--strict-mcp-config` with no `--mcp-config`: none loads, and the decision comes back (measured).
 - **No MCP server named in Codex's home loads, in an image built with `INSTALL_AGENT_CLIS=true`.** Each Codex call
-  passes `-c mcp_servers={}` to load none, but Codex merges a `-c` table into its configuration key by key, so a
-  server named in `CLI_HOME/.codex/config.toml` (the host's own, under `docker-compose.host-subscriptions.yml`, or one
-  a command of the model's wrote there) stayed enabled: measured with codex-cli 0.114.0, `codex mcp list` still
-  showed it. The image now writes `/etc/codex/requirements.toml`, owned by root, mode 0644, holding
-  `mcp_servers = {}`. Codex then lists such a server as `disabled: requirements (/etc/codex/requirements.toml)`, and
-  `-c mcp_servers.<name>.enabled=true` does not turn it back on. No grant of the CLI sandbox reaches `/etc/codex`.
-- **A page no longer answers for the reads that decide where a type's text goes, what its approval shows and what a
-  click lands on.** These in-page scripts read the DOM through properties. A form's named controls answer for the
-  form's own properties in every JavaScript world (in `<form><input name="parentNode"></form>` the form's `parentNode`
-  is that input), and by selector, where the scripts run in the page's own world, so does what a page defines on its
-  own nodes. So by selector a shadow root that gave itself the element a type named for its `host` made focus in a
-  plain field of another component pass for focus in that element, and the text went into the plain field; and a
-  label given a plain field for its `control` made the approval of a type into the password field it stands for read
-  `plain` and show the text. By selector, element_id or point, a hidden input named `parentNode` in a form inside a
-  button made a click on the form's text read as a press on that input, so a click labelled `read` on a "Delete
-  account" button went on unclassified; and a control named `isContentEditable` kept an approval's read from counting
-  a form that is editable by what it is in, and so from reading the form's secret name. By selector, an image named
-  `elementFromPoint` stood in for the document's own, so the check that the pointer finds a click's target threw
-  and the click was refused, and a frame given its own `getBoundingClientRect` moved the point it was asked at.
-  These reads (a node's parent, shadow root, host, slot, tag and document, a label's `control`, a document's or a
-  shadow root's focused element, `isContentEditable`, `querySelectorAll`, the listener methods, and the pointer
-  check's `elementFromPoint` and `getBoundingClientRect`) now go through the prototypes' own getters and methods,
-  taken as each script starts. In the element ids' world no page script reaches those; by selector, a page that
-  replaces a prototype's getter before the script runs still answers for it, and what a click's description reads
-  of the element it names (its type, text, attributes and labels) and the pointer check's `matches` and `closest`
-  on its target are still read off the node.
-- **An approval's read of the fields a type's text can go to counts them as the browser has them.** It looked an
-  input's type up from its `type` attribute trimmed, so `type="hidden "`, which the browser has as a text field, was
-  no field, and one named as a secret beside a plain field read `plain` and the approval showed the text. And it
-  counted an element as editable by its `contenteditable` attribute, so a text box named as a secret and editable by
-  what it is in was not counted (the same), while one whose attribute says `inherit`, in nothing editable, was,
-  though it takes no text. It now takes a form control by the type the browser has, and anything else by
-  `isContentEditable` (a hidden input or a checkbox in an editor is still no field). By that alone every block of
-  an editor is a field, and an editor of 20,000 paragraphs took 2.9 s to read, over 3 s with an `id` on each, past
-  the read's bound of a second: so of an editor it reads the editing host and, inside it, only what carries a
+  passed `-c mcp_servers={}` to load none, but Codex merges a `-c` table into its configuration key by key, so a server
+  named in `CLI_HOME/.codex/config.toml` (the host's own, under `docker-compose.host-subscriptions.yml`, or one a
+  command of the model's wrote there) stayed enabled: measured with codex-cli 0.114.0, `codex mcp list` still showed it.
+  The image now writes `/etc/codex/requirements.toml`, owned by root, mode 0644, holding `mcp_servers = {}`. Codex then
+  lists such a server as `disabled: requirements (/etc/codex/requirements.toml)`, and
+  `-c mcp_servers.<name>.enabled=true` does not turn it back on. With the image's settings, no grant of the CLI sandbox
+  reaches `/etc/codex`.
+- **A form's named controls and a document's named elements no longer answer for the reads that decide where a type's
+  text goes, what its approval shows and what a click lands on.** These in-page scripts read parts of the DOM through
+  properties. A form's named controls answer for the form's own properties in every JavaScript world (in
+  `<form><input name="parentNode"></form>` the form's `parentNode` is that input), and by selector, where the scripts
+  run in the page's own world, so does what a page defines on its own nodes. So by selector a shadow root that gave
+  itself the element a type named for its `host` made focus in a plain field of another component pass for focus in that
+  element, and the text went into the plain field; and a label given a plain field for its `control` made the approval
+  of a type into the password field it stands for read `plain` and show the text. By selector, element_id or point, a
+  hidden input named `parentNode` in a form inside a button made a click on the form's text read as a press on that
+  input, so a click labelled `read` on a "Delete account" button went on unclassified; and a control named
+  `isContentEditable` kept an approval's read from counting a form that is editable by what it is in, and so from
+  reading the form's secret name. By selector, an image named `elementFromPoint` stood in for the document's own, so the
+  check that the pointer finds a click's target threw and the click was refused, and a frame given its own
+  `getBoundingClientRect` moved the point it was asked at. Controls named `childNodes` or `ownerDocument` in a form
+  inside a "Delete account" button, or in a form drawn as one, made the read of a click's target throw, by selector,
+  element_id or point, and one named `innerText` left a form drawn as the button with no name: a click labelled `read`
+  on it went on unclassified. A form has no `labels`, but a control so named answers for them: in a form drawn as a
+  "Remove" button, a select named `labels` whose option reads "Remove filter" was read as the button's fuller name,
+  which excused its short one, and a click labelled `read` on it went on unclassified, by selector, element_id or point.
+  One named `shadowRoot` in the form under a click's point made the reads of what is under a point throw: by point the
+  click went on unclassified, and by selector on a wrapper the button fills it was refused. By selector an image named
+  `defaultView` made the read of a click's target throw, and the read of where a click Playwright places is pressed; and
+  by element_id, controls named `checkVisibility`, `getClientRects`, `scrollIntoViewIfNeeded` or `scrollIntoView` (the
+  scroll that takes a covered target from under its cover) in the form a click or a type names made it fail. And by
+  selector or element_id, a control named `isContentEditable` in a form under a disabled button, an `aria-disabled` one
+  or a label for a disabled input made the form read as enabled, so a click on the form pressed it where a click waits
+  for its target to be enabled. Each of these now reads as on the same page without them: a type whose focus is in
+  another field is refused, the approval reads `secret`, such a click is held for approval, a click or a type they
+  failed is made, and a click on such a form waits for the form to be enabled. These reads now go through the
+  prototypes' own getters and methods, which each script that makes them (a type's focus checks and its hold on the
+  field, the approval's read, the reads of a click's target and of what is under a point, the check that the pointer
+  finds a click's target, the place and the watch of a click Playwright places, and by element_id the wait for a click's
+  or a type's target to be ready) takes as it starts: those of a node's parent, children, type, root, shadow root, host,
+  slot, tag, local name, document and window and whether it is connected, of an element's attributes, text, `matches`,
+  `closest`, `getBoundingClientRect`, `getClientRects`, `checkVisibility` and `scrollIntoViewIfNeeded`, of a label's
+  `control`, of a document's or a shadow root's focused element and `elementFromPoint`, and `isContentEditable`,
+  `querySelectorAll` and the listener methods. In the element ids' world no page script reaches those. An element's
+  label elements are read only where its kind has them. And by selector a control named `hasAttribute` in the form a
+  type names made the type skip the click that gives its field focus: Playwright's own check that the target is enabled
+  read it as a property. That check is now the controller's own read, the one a target by element_id is read by, and the
+  type no longer skips the click.
+- **An approval's read of the fields a type's text can go to counts them as the browser has them.** It looked an input's
+  type up from its `type` attribute trimmed, so `type="hidden "`, which the browser has as a text field, was no field,
+  and one named as a secret beside a plain field read `plain` and the approval showed the text. And it counted an
+  element inside the one the type names as editable by its `contenteditable` attribute, so a text box named as a secret
+  and editable by what it is in was not counted (the same), while one whose attribute says `inherit`, in nothing
+  editable, was, though it takes no text. It now takes a form control by the type the browser has, and anything else by
+  `isContentEditable` (a hidden input or a checkbox in an editor is still no field). By that alone every block of an
+  editor is a field, and an editor of 20,000 paragraphs took 2.9 s to read, over 3 s with an `id` on each, past the
+  read's bound of a second: so of an editor it reads the editing host and, inside it, only what carries a `role` or a
   field's name by an attribute other than `id` (a text box named as a secret), and it answers fields alike in every
-  attribute once. Such an editor now takes under a quarter of a second either way (measured). Inside an editor, a
-  block in the light DOM whose parent is editable is no editing host, a `contenteditable` of its own included (focus
-  goes to the editor that holds it, measured), and it is read only where it carries a field's name by an attribute
-  other than `id`, or is the element the type names; 1.18.1 read one with its own `contenteditable` by that
-  attribute. One whose parent is not editable (an editor inside a `contenteditable="false"` region of another) is an
-  editing host, and is read. So is an editable element at the top of a shadow root though its host is editable: it
-  takes focus and the text itself.
-- **An approval's read no longer says `plain` by a field that cannot take text now.** A disabled, read-only or hidden
-  plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a
-  text box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field
-  (hidden by `hidden`, `display` or `visibility`, in an `inert` subtree, across shadow roots too, or outside what
-  the document has modal) no longer makes the read `plain`; named as a secret, it still makes it `secret`, since a
-  page can enable or show it as the type focuses. While a modal dialog is open, only the top one escapes an `inert`
-  subtree it is in, as the browser has it, and which is on top the read cannot tell: so an `inert` subtree between a
-  field and the outermost open light-DOM modal dialog it is in counts, and a field not inside every open modal dialog
-  counts as unable to take text. A field in a top dialog nested under `inert` in a lower one, or beside a lower one,
-  so counts as unable to take text though the browser gives it focus (the read fails closed). With no modal dialog
-  open, the fullscreen element is modal: it is not made inert by an `inert` subtree it is in, and a field outside it
-  counts as unable to take text; while a dialog is open, a fullscreen element escapes no `inert` subtree. A field
-  whose walk up to the document runs past 256 steps counts as unable to take text. A modal dialog in a shadow root is
-  not seen: a field outside one still counts, and while one in the light DOM is open, an `inert` subtree above the
-  shadow root's dialog counts. With none open in the light DOM, a shadow root's modal dialog stops the walk as the
-  fullscreen element does, so of two there, nested with `inert` between, the bottom one's field still counts (the
-  browser gives it no focus). Of a fullscreen element in a shadow root the document names the host it is in, which
-  stands in for it: a field outside that host is read as unable to take text, and one inside the host but outside the
-  fullscreen element still counts. A plain field that can take text, however small or faint the page draws it, still
-  makes a read beside such a component `plain`, and so, in the same way, does a plain field the browser gives no focus
-  by what the read does not see: CSS `interactivity: inert` with no `inert` attribute, a wrapper whose `display` is
-  passing to `none` by a transition (kept drawn until it ends), or a light-DOM field slotted into a closed shadow root
-  whose inside is `inert` (measured: each takes no focus, and each reads `plain`). And a plain field the page shows
-  only once what holds it is focused (a search box that opens on focus) is hidden when the approval reads it, so that
-  approval now reads `unread` and shows no text, where it read `plain`.
-- **A fenced frame is a frame to the in-page checks, as an iframe is.** The frame tags they knew were `iframe`,
-  `frame`, `object` and `embed`, so a plain field beside a `<fencedframe>` made an approval read `plain` though the
-  text can go into the frame's document; a click by element_id on a button a fenced frame filled went into the frame,
-  where one an iframe fills is refused as covered; and by element_id focus in a fenced frame inside the target counted
-  as focus in the target. Two points on one were taken for one element, so a click by coordinates there landed off
-  its point, as on no iframe; and a placed click whose target holds one, where the pointer is over it, was refused.
-  `<portal>` is on the list as well, though Chromium 156 has no such element.
-- **The TOTP autofill reads a field's attributes as a type's hold does.** It read them with a copy of that script of
-  its own, through the field's own `getAttribute`, which a page can define on the field: a promo-code field that said
-  it took a one-time code had the code typed into it, and Enter submitted its form (on a checkout page, the order).
+  attribute once. Such an editor is now read within that bound either way. Inside an editor, a block in the light DOM
+  whose parent is editable is no editing host, a `contenteditable` of its own included (focus goes to the editor that
+  holds it, measured), and it is read only where it carries a `role` or a field's name by an attribute other than `id`,
+  or is the element the type names; 1.18.1 read one with its own `contenteditable` by that attribute. One whose parent
+  is not editable (an editor inside a `contenteditable="false"` region of another) is an editing host, and is read. So
+  is an editable element at the top of a shadow root though its host is editable: it takes focus and the text itself.
+- **An approval's read no longer says `plain` by a field that is disabled, read-only, hidden, in an `inert` subtree, or
+  outside an open light-DOM modal dialog or, with none open, the fullscreen element.** A disabled, read-only or hidden
+  plain field counted as a field the type's text could go to, so beside a component that takes its keys itself (a text
+  box the page draws, whose own name is never read) the approval read `plain` and showed the text. Such a field (hidden
+  by `hidden`, `display` or `visibility`, in an `inert` subtree, across shadow roots too, or outside an open light-DOM
+  modal dialog or, with none open, the fullscreen element) no longer makes the read `plain`; named as a secret, it still
+  makes it `secret`, since a page can enable or show it as the type focuses. While a modal dialog is open, only the top
+  one escapes an `inert` subtree it is in, as the browser has it, and which is on top the read cannot tell: so an
+  `inert` subtree between a field and the outermost open light-DOM modal dialog it is in counts, and a field not inside
+  every open light-DOM modal dialog counts as unable to take text. A field in a top dialog nested under `inert` in a
+  lower one, or beside a lower one, so counts as unable to take text though the browser gives it focus (the read fails
+  closed). With no modal dialog open, the fullscreen element is modal: it is not made inert by an `inert` subtree it is
+  in, and a field outside it counts as unable to take text; while a dialog is open, a fullscreen element escapes no
+  `inert` subtree. A field whose walk up to the document runs past 256 steps counts as unable to take text. While a
+  modal dialog in the light DOM is open, an `inert` subtree above a shadow root's modal dialog counts. With none open in
+  the light DOM, a shadow root's modal dialog stops the walk as the fullscreen element does. Of a fullscreen element in
+  a shadow root the document names the host it is in, which stands in for it: a field outside that host is read as
+  unable to take text. A plain field the page shows only once what holds it is focused (a search box that opens on
+  focus) is hidden when the approval reads it, so that approval now reads `unread` and shows no text, where it read
+  `plain`.
+- **A fenced frame is a frame to the in-page checks, as an iframe is.** The frame tags they knew were `iframe`, `frame`,
+  `object` and `embed`, so a plain field beside a `<fencedframe>` made an approval read `plain` though the text can go
+  into the frame's document, and a click by element_id on a button a fenced frame filled went into the frame, where one
+  an iframe fills is refused as covered. Two points on one were taken for one element, so a click by coordinates there
+  landed off its point, as on no iframe; and a placed click whose target holds one, where the pointer is over it, was
+  refused. `<portal>` is on the list as well, though Chromium 156 has no such element.
+- **The TOTP autofill reads a field's attributes as a type's hold does.** It read them with a copy of that script of its
+  own, through the field's own `getAttribute` and `id`, which a page can define on the field: a promo-code field that
+  said it took a one-time code had the code typed into it, and Enter submitted its form (on a checkout page, the order).
   It now reads them with the hold's script, through `Element.prototype`'s.
-- **The TOTP autofill stops typing the code once it finds the page has left the named host.** It checked the host
-  before the typing and after it, before Enter, but not between the keys, so a key handler that sent the page to
-  another host had the rest of the code typed into whatever had focus there (four of the six digits, in one run
-  measured). It now checks before each key, in the same step as the key is sent, and types none after a check that
-  finds the page gone: no key goes out once the controller has heard the page left, where a key sent from a task
-  of its own went out after a navigation the controller had already queued. A page whose navigation the browser
-  has begun and the controller not yet heard of still gets that key. Where its fill of the field failed it pressed
-  select-all and Delete into whatever had focus, on whatever page was there by then, which emptied another host's
-  field: each is now pressed only where the page is still on a named host and focus is in the field, asked before
-  each key as the code's are, and each waits 2 seconds at most for the page, as a type's clear does, past which no
-  code is typed: it waited with no bound, and a page that never acknowledged one held the session.
+- **The TOTP autofill stops typing the code once it finds the page has left the named host.** It checked the host before
+  the typing and after it, before Enter, but not between the keys, so a key handler that sent the page to another host
+  had the rest of the code typed into whatever had focus there (four of the six digits, in one run measured). It now
+  checks before each key, in the same step as the key is sent, and types none after a check that finds the page gone: no
+  key goes out once the controller has heard the page left. Where its fill of the field failed it pressed select-all and
+  Delete into whatever had focus, on whatever page was there by then, which emptied another host's field: each is now
+  pressed only where the page is still on a named host and focus is in the field, asked before each key as the code's
+  are, and each waits 2 seconds at most for the page, as a type's clear does, past which no code is typed: it waited
+  with no bound, and a page that never acknowledged one held the session.
 - **A type that clears its field takes its hold on the field before the clear, not after it.** Taken after, the hold
-  heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a
-  plain one in the same element the type named kept the preview of the text meant for the password field, and a
-  move away and back between the clear's checks passed them both. Its preview is now withheld, unless the page
-  stops focus events before the field hears them: a hold has never heard a move away and back on such a page
-  (docs/llm-adapters.md). The hold reads the field once the clear is done as well, as the hold taken then did: a
-  field the clear's Delete makes a password field keeps no preview however it reads once the text is in. By
-  selector, the clear's checks also took focus in a frame inside the named element for focus in it, as by
-  `element_id` they do not, and the clear's keys and the text went to the frame's document: the type is now refused
-  there (`focus_lost`), unless focus was already in the frame as the type began.
-- **A field the page makes a password field while the text goes in keeps no preview.** The hold on the field a
-  type's text goes to heard only focus moves, and read the field's attributes as it was taken, once the clear was
-  done and as it was given back: a field the text's first key made a password field and its last key a plain one
-  again read plain at each, and the preview of a text 13 of whose 14 keys went into a password field was kept, by
-  selector and by `element_id` (as in 1.18.1). The hold now hears a change of any attribute it reads (`type`,
-  `name`, `id`, `placeholder`, `aria-label`, `autocomplete`) from its take on, and a type during which the page
-  changed one withholds its preview, though the attribute came back. That is the cost: a field whose page sets one
-  of them as the text goes in, even to the value it had (a page that writes the same placeholder or `aria-label`
-  again at each input), loses its preview. A page that changes other attributes of the field (a class,
-  `aria-invalid`, the `value` attribute) changes nothing.
+  heard nothing of a focus move during the clear: a select-all handler that sent focus from a password field to a plain
+  one in the same element the type named kept the preview of the text meant for the password field, and a move away and
+  back between the clear's checks passed them both. Its preview is now withheld. The hold reads the field once the clear
+  is done as well, as the hold taken then did: a field the clear's Delete makes a password field keeps no preview
+  however it reads once the text is in. By selector, the clear's checks also took focus in a frame inside the named
+  element for focus in it, as by `element_id` they do not, and the clear's keys and the text went to the frame's
+  document: the type is now refused there (`focus_lost`), unless focus was already in a frame inside it as the type
+  began.
+- **A field the page makes a password field while the text goes in keeps no preview.** The hold on the field a type's
+  text goes to heard only focus moves, and read the field's attributes as it was taken (once the clear was done) and as
+  it was given back: a field the text's first key made a password field and its last key a plain one again read plain at
+  each, and the preview of a text 13 of whose 14 keys went into a password field was kept, by selector and by
+  `element_id` (as in 1.18.1). The hold now hears a change of any attribute it reads (`type`, `name`, `id`,
+  `placeholder`, `aria-label`, `autocomplete`) from its take on, and a type during which the page changed one withholds
+  its preview, though the attribute came back. That is the cost: a field whose page sets one of them as the text goes
+  in, even to the value it had (a page that writes the same placeholder or `aria-label` again at each input), loses its
+  preview. A page that changes other attributes of the field (a class, `aria-invalid`, the `value` attribute) changes
+  nothing.
+- **Under the CLI sandbox, a provider CLI can no longer signal the controller, or reach an abstract Unix socket of a
+  process outside it, on Linux 6.12 or later.** The CLI sandbox's Landlock ruleset handled files alone, so a
+  prompt-injected CLI, a process of the controller's user, could stop or kill the controller and any other process of
+  that user, another call's CLI among them, and connect to an abstract Unix socket any of them listened on. Where the
+  kernel has Landlock's scopes (its ABI 6) the ruleset now sets both: a CLI signals, and connects to the abstract
+  sockets of, only the processes it started (measured on Linux 6.18: the signal and the connect to a process outside
+  answer `EPERM`).
+- **The CLI sandbox's check of the controller's own code takes in its whole import path, and no longer all of `/usr`.**
+  1.18.1's check took in the controller's package, its interpreter, `sys.prefix`, `sys.base_prefix` and where its
+  packages are installed, but not the rest of `sys.path`: on a host run started from a directory a CLI may write
+  (`/tmp`, `CLI_HOME`), or with a `PYTHONPATH` entry there, a sandboxed CLI could leave a module (a `json.py`, under
+  `python -m uvicorn` or in that `PYTHONPATH` entry) that the controller imported in the standard library's place at its
+  next start, outside the sandbox, with no warning, under `CLI_SANDBOX_REQUIRED=true` too. The check now takes each
+  entry of `sys.path` (as written, a `..` after a link read after the link, and a relative one taken from the working
+  directory) and the standard library's directories in place of the two prefixes, so such a host run is reported, and
+  with `CLI_SANDBOX_REQUIRED=true` runs no provider CLI. Where the working directory was removed while the controller
+  runs (a release directory swapped under it), a relative entry without a `..` part is passed over, as nothing can be
+  made where it leads, and one with a `..` part is reported, as where it leads past the removed directory cannot be
+  said; so is a relative `PLAYWRIGHT_BROWSERS_PATH`, `..` or not, which Playwright's driver resolved under that
+  directory at its start. With a distribution's Python, whose prefixes are both `/usr`, a directory a CLI may write
+  elsewhere in `/usr` (`/usr/local/lib/node_modules`) was reported, and refused under `CLI_SANDBOX_REQUIRED=true`, where
+  the controller runs no code from it; it no longer is, unless a program the controller runs leads there. The check
+  takes in each directory of the controller's `PATH` too (a relative one, the empty one among them, read from the
+  working directory, as `exec` reads it, and `/bin` and `/usr/bin` where `PATH` is not set), and each program the
+  controller runs outside the sandbox where `exec` finds it, through its links: `tesseract` and `autossh` in each `PATH`
+  directory, `HARNESS_UV_COMMAND`'s program (where `HARNESS_VERIFIER`, `uv` or `ensemble`, runs it) there or as written,
+  each later word of that command and each word a shell reads in one (as `sh -c` and `env -S` split a command string,
+  read both at space, tab and line breaks alone and at every ASCII whitespace and at its operators, again until no word
+  is new), as a program where it has no `/` and as a path (a script it runs or a file it reads or writes, the part after
+  `=` of a word and each part of a ':' list among them, but for a URL's host and for the root itself), the files Python
+  runs from the working directory for the module each such word may name (the word after `-m`, a `/` in it or not, or
+  uv's module after its `-m` or `--module` and any options, and the parts after the first letter and after the first `m`
+  of a word led by one `-`, `mod` in `-mmod`, `-uBmmod` or pytest's `-pmod`; each name on the way and the module itself,
+  as a package's `__init__` or as a file, in every form this Python imports: source, bytecode, extension; and a
+  package's `__main__`; for a name that holds a `/`, the names on the way before the first part that holds one, which
+  Python imports before it fails there), the working directory itself wherever the verifier runs (Python puts it, or a
+  directory in it, first on the verifier's import path under `-m` or `-c`, from stdin, for a script run from there and
+  for an empty part of a `PYTHONPATH` list, and `pytest` collects every `test_*.py` under it: a host run that gives CLIs
+  a directory in it is reported; start the controller from one that holds none given, as the image does from `/app`),
+  and where Playwright finds shadow browse's Chromium on a host (`PLAYWRIGHT_BROWSERS_PATH` as Playwright joins it, or
+  `~/.cache/ms-playwright` where it is unset). `/usr/local/bin`, where npm links a CLI it updates in
+  `/usr/local/lib/node_modules`, is reported where a CLI may write it and it is on the controller's `PATH`, and so are a
+  `tesseract` on the `PATH` that links into a directory a CLI may write and, with `/usr/local/lib/node_modules` given, a
+  verifier npm links into it from `/usr/local/bin`, as 1.18.1 did where the directory given lay in its prefix (`/usr`,
+  or the image's `/usr/local`); a `PATH` directory, a verifier named by its path, a script its command runs or a file it
+  reads or writes, or a `PLAYWRIGHT_BROWSERS_PATH` in a directory a CLI may write (`/tmp`), which 1.18.1 never judged,
+  are reported too: `--log /dev/null` among them, as `docs/deployment.md` says. So is the bytecode prefix, where
+  `PYTHONPYCACHEPREFIX` sets one: a `.pyc` a CLI leaves there ran in place of the standard library's `json` at the next
+  start (measured), with nothing said. So are the places named by the variables the controller hands those programs,
+  where a value holds a `/`, each value read as a word of the verifier's command is (Tesseract's `TESSDATA_PREFIX` and
+  `OMP_*`; the driver's `DEBUG`, `DEBUG_FILE`, `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`,
+  `XDG_RUNTIME_DIR`, judged one way, and its `PW_*` and `PLAYWRIGHT_*` names; `AUTOSSH_*`; those
+  `HARNESS_UV_ENV_PASSTHROUGH` hands the verifier, but `HOME`, the temp names, `XAUTHORITY` and `XDG_RUNTIME_DIR`; the
+  CA bundles' names and `SHELL`; not `XAUTHORITY`, `HOME`, the temp names or, unless passed through, `PATH`): with
+  `TESSDATA_PREFIX` in a directory a CLI may write, a CLI set Tesseract's parameters, file writes among them (measured),
+  and nothing was said. The image's import path and `PATH` hold no directory a CLI may write, and it sets no bytecode
+  prefix and none of those variables.
+- **The CLI sandbox checks the `.env` the controller reads its settings from.** The controller reads `.env` from its
+  working directory at its start, and 1.18.1's check judged that directory only where the controller's own code lay in
+  it (a run from a checkout): a host run of installed code started from a directory a CLI may write (`/tmp`, `CLI_HOME`)
+  let a sandboxed CLI write the next start's settings there (`CLI_SANDBOX_ENABLED=false`, a token of its own), with no
+  warning. That `.env` is now judged with the other places read at the start: reported, and with
+  `CLI_SANDBOX_REQUIRED=true` no CLI runs.
+- **The CLI sandbox checks where the compliance manifest and the host bridge's socket are kept.** It checked the
+  secrets' and the stores' settings, but not `COMPLIANCE_MANIFEST_PATH`, which the controller writes at its start where
+  `COMPLIANCE_TEMPLATE` is set, through a temporary file beside it, or `OPENAI_HOST_BRIDGE_SOCKET`, whose answers the
+  controller takes for the bridge's Codex. Set in a directory a CLI may write (`CLI_HOME`, `/tmp`), a sandboxed CLI
+  could leave a link at the manifest's temporary name, which the controller's next start writes through, or bind a
+  socket of its own at the bridge's path and answer the controller's Codex calls, with no warning, under
+  `CLI_SANDBOX_REQUIRED=true` too. The manifest is now checked as a store is, and the socket as a store is but for lying
+  outside `/data`.
+- **The CLI sandbox checks the stores no setting names.** The isolated sessions' runtime root, `browser-sessions` beside
+  `ARTIFACT_ROOT`'s place (each session's browser profile, and the endpoint file the controller takes for its
+  browser's), and the witness keys' place where `WITNESS_ROOT` cannot be made, `witness` beside `AUDIT_ROOT`'s, were in
+  no list the check judged: `CLI_SANDBOX_WRITABLE=/data/browser-sessions` gave a sandboxed CLI those profiles and
+  endpoint files with no warning, under `CLI_SANDBOX_REQUIRED=true` too. Each is now checked as a store is.
+- **The host bridge unit's option hides the controller's stores as they are when the bridge starts, not only its
+  secrets.** Turned on, it hid the checkout's `.env`, the secrets' places and `data/cli-home` from the bridge's Codex,
+  which runs outside the CLI sandbox, and left it the approvals with their digest key, the audit log, the sessions, the
+  jobs and the mesh's peers, to read and, where the checkout is the bridge's user's, to change. Its `InaccessiblePaths=`
+  lines and its start-up check now name each store's place at its setting's default (`data/approvals`, `data/audit`,
+  `data/sessions`, `data/jobs`, `data/memory`, `data/harness`, `data/mcp`, `data/crons`, `data/share`, `data/tunnels`,
+  `data/artifacts`, `data/uploads` and `data/compliance-manifest.json`), `data/browser-sessions`, which no setting
+  names, and `data/db`, where the docs put `STATE_DB_PATH`, and `data/mesh` in place of `data/mesh/identity`, so that
+  the peers file, which the controller replaces by a rename, is hidden with it. The option stays off as shipped, and a
+  copy of the unit installed before keeps its old lines (see Upgrade notes).
+- **Under the CLI sandbox, a provider CLI no longer reaches the temp files the controller now keeps in `/data`.** The
+  controller, and the children it starts, kept them in the system temp directory, which the CLI
+  sandbox gives every CLI to write: a prompt-injected CLI, which runs as the controller's user, could read the
+  screenshot an OCR writes to `/tmp` while Tesseract reads it, read or replace the profile (its cookies) and the
+  downloads of a browser Playwright launches on the controller, as shadow browse does, and read or rewrite what the
+  Universal Verifier's command stages there (the trace it is given, which it may read back to judge). At its start the
+  controller now makes `/data/controller-tmp`, mode `0700`, removes what an earlier start left in it, and keeps its own
+  temp files there, SQLite's among them in the image (a store's sort or temp table larger than its cache, measured
+  with the image's SQLite), as Tesseract, Playwright's
+  driver, the Universal Verifier's command and `autossh` do theirs; the sandbox closes it to every CLI, and a CLI's own
+  `TMPDIR` stays the operator's (measured in the image: the OCR leaves and makes nothing in `/tmp`, and a CLI under the
+  sandbox can neither list nor read the directory). Where `/data` is not there, or that directory cannot be made in it
+  or be the controller's alone (a link, another user's, a mode other than `0700`), or what an earlier start left in it
+  cannot be removed by the controller's user (a directory of mode `0500` holding a file), the controller keeps the
+  system temp directory and says why in one warning at its start; the image's root step hands a directory a
+  `CONTROLLER_RUN_AS=root` start left back to the controller's user, as it does the controller's other files. Each CLI
+  call judges the controller's temp directory as it judges a secret's place: one that lies outside `/data`, in a
+  directory a CLI may write, or holds one is one warning, and with `CLI_SANDBOX_REQUIRED=true` an error, and no CLI
+  runs. Where the CLI sandbox is off, or there is no Landlock, the directory's mode stops nothing. The host bridge
+  unit's option hides `data/controller-tmp` too.
 
 ### Fixed
 
-- **Codex's own sandbox now runs beneath the CLI sandbox, in an image built with `INSTALL_AGENT_CLIS=true`.** The
-  image installed codex-cli 0.114.0 from npm, whose binary is the musl build. Its sandbox helper opens `/` with
-  `O_PATH`, which Rust's standard library drops on musl, so the open reached the kernel as an open of `/` for
-  reading and the CLI sandbox refused it: under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write`
-  the helper failed, and no command Codex's model asked for ran. Under `danger-full-access`, and with
-  `CODEX_BRIDGE_ALLOW_HOST_EXEC=true`, Codex runs the command with no sandbox of its own, beneath the CLI sandbox
-  alone, and those commands ran in 1.18.1's image too (measured): 1.18.0's notes and the GHSA-9qq7 advisory said no
-  command ran in any mode. The decision the controller asks Codex for needs no command. The image now installs the
-  glibc build of the same release from Codex's GitHub release (`rust-v0.114.0`, for amd64 and arm64): it checks the
-  tarball, and then the binary in it, against pinned sha256s (the binaries verified first against the release's
-  sigstore bundles) and installs it as `/usr/local/bin/codex`, owned by root, mode 0755. npm installs only the Claude
-  and Gemini CLIs. What a command of the model's reaches there, measured with Codex run as the controller runs it
-  (uid 10002, the CLI sandbox's grants, a call directory in the CLI home) on Docker Desktop:
-  - `read-only`: it reads what the CLI sandbox leaves readable, which inside `/data` is the CLI home (Codex's
-    sign-in, and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by
-    the CLI sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes no
-    file's content (the CLI sandbox's caveats still apply: metadata changes, and truncation on a kernel older
-    than 6.2) and cannot connect (a connect to 127.0.0.1 was refused).
-  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
-    home; it cannot connect.
+- **Codex's own sandbox now runs beneath the CLI sandbox, in an image built with `INSTALL_AGENT_CLIS=true`.** The image
+  installed codex-cli 0.114.0 from npm, whose binary is the musl build. Its sandbox helper opens `/` with `O_PATH`,
+  which Rust's standard library drops on musl, so the open reached the kernel as an open of `/` for reading and the CLI
+  sandbox refused it: under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write` the helper failed, and no
+  command Codex's model asked for ran. Under `danger-full-access`, and with `CODEX_BRIDGE_ALLOW_HOST_EXEC=true`, Codex
+  runs the command with no sandbox of its own, beneath the CLI sandbox alone, and those commands ran in 1.18.1's image
+  too (measured): 1.18.0's notes and the GHSA-9qq7 advisory said no command ran in any mode. The decision the controller
+  asks Codex for needs no command. The image now installs the glibc build of the same release from Codex's GitHub
+  release (`rust-v0.114.0`, for amd64 and arm64): it checks the tarball, and then the binary in it, against pinned
+  sha256s (the binaries verified first against the release's sigstore bundles) and installs it as
+  `/usr/local/bin/codex`, owned by root, mode 0755. npm installs only the image's other CLIs. What a command of the
+  model's reaches there, measured with Codex run as the controller runs it (uid 10002, the CLI sandbox's grants, a call
+  directory in the CLI home) on Docker Desktop:
+  - `read-only`: it reads what the CLI sandbox leaves readable, which inside `/data` is the CLI home (Codex's sign-in,
+    and the other CLIs' where they share the home) and, by the CLI sandbox's grants, what `CLI_SANDBOX_WRITABLE` names
+    there and the call's screenshot; it writes no file's content and cannot connect (a connect to 127.0.0.1 was
+    refused).
+  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory); a file in the home itself
+    and one beside Codex's `config.toml` were refused, and it cannot connect.
   - `danger-full-access` and `CODEX_BRIDGE_ALLOW_HOST_EXEC=true`: everything the CLI sandbox allows, which includes
     writing the CLI home (and so the configuration the next call reads) and connecting.
   No setting reads or writes the rest of `/data`. A new workflow, `agent-cli-image`, builds that image on both
-  architectures on a change to the controller's Dockerfile, `.dockerignore` or entrypoint, the CLI sandbox's code,
-  the CLI launch in `providers/base.py`, the root image's inputs, its own check scripts or the workflow itself. It
-  runs Codex there the same way against a stand-in model that asks for one command, and fails unless each setting
-  reaches what `docs/deployment.md` ("Codex's own sandbox") says; other changes to the image's inputs do not start
-  it. A controller run on the host with the npm package's codex keeps the old limit, and has no
-  `/etc/codex/requirements.toml`, so there the MCP servers its Codex home names load (the same section).
-- **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image
-  does.** It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a
-  release published that hour. No workflow built it: a new one, `glama-image`, builds it and drives it as an MCP
-  client (`initialize`, then `tools/list`) on any change to what the image copies, `controller/app` included.
-- **A malformed `CONTROLLER_ALLOWED_HOSTS` now stops the start, where the controller served a 500 to every
+  architectures on a change to the controller's Dockerfile, `.dockerignore` or entrypoint, the controller's code
+  (`controller/app/`), the Codex host bridge, a file under `scripts/ci/` or the workflow itself. It runs Codex there the
+  same way against a stand-in model that asks for
+  one command, and fails unless each setting reaches what `docs/deployment.md` ("Codex's own sandbox") says. With MCP
+  servers planted where each CLI reads them, it has the Codex host bridge and the controller's Codex and Claude calls
+  each make a decision, and fails unless none starts a server, the controller's calls offer the model no command
+  tool, and each decision comes back. Other changes to the image's inputs do not start it.
+- **The root (Glama) image installs its requirements under `controller/constraints.txt`, as the controller image does.**
+  It installed `requirements.txt` alone, so each build resolved the dependency tree afresh and could take a release
+  published that hour. No workflow built it: a new one, `glama-image`, builds it and drives it as an MCP client
+  (`initialize`, then `tools/list`) on any change to what the image copies, `controller/app` included.
+- **A malformed `CONTROLLER_ALLOWED_HOSTS` now stops the image's start, where the controller served a 500 to every
   request.** The Host check refuses a malformed entry (a wildcard written other than `*` or `*.example.com`, brackets
   round anything but an IPv6 address) when the app's middleware is built, at its first call, the lifespan's startup.
   Under uvicorn's default `--lifespan auto` a failure there reads as an app without a lifespan: uvicorn logged
   `ASGI 'lifespan' protocol appears unsupported.` at INFO and served, the controller's own startup never ran, and
-  `GET /healthz` answered 500. The image's command and the root image's entrypoint now pass `--lifespan on`, so
-  uvicorn logs the error and exits (status 3) without serving.
-- **The root (Glama) image's entrypoint starts its stdio bridge only once uvicorn answers `/healthz`.** It polled
-  for 60 seconds and then started the bridge whatever the answer, so a uvicorn that had already exited left the
-  bridge talking to nothing and the container running. It now ends with uvicorn's status (1 where that is 0) when
-  uvicorn exits before it is healthy, and with 1 when the 60 seconds run out.
+  `GET /healthz` answered 500. The image's command and the root image's entrypoint now pass `--lifespan on`, so uvicorn
+  logs the error and exits (status 3) without serving.
+- **The root (Glama) image's entrypoint starts its stdio bridge only once uvicorn answers `/healthz`.** It polled for 60
+  seconds and then started the bridge whatever the answer, so a uvicorn that had already exited left the bridge talking
+  to nothing and the container running. It now ends with uvicorn's status (1 where that is 0) when uvicorn exits before
+  it is healthy, and with 1 when the 60 seconds run out.
 - **The root (Glama) image starts again; it had failed at every start since 1.15.0.** Its entrypoint set
-  `SESSION_ISOLATION_MODE=glama_inspect`, a mode no code named, which skipped the startup connect to a browser-node
-  only because it was not `shared_browser_node`; 1.15.0 refuses an unknown mode, so the server failed at import and
-  the bridge started with nothing behind it. A new setting, `CONNECT_AT_STARTUP` (default `true`), says what the
-  image needs: with it `false` the controller starts without connecting to the shared browser-node, and the first
-  call that needs the browser connects. The image sets it, and it answers MCP's `initialize` and `tools/list` again
-  (20 tools, measured on the image built from this release; `glama-image` checks the same on every change to what
-  the image copies, and fails on 1.18.1's image). uvicorn's output there now goes to stderr: stdout is the
-  bridge's, one MCP message a line, and uvicorn's access log put lines of its own among them.
+  `SESSION_ISOLATION_MODE=glama_inspect`, a mode no code named, which skipped the startup connect to a browser-node only
+  because it was not `shared_browser_node`; 1.15.0 refuses an unknown mode, so the server failed at import and the
+  bridge started with nothing behind it. A new setting, `CONNECT_AT_STARTUP` (default `true`), says what the image
+  needs: with it `false` the controller starts without connecting to the shared browser-node, and the first call that
+  needs the browser connects. The image sets it, and it answers MCP's `initialize` and `tools/list` again (20 tools,
+  measured on the image built from this release; `glama-image` checks that both are answered, with at least one tool, on
+  every change to what the image copies, and fails on 1.18.1's image). uvicorn's output there now goes to stderr: stdout
+  is the bridge's, one MCP message a line, and uvicorn's access log put lines of its own among them.
 - **A type into a field in a form with a control named after a DOM property is no longer refused.** A control named
   `nodeType` stopped the focus check's walk up from the field at the form, so focus in the field was not focus in the
-  element around it, and the type ended in `focus_lost`. Controls named `addEventListener` and `removeEventListener`
-  on a focused form failed the type's hold: by element_id the type failed, and by selector its preview was withheld.
-  One named `querySelectorAll` left an approval's read `unread`. By selector, a component whose shadow root defines a
-  `host` of its own was refused the same way. And the check before a press that the pointer finds its target no
-  longer runs on without end from a form with a control named `parentNode`, which it walked to and back from, holding
-  the page and the click: it reads the form's own parent, and stops at 256 steps as the click target's walks do, so
-  a target more than 256 nodes above what the pointer finds is not found there (a no, and the click is refused).
-- **A page whose `addEventListener` or `removeEventListener` throws keeps no more of a type's listeners than the
-  one that threw.** By selector the hold on the field a type's text goes to puts its listeners on in the page's own
+  element around it, and the type ended in `focus_lost`. Controls named `addEventListener` and `removeEventListener` on
+  a focused form failed the type's hold: by element_id the type failed, and by selector its preview was withheld. One
+  named `querySelectorAll` left an approval's read `unread`. By selector, a component whose shadow root defines a `host`
+  of its own was refused the same way. And the check before a press that the pointer finds its target no longer runs on
+  without end from a form with a control named `parentNode`, which it walked to and back from, holding the page and the
+  click: it reads the form's own parent, and stops at 256 steps as the click target's walks do, so a target more than
+  256 nodes above what the pointer finds is not found there (a no: the click is then one Playwright places, and for an
+  action whose target is read that click is refused). A control named `getAttribute` or `querySelectorAll` made observe
+  fail on the page with `TypeError: form.getAttribute is not a function` (or `form.querySelectorAll`): the page summary
+  read each form's attributes and fields through the form's own properties. So observe gave no element_id there, and a
+  type by selector into a field of the form failed the same way before anything was typed. Observe now lists such a page
+  as it lists it without the control, with the control among the form's fields, and a type into the field, by selector
+  or by the element_id observe gives, puts its text there. In observe's list a control named `disabled` or `href` gave a
+  form `"disabled": true` or `"href": {}`, and a select named `labels` gave it the select's text for its label; and a
+  button whose `aria-labelledby` names a form was named by that form's control named `innerText`
+  (`[object HTMLInputElement]`). 1.18.1 did the same. Each now reads as without the control.
+- **A page whose `addEventListener` or `removeEventListener` throws keeps no more of a type's listeners than those whose
+  own removal threw.** By selector the hold on the field a type's text goes to puts its listeners on in the page's own
   world, with what the page has made of those methods. One that threw as it went on ended the take with the listener
   before it left on the field for good, and one that threw as it came off left those after it. Each now goes on and
   comes off on its own: a listener whose own removal throws stays on the field, and the others come off. A hold that
   could not put one on withholds the type's preview, as one whose field lost focus does.
-- **A page that stops answering no longer holds a click, or a type's focus check and clear, past their bounds.** A
+- **A click's own questions to a page that stops answering, and a type's focus check and clear, end at their bounds.** A
   click Playwright places asked its target's handle for the box and set the pointer watch up on it with no bound, and
-  the question whether the pointer finds the target asked each handle on its way up the frames with none: a
-  Locator's own `timeout` bounds only the look-up of the element. Each is now asked within what the click's budget
-  leaves (each call of the question, on its way up the frames, within a second at most), past which the click ends
-  as a timeout, as at any of its other waits; the question before a human-like press is asked within a second in
-  all, since its no hands the click to one Playwright places, which needs the rest; the handles it took are given
-  back together, the question's within about a second and the click's own within about another (in turn, a page
-  that answered no disposal held the click a second a handle). By selector, a type's check that focus is in its
-  field answers within a second or refuses the type (`focus_lost`), and its focus click reads its target's box within
-  a second, then has a second for its human-like click (a box not read by then makes the click one Playwright
-  places, and a click that runs out of it gives way, as before, to focusing the field by script). The clear's
-  select-all and Delete are each bounded at 2 seconds, the least a keystroke is given, past which the type ends as
-  `typing_timeout` with none of its text typed. And a type whose field cannot be found again is refused before
-  select-all, which was pressed first, into whatever had focus. The pointer's moves and the press still wait for the
-  page.
-- **A click cancelled between pressing the mouse button and letting it go no longer leaves the button pressed.**
-  The press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or
-  while the page had not yet answered the button going down, skipped the up: whatever ran next on the page began
-  with the button held. It is let go as a drag's is, within 5 seconds, and the cancel then goes on. A click or a drag
-  that went in, but whose button is not let go within those 5 seconds, also where the browser does not answer the
-  cancel of the release, ends as `mouse_not_released` (504, not to be retried): the button went down and may still
-  be held, so observe the page before acting again. A drag's ended as an untyped `RuntimeError`. Where the press or
-  the drag itself failed, was cancelled or ran past its deadline, its own error is the one reported, and a release
-  that then fails is only logged: a drag at its deadline ends with the deadline's error, which says nothing of the
-  button.
-- **A type cancelled as the page answered one of its calls no longer goes on, on the image's Python 3.11.** There,
-  `asyncio.wait_for` answered a caller cancelled in the loop turn its call answered with that answer, so the cancel
-  was lost: the next keystroke was typed, a key of the clear pressed, or a take read on. The bounds of each
-  keystroke and key of the clear now raise the cancel, and by selector so do those of a type's questions to its
-  field and of its take's read. By `element_id` those questions and the take still go through `asyncio.wait_for`.
+  the question whether the pointer finds the target asked each handle on its way up the frames with none: a Locator's
+  own `timeout` bounds only the look-up of the element. Each is now asked within what the click's budget leaves (each
+  call of the question, on its way up the frames, within a second at most), and where one is not answered by then the
+  click's result is a timeout, as at any of its other waits; the question before a human-like press is asked within a
+  second in all, since its no hands the click to one Playwright places, which needs the rest; the handles it took are
+  given back together, the question's within about a second and the click's own within about another (in 1.18.1 they
+  were given back one after another with no bound, and a page that answered no disposal held the click). By selector,
+  each of a type's checks that focus is in its field answers within a second, and one that does not counts as a no; the
+  type's focus click reads its target's box within a second, then has a second for its human-like click (a box not read
+  by then makes the click one Playwright places, and a click that runs out of it gives way, as before, to focusing the
+  field by script). The clear's select-all and Delete are each bounded at 2 seconds, the least a keystroke is given, and
+  where a key is not acknowledged by then the type's result is `typing_timeout`, with none of its text typed. And a type
+  whose field cannot be found again is refused before select-all, which was pressed first, into whatever had focus.
+- **A click cancelled between pressing the mouse button and letting it go no longer leaves the button pressed.** The
+  press sent the button down, paused, then sent it up, and a cancel in the pause (a client that gave up), or while the
+  page had not yet answered the button going down, skipped the up: whatever ran next on the page began with the button
+  held. It is let go as a drag's is, within 5 seconds, and the cancel then goes on. A click or a drag that went in, but
+  whose button is not let go within those 5 seconds, also where the browser does not answer the cancel of the release,
+  ends as `mouse_not_released` (504, not to be retried): the button went down and may still be held, so observe the page
+  before acting again. A drag's ended as an untyped `RuntimeError`. Where the press or the drag itself failed, was
+  cancelled or ran past its deadline, its own error is the one reported, and a release that then fails is only logged: a
+  drag at its deadline ends with the deadline's error, which says nothing of the button. Only a cancel that arrives
+  while that release is waited for is raised instead.
+- **A type cancelled as the page answered one of its keystrokes, or by selector one of its questions, no longer goes on,
+  on the image's Python 3.11.** There, `asyncio.wait_for` answered a caller cancelled in the loop turn its call answered
+  with that answer, so the cancel was lost: the next keystroke was typed, a key of the clear pressed, or a take read on.
+  The bounds of each keystroke and key of the clear now raise the cancel, and by selector so do those of a type's
+  questions to its field and of its take's read.
+- **The CLI sandbox's launcher makes no Landlock call on a machine whose numbers for those calls it does not know.** It
+  called them by the numbers 444 to 446 on any machine, and on alpha, ia64 and MIPS Landlock's calls have other numbers.
+  It now runs on x86-64 and arm64, 32-bit x86 and Arm, RISC-V 64, ppc64le and s390x, whose kernels number the calls so,
+  and elsewhere exits with its own status and a line naming the machine: provider CLIs then start without it, with the
+  "no Landlock" warning, and with `CLI_SANDBOX_REQUIRED=true` none starts. A 32-bit process on an x86-64 kernel that
+  names itself `x86_64` is refused too, since an x32 one, whose numbers differ, cannot be told from it; one with the
+  32-bit personality (`linux32`) names itself `i686` and is taken, with i386's numbers, its own.
+- **The CLI sandbox's warnings name each path whole.** They cut each path they quoted at 200 characters, so a CLI that
+  padded the name of a directory it made past that, and swapped in a link to it, hid where the link leads; and a second
+  such place, the same in its first 200 characters, made the same text, which is written once for the process, so it was
+  never written. What the sandbox refused was not affected.
+- **A temp directory or `HOME` of the CLI's that the CLI sandbox does not give is said.** A `TMPDIR`, `TEMP`, `TMP` or
+  `HOME` of the CLI's environment that resolves into `/data` outside `CLI_HOME` and the entries of
+  `CLI_SANDBOX_WRITABLE`, or that no directory given holds once resolved (one in `/tmp` linked elsewhere, which a CLI
+  may swap), and a `/tmp`, `/var/tmp` or `/dev` that resolves into `/data`, got no rule, and nothing was said: the CLI
+  could not write there, and the log did not say why. Each written as an absolute path that no directory given holds is
+  now one warning, which refuses nothing, as an entry of `CLI_SANDBOX_WRITABLE` is. A `/var/tmp` that is not there is
+  still passed over in silence as a shared directory (a `TMPDIR` that names it is said, as one naming any other
+  directory that is not there and that no directory given holds is), and a directory written as `CLI_HOME` is (its
+  `HOME`, a `TMPDIR`, an entry of `CLI_SANDBOX_WRITABLE`) is named by the home's own warning alone.
+- **A directory a CLI may write is no longer left without a rule for lying where a directory dropped later leads.** The
+  CLI sandbox gives no rule to a directory that lies in another it gives, and a directory that holds another as written
+  takes its place. Judged in turn, a directory passed over for lying where an earlier one leads kept no rule once a
+  later entry took that one's place, though it lay in nothing kept: a `TMPDIR` where `HOME` leads, with `HOME` a link in
+  an entry of `CLI_SANDBOX_WRITABLE`, or `CLI_SANDBOX_WRITABLE=/opt/link,/srv/t/sub,/opt` with `/opt/link` leading to
+  `/srv/t`. The CLI could not write it (closed, not open). Each is now judged again against what is kept: both get a
+  rule of their own.
+- **The host bridge unit's start-up check refuses a directory left searchable.** The commented `ExecStartPre=` check of
+  the option that hides the checkout's secrets from the bridge refused a start only while a hidden path could still be
+  read (`-r`), so a directory left searchable but not readable passed, though a file in it whose name is known still
+  opens (`data/auth/profiles/...`). It now refuses one that can be read or searched (`-x`), with a message that says so.
+  A copy of the unit installed before keeps the old check (see Upgrade notes).
 
 ### Changed
 
-- **Every image's base is pinned by digest, its tag kept for the reader.** The controller, browser-node and root
-  (Glama) images build on `python:3.11-slim`, and reverse-ssh and the smoke bastion on `alpine:3.21`, each at the
-  digest the tag has named since 2026-11-08; before, a build took whatever the tag named that day. Dependabot now
-  proposes each base's newer digest, with one docker entry listing each Dockerfile's directory and the 3-day
-  cooldown its other entries have. Each build context has a `.dockerignore` that keeps out `.git`, `.venv*`,
-  `node_modules`, `__pycache__`, `data/` and `.env*`, with no exception and nothing its Dockerfile copies: a build of
-  the root image was sent the whole checkout, `data/` and any `.env` included, though it copies only a few paths of
-  it.
+- **Every image's base is pinned by digest, its tag kept for the reader.** The controller, browser-node and root (Glama)
+  images build on `python:3.11-slim`, and reverse-ssh and the smoke bastion on `alpine:3.21`, each at the digest the tag
+  named when it was pinned (pushed 2026-11-08); before, a build took whatever the tag named that day. Dependabot now
+  proposes each base's newer digest, with one docker entry listing each Dockerfile's directory and the 3-day cooldown
+  its other entries have. Each build context has a `.dockerignore` that keeps out `.git`, `.venv*`, `node_modules`,
+  `__pycache__`, `data/` and `.env*`, with no exception and nothing its Dockerfile copies: a build of the root image was
+  sent the whole checkout, `data/` and any `.env` included, though it copies only a few paths of it.
+- **The Codex host bridge's unit runs the bridge with `NoNewPrivileges=yes`, in a checkout the install names.** The unit
+  sets `NoNewPrivileges=yes` (the kernel's no_new_privs flag for the bridge and what it starts), which needs no user
+  namespace. The unit's checkout is now a placeholder that `docs/deployment.md`'s install replaces with yours (see
+  Upgrade notes), where it named one developer's, and the docs' install had no step to change it.
+  `ProtectSystem=strict`, `ProtectHome=read-only` and `ReadWritePaths=` (the socket's directory, Codex's home and
+  `/tmp`) ship as commented options.
 
 ## [1.18.1] — 2026-11-15
 

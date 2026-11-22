@@ -7,7 +7,6 @@ stderr went back to the caller on success.
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import os
@@ -26,26 +25,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "codex_host_bridge.py"
+from tests._codex_bridge import BRIDGE_SCRIPT, load_bridge
+from tests._codex_mcp_list import listing_no_servers
 
-
-def _load_bridge():
-    """Load the script under a private name; UnixStreamServer is missing on Windows (import only)."""
-    shimmed = not hasattr(socketserver, "UnixStreamServer")
-    if shimmed:
-        socketserver.UnixStreamServer = socketserver.TCPServer
-    try:
-        spec = importlib.util.spec_from_file_location("codex_host_bridge_hardening_under_test", _SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        if shimmed:
-            del socketserver.UnixStreamServer
-
-
-bridge = _load_bridge() if _SCRIPT.is_file() else None
+bridge = load_bridge("codex_host_bridge_hardening_under_test") if BRIDGE_SCRIPT.is_file() else None
 PAYLOAD = {"prompt": "decide", "schema": {"type": "object"}}
 
 
@@ -208,7 +191,7 @@ class BridgeErrorReplyTests(unittest.TestCase):
         service = bridge.CodexBridgeService(codex_path="codex")
         captured = io.StringIO()
 
-        with patch.object(bridge.subprocess, "Popen", _FakeCodex), redirect_stderr(captured):
+        with patch.object(bridge.subprocess, "Popen", listing_no_servers(_FakeCodex)), redirect_stderr(captured):
             reply = service.handle_openai_decide(dict(PAYLOAD))
 
         self.assertEqual(reply["raw_text"], '{"action": "done"}')
@@ -234,7 +217,7 @@ class BridgeErrorReplyTests(unittest.TestCase):
                 captured = io.StringIO()
 
                 with (
-                    patch.object(bridge.subprocess, "Popen", _FailingCodex),
+                    patch.object(bridge.subprocess, "Popen", listing_no_servers(_FailingCodex)),
                     redirect_stderr(captured),
                     self.assertRaises(bridge.BridgeError) as raised,
                 ):
@@ -259,7 +242,7 @@ class BridgeErrorReplyTests(unittest.TestCase):
         service = bridge.CodexBridgeService(codex_path="codex")
         captured = io.StringIO()
         with (
-            patch.object(bridge.subprocess, "Popen", _SilentCodex),
+            patch.object(bridge.subprocess, "Popen", listing_no_servers(_SilentCodex)),
             redirect_stderr(captured),
             self.assertRaises(bridge.BridgeError) as raised,
         ):
@@ -356,7 +339,7 @@ class BridgeLimitsTests(unittest.TestCase):
                 outcomes.append(exc)
 
         with (
-            patch.object(bridge.subprocess, "Popen", _FakeCodex),
+            patch.object(bridge.subprocess, "Popen", listing_no_servers(_FakeCodex)),
             patch.object(bridge, "DECISION_SLOT_WAIT_SECONDS", 0.2, create=True),
         ):
             first = [threading.Thread(target=call) for _ in range(2)]
@@ -607,7 +590,7 @@ class BridgeShutdownTests(unittest.TestCase):
         killed: list[tuple[object, bool]] = []
 
         with (
-            patch.object(bridge.subprocess, "Popen", _RunningCodex),
+            patch.object(bridge.subprocess, "Popen", listing_no_servers(_RunningCodex)),
             patch.object(
                 bridge, "_kill_process_tree", side_effect=lambda process, grouped: killed.append((process, grouped))
             ),
@@ -647,7 +630,12 @@ class BridgeShutdownTests(unittest.TestCase):
         service = bridge.CodexBridgeService(codex_path="codex")
         results: list[tuple[int, bytes, bytes]] = []
         sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
-        worker = threading.Thread(target=lambda: results.append(service._run_codex(sleeper, b"")))
+        folder = tempfile.gettempdir()
+        worker = threading.Thread(
+            target=lambda: results.append(
+                service._run_codex(sleeper, b"", timeout=service.request_timeout_seconds, cwd=folder)
+            )
+        )
         worker.start()
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not service._in_flight:  # the sweep would stop the service: wait first
@@ -697,6 +685,14 @@ class BridgeShutdownTests(unittest.TestCase):
         self.assertEqual(calls, ["served", "killed", "closed"])
 
 
+# A fake codex script's first line: its `codex features list` finds each feature of the call off and its `codex mcp
+# list --json` lists no server, as NoServers does.
+_SH_NO_SERVERS = (
+    'case "$*" in *"features list") echo "shell_tool  stable  false"; exit 0;; '
+    '*"mcp list --json") echo "[]"; exit 0;; esac\n'
+)
+
+
 @unittest.skipUnless(
     bridge is not None and hasattr(os, "killpg") and sys.platform != "darwin", "needs POSIX process groups"
 )
@@ -705,7 +701,7 @@ class BridgeProcessGroupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "child.pid"
             fake = Path(tmp) / "fake-codex"
-            fake.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pid_file}\nwait\n", encoding="utf-8")
+            fake.write_text(f"#!/bin/sh\n{_SH_NO_SERVERS}sleep 60 &\necho $! > {pid_file}\nwait\n", encoding="utf-8")
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             service = bridge.CodexBridgeService(codex_path=str(fake), request_timeout_seconds=1.0)
 
@@ -729,7 +725,9 @@ class BridgeProcessGroupTests(unittest.TestCase):
                 f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(20)"
             )
             fake = Path(tmp) / "fake-codex"
-            fake.write_text(f"#!/bin/sh\n'{sys.executable}' -c \"{escape}\" &\nsleep 60\n", encoding="utf-8")
+            fake.write_text(
+                f"#!/bin/sh\n{_SH_NO_SERVERS}'{sys.executable}' -c \"{escape}\" &\nsleep 60\n", encoding="utf-8"
+            )
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             service = bridge.CodexBridgeService(codex_path=str(fake), request_timeout_seconds=1.0)
             errors: list[BaseException] = []
@@ -763,7 +761,12 @@ class BridgeProcessGroupTests(unittest.TestCase):
             fake.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pid_file}\nexit 0\n", encoding="utf-8")
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             service = bridge.CodexBridgeService(codex_path="codex", request_timeout_seconds=60.0)
-            worker = threading.Thread(target=service._run_codex, args=([str(fake)], b""), daemon=True)
+            worker = threading.Thread(
+                target=service._run_codex,
+                args=([str(fake)], b""),
+                kwargs={"timeout": service.request_timeout_seconds, "cwd": tmp},
+                daemon=True,
+            )
             worker.start()
             deadline = time.monotonic() + 10
             leader = None

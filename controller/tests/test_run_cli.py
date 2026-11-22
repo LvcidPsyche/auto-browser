@@ -107,6 +107,21 @@ class RunCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("boom: bad flag", caught.exception.message)
         self.assertFalse(caught.exception.retryable)
 
+    async def test_a_cli_that_fails_with_both_has_its_stderr_as_its_errors_text(self) -> None:
+        # As bytes, so that the newline between its two lines is the same on every OS.
+        code = "import sys; sys.stdout.write('said'); sys.stderr.buffer.write(b'boom\\nwhy\\n'); sys.exit(3)"
+        with self.assertRaises(ProviderAPIError) as caught:
+            await self._run(code)
+
+        self.assertEqual(caught.exception.message, "boom\nwhy")
+
+    async def test_a_cli_that_fails_with_stdout_alone_has_that_stdout_as_its_errors_text(self) -> None:
+        with self.assertRaises(ProviderAPIError) as caught:
+            await self._run("import sys; sys.stdout.write(' boom: said on stdout \\n'); sys.exit(3)")
+
+        self.assertEqual(caught.exception.message, "boom: said on stdout")
+        self.assertFalse(caught.exception.retryable)
+
     async def test_stdout_past_the_cap_is_an_error_and_the_child_is_reaped(self) -> None:
         started, spy = self._spy_on_spawns()
 

@@ -5,16 +5,27 @@
 # Codex runs as the controller runs it: as uid 10002 with no new privileges and no capabilities, under the launcher
 # with the grants cli_sandbox.launch_command gives (the CLI home, /tmp, /var/tmp, /dev), in a call directory inside the
 # home, against codex_responses_mock.py, which asks it to run one probe. Each CODEX_SANDBOX_MODE setting must reach
-# what docs/deployment.md ("Codex's own sandbox") says and no more: read-only reads but writes no file's content
+# what docs/deployment.md ("Codex's own sandbox") says where probed: read-only reads but writes no file's content
 # and connects nowhere; workspace-write also writes /tmp and its working directory; danger-full-access and the
 # bypass flag run the command with no sandbox of Codex's (the control: what read-only refuses there, Codex's sandbox
-# refused). No setting reaches the rest of /data. Then Codex's own sandbox runs a command under the launcher, and an
-# MCP server planted in the home's config.toml is disabled by /etc/codex/requirements.toml.
+# refused). No setting reaches the rest of /data. Then Codex's own sandbox runs a command under the launcher. Last, an
+# MCP server planted in the home's config.toml (cli_stand_ins.py's, which notes its start) is listed as disabled by
+# /etc/codex/requirements.toml, also with -c mcp_servers.<name>.enabled=true, and codex exec with that flag, against
+# cli_stand_ins.py's model: with the file moved aside it starts the server and its model is offered the server's tool
+# (the control: else the step proves nothing); with the file in place the server does not start, the model is asked,
+# and it is offered no MCP tool.
 set -u
 CI_DIR=$(dirname "$0")
 H=/data/cli-home
 CALL=$H/call
 PORT=18080
+# The checks' stand-ins, by an absolute path (Codex starts the planted server), where it notes its start, the log of
+# its model, and how long after a call returned its notes are read (cli_stand_ins.py's SETTLE_SECONDS).
+STAND_INS=$(cd "$CI_DIR" && pwd)/cli_stand_ins.py
+STARTED=$H/mcp-started
+MODEL_LOG=/tmp/model.log
+SETTLE_SECONDS=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import cli_stand_ins
+print(cli_stand_ins.SETTLE_SECONDS)' "$CI_DIR")
 AS_CLI="setpriv --reuid 10002 --regid 10002 --clear-groups --no-new-privs --inh-caps=-all"
 LAUNCHER="python3 -I -S /app/app/cli_sandbox_launcher.py --protect /data --rw $H --rw /tmp --rw /var/tmp --rw /dev --"
 LABELS='read /data/cli-home/.codex/auth.json
@@ -58,6 +69,36 @@ probe_under() {
   grep -E '^(read|write|connect)' "$log"
 }
 
+# One codex exec with -c mcp_servers.planted.enabled=true, as uid 10002, against cli_stand_ins.py's model, which calls
+# the first MCP tool it is offered; then how many requests the model got ($requests) and the MCP tools any of them
+# offered ($tools), read SETTLE_SECONDS after the call returned, as the other checks read a decision's notes.
+exec_with_the_server_on() {
+  rm -f "$STARTED" "$MODEL_LOG"
+  python3 "$STAND_INS" responses "$PORT" "$MODEL_LOG" &
+  model=$!
+  i=0
+  until python3 -c "import socket; socket.create_connection(('127.0.0.1', $PORT), 1)" 2>/dev/null; do
+    i=$((i + 1)); [ $i -lt 50 ] || fail "the stand-in model did not start"; sleep 0.1
+  done
+  # shellcheck disable=SC2086 # the uid's command line is split on purpose
+  (cd "$CALL" && HOME=$H CODEX_HOME=$H/.codex timeout 120 $AS_CLI codex -c mcp_servers.planted.enabled=true \
+    exec --skip-git-repo-check --ephemeral --cd "$CALL" -s read-only decide) > /tmp/mcp-exec.out 2>&1 < /dev/null
+  status=$?
+  sleep "$SETTLE_SECONDS"
+  kill "$model" 2>/dev/null
+  wait "$model" 2>/dev/null
+  read -r requests tools <<EOF
+$(python3 -I -c 'import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import cli_stand_ins as s
+requests = s.logged(pathlib.Path(sys.argv[2]))
+print(len(requests), *s.mcp_tools(requests))' "$CI_DIR" "$MODEL_LOG")
+EOF
+  echo "exit $status; start note: $(cat "$STARTED" 2>/dev/null || echo none); model requests: $requests;" \
+    "MCP tools offered: ${tools:-none}"
+  grep -i mcp /tmp/mcp-exec.out | head -n 5
+}
+
 # One setting, then the answers the docs give for it.
 check() {
   setting=$1
@@ -96,8 +137,30 @@ echo "$out"
 [ "$status" -eq 0 ] && [ "$out" = nested-ok ] || fail "Codex's sandbox under the launcher: exit $status"
 
 echo "=== an MCP server planted in the home's config.toml"
-printf '%s\n' '[mcp_servers.planted]' 'command = "/bin/true"' >> "$H/.codex/config.toml"
+# The checks' stand-in server (cli_stand_ins.py's), which notes its start in $STARTED.
+printf '%s\n' '[mcp_servers.planted]' "command = \"$(command -v python3)\"" \
+  "args = [\"$STAND_INS\", \"server\", \"planted\", \"$STARTED\"]" 'startup_timeout_sec = 60' >> "$H/.codex/config.toml"
 listed=$(HOME=$H CODEX_HOME=$H/.codex $AS_CLI codex mcp list 2>&1 < /dev/null)
 echo "$listed"
 echo "$listed" | grep planted | grep -q "disabled: requirements" || fail "the planted MCP server is not disabled"
+echo "=== the same server, with -c mcp_servers.planted.enabled=true"
+listed=$(HOME=$H CODEX_HOME=$H/.codex $AS_CLI codex -c mcp_servers.planted.enabled=true mcp list 2>&1 < /dev/null)
+echo "$listed"
+echo "$listed" | grep planted | grep -qF "disabled: requirements (/etc/codex/requirements.toml)" \
+  || fail "with -c mcp_servers.planted.enabled=true the planted MCP server is not disabled by requirements"
+
+echo "=== control: codex exec with -c mcp_servers.planted.enabled=true, /etc/codex/requirements.toml moved aside"
+mv /etc/codex/requirements.toml /etc/codex/requirements.toml.aside
+exec_with_the_server_on
+mv /etc/codex/requirements.toml.aside /etc/codex/requirements.toml
+[ -s "$STARTED" ] || fail "the planted MCP server did not start without requirements.toml: the step would prove nothing"
+case " $tools " in
+  *" mcp__planted__"*) ;;
+  *) fail "the model was not offered the planted tool without requirements.toml: the step would prove nothing" ;;
+esac
+echo "=== codex exec with -c mcp_servers.planted.enabled=true, /etc/codex/requirements.toml in place"
+exec_with_the_server_on
+[ ! -e "$STARTED" ] || fail "with -c mcp_servers.planted.enabled=true the planted MCP server started: $(cat "$STARTED")"
+[ "$requests" -gt 0 ] || fail "the model was never asked"
+[ -z "$tools" ] || fail "with -c mcp_servers.planted.enabled=true the model was offered MCP tools: $tools"
 echo "=== all held"

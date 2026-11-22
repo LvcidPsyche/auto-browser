@@ -28,6 +28,7 @@ from unittest.mock import patch
 
 from app import run_as
 from app.config import Settings
+from app.process_hardening import PRIVATE_TEMP_NAME
 from app.readiness import run_readiness_checks
 from app.run_as import (
     BROWSER_UID,
@@ -172,6 +173,7 @@ class OwnedPathsTests(unittest.TestCase):
                 "browser-sessions",
                 "cli-home",
                 "compliance-manifest.json",
+                "controller-tmp",
                 "crons",
                 "db",
                 "harness",
@@ -786,6 +788,26 @@ class MainLinuxTests(unittest.TestCase):
                         (oct(mode), start),
                     )
                     self.assertEqual(parent.stat().st_uid, BROWSER_UID, (oct(mode), start))
+
+    def test_as_root_the_controllers_temp_directory_a_root_start_left_is_handed_to_the_controllers_user(
+        self,
+    ) -> None:
+        # B5-fix2 item 6 (OC2-1): a start with CONTROLLER_RUN_AS=root makes data/controller-tmp root's, mode 0700.
+        # Every later start as the controller's user found it another user's, kept the system temp directory, and
+        # with CLI_SANDBOX_REQUIRED=true ran no provider CLI, until root removed it.
+        if ME != 0:
+            self.skipTest("needs root (runs inside the controller image)")
+        self.addCleanup(_give_back_to_root, self.data)
+        private = self.data / PRIVATE_TEMP_NAME
+        private.mkdir(mode=0o700)
+        (private / "tess_left_input.PNG").write_bytes(b"screenshot")
+
+        _, lines, _ = self._main(run_as="auto")
+
+        self.assertIn(f"RUN_UID={CONTROLLER_UID}", lines)
+        info = private.stat()
+        self.assertEqual((info.st_uid, oct(info.st_mode & 0o7777)), (CONTROLLER_UID, oct(0o700)))
+        self.assertEqual((private / "tess_left_input.PNG").stat().st_uid, CONTROLLER_UID)
 
     def test_the_log_escapes_lists_caps_and_reports_progress(self) -> None:
         # R-a, R-b, R-c, R-d: an escaped newline name, "... and N more" past 20 skips, the withheld WARNING, and the

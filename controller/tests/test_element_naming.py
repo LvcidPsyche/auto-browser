@@ -29,6 +29,12 @@ from tests._chromium import chromium_executable, requires_chromium
 
 NODE = shutil.which("node")
 
+# The prototypes the naming code takes its getters and methods from (DOM_JS), with no members of their own: through
+# them it reads each member off the fake element.
+FAKE_PROTOTYPES = (
+    "for (const name of ['EventTarget', 'Node', 'Element', 'HTMLElement', 'HTMLLabelElement', 'Document',"
+    " 'DocumentFragment', 'ShadowRoot', 'Text']) globalThis[name] = function () {};\n"
+)
 # Minimal stand-ins for DOM elements: just the members abName/abRole/abChecked read.
 _FAKE_DOM = r"""
 const byId = {};
@@ -77,7 +83,7 @@ console.log(JSON.stringify(out));
 
 
 def _run_naming_under_node() -> dict:
-    source = browser_scripts._ELEMENT_NAMING_JS + _FAKE_DOM
+    source = FAKE_PROTOTYPES + browser_scripts._ELEMENT_NAMING_JS + _FAKE_DOM
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
         handle.write(source)
     try:

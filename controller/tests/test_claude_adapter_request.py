@@ -8,6 +8,7 @@ those models always do, counts against max_tokens.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,7 @@ from unittest.mock import AsyncMock
 from PIL import Image
 
 from app.config import Settings
-from app.providers.base import PAGE_DATA_NOTICE
+from app.providers.base import PAGE_DATA_NOTICE, CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
 
 TOOL_USE = {
@@ -70,6 +71,53 @@ class ClaudeAdapterRequestTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             await self._decide({"content": [], "model": "claude-opus-5-5", "stop_reason": "refusal"})
         self.assertIn("refusal", str(ctx.exception))
+
+
+class ClaudeCliCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Claude Code loads no MCP server: --strict-mcp-config, before the prompt, leaves it only the servers a
+    --mcp-config names, and the command has none (a bare --mcp-config takes every word after it, the prompt too)."""
+
+    async def _cli_command(self, model: str) -> list[str]:
+        """The command one CLI decision runs, with CLAUDE_CLI_MODEL ``model``."""
+        adapter = ClaudeAdapter(Settings(_env_file=None, CLAUDE_AUTH_MODE="cli", CLAUDE_CLI_MODEL=model))
+        stdout = '{"result": {"action": "done", "reason": "complete", "risk_category": "read"}}'
+        adapter.run_cli = AsyncMock(  # type: ignore[method-assign]
+            return_value=CLIResult(command=["claude"], stdout=stdout, stderr="", returncode=0)
+        )
+        await adapter._decide(
+            goal="Open the menu", observation={"url": "https://example.com"}, context_hints=None,
+            previous_steps=[], model_override=None,
+        )  # fmt: skip
+        return adapter.run_cli.await_args.kwargs["command"]
+
+    async def test_the_cli_is_told_to_load_no_mcp_server(self) -> None:
+        for model in ("", "sonnet"):
+            with self.subTest(model=model):
+                command = await self._cli_command(model)
+
+                self.assertIn("--strict-mcp-config", command)
+                self.assertEqual([word for word in command if word.startswith("--mcp-config")], [])
+                self.assertIn("Choose exactly one next browser action", command[-1], "the prompt is the last word")
+
+    async def test_the_cli_runs_no_hook_and_reads_no_instruction_file(self) -> None:
+        # One --settings value, merged over the user's settings files: no hook, no CLAUDE.md, CLAUDE.local.md, rules
+        # or auto memory file, no LSP tool; nothing of the sign-in, the endpoint or the model.
+        for model in ("", "sonnet"):
+            with self.subTest(model=model):
+                command = await self._cli_command(model)
+
+                self.assertEqual(command.count("--settings"), 1)
+                self.assertNotIn("--setting-sources", command)
+                value = command.index("--settings") + 1
+                self.assertEqual(
+                    json.loads(command[value]),
+                    {
+                        "disableAllHooks": True,
+                        "claudeMdExcludes": ["**"],
+                        "autoMemoryEnabled": False,
+                        "permissions": {"deny": ["LSP"]},
+                    },
+                )
 
 
 if __name__ == "__main__":

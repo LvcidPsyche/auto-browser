@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -104,6 +105,8 @@ DECISION_SLOT_WAIT_SECONDS = 2.0
 # Seconds a killed codex run's pipes are drained, and then its exit waited for, before the run gives up on each: a
 # descendant that left codex's process group (setsid) can hold stdout open long after the kill.
 CODEX_DRAIN_TIMEOUT_SECONDS = 3.0
+# Characters of Codex's output a line of the bridge log holds at most.
+LOGGED_OUTPUT_CHARS = 2000
 # Connections served at once. Each holds a handler thread, and a timer thread while its headers come in; a connection
 # past this is answered 503 and closed at once.
 MAX_CONNECTIONS = 32
@@ -159,7 +162,7 @@ def prepare_socket_path(raw: str) -> Path:
         )
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     # Held for the bridge's life, before the stale-socket check: two bridges probing at once could each find the
-    # socket refused, and one then removed the socket the other had just bound (W5-7).
+    # socket refused, and one then removed the socket the other had just bound.
     _hold_socket_lock(socket_path)
     try:
         for candidate in (Path(raw), socket_path):
@@ -211,7 +214,7 @@ def _hold_socket_lock(socket_path: Path) -> None:
             f"another bridge is running on {socket_path}; stop it or pass another --socket-path"
         ) from None
     except OSError as exc:
-        # ENOLCK, or EOPNOTSUPP on a filesystem without locks (W9-9): as an unopenable lock file, not a traceback.
+        # ENOLCK, or EOPNOTSUPP on a filesystem without locks: as an unopenable lock file, not a traceback.
         os.close(fd)
         raise SocketPathError(
             f"cannot lock {lock_path} ({exc.strerror or exc}); remove it or pass another --socket-path"
@@ -267,17 +270,143 @@ def model_name_is_valid(model: str) -> bool:
 CONFIG_OVERRIDES = (
     "project_doc_fallback_filenames=[]",
     "agents={}",
-    "mcp_servers={}",
     "features.multi_agent=false",
     "features.apps=false",
+    # No command tool: the decision needs none (the prompt goes in on stdin, the screenshot as --image).
+    "features.shell_tool=false",
+    "features.unified_exec=false",
     'web_search="disabled"',
+    # The project root is the call's own new directory, so Codex reads no .codex/config.toml above it.
+    "project_root_markers=[]",
+    "notify=[]",  # no program run at the turn's end
+    "features.codex_hooks=false",  # no hook of any hooks.json
+    # No telemetry export: logs, traces, metrics.
+    'otel.exporter="none"',
+    'otel.trace_exporter="none"',
+    'otel.metrics_exporter="none"',
+    "project_doc_max_bytes=0",  # no AGENTS.md from the working directory or its parents
+    "features.shell_snapshot=false",  # no login shell for a snapshot: it runs the home's .bash_profile and .bashrc
+    "features.js_repl=false",  # no js_repl tool, and no Node (js_repl_node_path, else node) run to offer one
+    "features.code_mode=false",  # no code_mode tool, and no Node run to offer one
+    "features.apply_patch_freeform=false",  # no apply_patch tool from the feature (a model's catalog can bring one)
+    "features.artifact=false",  # no artifacts tool
+    "features.image_generation=false",  # no image_generation tool
+    "features.request_permissions_tool=false",  # no request_permissions tool
 )
+# CONFIG_OVERRIDES as a Codex command line takes them, each after a -c.
+CONFIG_FLAGS = tuple(word for override in CONFIG_OVERRIDES for word in ("-c", override))
+MCP_LIST_COMMAND = ("mcp", "list", "--json")
+FEATURES_LIST_COMMAND = ("features", "list")
+# The one feature the call turns off that the look leaves out: on its own it gives the model no tool and starts nothing
+# (it chooses the shape of the command tool that shell_tool brings, and the look refuses shell_tool), and a Codex newer
+# than the pinned one lists it on whatever a call says.
+FEATURE_NOT_LOOKED_AT = "unified_exec"
+# The features the look reads: each the call turns off (a features.<name>=false of CONFIG_OVERRIDES) but that one.
+LOOKED_AT_FEATURES = tuple(
+    override.removeprefix("features.").removesuffix("=false")
+    for override in CONFIG_OVERRIDES
+    if override.startswith("features.")
+    and override.endswith("=false")
+    and override != f"features.{FEATURE_NOT_LOOKED_AT}=false"
+)
+# The shape of a feature's name in `codex features list`: a newer Codex lists a dotted name.
+FEATURE_NAME = re.compile(r"[a-z0-9_.]+")
+# What toml_basic_string writes for each character it escapes.
+_TOML_ESCAPES = {ord('"'): '\\"', ord("\\"): "\\\\", **{code: "\\u%04x" % code for code in (*range(0x20), 0x7F)}}
+
+
+def toml_basic_string(text: str) -> str:
+    """``text`` as a TOML basic string: quote and backslash escaped, and each control character as a \\u escape."""
+    return '"' + text.translate(_TOML_ESCAPES) + '"'
+
+
+def mcp_servers_off(names: list[str]) -> str:
+    """The -c value that turns off each named MCP server: `mcp_servers={"<name>"={enabled=false},...}`.
+
+    Codex merges a -c table into its config key by key, so `mcp_servers={}` turned off none, and the dotted form
+    (`mcp_servers.<name>.enabled=false`) makes Codex exit 1 for a name outside [a-zA-Z0-9_-]; one inline table holds
+    for every name.
+    """
+    return "mcp_servers={%s}" % ",".join(toml_basic_string(name) + "={enabled=false}" for name in dict.fromkeys(names))
+
+
+def listed_mcp_servers(stdout: bytes) -> dict[str, bool] | None:
+    """Each server `codex mcp list --json` printed (a JSON list of objects, each with a string "name"), by name, with
+    whether it is on; None for anything else.
+
+    A server counts as off only where its "enabled" is the JSON false: true, no "enabled" or any other value counts as
+    on. A name listed more than once is on where any of its entries is.
+    """
+    try:
+        listed = json.loads(stdout.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(listed, list) or not all(
+        isinstance(entry, dict) and isinstance(entry.get("name"), str) for entry in listed
+    ):
+        return None
+    on = {entry["name"] for entry in listed if entry.get("enabled") is not False}
+    return {entry["name"]: entry["name"] in on for entry in listed}
+
+
+def features_on(stdout: bytes) -> list[str] | None:
+    """Those of LOOKED_AT_FEATURES that `codex features list` printed as on, in their order; None where what it
+    printed is no list of features.
+
+    It counts as a list only where its bytes are UTF-8, it is not blank and each of its non-empty lines is a row: a
+    feature's name (one or more of a-z, 0-9, underscore and dot: FEATURE_NAME), its stage's words, then the word true
+    or the word false. A feature is on where its row ends in true; of two rows for one name, the true one wins. A
+    feature with no row under the call's name for it counts as off (the bridge runs whatever Codex its host has: a
+    newer one lists more features, and may drop one).
+    """
+    try:
+        text = stdout.decode("utf-8")
+    except ValueError:
+        return None
+    rows = [line.split() for line in text.splitlines() if line.strip()]
+    if not rows or any(
+        len(words) < 3 or not FEATURE_NAME.fullmatch(words[0]) or words[-1] not in ("true", "false") for words in rows
+    ):
+        return None
+    on = {words[0] for words in rows if words[-1] != "false"}
+    return [name for name in LOOKED_AT_FEATURES if name in on]
+
+
+def features_on_error(names: list[str]) -> str:
+    """What a call the look stops says: the features it found on (the call's own names for them), where a configuration
+    can turn one on against the call, and what to do."""
+    features, them = ("the feature", "it") if len(names) == 1 else ("the features", "them")
+    return (
+        f"the Codex configuration turns on {features} {', '.join(names)}, which a decision call needs off: turn {them} "
+        f"off where the configuration turns {them} on, such as in a selected profile, in the managed configuration, in "
+        "a requirements file, or under an older name in a [features] table"
+    )
+
+
+# The status of a call refused before its exec, for Codex's configuration or a look or list that failed. The
+# controller's client retries a 429 or a 5xx and asks this once, as the controller's own path raises the same refusals
+# once.
+REFUSAL_STATUS = 409
+
+# The refusal of a call whose second server list shows a server on: the names go to the bridge's log alone.
+MCP_SERVERS_ON_ERROR = (
+    "the Codex configuration keeps on MCP servers that a decision call turns off, so the Codex call was not made; "
+    "see the bridge log"
+)
+BRIDGE_STOPPING_ERROR = "the bridge is stopping"
 
 
 @dataclass
 class BridgeError(RuntimeError):
     message: str
     status_code: int = 500
+
+
+@dataclass
+class _CodexTimedOut(BridgeError):
+    """A codex run that did not finish in time (a 504)."""
+
+    status_code: int = 504
 
 
 class CodexBridgeService:
@@ -359,41 +488,44 @@ class CodexBridgeService:
             if image_bytes is not None:
                 image_path.write_bytes(image_bytes)
 
-            command = [self.codex_path]
-            if model:
-                command.extend(["--model", model])
-            for override in CONFIG_OVERRIDES:
-                command.extend(["-c", override])
-            command.extend(["exec", "--skip-git-repo-check"])
-            command.extend(self.sandbox_flags)
-            command.extend(
-                [
-                    "--cd",
-                    tempdir,
-                    "--ephemeral",
-                    "--output-schema",
-                    str(schema_path),
-                    "--output-last-message",
-                    str(output_path),
-                    *(["--image", str(image_path)] if image_bytes is not None else []),
-                    "-",
-                ]
+            # One deadline for the call: the look, the server lists and codex exec share it, each getting what is left.
+            deadline = time.monotonic() + self.request_timeout_seconds
+            # The look first: a call it stops has started one process.
+            self._look_at_features(tempdir, deadline)
+            servers = self._mcp_servers_off(tempdir, deadline)
+            command = self._exec_command(
+                model=model,
+                servers=servers,
+                tempdir=tempdir,
+                schema_path=schema_path,
+                output_path=output_path,
+                image_path=image_path,
+                image_bytes=image_bytes,
             )
 
-            returncode, stdout_bytes, stderr_bytes = self._run_codex(command, prompt.encode("utf-8"))
+            # In the folder its lists ran in, as Codex resolves a relative CODEX_HOME against the process's folder.
+            returncode, stdout_bytes, stderr_bytes = self._run_codex(
+                command, prompt.encode("utf-8"), timeout=deadline - time.monotonic(), cwd=tempdir
+            )
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")
             if stderr.strip():
                 # Codex's stderr stays on the bridge side; the reply to the controller carries the decision only.
-                print(f"[codex-bridge] codex stderr: {stderr.strip()[:2000]}", file=sys.stderr, flush=True)
+                print(
+                    f"[codex-bridge] codex stderr: {stderr.strip()[:LOGGED_OUTPUT_CHARS]}", file=sys.stderr, flush=True
+                )
             raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else stdout
             if returncode != 0:
                 # Codex's output can name host paths or a token: it is logged here (stderr above, stdout when stderr
                 # is empty), and the controller gets a fixed message. It decides retries on the status code only.
                 if not stderr.strip() and stdout.strip():
-                    print(f"[codex-bridge] codex stdout: {stdout.strip()[:2000]}", file=sys.stderr, flush=True)
+                    print(
+                        f"[codex-bridge] codex stdout: {stdout.strip()[:LOGGED_OUTPUT_CHARS]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 elif not stderr.strip():
-                    # Nothing to show, but the reply points here: say what happened (CB2-5).
+                    # Nothing to show, but the reply points here: say what happened.
                     print(
                         f"[codex-bridge] codex exited with {returncode} and printed nothing",
                         file=sys.stderr,
@@ -408,12 +540,129 @@ class CodexBridgeService:
                 "raw_text": raw_text,
             }
 
-    def _run_codex(self, command: list[str], prompt: bytes) -> tuple[int, bytes, bytes]:
-        """Run codex with `prompt` on stdin; on timeout kill its whole process group, not just the direct child."""
+    def _exec_command(
+        self,
+        *,
+        model: str | None,
+        servers: list[str],
+        tempdir: str,
+        schema_path: Path,
+        output_path: Path,
+        image_path: Path,
+        image_bytes: bytes | None,
+    ) -> list[str]:
+        """The codex exec command line of one decision."""
+        command = [self.codex_path]
+        if model:
+            command.extend(["--model", model])
+        command.extend(CONFIG_FLAGS)
+        if servers:
+            command.extend(["-c", mcp_servers_off(servers)])
+        command.extend(["exec", "--skip-git-repo-check"])
+        command.extend(self.sandbox_flags)
+        command.extend(
+            [
+                "--cd",
+                tempdir,
+                "--ephemeral",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                *(["--image", str(image_path)] if image_bytes is not None else []),
+                "-",
+            ]
+        )
+        return command
+
+    def _look_at_features(self, tempdir: str, deadline: float) -> None:
+        """Refuses the call where `codex <the call's -c flags> features list` shows on a feature the call turns off
+        (LOOKED_AT_FEATURES): REFUSAL_STATUS, with a message that names those features and says what to do, logged
+        here; nothing Codex printed goes into either."""
+        command = [self.codex_path, *CONFIG_FLAGS, *FEATURES_LIST_COMMAND]
+        on = self._listed(command, tempdir, deadline, features_on, "codex features list")
+        if on:
+            message = features_on_error(on)
+            print(f"[codex-bridge] {message}; the Codex call was not made", file=sys.stderr, flush=True)
+            raise BridgeError(message, status_code=REFUSAL_STATUS)
+
+    def _mcp_servers_off(self, tempdir: str, deadline: float) -> list[str]:
+        """The MCP servers this call turns off: each that `codex <the call's -c flags> mcp list --json` names, from
+        every config layer Codex reads.
+
+        Where that list shows one on, the list runs once more with the table that turns them off (mcp_servers_off), and
+        a server it still shows on refuses the call: REFUSAL_STATUS, with a message that names none of them; their names
+        are logged here.
+        """
+        listed = self._mcp_list(tempdir, deadline, [])
+        names = list(listed)
+        if any(listed.values()):
+            relisted = self._mcp_list(tempdir, deadline, names)
+            if still_on := [name for name, on in relisted.items() if on]:
+                print(
+                    "[codex-bridge] codex mcp list shows MCP servers on with the call's table that turns them off, so "
+                    f"the Codex call was not made: {json.dumps(still_on)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise BridgeError(MCP_SERVERS_ON_ERROR, status_code=REFUSAL_STATUS)
+        return names
+
+    def _mcp_list(self, tempdir: str, deadline: float, servers: list[str]) -> dict[str, bool]:
+        """What `codex <the call's -c flags> mcp list --json` lists (listed_mcp_servers), with the table that turns off
+        ``servers`` where there are any."""
+        table = ["-c", mcp_servers_off(servers)] if servers else []
+        command = [self.codex_path, *CONFIG_FLAGS, *table, *MCP_LIST_COMMAND]
+        return self._listed(command, tempdir, deadline, listed_mcp_servers, "codex mcp list")
+
+    def _listed(
+        self, command: list[str], tempdir: str, deadline: float, read: Callable[[bytes], Any], name: str
+    ) -> Any:
+        """What ``read`` makes of what ``command`` (one of the lists a call runs before its exec, which ``name`` names)
+        printed, run in the call's directory with the call's environment.
+
+        One that exits non-zero (Codex's answer to a config.toml it cannot read or parse, on which exec refuses to run
+        too) or prints what ``read`` does not take (None) refuses the call: REFUSAL_STATUS, with its exit code, the
+        length of its stdout and its stderr logged here. One that exits non-zero while the bridge is stopping
+        (kill_in_flight kills it) is answered 503, as a call that reaches codex after that sweep is. One that does not
+        answer by the deadline, or has no time left to start, fails the call with the timed-out error itself, as a
+        timed-out exec does (504), logged here with ``name``.
+
+        What a list prints on stdout is in no line logged here: `codex mcp list --json` prints each server's env and
+        http_headers values. Of it, only the names of the servers a second list still shows on are logged
+        (_mcp_servers_off).
+        """
+        try:
+            returncode, stdout, stderr = self._run_codex(command, b"", timeout=deadline - time.monotonic(), cwd=tempdir)
+        except _CodexTimedOut as exc:
+            print(f"[codex-bridge] {name}: {exc.message}", file=sys.stderr, flush=True)
+            raise
+        if returncode != 0 and self._stopping:
+            raise BridgeError(BRIDGE_STOPPING_ERROR, status_code=503)
+        listed = read(stdout) if returncode == 0 else None
+        if listed is None:
+            outcome = f"exited with {returncode}" if returncode else "exited with 0 and printed no list"
+            errors = stderr.decode("utf-8", errors="replace").strip()
+            print(
+                f"[codex-bridge] {name} {outcome}: {len(stdout)} bytes on stdout, not logged; stderr: "
+                f"{errors[:LOGGED_OUTPUT_CHARS] or '(nothing)'}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise BridgeError(f"{name} failed; see the bridge log", status_code=REFUSAL_STATUS)
+        return listed
+
+    def _run_codex(self, command: list[str], prompt: bytes, *, timeout: float, cwd: str) -> tuple[int, bytes, bytes]:
+        """Run codex with `prompt` on stdin in the folder `cwd`, for `timeout` seconds; on timeout kill its whole
+        process group, not just the direct child, and raise the timed-out error, with nothing codex printed in its
+        text, its cause or its context. With no time left (`timeout` <= 0) no codex is started, and the run is a
+        timed-out one."""
         grouped = hasattr(os, "killpg")  # POSIX; the bridge listens on a Unix socket, so this is its normal case
         with self._in_flight_lock:
             if self._stopping:
-                raise BridgeError("the bridge is stopping", status_code=503)
+                raise BridgeError(BRIDGE_STOPPING_ERROR, status_code=503)
+            if timeout <= 0:
+                raise self._timed_out()
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.PIPE,
@@ -421,25 +670,29 @@ class CodexBridgeService:
                 stderr=subprocess.PIPE,
                 start_new_session=grouped,
                 env=codex_environment(self.pass_env),
+                cwd=cwd,
             )
             self._in_flight[process] = grouped
         try:
-            stdout, stderr = process.communicate(prompt, timeout=self.request_timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = process.communicate(prompt, timeout=timeout)
+        except subprocess.TimeoutExpired:
             _kill_process_tree(process, grouped)
             _reap_killed(process)
-            raise BridgeError(
-                f"codex timed out after {self.request_timeout_seconds:.0f}s",
-                status_code=504,
-            ) from exc
         except BaseException:
             _kill_process_tree(process, grouped)
             _reap_killed(process)
             raise
+        else:
+            return process.returncode, stdout, stderr
         finally:
             with self._in_flight_lock:
                 self._in_flight.pop(process, None)
-        return process.returncode, stdout, stderr
+        # Only a timed-out run gets here. Raised past its except block: on POSIX the TimeoutExpired holds what codex
+        # printed on stdout and stderr, so it must be neither the cause nor the context of the error that goes up.
+        raise self._timed_out()
+
+    def _timed_out(self) -> _CodexTimedOut:
+        return _CodexTimedOut(f"codex timed out after {self.request_timeout_seconds:.0f}s")
 
     def kill_in_flight(self) -> int:
         """Kill every codex run still going (its whole process group on POSIX), for bridge shutdown; returns how many
@@ -733,7 +986,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    make_non_dumpable()  # first, before any Codex run (W2-27)
+    make_non_dumpable()  # first, before any Codex run
     args = parse_args()
     for name in args.pass_env:
         if not _ENV_NAME_RE.fullmatch(name) or not name.isascii():
@@ -760,9 +1013,9 @@ def main() -> int:
         pass_env=tuple(args.pass_env),
     )
     server = UnixHTTPServer(str(socket_path), service)
-    # What this bridge bound: just before its shutdown removes the socket it checks that the path still names it
-    # (W5-7). That keeps out a socket a later bridge bound (each bridge holds its lock until it exits), but not one a
-    # process ignoring the lock puts there between the check and the unlink (W7-6).
+    # What this bridge bound: just before its shutdown removes the socket it checks that the path still names it.
+    # That keeps out a socket a later bridge bound (each bridge holds its lock until it exits), but not one a
+    # process ignoring the lock puts there between the check and the unlink.
     bound = _socket_identity(socket_path)
     # The umask above already makes it 0600; say so explicitly rather than rely on it.
     os.chmod(socket_path, 0o600)

@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from app.action_errors import BrowserActionError
+from app.approvals import ApprovalRequiredError
 from app.browser.click_target import classified_risk, read_click_target, same_element_at
 from app.browser.services.actions import _RECEIVES_POINTER_SCRIPT, POINTER_CHECK_TIMEOUT_MS, BrowserActionService
 from app.models import BrowserActionDecision
@@ -667,3 +668,135 @@ async def test_an_approval_reads_the_fields_as_the_browser_gives_them_keys(tmp_p
     # once it ran out of steps.
     page, read = READS_AS_THE_BROWSER_TAKES_ITS_KEYS[case]
     assert await _approval_read(tmp_path, page) == _read_as(read)
+
+
+# Counts the presses that reach the page.
+COUNTS_PRESSES = (
+    "<script>window.presses = 0;"
+    " addEventListener('click', (event) => { if (event.isTrusted) window.presses += 1; }, true);</script>"
+)
+# A "Delete account" button the page draws as a div around a form, and a form drawn as the button and named by its
+# text alone; {control} is put in the form.
+A_BUTTON_AROUND_A_FORM = (
+    '<title>account</title><div id="target" role="button" aria-label="Delete account" '
+    'style="width: 240px; height: 60px"><form id="form" style="height: 60px">{control}</form></div>'
+)
+A_FORM_DRAWN_AS_THE_BUTTON = (
+    '<title>account</title><form id="target" role="button" style="width: 240px; height: 60px">'
+    "Delete account{control}</form>"
+)
+# A plain wrapper the button fills: a click on the wrapper presses the button, around a form.
+A_WRAPPER_THE_BUTTON_FILLS = (
+    '<title>account</title><div id="target" style="position: relative; width: 240px; height: 60px">'
+    '<div role="button" aria-label="Delete account" style="position: absolute; inset: 0">'
+    '<form id="form" style="height: 60px">{control}</form></div></div>'
+)
+
+
+def _hidden(name: str) -> str:
+    return f'<input type="hidden" name="{name}">'
+
+
+async def _click_read_and_held(tmp_path: Path, page: str, by: str, *, at: str = "#target") -> tuple[Any, str, int]:
+    """A click labelled read on ``page``, by ``by`` (on ``at`` for a point): what its target reads as, how the click
+    ended (held for approval, and of what kind) and how many presses reached the page."""
+    async with browser_env(tmp_path, {"/account": COUNTS_PRESSES + page}) as env:
+        session_id = await env.create("/account")
+        tab = env.manager.sessions[session_id].page
+        named: dict[str, Any] = {"selector": "#target"}
+        if by == "element_id":
+            items = (await env.manager.observe(session_id, preset="text"))["interactables"]
+            (button,) = [item for item in items if item.get("role") == "button"]
+            named = {"element_id": button["element_id"]}
+        elif by == "point":
+            box = await tab.locator(at).bounding_box()
+            named = {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2}
+        click = BrowserActionDecision(action="click", reason="look", risk_category="read", **named)
+        target = await read_click_target(env.manager.element_ids, tab, click, session_id=session_id)
+        try:
+            await env.manager.execute_decision(session_id, click)
+        except ApprovalRequiredError as asked:
+            ended = f"held for approval ({asked.approval.kind})"
+        else:
+            ended = "went ahead"
+        return target, ended, await tab.evaluate("() => window.presses")
+
+
+@pytest.mark.parametrize("by", ["selector", "element_id", "point"])
+@pytest.mark.parametrize(
+    ("page", "control"),
+    [
+        (A_BUTTON_AROUND_A_FORM, _hidden("childNodes")),
+        (A_BUTTON_AROUND_A_FORM, _hidden("ownerDocument")),
+        (A_FORM_DRAWN_AS_THE_BUTTON, _hidden("childNodes")),
+        (A_FORM_DRAWN_AS_THE_BUTTON, _hidden("ownerDocument")),
+        (A_FORM_DRAWN_AS_THE_BUTTON, _hidden("innerText")),
+    ],
+    ids=[
+        "around-a-form-childNodes",
+        "around-a-form-ownerDocument",
+        "a-form-as-the-button-childNodes",
+        "a-form-as-the-button-ownerDocument",
+        "a-form-as-the-button-innerText",
+    ],
+)
+async def test_a_click_labelled_read_on_delete_is_held_whatever_its_form_names_a_control(
+    tmp_path: Path, page: str, control: str, by: str
+) -> None:
+    # DESCRIBE_TARGET_SCRIPT gathered the button's text through the form's childNodes, ownerDocument and innerText
+    # read as properties: the first two made the read throw, the third left the button with no label, and the click
+    # went on unclassified and pressed "Delete account". Read through the prototypes' getters, it reads as on the page
+    # without the control, and is held.
+    unnamed = await _click_read_and_held(tmp_path, page.format(control=""), by)
+    named = await _click_read_and_held(tmp_path, page.format(control=control), by)
+
+    assert unnamed == (unnamed[0], "held for approval (destructive)", 0)
+    assert named == unnamed
+
+
+@pytest.mark.parametrize(
+    ("page", "by", "at"),
+    [(A_BUTTON_AROUND_A_FORM, "point", "#form"), (A_WRAPPER_THE_BUTTON_FILLS, "selector", "#target")],
+    ids=["by-point-on-the-form", "by-selector-on-a-wrapper"],
+)
+async def test_a_click_labelled_read_that_lands_on_a_form_with_a_control_named_shadow_root_is_held(
+    tmp_path: Path, page: str, by: str, at: str
+) -> None:
+    # The read of what is under a point (_ELEMENT_AT_SCRIPT) took hit.shadowRoot as a property, and the form's control
+    # answered for it: the read threw, by a point before the decision and at the press, and the click pressed "Delete
+    # account". By selector on a wrapper only the read at the press can see the button, and it threw.
+    unnamed = await _click_read_and_held(tmp_path, page.format(control=""), by, at=at)
+    named = await _click_read_and_held(tmp_path, page.format(control=_hidden("shadowRoot")), by, at=at)
+
+    assert unnamed[1:] == ("held for approval (destructive)", 0)
+    assert named == unnamed
+
+
+async def test_two_points_on_a_form_with_a_control_named_shadow_root_are_one_element(tmp_path: Path) -> None:
+    # SAME_ELEMENT_SCRIPT holds the same read of what is under a point, which threw: the two points were not the same
+    # element, and a click by coordinates gave up its jitter.
+    page = A_BUTTON_AROUND_A_FORM.format(control=_hidden("shadowRoot"))
+    async with browser_env(tmp_path, {"/account": page}) as env:
+        session_id = await env.create("/account")
+        tab = env.manager.sessions[session_id].page
+        box = await tab.locator("#form").bounding_box()
+        point = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+        assert await same_element_at(env.manager.element_ids, tab, point, (point[0] + 2, point[1] + 1)) is True
+
+
+# A plain field, then a password field, inside the element a type names, on a page whose script replaced
+# JSON.stringify with a function that answers the same for every field.
+FIELDS_ON_A_PAGE_THAT_REPLACED_JSON_STRINGIFY = (
+    '<div id="named" tabindex="0" role="textbox" aria-label="Note"><textarea aria-label="Body"></textarea>'
+    '<input type="password" aria-label="Pin"></div><script>JSON.stringify = () => \'same\';</script>'
+)
+
+
+async def test_an_approval_reads_a_password_field_after_a_plain_one_whatever_the_page_made_of_json_stringify(
+    tmp_path: Path,
+) -> None:
+    # By selector NAMED_FIELDS_SCRIPT runs in the page's own world, and answered fields alike in every attribute once
+    # by a key JSON.stringify made there: every field had the page's key, the password field after the plain one was
+    # not read, and the approval read plain and showed the typed text.
+    assert await _approval_read(tmp_path, FIELDS_ON_A_PAGE_THAT_REPLACED_JSON_STRINGIFY) == _read_as("secret")

@@ -19,6 +19,7 @@ from app.codex_sandbox import BYPASS_FLAG, build_sandbox_flags, codex_sandbox_fl
 from app.config import Settings
 from app.providers.base import CLIResult
 from app.providers.openai_adapter import OpenAIAdapter
+from tests._codex_mcp_list import answers_mcp_list, listing_no_servers
 from tests.test_codex_host_bridge_hardening import bridge
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
@@ -109,6 +110,7 @@ class ExecCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_adapters_codex_exec_carries_the_sandbox(self) -> None:
         commands: list[list[str]] = []
 
+        @answers_mcp_list
         async def fake_run_cli(*, command: list[str], **_kwargs) -> CLIResult:
             commands.append(command)
             Path(command[command.index("--output-last-message") + 1]).write_text(DECISION, encoding="utf-8")
@@ -150,7 +152,7 @@ class ExecCommandTests(unittest.IsolatedAsyncioTestCase):
                 return b"", b""
 
         for _env, options, flags in EXEC_CASES:
-            with self.subTest(**options), patch.object(bridge.subprocess, "Popen", FakeCodex):
+            with self.subTest(**options), patch.object(bridge.subprocess, "Popen", listing_no_servers(FakeCodex)):
                 service = bridge.CodexBridgeService(codex_path="codex", **options)
                 service.handle_openai_decide({"prompt": "p", "schema": {"type": "object"}})
 

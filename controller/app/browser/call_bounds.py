@@ -2,7 +2,7 @@
 
 One function for the actions' bounded calls and the click target's read by selector: as two copies they drifted
 once, and the drift was a bug (the actions' copy read the end of a call it gave up on only where the call had not
-answered, B1-fix1 item 6).
+answered).
 """
 
 from __future__ import annotations

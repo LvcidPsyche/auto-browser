@@ -468,7 +468,7 @@ DESCRIBE_TARGET_SCRIPT = (
   }
   // A link in a button or in a menu item is that item's text (a menu whose items carry a URL), and a press on it
   // is one on the item: from a link the walk goes on to the button or the menu item around it, if there is one.
-  if (target && target.localName === 'a' && !ROLES.includes(roleOf(target))) {
+  if (target && dom.localName(target) === 'a' && !ROLES.includes(roleOf(target))) {
     let node = dom.flatUp(target);
     for (let steps = 0; node && steps < dom.STEPS; steps += 1) {
       if (dom.type(node) === 1 && (dom.tag(node) === 'BUTTON' || ROLES.includes(roleOf(node)))) {
@@ -484,8 +484,8 @@ DESCRIBE_TARGET_SCRIPT = (
   if (!target && control && dom.matches(control, 'button, input')) target = control;
   // A component that is a button: all the page gives it sits, slotted, in one button of its own tree. Text given
   // to it with no element around is under the pointer as the component, and the walk above starts outside its tree.
-  if (!target && el.shadowRoot) {
-    const given = Array.from(el.childNodes).filter(
+  if (!target && dom.shadowRoot(el)) {
+    const given = Array.from(dom.children(el)).filter(
       (child) => dom.type(child) === 1 || (dom.type(child) === 3 && child.nodeValue.trim() !== '')
     );
     let inner = null;
@@ -501,26 +501,27 @@ DESCRIBE_TARGET_SCRIPT = (
     target = inner;
   }
   target = target || el;
-  const tag = target.localName;
+  const tag = dom.localName(target);
   const type = tag === 'button' || tag === 'input' ? String(target.type || '').toLowerCase() : '';
   const role = roleOf(target);
   const submits = (tag === 'button' && type === 'submit')
     || (tag === 'input' && (type === 'submit' || type === 'image'));
   const cut = (value) => (typeof value === 'string' ? value.slice(0, limit) : '');
-  const labels = [cut(target.getAttribute('aria-label')), cut(target.innerText), cut(target.getAttribute('title'))];
-  if (tag === 'input') labels.push(cut(target.value), cut(target.getAttribute('alt')));
-  // Its label elements name it too, whichever of the two was pressed: an icon button is often named by one.
-  const outside = target.labels ? Array.from(target.labels).slice(0, 4) : [];
-  for (const one of outside) labels.push(cut(one.innerText));
+  const labels = [cut(dom.attr(target, 'aria-label')), cut(dom.text(target)), cut(dom.attr(target, 'title'))];
+  if (tag === 'input') labels.push(cut(target.value), cut(dom.attr(target, 'alt')));
+  // Its label elements name it too, whichever of the two was pressed: an icon button is often named by one. Read only
+  // where its kind has them (dom.labels): a form has none, and a control named labels answered for them there.
+  const outside = dom.labels(target).slice(0, 4);
+  for (const one of outside) labels.push(cut(dom.text(one)));
   // An icon button is often named on what is inside it: a label, a title or alt text on the icon.
-  const named = target.querySelectorAll('[aria-label], [title], [alt]');
+  const named = dom.all(target, '[aria-label], [title], [alt]');
   for (let index = 0; index < named.length && index < 4; index += 1) {
-    for (const name of ['aria-label', 'title', 'alt']) labels.push(cut(named[index].getAttribute(name)));
+    for (const name of ['aria-label', 'title', 'alt']) labels.push(cut(dom.attr(named[index], name)));
   }
   // An SVG carries its name in a <title>, which is not rendered, and shows text in <text>. innerText has neither
   // where the button is an <svg> (an SVG element has no innerText), and no <title> anywhere.
   let drawn = 0;
-  for (const node of target.querySelectorAll('title, text')) {
+  for (const node of dom.all(target, 'title, text')) {
     if (drawn >= 4) break;
     if (node.namespaceURI !== 'http://www.w3.org/2000/svg') continue;
     drawn += 1;
@@ -534,25 +535,27 @@ DESCRIBE_TARGET_SCRIPT = (
   const gather = (node) => {
     if (budget <= 0) return;
     budget -= 1;
-    if (node.nodeType === 3) { shown.push(node.nodeValue.replace(/\s+/g, ' ')); return; }
-    if (node.nodeType === 11) { node.childNodes.forEach(gather); return; }
-    if (node.nodeType !== 1) return;
-    const name = node.localName;
+    const kind = dom.type(node);
+    if (kind === 3) { shown.push(node.nodeValue.replace(/\s+/g, ' ')); return; }
+    if (kind === 11) { dom.children(node).forEach(gather); return; }
+    if (kind !== 1) return;
+    const name = dom.localName(node);
     if (name === 'script' || name === 'style' || name === 'template') return;
     if (name === 'br') { shown.push('\n'); return; }
-    const display = node.ownerDocument.defaultView.getComputedStyle(node).display;
+    const display = dom.view(node).getComputedStyle(node).display;
     if (display === 'none') return;
     const block = !/^(inline|contents)/.test(display);
     if (block) shown.push('\n');
     const assigned = name === 'slot' ? node.assignedNodes({ flatten: true }) : [];
+    const shadow = dom.shadowRoot(node);
     if (assigned.length) {
       crossed = true;
       assigned.forEach(gather);
-    } else if (node.shadowRoot) {
+    } else if (shadow) {
       crossed = true;
-      gather(node.shadowRoot);
+      gather(shadow);
     } else {
-      node.childNodes.forEach(gather);
+      dom.children(node).forEach(gather);
     }
     if (block) shown.push('\n');
   };
@@ -580,8 +583,8 @@ _ELEMENT_AT_SCRIPT = r"""
   let el = null;
   for (let frames = 0; frames <= 3; frames += 1) {
     let hit = root.elementFromPoint(x, y);
-    for (let depth = 0; hit && hit.shadowRoot && depth < 8; depth += 1) {
-      const inner = hit.shadowRoot.elementFromPoint(x, y);
+    for (let depth = 0; hit && dom.shadowRoot(hit) && depth < 8; depth += 1) {
+      const inner = dom.shadowRoot(hit).elementFromPoint(x, y);
       if (!inner || inner === hit) break;
       hit = inner;
     }
@@ -590,7 +593,7 @@ _ELEMENT_AT_SCRIPT = r"""
     if (!dom.frame(el)) break;
     let inside = null;
     try { inside = el.contentDocument || null; } catch (error) { inside = null; }
-    const held = el.localName === 'embed' ? el.ownerDocument.defaultView : null;
+    const held = dom.localName(el) === 'embed' ? dom.view(el) : null;
     for (let index = 0; !inside && held && index < held.length && index < 256; index += 1) {
       try {
         if (held[index].frameElement === el) inside = held[index].document;
@@ -600,7 +603,7 @@ _ELEMENT_AT_SCRIPT = r"""
     }
     if (!inside || !inside.defaultView) break;
     const box = el.getBoundingClientRect();
-    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    const style = dom.view(el).getComputedStyle(el);
     x -= box.left + el.clientLeft + (parseFloat(style.paddingLeft) || 0);
     y -= box.top + el.clientTop + (parseFloat(style.paddingTop) || 0);
     root = inside;

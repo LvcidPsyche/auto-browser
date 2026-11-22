@@ -12,17 +12,21 @@ import errno
 import json
 import os
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from app import cli_sandbox_launcher as launcher
 
 LAUNCHER = Path(launcher.__file__)
+LINUX = launcher._Linux
 ALL_RIGHTS = launcher.handled_rights(5)
 # A directory tree as the stand-in kernel sees one: the image's root, with /data to protect.
 IMAGE_ROOT = {
@@ -54,6 +58,7 @@ class FakeKernel:
         self.real: dict[str, str] = {}
         self.calls: list[str] = []
         self.handled: int | None = None
+        self.scoped: int | None = None
         self.rules: dict[str, int] = {}
         self.followed: dict[str, bool] = {}
         self._open: dict[int, str] = {}
@@ -68,9 +73,10 @@ class FakeKernel:
         self._call("abi")
         return self.abi_version
 
-    def create_ruleset(self, handled: int) -> int:
+    def create_ruleset(self, handled: int, scoped: int) -> int:
         self._call("create_ruleset")
         self.handled = handled
+        self.scoped = scoped
         self._open[3] = "<ruleset>"
         return 3
 
@@ -152,6 +158,34 @@ def test_a_file_rule_carries_only_what_the_kernel_takes_on_a_file() -> None:
         launcher.EXECUTE | launcher.WRITE_FILE | launcher.READ_FILE | launcher.TRUNCATE | launcher.IOCTL_DEV
     )
     assert not launcher.FILE_RIGHTS & launcher.READ_DIR
+
+
+def test_the_scopes_are_landlocks_bits_for_abstract_sockets_and_signals() -> None:
+    assert (launcher.SCOPE_ABSTRACT_UNIX_SOCKET, launcher.SCOPE_SIGNAL) == (1, 2)
+
+
+@pytest.mark.parametrize(("abi", "scoped"), [(1, 0), (5, 0), (6, 3), (7, 3), (8, 3), (40, 3)])
+def test_a_ruleset_sets_both_scopes_from_abi_6_and_none_below_it(abi: int, scoped: int) -> None:
+    # An older kernel refuses a ruleset that names a scope it does not know: below ABI 6 the CLI can still signal
+    # and connect outside its domain, a limit the docs name.
+    assert launcher.handled_scopes(abi) == scoped
+    assert _applied(abi=abi).scoped == scoped
+
+
+@pytest.mark.parametrize(("scoped", "words"), [(0, [ALL_RIGHTS]), (3, [ALL_RIGHTS, 0, 3])])
+def test_the_ruleset_attribute_is_its_8_byte_form_without_scopes_and_its_24_byte_form_with_them(
+    scoped: int, words: list[int]
+) -> None:
+    # handled_access_fs, then handled_access_net (no network right handled), then scoped: 8 bytes each.
+    sent = []
+    kernel = launcher._Linux.__new__(launcher._Linux)
+    kernel._syscall = lambda name, number, attribute, size, flags: sent.append((number, attribute, size)) or 3
+
+    assert kernel.create_ruleset(ALL_RIGHTS, scoped) == 3
+
+    ((number, attribute, size),) = sent
+    assert number == 444 and size.value == 8 * len(words)
+    assert bytes(attribute._obj) == struct.pack(f"={len(words)}Q", *words)
 
 
 # ---- what gets a rule ----
@@ -559,6 +593,90 @@ def test_a_cli_that_cannot_be_started_is_126_or_127_with_a_line_naming_the_exec(
     assert error.startswith(launcher.MARKER + "execvpe: ") and errno.errorcode[failure.errno] in error
 
 
+@pytest.fixture
+def machine(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The machine _Linux reads, named by the test, with 8-byte pointers whatever this runner's are (a test that is
+    about x32 sets 4: B5-fix2 item 12, H-5), and a libc that records whether it was loaded at all."""
+    seen = SimpleNamespace(name="x86_64", loaded=[])
+    monkeypatch.setattr(launcher.os, "uname", lambda: SimpleNamespace(machine=seen.name), raising=False)
+    monkeypatch.setattr(launcher, "_POINTER_BYTES", 8)
+    monkeypatch.setattr(
+        launcher.ctypes, "CDLL", lambda *arguments, **options: seen.loaded.append(1) or SimpleNamespace(syscall=Mock())
+    )
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("name", "pointer_bytes"),
+    [*((name, 8) for name in ("alpha", "mips", "mips64", "ia64", "", "a machine of tomorrow")), ("x86_64", 4)],
+)
+def test_a_machine_whose_landlock_call_numbers_are_not_known_is_refused_before_any_call(
+    machine, monkeypatch, name: str, pointer_bytes: int
+) -> None:
+    # 444 to 446 are other calls on alpha, ia64 and MIPS: a ruleset is never asked for by a number not known. x32's
+    # calls set a bit in the number, and its machine is x86_64: it cannot be told from a 32-bit x86 process there.
+    machine.name = name
+    monkeypatch.setattr(launcher, "_POINTER_BYTES", pointer_bytes)
+
+    with pytest.raises(launcher.NotApplied) as refused:
+        launcher._Linux()
+
+    assert refused.value.call == "machine"
+    assert refused.value.detail == f"{name}: its Landlock call numbers are not known"
+    assert not machine.loaded
+
+
+# B5-fix1 item 7 (OC-9): the 32-bit ones too, each with the numbers its table gives (i386's and arm's are 444 to 446
+# as well).
+@pytest.mark.parametrize(
+    "name",
+    ["x86_64", "aarch64", "riscv64", "ppc64le", "s390x", "i386", "i486", "i586", "i686", "armv6l", "armv7l", "armv8l"],
+)
+def test_a_machine_whose_landlock_call_numbers_are_the_common_ones_is_taken(machine, name: str) -> None:
+    machine.name = name
+
+    launcher._Linux()
+
+    assert machine.loaded == [1]
+
+
+@pytest.mark.parametrize(
+    "call, name",
+    [
+        (lambda linux: linux.abi(), "landlock_create_ruleset(version)"),
+        (lambda linux: linux.create_ruleset(1, 0), "landlock_create_ruleset"),
+        (lambda linux: linux.create_ruleset(1, 3), "landlock_create_ruleset"),
+        (lambda linux: linux.add_rule(3, 4, 1), "landlock_add_rule"),
+        (lambda linux: linux.restrict_self(3), "landlock_restrict_self"),
+    ],
+    ids=["abi", "create_ruleset", "create_ruleset with scopes", "add_rule", "restrict_self"],
+)
+def test_a_call_the_kernel_refuses_is_not_applied_by_its_name(machine, monkeypatch, call, name: str) -> None:
+    # B5-fix1 item 6 (Codex): a libc whose syscall answers -1 with errno set, as it does for a call the kernel
+    # refuses. A restrict_self that failed and went on would exec the CLI with no ruleset.
+    linux = launcher._Linux()
+    linux._libc.syscall = Mock(return_value=-1)
+    monkeypatch.setattr(launcher.ctypes, "get_errno", lambda: errno.EPERM)
+
+    with pytest.raises(launcher.NotApplied) as refused:
+        call(linux)
+
+    assert (refused.value.call, refused.value.detail) == (name, f"EPERM ({os.strerror(errno.EPERM)})")
+    linux._libc.syscall.assert_called_once()
+
+
+def test_an_unknown_machine_is_the_launchers_status_and_no_exec(
+    started, machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(launcher, "_Linux", LINUX)
+    machine.name = "mips64"
+
+    assert _main("--protect", "/data", "--", "cli") == launcher.EXIT_NOT_APPLIED
+
+    assert started.exec is None
+    assert capsys.readouterr().err == f"{launcher.MARKER}machine: mips64: its Landlock call numbers are not known\n"
+
+
 def test_the_launcher_imports_only_the_standard_library() -> None:
     # It is started with -I -S as a script: nothing of the app, and no package, is there to import.
     import ast
@@ -590,11 +708,12 @@ def _landlock_abi() -> int:
 
 LANDLOCK_ABI = _landlock_abi()
 needs_landlock = pytest.mark.skipif(LANDLOCK_ABI < 1, reason="needs Linux with Landlock")
+needs_scopes = pytest.mark.skipif(LANDLOCK_ABI < 6, reason="needs Landlock's scopes: its ABI 6, Linux 6.12 or later")
 # What a child is given: nothing of this process's environment but where programs are.
 CHILD_ENV = {"PATH": os.environ.get("PATH", "")}
 # The CLI stand-in: tries each [operation, path...] of its first argument and prints what came of each.
 STAND_IN = r"""
-import errno, json, os, subprocess, sys
+import errno, json, os, signal, socket, subprocess, sys
 
 def attempt(operation, *paths):
     try:
@@ -625,6 +744,40 @@ def attempt(operation, *paths):
         elif operation == "pty":
             for fd in os.openpty():
                 os.close(fd)
+        elif operation == "link":
+            os.link(paths[0], paths[1])
+        elif operation == "fifo":
+            os.mkfifo(paths[0])
+        elif operation == "symlink":
+            os.symlink(paths[0], paths[1])
+        elif operation == "open O_PATH":
+            os.close(os.open(paths[0], os.O_PATH | os.O_DIRECTORY))
+        elif operation == "openat through O_PATH":
+            directory = os.open(paths[0], os.O_PATH | os.O_DIRECTORY)
+            try:
+                os.close(os.open(paths[1], os.O_RDONLY, dir_fd=directory))
+            finally:
+                os.close(directory)
+        elif operation == "list through O_PATH":
+            directory = os.open(paths[0], os.O_PATH | os.O_DIRECTORY)
+            try:
+                os.listdir(directory)
+            finally:
+                os.close(directory)
+        elif operation == "signal":
+            os.kill(int(paths[0]), signal.SIGTERM)
+        elif operation == "signal its own child":
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            os.kill(child.pid, signal.SIGTERM)
+            child.wait()
+        elif operation == "connect abstract":
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect("\0" + paths[0])
+        elif operation == "connect its own abstract":
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as own, socket.socket(socket.AF_UNIX) as client:
+                own.bind("\0" + paths[0])
+                own.listen()
+                client.connect("\0" + paths[0])
     except OSError as exc:
         return errno.errorcode.get(exc.errno, str(exc.errno))
     return "ok"
@@ -725,6 +878,81 @@ def test_a_child_under_the_launcher_cannot_list_the_protected_root_or_make_a_fil
 def test_a_child_under_the_launcher_still_stats_a_secret(layout) -> None:
     # Landlock has no right for it: documented as a limit, and pinned here so that the documents stay true.
     assert _stand_in(layout, [["stat", str(layout.secrets[0])]])["results"] == ["ok"]
+
+
+@needs_landlock
+def test_a_secret_in_the_root_is_not_linked_renamed_out_or_truncated_and_nothing_is_made_in_the_root(layout) -> None:
+    # Each on a secret of its own: one that an operation got through to is no longer what the next one tries.
+    token, takeover, personas = (layout.root / name for name in ("api-token", "takeover-token", "proxy-personas.json"))
+    steps = [
+        ["link", str(token), str(layout.home / "linked")],
+        ["rename", str(takeover), str(layout.home / "renamed")],
+        ["truncate", str(personas)],
+        ["fifo", str(layout.root / "fifo")],
+        ["symlink", str(token), str(layout.root / "symlink")],
+        # What the CLI makes in its home stays its own: a link there into the root reads nothing.
+        ["symlink", str(token), str(layout.home / "to-the-token")],
+        ["read", str(layout.home / "to-the-token")],
+        ["fifo", str(layout.home / "fifo")],
+    ]
+
+    report = _stand_in(layout, steps)
+
+    # Below the second ABI a link or rename from one directory to another is EXDEV to every process, before any right
+    # is looked at (Linux 5.13 to 5.18's hook_path_rename; B5-fix1 item 9). The third ABI brought the right to
+    # truncate: below it, Landlock cannot refuse it, a limit the docs name.
+    renamed = "EACCES" if LANDLOCK_ABI >= 2 else "EXDEV"
+    truncated = "EACCES" if LANDLOCK_ABI >= 3 else "ok"
+    assert report["results"] == ["EXDEV", renamed, truncated, "EACCES", "EACCES", "ok", "EACCES", "ok"]
+    assert token.read_text(encoding="utf-8") == "content of api-token" and takeover.is_file()
+    assert not (layout.home / "linked").exists() and not (layout.home / "renamed").exists()
+    assert not (layout.root / "fifo").exists() and not (layout.root / "symlink").is_symlink()
+    if LANDLOCK_ABI >= 3:
+        assert personas.read_text(encoding="utf-8") == "content of proxy-personas.json"
+
+
+@needs_landlock
+def test_an_o_path_descriptor_of_the_root_opens_and_reads_and_lists_nothing_through_it(layout) -> None:
+    # Landlock has no right for an open with O_PATH, which reads nothing. What is opened
+    # through such a descriptor is judged by where it is, as an open by its path is.
+    steps = [
+        ["open O_PATH", str(layout.root)],
+        ["openat through O_PATH", str(layout.root), "api-token"],
+        ["list through O_PATH", str(layout.root)],
+        ["openat through O_PATH", str(layout.home), "../api-token"],
+    ]
+
+    assert _stand_in(layout, steps)["results"] == ["ok", "EACCES", "EBADF", "EACCES"]
+
+
+@needs_scopes
+def test_the_cli_signals_its_own_children_and_no_process_outside_its_sandbox(layout) -> None:
+    # This process stands for the controller: outside the CLI's Landlock domain, as the bridge and another call's CLI
+    # are. A process the CLI starts is in its domain.
+    outside = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], stdin=subprocess.DEVNULL)
+    try:
+        report = _stand_in(layout, [["signal", str(outside.pid)], ["signal its own child"]])
+        alive = outside.poll() is None
+    finally:
+        outside.kill()
+        outside.wait()
+
+    assert report["results"] == ["EPERM", "ok"]
+    assert alive, "the process outside the sandbox was signalled"
+
+
+@needs_scopes
+def test_the_cli_connects_to_its_own_abstract_socket_and_to_none_a_process_outside_its_sandbox_listens_on(
+    layout,
+) -> None:
+    name = f"auto-browser-scope-test-{os.getpid()}-{layout.base.name}"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind("\0" + name)
+        listener.listen()
+
+        report = _stand_in(layout, [["connect abstract", name], ["connect its own abstract", name + "-own"]])
+
+    assert report["results"] == ["EPERM", "ok"]
 
 
 @needs_landlock

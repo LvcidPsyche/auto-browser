@@ -98,7 +98,7 @@ class CodexComesFromItsReleaseTests(unittest.TestCase):
 @unittest.skipUnless(DOCKERFILE.is_file(), NOT_IN_THIS_TREE)
 @unittest.skipIf(BASH is None, NO_BASH_REASON)
 class NoMcpServerLoadsTests(unittest.TestCase):
-    """/etc/codex/requirements.toml holds `mcp_servers = {}`: the adapter's `-c mcp_servers={}` clears no server a
+    """/etc/codex/requirements.toml holds `mcp_servers = {}`: a `-c mcp_servers={}` clears no server a
     CODEX_HOME config.toml names (Codex merges -c tables key by key), and the file lies outside every grant of the CLI
     sandbox. The agent-cli-image workflow checks that Codex reads it so."""
 

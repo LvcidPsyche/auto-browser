@@ -13,6 +13,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError
 from app.browser.element_scripts import (
+    ELEMENT_ENABLED_SCRIPT,
     ELEMENT_FOCUS_PLACE_SCRIPT,
     FIELD_HOLD_READ_SCRIPT,
     FIELD_HOLD_RELEASE_SCRIPT,
@@ -111,12 +112,10 @@ class FakeLocator:
         self.fill = AsyncMock()
         self.count = AsyncMock(return_value=1)
         self.is_visible = AsyncMock(return_value=True)
-        # A click looks whether its target is enabled before it hovers (_checks_of_a_click); the pages where it is
-        # not yet are tests/test_click_target_chromium.py's.
-        self.is_enabled = AsyncMock(return_value=True)
         self.bounding_box = AsyncMock(return_value={"x": 10, "y": 20, "width": 100, "height": 40})
         self.get_attribute = AsyncMock(side_effect=lambda name, **_given: self.attributes.get(name))
-        # The element is what the pointer hits and keeps focus once clicked;
+        # The element is enabled (a click reads that before it hovers, _checks_of_a_click; the pages where it is not
+        # yet are tests/test_click_target_chromium.py's), is what the pointer hits and keeps focus once clicked;
         # tests/test_targeting.py covers the pages where it is not and does not.
         self.evaluate = AsyncMock(return_value=True)
         self.focus = AsyncMock()
@@ -284,10 +283,14 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.click("session-1", selector="#submit")
 
         whole = self.manager.settings.action_timeout_ms
+        asked = {
+            script: [call for call in locator.evaluate.await_args_list if call.args[0] == script]
+            for script in (ELEMENT_ENABLED_SCRIPT, actions._RECEIVES_POINTER_SCRIPT)
+        }
         given = {
             "scroll": locator.scroll_into_view_if_needed.await_args.kwargs.get("timeout"),
             "box": locator.bounding_box.await_args_list[0].kwargs.get("timeout"),
-            "enabled": locator.is_enabled.await_args_list[0].kwargs.get("timeout"),
+            "enabled": asked[ELEMENT_ENABLED_SCRIPT][0].kwargs.get("timeout"),
             "trial hover": locator.hover.await_args_list[0].kwargs.get("timeout"),
         }
         for step, timeout in given.items():
@@ -295,7 +298,7 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(whole - 50 < given["scroll"] <= whole, given)
         self.assertTrue(0 < given["trial hover"] <= given["enabled"] <= given["box"] <= whole - 50, given)
         # The question has a bound of its own within that (POINTER_CHECK_TIMEOUT_MS).
-        self.assertEqual(locator.evaluate.await_args_list[0].kwargs.get("timeout"), 1000)
+        self.assertEqual(asked[actions._RECEIVES_POINTER_SCRIPT][0].kwargs.get("timeout"), 1000)
 
     async def test_a_scroll_into_view_that_met_a_replaced_element_is_made_again(self) -> None:
         # Playwright's scroll finds one element and ends at once when the page replaces it meanwhile ("Element is

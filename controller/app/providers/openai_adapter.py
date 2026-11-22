@@ -9,12 +9,22 @@ import secrets
 import shutil
 import stat
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
 
+from ..codex_config import (
+    CONFIG_FLAGS,
+    FEATURES_LIST_COMMAND,
+    MCP_LIST_COMMAND,
+    features_on,
+    features_on_error,
+    listed_mcp_servers,
+    mcp_servers_off,
+)
 from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision, ResumeCheckpoint
 from ..utils import error_text_for_log, quoted_for_log
@@ -38,6 +48,11 @@ _HOME_ROOT_PARTS = 4  # ("/", "home", "<user>", ".codex")
 # is 0.
 _DECISION_FILE_FLAGS = (
     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+)
+# The error of a Codex call whose second server list shows a server on: the names go to the log alone.
+MCP_SERVERS_ON_ERROR = (
+    "the Codex configuration keeps on MCP servers that a decision call turns off, so the Codex call was not made; "
+    "the controller's log names them"
 )
 
 
@@ -391,38 +406,27 @@ class OpenAIAdapter(BaseProviderAdapter):
                 logger.warning("something was at the schema file's name in a new Codex call's directory: no call made")
                 raise RuntimeError("the Codex call's working directory was changed before the call") from None
             self._ensure_codex_config_path_compatibility()
-            config_overrides = [
-                "project_doc_fallback_filenames=[]",
-                "agents={}",
-                "mcp_servers={}",
-                "features.multi_agent=false",
-                "features.apps=false",
-                'web_search="disabled"',
-            ]
+            # One deadline for the call: the look, the server lists and codex exec share it, each getting what is left.
+            deadline = time.monotonic() + self.settings.model_request_timeout_seconds
+            # The look first: a call it stops has started one process.
+            await self._look_at_features(tempdir, deadline)
+            servers = await self._mcp_servers_off(tempdir, deadline)
 
-            command = [self.settings.openai_cli_path]
-            if model:
-                command.extend(["--model", model])
-            for override in config_overrides:
-                command.extend(["-c", override])
-            command.extend(["exec", "--skip-git-repo-check"])
-            command.extend(codex_sandbox_flags(self.settings))
-            command.extend(
-                [
-                    "--cd",
-                    tempdir,
-                    "--ephemeral",
-                    "--output-schema",
-                    str(schema_path),
-                    "--output-last-message",
-                    str(output_path),
-                    *(["--image", observation["screenshot_path"]] if observation.get("screenshot_path") else []),
-                    "-",
-                ]
+            command = self._exec_command(
+                model=model,
+                servers=servers,
+                tempdir=tempdir,
+                schema_path=schema_path,
+                output_path=output_path,
+                observation=observation,
             )
 
             result = await self.run_cli(
-                command=command, input_text=prompt, cwd=tempdir, image_path=observation.get("screenshot_path")
+                command=command,
+                input_text=prompt,
+                cwd=tempdir,
+                image_path=observation.get("screenshot_path"),
+                deadline=deadline,
             )
             written, instead = _decision_file_bytes(output_path.name, directory.open)
             if instead:
@@ -438,6 +442,109 @@ class OpenAIAdapter(BaseProviderAdapter):
                 usage={"auth_mode": "cli", "transport": "codex-exec"},
                 raw_text=raw_text,
             )
+
+    def _exec_command(
+        self,
+        *,
+        model: str | None,
+        servers: list[str],
+        tempdir: str,
+        schema_path: Path,
+        output_path: Path,
+        observation: dict[str, Any],
+    ) -> list[str]:
+        """The codex exec command line of one decision."""
+        command = [self.settings.openai_cli_path]
+        if model:
+            command.extend(["--model", model])
+        command.extend(CONFIG_FLAGS)
+        if servers:
+            command.extend(["-c", mcp_servers_off(servers)])
+        command.extend(["exec", "--skip-git-repo-check"])
+        command.extend(codex_sandbox_flags(self.settings))
+        command.extend(
+            [
+                "--cd",
+                tempdir,
+                "--ephemeral",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                *(["--image", observation["screenshot_path"]] if observation.get("screenshot_path") else []),
+                "-",
+            ]
+        )
+        return command
+
+    async def _look_at_features(self, tempdir: str, deadline: float) -> None:
+        """Stops the call where `codex <the call's -c flags> features list` shows on a feature the call turns off
+        (codex_config.LOOKED_AT_FEATURES): a provider error, not retried, that names those features and says what to
+        do, logged; nothing Codex printed goes into either."""
+        command = [self.settings.openai_cli_path, *CONFIG_FLAGS, *FEATURES_LIST_COMMAND]
+        on = await self._listed(
+            command, tempdir, deadline, features_on, "codex features list printed no list of features"
+        )
+        if on:
+            message = features_on_error(on)
+            logger.error("%s; the Codex call was not made", message)
+            raise ProviderAPIError(provider=self.provider, message=message, retryable=False)
+
+    async def _mcp_servers_off(self, tempdir: str, deadline: float) -> list[str]:
+        """The MCP servers this call turns off: each that `codex <the call's -c flags> mcp list --json` names, from
+        every config layer Codex reads.
+
+        Where that list shows one on, the list runs once more with the table that turns them off (mcp_servers_off), and
+        a server it still shows on stops the call: a provider error, not retried, that names none of them; their names
+        are logged.
+        """
+        listed = await self._mcp_list(tempdir, deadline, [])
+        names = list(listed)
+        if any(listed.values()):
+            relisted = await self._mcp_list(tempdir, deadline, names)
+            if still_on := [name for name, on in relisted.items() if on]:
+                logger.error(
+                    "codex mcp list shows MCP servers on with the call's table that turns them off, so the Codex call "
+                    "was not made: %s",
+                    ", ".join(quoted_for_log(name) for name in still_on),
+                )
+                raise ProviderAPIError(provider=self.provider, message=MCP_SERVERS_ON_ERROR, retryable=False)
+        return names
+
+    async def _mcp_list(self, tempdir: str, deadline: float, servers: list[str]) -> dict[str, bool]:
+        """What `codex <the call's -c flags> mcp list --json` lists (listed_mcp_servers), with the table that turns off
+        ``servers`` where there are any."""
+        table = ["-c", mcp_servers_off(servers)] if servers else []
+        command = [self.settings.openai_cli_path, *CONFIG_FLAGS, *table, *MCP_LIST_COMMAND]
+        return await self._listed(
+            command, tempdir, deadline, listed_mcp_servers, "codex mcp list printed no list of MCP servers"
+        )
+
+    async def _listed(
+        self, command: list[str], tempdir: str, deadline: float, read: Callable[[str], Any], refusal: str
+    ) -> Any:
+        """What ``read`` makes of what ``command`` (one of the lists a call runs before its exec) printed, run as the
+        exec runs (run_cli, in the call's directory, to the call's deadline).
+
+        One that exits non-zero (Codex's answer to a config.toml it cannot read or parse, on which exec refuses to run
+        too) fails the call with Codex's stderr as the error's text, else its exit code; one that does not answer by
+        the deadline fails it as a timed-out exec does; one whose output ``read`` does not take (None) fails it with
+        ``refusal``, logged with the length of what it printed.
+
+        What a list prints on stdout goes into no error and no log: `codex mcp list --json` prints each server's env
+        and http_headers values. Of it, only the names of the servers a second list still shows on are logged
+        (_mcp_servers_off).
+        """
+        result = await self.run_cli(command=command, cwd=tempdir, deadline=deadline, stdout_in_error=False)
+        listed = read(result.stdout)
+        if listed is None:
+            logger.error(
+                "%s, so the Codex call was not made; what it printed, %d characters, is not logged",
+                refusal,
+                len(result.stdout),
+            )
+            raise ProviderAPIError(provider=self.provider, message=refusal, retryable=False)
+        return listed
 
     def _call_directory(self) -> _CallDirectory:
         """The directory one Codex call works in, under the CLI home and not the shared system temp dir, whose other

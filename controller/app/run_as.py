@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .process_hardening import PRIVATE_TEMP_NAME
 from .utils import error_text, error_text_for_log
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,9 @@ def controller_owned_paths(settings: Any, data_root: Path = DATA_ROOT) -> list[P
         parent(settings.share_revocation_store_path),
         data_root / "browser-sessions",
         data_root / "db",
+        # The controller's own temp directory (process_hardening.use_private_temp_directory): one a root start made is
+        # root's, and the next start as another user would refuse it and keep the system temp directory.
+        data_root / PRIVATE_TEMP_NAME,
     ]
     if settings.cli_home:
         candidates.append(Path(settings.cli_home))

@@ -507,17 +507,51 @@ shadow browse's headed browser), and Tesseract, which screenshot redaction's OCR
 also makes itself non-dumpable at startup, so a process of its uid cannot read the controller's own environment
 through `/proc/PID/environ`.
 
+A decision call gives its CLI no MCP server, and its model no command tool (measured with codex-cli 0.114.0, Claude
+Code 2.1.72 and Gemini CLI 0.32.1):
+
+- **Codex** runs with `-c features.shell_tool=false -c features.unified_exec=false`, so its model is offered no
+  command tool (the page goes in on stdin, the screenshot as `--image`): it is offered Codex's `update_plan`,
+  `request_user_input` and `view_image`, and `apply_patch` where the model's own catalog entry brings it ("Codex's own
+  sandbox", below, gives where a file edit writes). Before each `codex exec` the controller runs two commands with
+  the same `-c` flags, as the exec runs (the launcher, the CLI's environment, the call's directory, the call's
+  timeout). First `codex <flags> features list`, the look: where a feature the call turns off still reads on (each
+  but `unified_exec`, which on its own brings the model no tool), no call is made, and the log names the feature. A
+  profile the configuration selects, the managed configuration, a `[features]` table in
+  `/etc/codex/requirements.toml` or an older name for the feature in the home config's `[features]` table can turn
+  one back on against the command line. Then `codex <flags> mcp list --json`: the exec gets
+  `-c project_root_markers=[]`, which makes the call's own directory the project root, and one
+  `-c mcp_servers={"<name>"={enabled=false},...}` that sets `enabled=false` for each server listed. Where the list
+  names a server that is not already off, the controller lists once more with that table, and makes no call while a
+  server is still listed as on (as one `/etc/codex/managed_config.toml` names with `enabled = true` is, where there
+  is no `/etc/codex/requirements.toml`). So none of the servers of the home's `config.toml` (`CODEX_HOME`, else
+  `~/.codex`), `/etc/codex/config.toml`, `/etc/codex/managed_config.toml` or a project's `.codex/config.toml`
+  starts. Either command that exits non-zero (as on a `config.toml` Codex cannot read or parse, where `codex exec`
+  refuses to run too) or prints no list ends the call with no exec, and one that does not answer within the call's
+  timeout ends it as a `codex exec` that times out does.
+- **Claude Code** runs with `--strict-mcp-config` and no `--mcp-config`, so no server of `~/.claude.json` or of the
+  home's `.mcp.json` loads; with `--tools ""` and `--json-schema` its model is offered only the structured answer.
+- **Gemini CLI** runs with `--allowed-mcp-server-names` and a name made for that call (`ab-none-` and 32 random hex
+  digits), which no server has, so no server of its settings or its extensions loads: the command line wins over the
+  settings. Its `GEMINI_CLI_SYSTEM_SETTINGS_PATH` names `controller/app/providers/gemini_system_settings.json`, which
+  ships with the controller's code and declares no tool: no core tool (`tools.core` is an allowlist), no skill, and
+  none of its agents (`codebase_investigator`, `cli_help`, `generalist`). The controller sets it on every call, in
+  place of one `CLI_PROVIDER_ENV_PASSTHROUGH` passes.
+
 #### The CLI sandbox
 
-A provider CLI (`OPENAI_AUTH_MODE=cli` and the others) runs as the controller's user, and page content it is shown
-can prompt-inject it. On Linux with Landlock (kernel 5.13 or later, with Landlock enabled) the controller starts each
+A provider CLI (`OPENAI_AUTH_MODE=cli` and the others) runs as the controller's user, and page content it is shown can
+prompt-inject it. On Linux with Landlock (kernel 5.13 or later, with Landlock enabled) the controller starts each
 provider CLI through a launcher (`controller/app/cli_sandbox_launcher.py`) that applies a Landlock ruleset and then
-execs the CLI. Of `/data` the CLI can then open only `CLI_HOME` and what `CLI_SANDBOX_WRITABLE` names there, to read
-and write, and the screenshot its own call names (Codex's `--image`), to read. Kept in their default places,
+execs the CLI. Of `/data` the CLI can then open only `CLI_HOME` and what `CLI_SANDBOX_WRITABLE` names there, to read and
+write, and the screenshot its own call names (Codex's `--image`), to read. Kept in their default places,
 `data/api-token`, `data/takeover-token`, the auth profiles, the witness and mesh keys and the tunnel key cannot be
 opened, and neither can another session's screenshots or anything else under `/data`; nothing there can be listed or
-run. Each answers `EACCES`, to a CLI that runs as root as to any other. A `stat`, an inotify watch and a connection to
-a Unix socket under `/data` are not refused (below), and the conditions below say where a secret is left open.
+run, renamed out, emptied (from kernel 6.2, below) or made there (a file, a directory, a FIFO or a symbolic link). Each
+answers `EACCES`, to a CLI that runs as root as to any other, and a hard link to a file there `EXDEV` (measured); below
+Landlock ABI 2 (Linux 5.13 to 5.18) a rename out to another directory answers `EXDEV` too, before any right is looked at
+(from the kernel's source). A `stat`, an inotify watch and a connection to a Unix socket under `/data` are not refused
+(below), and the conditions below say where a secret is left open.
 
 Outside `/data` a CLI can read, list and run what it could before, and write only in its home (wherever that is),
 the temp directories (`/tmp`, `/var/tmp`, and those its own `TMPDIR`, `TEMP` and `TMP` name where they lie outside
@@ -549,26 +583,33 @@ given to the CLI: one in `/tmp` linked to `/opt/toolcache`, say, since `/tmp`'s 
 written and not where it leads, which a CLI may swap. The same goes for an entry whose way to where it leads
 passes through a directory a CLI may write: `/opt/x` linked to `/tmp/sub/inner`, which a CLI can make a link to
 wherever it likes, is not given, and neither is `/opt/x` linked to `/tmp/sub/../../target`, where a CLI can swap
-`/tmp/sub`. Each place Linux looks up on the way counts. A CLI that cannot run under the ruleset (it needs
-something under `/data` that cannot move into `CLI_HOME`, or it fails there) can be started without it:
-`CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI without the launcher, and a CLI then reads
-and writes what the controller's user can, as before 1.18.0.
+`/tmp/sub`. Each place Linux looks up on the way counts. The CLI's own `HOME`, `TMPDIR`, `TEMP` and `TMP` (each where it
+is an absolute path), and `/tmp`, `/var/tmp` and `/dev`, are judged the same way, and one that is not given and that no
+directory given holds (a `TMPDIR` in `/data` outside `CLI_HOME`, or a `/tmp` linked into `/data`) is one warning too,
+which refuses nothing; a `/var/tmp` that is not there is passed over in silence. A CLI that cannot run under the ruleset
+(it needs something under `/data` that cannot move into `CLI_HOME`, or it fails there) can be started without it:
+`CLI_SANDBOX_ENABLED=false` (default `true`) starts every provider CLI without the launcher, and a CLI then reads and
+writes what the controller's user can, as before 1.18.0.
 
 Where the sandbox would leave a secret or a store open, or would not hold, the controller writes a warning, once in
 the life of the process for each distinct line, which names the condition (a setting by its name and never its value,
-a directory by its path, quoted, with a line break in it escaped), and runs the CLI: without the sandbox, or under it
-with something left open, or under it without its home. Where several conditions hold, only the first in this list
-is named (no Landlock hides an open setting until Landlock is there):
+a directory by its whole path, quoted, with a line break in it escaped), and runs the CLI: without the sandbox, or
+under it with something left open, or under it without its home. Where several conditions hold, only the first in
+this list is named (no Landlock hides an open setting until Landlock is there):
 
 - **`CLI_SANDBOX_ENABLED=false`.** The CLI starts without the launcher, and no probe runs.
 - **No Landlock.** The host is not Linux, its kernel is older than 5.13 or has Landlock switched off, the container's
-  seccomp profile refuses Landlock's system calls (Docker's default profile allows them), or the launcher's probe
-  failed for another reason: at the first CLI call the controller runs the launcher in a mode that applies the
-  ruleset and exits. The CLI starts without the launcher, as it did before 1.18.0. The launcher's own answer (it
-  applied the ruleset, or it refused to) is taken once for the process. A probe that did not finish (it timed out
-  after 30 seconds, or could not be started) is run again at the next CLI call; the calls that started while it ran
-  take its answer. The probe runs outside the call's own timeout, so on a host where it keeps timing out every CLI
-  call waits 30 seconds before it starts, and then runs without the launcher.
+  seccomp profile refuses Landlock's system calls (Docker's default profile allows them), the machine is not one whose
+  numbers for those calls the launcher knows (x86-64 and arm64, and 32-bit x86 and Arm, RISC-V 64, ppc64le and s390x;
+  alpha, ia64, MIPS and x32 number them otherwise, and a 32-bit process on an x86-64 kernel that names itself `x86_64`,
+  which may be x32, is refused too; one started with the 32-bit personality, `linux32`, names itself `i686` and is
+  taken, with i386's numbers, which are its own), or the launcher's probe failed for another reason: at the first CLI
+  call the controller runs the launcher in a mode that applies the ruleset and exits. The CLI starts without the
+  launcher, as it did before 1.18.0. The launcher's own answer (it applied the ruleset, or it refused to) is taken once
+  for the process. A probe that did not finish (it timed out after 30 seconds, or could not be started) is run again at
+  the next CLI call; the calls that started while it ran take its answer. The probe runs outside the call's own timeout,
+  so on a host where it keeps timing out every CLI call waits 30 seconds before it starts, and then runs without the
+  launcher.
 - **`CLI_HOME` is `/data` or a directory that holds it,** as written, with no `..` part. The CLI starts without the
   launcher.
 - **`CLI_HOME` only resolves into `/data`, or to `/data` or a directory that holds it, or to a place no directory
@@ -580,27 +621,103 @@ is named (no Landlock hides an open setting until Landlock is there):
   resolves. The warning names `CLI_HOME`, its path and where it resolves (or
   that it is not a directory, or has a `..` part); a `CLI_HOME` that is a link on purpose is to be set to its real
   path, and one with a `..` part written without it.
-- **A CLI may write the controller's own home, or a directory in it, or a place the controller reads at its start.**
-  The home is judged as `HOME` names it and as the user's passwd entry does (ssh reads that one). `CLI_HOME` is blank
-  (the CLI's `HOME` is then the controller's), or a directory a CLI may write (`CLI_HOME`, an entry of
-  `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's home, holds it or lies in it: its `.ssh` or its Python user
-  site, say. The places read at the start are each home's `.ssh` and `.local` and Python's user base, wherever
-  `PYTHONUSERBASE` puts it, and the controller's own code: its package (`controller/app`, with the launcher it runs
-  at each CLI call), its interpreter as it was started and once resolved, `sys.prefix` and `sys.base_prefix`, and
-  where its packages are installed. A directory a CLI may write that is, holds or lies in one of them is reported
-  wherever it is (a `PYTHONUSERBASE` in `/tmp`, or a host run from a checkout or a venv in `/tmp`, say). A `CLI_HOME`
-  in the controller's home is the CLI's own, as is the private directory there that a host run falls back to when
-  its `CLI_HOME` cannot be made, and is not reported unless it is, holds or lies in one of those places. The CLI
-  starts under the launcher, and what it leaves there the controller may run at its next start or CLI call, where it
-  is a Python user site, an ssh config or its own code.
+- **A CLI may write the controller's own home, or a directory in it, or a place the controller reads at its start or
+  runs a program from.** The home is judged as `HOME` names it and as the user's passwd entry does (ssh reads that one).
+  `CLI_HOME` is blank (the CLI's `HOME` is then the controller's), or a directory a CLI may write (`CLI_HOME`, an entry
+  of `CLI_SANDBOX_WRITABLE`, a `TMPDIR`) is the controller's home, holds it or lies in it: its `.ssh` or its Python user
+  site, say. The places read at the start are each home's `.ssh` and `.local`, Python's user base, wherever
+  `PYTHONUSERBASE` puts it, the `.env` the controller reads its settings from in its working directory, and the
+  controller's own code: its package (`controller/app`, with the launcher it runs at each CLI call), its interpreter as
+  it was started and once resolved, its standard library, where its packages are installed, each entry of its import
+  path (`sys.path`: the directory it was started from, `PYTHONPATH`'s entries, what a `.pth` file adds), and each
+  directory of its `PATH` (`/bin` and `/usr/bin`, where `exec` looks, when `PATH` is not set). And the programs it runs
+  outside the sandbox, each where `exec` finds it and through its links: `tesseract` (an OCR's) and `autossh` (a
+  tunnel's) in each directory of the `PATH`, the program of `HARNESS_UV_COMMAND` (the verifier's, where
+  `HARNESS_VERIFIER` is `uv` or `ensemble`, the modes that run it) there, or as written where it has a `/`, each later
+  word of that command, and each word a shell reads in one (as `sh -c` and `env -S` split a command string, read both
+  ways: at space, tab and line breaks alone, and at every ASCII whitespace and at `;`, `&`, `|`, `<`, `>` and the
+  parentheses; its quotes removed, and at whitespace alone where its quotes do not match), and in each word that gives,
+  again until none is new: as a program `exec` finds where it has
+  no `/` (`sh -c verify`, `timeout 30 verify`), and as a path (a script it runs or a file it reads or writes,
+  `2>/tmp/uv.log` among them), with the part after `=` of a word (`--config=v.toml`, `-X pycache_prefix=/srv/x`, `env
+  PYTHONPATH=/srv/x`), and each part of a `:` list in either (`env PATH=/srv/x:/usr/bin`, `-cp /a:/srv/x`), but for a
+  URL's host (a part that starts with `//` but not `///` after a scheme: `http://dev:8080` names no `/dev`, and
+  `sqlite:////tmp/v.db` names `/tmp/v.db`) and for the root itself (`/`, `//`, `/.` or `/..`, as in `cd /`), in which
+  every directory given lies; and, for each such word as the module it may name (the word after `-m`, which Python takes
+  as it is, a `/` in it or not, or uv's module, the first word after its options, whose `-m` and `--module` are flags),
+  and for the parts after the first letter and after the first `m` of a word led by one `-` (`mod` in `-mmod`, `-uBmmod`
+  or pytest's `-pmod`), the files Python runs for it from the working directory (no word is read as an option, so one
+  that names no module is judged so too): each name on the way and the module itself (`a`, `a/b`, `a/b/c`), as a
+  package's `__init__` or as a file, in every form this Python imports (source, bytecode, extension), and a package's
+  `__main__`, or for a name that holds a `/`, the names on the way before the first part that holds one, which Python
+  imports before it fails there (`pkg` for `pkg.bad/name`, none for `./tmp/verify.py`); the working directory itself,
+  wherever the verifier runs, whatever its command: Python puts it, or a
+  directory in it, first on the verifier's import path in most ways it runs (under `-m`, which imports standard-library
+  modules such as `collections` from it before the module runs, under `-c`, from stdin, for a script run from there, and
+  for an empty part of a `PYTHONPATH` list), and `pytest` collects every `test_*.py` under it, so a host run that gives
+  CLIs a directory in it, or runs from one, is reported (and refused under `CLI_SANDBOX_REQUIRED=true`) whatever the
+  command: start the controller from a directory that holds none given, as the image does from `/app`; and where
+  Playwright finds the browsers (the Chromium shadow browse runs on a host): `PLAYWRIGHT_BROWSERS_PATH`, normalised as
+  Playwright joins it, where it is set and not `0`, or, where it is unset or empty, `.cache/ms-playwright` in the
+  controller's `HOME` (from the working directory where `HOME` is set and empty, as node reads it). And the places named
+  by the variables the controller hands these programs, as its own environment has them, where a value holds a `/`, each
+  value read as a later word of the verifier's command is (its words, its part after `=` and its `:` list:
+  `NODE_OPTIONS=--require=/srv/x/hook.js`, `unix:path=/tmp/dbus-x`): Tesseract's `TESSDATA_PREFIX`, where it reads its
+  parameters, file writes among them, and its `OMP_*` names (`OMP_TOOL_LIBRARIES` names a library OpenMP loads);
+  Playwright's driver's `DEBUG`, `DEBUG_FILE` (which it writes), `DISPLAY`, `WAYLAND_DISPLAY` and
+  `DBUS_SESSION_BUS_ADDRESS`, its `PW_*` and `PLAYWRIGHT_*` names (`PLAYWRIGHT_NODEJS_PATH`, the node it runs;
+  `PLAYWRIGHT_BROWSERS_PATH` as the driver reads it, above), and `XDG_RUNTIME_DIR`, where the browser opens its sockets,
+  judged one way: reported where it is or lies in a directory given, and not where it holds one (a CLI home in it, as
+  the controller's own fallback `$XDG_RUNTIME_DIR/auto-browser-cli` is); autossh's `AUTOSSH_*` (`AUTOSSH_PATH`,
+  `AUTOSSH_PIDFILE`, `AUTOSSH_LOGFILE`); the names `HARNESS_UV_ENV_PASSTHROUGH` hands the verifier, where it runs
+  (`PLAYWRIGHT_BROWSERS_PATH` among them as written, as the verifier gets it), but `HOME`, the temp names, `XAUTHORITY`
+  and `XDG_RUNTIME_DIR`; and the CA
+  bundles' (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) and `SHELL`, which each of
+  them gets. Not judged: `XAUTHORITY` (the driver and its browser only read the cookie, which a CLI that may write it
+  can read already, and `xvfb-run` puts it in `/tmp`), `HOME` (judged as the controller's home), the temp names
+  `TMPDIR`, `TEMP` and `TMP` (the verifier gets the controller's own temp directory), and, where
+  `HARNESS_UV_ENV_PASSTHROUGH` does not name it, `PATH` (judged as `exec` searches it). The CLIs are not among those
+  programs: the launcher finds and runs a CLI once the ruleset is on. An argument of the verifier's command that names a
+  file in a directory CLIs may write is reported, `--log /dev/null` or `--log /tmp/uv.log` among them: the verifier runs
+  as the controller's user outside the sandbox, and a link a CLI leaves at that name sends what it writes, or what it
+  reads, where the CLI chose (a CLI that runs as root can replace `/dev/null`); leave such an argument out, or name a
+  file in a directory no CLI may write. Each entry is judged as Python and `exec` read it: as written, a `..` after a
+  link read after the link, and one that is relative, an empty `PATH` entry among them, from the controller's working
+  directory. Where that directory was removed while the controller runs (a release directory swapped under it), a
+  relative entry without a `..` part is not judged, since nothing can be made where it leads, and one with a `..` part
+  is reported, since where it leads past the removed directory cannot be said. Where Playwright finds the browsers is
+  the exception, reported where it is relative (a relative `PLAYWRIGHT_BROWSERS_PATH`, or the default place where `HOME`
+  is relative), `..` or not: Playwright's driver starts once, with the controller, and resolved it then to a path under
+  that directory, which a CLI that may write the directory's parent can make again. The bytecode prefix is one of them
+  too, where `PYTHONPYCACHEPREFIX` sets one: Python runs a `.pyc` it finds there in place of any module of that code.
+  `sys.prefix` and `sys.base_prefix` are not judged whole: a distribution's Python has `/usr` for both, and a directory
+  elsewhere in `/usr` (a `/usr/local/lib/node_modules` that a CLI updates itself in) is judged only where one of those
+  programs leads there (a verifier npm links into `/usr/local/bin`). A directory a CLI may write that is, holds or lies
+  in one of them is reported wherever it is (a `PYTHONUSERBASE` in `/tmp`, or a host run from a checkout or a venv in
+  `/tmp`, say). A broad entry makes every call a report: any uvicorn start from `/` (a systemd system service's default
+  `WorkingDirectory=`), `uvicorn` or `python -m uvicorn`, puts `/` on the import path (`uvicorn` adds the working
+  directory as `''` for its `--app-dir`), where every directory a CLI may write lies, and with
+  `CLI_SANDBOX_REQUIRED=true` no CLI runs, though none can write a module there; start the controller from its own
+  directory, as the image does (`/app`). A `CLI_HOME` in the controller's home is the CLI's own, as is the private
+  directory there that a host run falls back to when its `CLI_HOME` cannot be made, and is not reported unless it is,
+  holds or lies in one of those places. The CLI starts under the launcher, and what it leaves there the controller may
+  run at its next start, CLI call, OCR, tunnel or verification, where it is a Python user site, an ssh config, its own
+  code or a program it runs, or take for its settings, where it is that `.env`.
 - **A secret or a store is kept outside `/data`, in a directory a CLI may write, or is a directory that holds one, or
   its path has a `..` part.** The secrets `API_TOKEN_FILE`, `TAKEOVER_TOKEN_FILE`, `AUTH_ROOT`, `WITNESS_ROOT`,
   `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_KEY_PATH`, `PROXY_PERSONA_FILE` and `BROWSER_WS_ENDPOINT_FILE` are checked,
   and so are the stores: `APPROVAL_ROOT` (which holds the approvals' digest key), `AUDIT_ROOT`, `STATE_DB_PATH`,
   `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `MEMORY_ROOT`, `HARNESS_ROOT`, `MESH_PEERS_PATH`, `MCP_SESSION_STORE_PATH`,
   `CRON_STORE_PATH`, `SHARE_REVOCATION_STORE_PATH`, the tunnel's `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`,
-  `ISOLATED_TUNNEL_INFO_ROOT` and `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT` and `UPLOAD_ROOT`. Each is resolved
-  first, so a `/data` that is a symbolic link to another place holds none of them. "In a directory a CLI may write"
+  `ISOLATED_TUNNEL_INFO_ROOT` and `REMOTE_ACCESS_INFO_PATH`, `ARTIFACT_ROOT`, `UPLOAD_ROOT` and
+  `COMPLIANCE_MANIFEST_PATH` (the record of the compliance template applied at the start), and two stores no setting
+  names, each beside a store setting's place as the code that keeps it finds it: `browser-sessions` beside
+  `ARTIFACT_ROOT`'s (the isolated sessions' browser profiles and the endpoint files the controller trusts) and
+  `witness` beside `AUDIT_ROOT`'s (the witness keys, where `WITNESS_ROOT` cannot be made). Each is resolved
+  first, so a `/data` that is a symbolic link to another place holds none of them. `OPENAI_HOST_BRIDGE_SOCKET` is
+  checked too, but for lying outside `/data`: a CLI can connect to the bridge's socket wherever it is ("Signals and
+  connections", below), and where it may write the socket's place it can put a socket of its own there, which the
+  controller would take for the bridge. "In a directory a CLI may write"
   (`CLI_HOME`, or an entry of `CLI_SANDBOX_WRITABLE` under `/data`) is as written or once resolved: a path written
   there counts wherever it resolves, since the CLI can replace a link there with a file of its own, and so does a
   path whose way to where it resolves passes through such a directory (a link to a link in `CLI_HOME`). A secret's
@@ -610,6 +727,9 @@ is named (no Landlock hides an open setting until Landlock is there):
   `slot` points, and a CLI can make `slot` a link). The CLI starts under the launcher, which closes `/data` and not
   that place. A Linux host run that keeps its data elsewhere gets this warning, with the name of each of them it
   sets.
+- **The controller's own temp directory is outside `/data`, in a directory a CLI may write, or holds one**, judged
+  as a secret's place is: the system temp directory where the controller could not make `/data/controller-tmp` at
+  its start ("The controller's own temp files", below).
 
 `CLI_SANDBOX_REQUIRED=true` refuses instead: with any of these conditions no provider CLI is started, the step fails
 with `Provider request failed` (`502`), and the log names the condition in one error line. So
@@ -619,10 +739,10 @@ passed, fails that call the same way, and the CLI is never started without it.
 
 What the sandbox does not stop, and what does not work under it:
 
-- **Metadata, and names learnt by watching.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or
-  extended attributes: to a file under `/data` whose path it knows, a CLI can do whatever of those the file's own
-  permissions allow. Outside its home it cannot list a directory there, but it can place an inotify watch on one
-  (Landlock has no hook for a watch) and read the names of the entries made in it afterwards.
+- **Metadata, and names learnt by watching.** Landlock has no right for `stat`, `chmod`, `chown`, `utime` or extended
+  attributes: to a file under `/data` whose path it knows, a CLI can do whatever of those the file's own permissions
+  allow. Outside its home it cannot list a directory there, but it can place an inotify watch on one (Landlock has no
+  hook for a watch) and read the names of the entries made in it afterwards.
 - **Another CLI call's files.** Every call's CLI reads and writes all of `CLI_HOME`: the sign-in state, and the
   per-call directory of a call that runs at the same time. So a CLI can write a regular `decision.json` into the
   directory of another Codex call that runs at the same time, and the controller takes it as that call's decision.
@@ -632,20 +752,47 @@ What the sandbox does not stop, and what does not work under it:
   can open, such as `/tmp`; or, where `/data` is no mount of its own (an image run with no volume), as a hard link
   beside it. A sandboxed CLI cannot make such a link itself (`EXDEV`). Where a CLI may have been prompt-injected
   before, rotate the secrets.
-- **Signals and connections.** The ruleset handles files and nothing of the network, and Landlock's file rights name
-  no connect. A CLI is a process of the controller's user with the container's network: it can signal the
-  controller, it can open a TCP connection to the controller's port (a local client like any other, which lacks the
-  API token wherever the controller demands one) and to whatever else the container reaches, and it can connect to a
-  listening Unix socket under `/data` and talk over it (measured). `data/host-bridge/codex.sock` is one: where the
-  Codex host bridge runs beside a `cli` provider and the socket's permissions let the controller's user connect, a
-  sandboxed `claude` or `gemini` can ask the bridge's Codex, which runs outside the sandbox.
-- **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the
-  next CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller
-  takes only as a regular file of at most 1 MiB, never through a link at its own name, and from the directory it made
-  for the call even where a CLI has moved that aside and left a link in its place; and Codex's `config.toml`, which
-  the controller reads only as a regular file of at most 1 MiB that is itself at its name, for the paths it names,
-  making the directories and the `.codex` link each calls for in `CLI_HOME` without passing through a link there.
-  The temp directories are shared with the controller's own children: the OCR's input image is there while it runs.
+- **Signals and connections.** The ruleset handles files and nothing of the network, and Landlock's file rights name no
+  connect. A CLI is a process of the controller's user with the container's network: it can open a TCP connection to the
+  controller's port (a local client like any other, which lacks the API token wherever the controller demands one) and
+  to whatever else the container reaches, and it can connect to a listening Unix socket under `/data` and talk over it
+  (measured). `data/host-bridge/codex.sock` is one: where the Codex host bridge runs beside a `cli` provider and the
+  socket's permissions let the controller's user connect, a sandboxed `claude` or `gemini` can ask the bridge's Codex,
+  which runs outside the sandbox. Where the kernel has Landlock's scopes (its ABI 6, Linux 6.12 or later) the ruleset
+  also keeps a CLI from signalling a process outside its sandbox (the controller, or a process of another CLI call) and
+  from connecting to an abstract Unix socket that such a process made; the processes a CLI starts are inside it, and it
+  still signals them and connects to theirs (measured on Linux 6.18). A host run whose CLI reaches a session bus at an
+  abstract address (`unix:abstract=` in `DBUS_SESSION_BUS_ADDRESS`) can no longer reach it there.
+- **What a CLI leaves where it may write.** What it writes in its home and in the temp directories is there for the next
+  CLI call and for anything of the controller's that reads it: a call's `decision.json`, which the controller takes only
+  as a regular file of at most 1 MiB, never through a link at its own name, and from the directory it made for the call
+  even where a CLI has moved that aside and left a link in its place; and Codex's `config.toml`, which the controller
+  reads only as a regular file of at most 1 MiB that is itself at its name, for the paths it names, making the
+  directories and the `.codex` link each calls for in `CLI_HOME` without passing through a link there. The controller
+  keeps its own temp files apart from them (the next entry says where, and where it cannot).
+- **The controller's own temp files, where they cannot be kept apart.** At its start the controller makes
+  `/data/controller-tmp`, mode `0700`, removes what an earlier start left in it, and keeps its own temp files there,
+  SQLite's among them in the image (a store's sort or temp table larger than its cache, measured with the image's
+  SQLite), and so do the children of its own that would
+  put them in `/tmp`: the screenshot an OCR writes while Tesseract reads it, the profile (its cookies) and downloads of
+  a browser Playwright launches on the controller, as shadow browse does, and what the Universal Verifier's command
+  (`HARNESS_UV_COMMAND`) and `autossh` write there, the trace a verifier stages among it. The ruleset closes that
+  directory to every CLI, whose own `TMPDIR` stays the operator's. Where `/data` is not there, or
+  that directory cannot be made in it or be the controller's alone (a link, another user's, or a mode other than
+  `0700`), or what an
+  earlier start left in it cannot be removed by the controller's user (a directory of mode `0500` holding a file), the
+  controller keeps the system temp directory and says why in one warning at its start; the image's root step hands a
+  directory a `CONTROLLER_RUN_AS=root` start left back to the controller's user, as it does the controller's other
+  files. Each CLI call judges the controller's temp directory as it judges a secret's place: where it lies outside
+  `/data`, in a directory a CLI may write, or holds one (the system's among them), that is one warning, and a CLI can
+  read and replace those files while they are there; with `CLI_SANDBOX_REQUIRED=true` it is an error, and no CLI runs (a
+  `CLI_HOME` outside a `/data` that is not there runs CLIs under the sandbox otherwise, measured). Where the CLI sandbox
+  is off, or there is no Landlock, the directory's mode stops nothing: a CLI runs as the controller's user.
+  The directory is one controller's: a second controller that the same user starts on the same `/data` empties it at
+  its start, the first one's temp files with it.
+- **Where the check reads otherwise than the programs it judges.** A `:` list is split at each `:`, and only a URL's
+  host is left out (a part that starts with `//` but not `///` after a scheme); any other `:` is read as a list's
+  separator, which can over-judge: `--dest=host:/tmp/x` is judged as `/tmp/x` too.
 - **What the controller's user can read outside `/data`, and the sockets it can connect to.** With the isolation
   overlay that includes the Docker socket.
 - **Truncation, on a kernel older than 6.2.** Landlock could not deny `truncate` before its third ABI. There a CLI
@@ -653,31 +800,35 @@ What the sandbox does not stop, and what does not work under it:
   so a file outside `/data` that the controller's user may write.
 - **A tool that builds its own mount namespace.** Landlock refuses mounting or unmounting to every process it
   restricts.
-- **Codex's own sandbox.** Under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write` Codex wraps
-  each command its model asks for in a sandbox of its own, whose helper opens `/` with `O_PATH` before it makes its
+- **Codex's own sandbox.** The decision calls offer Codex's model no command tool ("Option B", above), and its
+  file-edit tool, `apply_patch`, where the model's own catalog entry brings it; this is what Codex's sandbox gives a
+  command where Codex runs one, and a file edit the model asks for writes where a command may (measured under each
+  of the three modes). Under `CODEX_SANDBOX_MODE=read-only` (the default) and `workspace-write` Codex wraps each
+  command its model asks for in a sandbox of its own, whose helper opens `/` with `O_PATH` before it makes its
   rules. Under `danger-full-access`, and with `CODEX_BRIDGE_ALLOW_HOST_EXEC=true` (which passes
   `--dangerously-bypass-approvals-and-sandbox`), Codex runs the command with no sandbox of its own, beneath this one
   alone. An image built with `INSTALL_AGENT_CLIS=true` has the glibc build of codex-cli 0.114.0 from Codex's GitHub
   release, whose sandbox runs beneath this one. What a command of the model's reaches there, measured 2026-11-16 on
   Docker Desktop with Codex run as the controller runs it (uid 10002, this sandbox's grants, a call directory in the
   CLI home; the `agent-cli-image` workflow checks the same on GitHub's amd64 and arm64 runners on a change to the
-  controller's Dockerfile, `.dockerignore` or entrypoint, this sandbox's code, the CLI launch in
-  `providers/base.py` or the check's own scripts):
-  - `read-only`: it reads what this sandbox leaves readable, which inside `/data` is the CLI home (Codex's sign-in,
-    and the other CLIs' where they share the home, as under `docker-compose.host-subscriptions.yml`) and, by this
-    sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there and the call's screenshot; it writes no file's
-    content ("Metadata, and names learnt by watching" and "Truncation, on a kernel older than 6.2" above
-    still apply), and a connect to 127.0.0.1 is refused.
-  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory), not the rest of the
-    home; the connect is refused.
+  controller's Dockerfile, `.dockerignore` or entrypoint, the controller's code (`controller/app/`), the Codex host
+  bridge, a file under `scripts/ci/` or the workflow itself):
+  - `read-only`: it reads what this sandbox leaves readable, which inside `/data` is the CLI home (Codex's sign-in, and
+    the other CLIs' where they share the home) and, by this sandbox's grants, what `CLI_SANDBOX_WRITABLE` names there
+    and the call's screenshot; it writes no file's content (Codex rejects a file edit too), and a connect to
+    127.0.0.1 is refused.
+  - `workspace-write`: it also writes `/tmp` and its working directory (the call's directory); a file in the home
+    itself and one beside Codex's `config.toml` are refused, and so is the connect.
   - `danger-full-access` and the bypass: everything this sandbox allows, which includes writing the CLI home (and so
     the configuration the next call reads) and connecting where the container can.
 
   No setting reads or writes the rest of `/data`. The image also writes `/etc/codex/requirements.toml` with
-  `mcp_servers = {}`, which no grant of this sandbox reaches, so no MCP server the home's `config.toml` names loads:
-  `codex mcp list` shows such a server `disabled: requirements`. The controller's `-c mcp_servers={}` alone clears
-  none, as Codex merges `-c` tables key by key (measured). A controller run on the host has no such file, so there
-  the MCP servers its Codex home names load: give it a `CLI_HOME` of its own. The npm package's codex is the musl
+  `mcp_servers = {}`, which no grant of this sandbox reaches with the image's settings, so no MCP server the home's
+  `config.toml` names loads:
+  `codex mcp list` shows such a server `disabled: requirements`. A `-c mcp_servers={}` alone clears none, as Codex
+  merges `-c` tables key by key (measured); each call also sets `enabled=false` for every server Codex lists for
+  it, and is not made while one is still listed as on (above), so a controller run on the host, which has no such
+  file, loads none either. The npm package's codex is the musl
   build, where Rust's standard library drops `O_PATH` from the helper's open: it reaches the kernel as an open of `/`
   for reading, which this sandbox refuses (`/` itself has no rule, and a rule there would make every name under
   `/data` listable). Under `read-only` and `workspace-write` that helper fails (exit 101) and no command of the
@@ -755,14 +906,51 @@ mkdir -p data/host-bridge
 python3 scripts/codex_host_bridge.py --socket-path data/host-bridge/codex.sock
 ```
 
-To keep that bridge running like a host-local skill, install the included user-service template:
+To keep that bridge running like a host-local skill, install the included user-service template. It names the
+checkout it works in as `/path/to/auto-browser`, a placeholder: run these from your checkout's root, and the copy
+gets its path in place of the placeholder, in `WorkingDirectory=` and in the commented `ReadWritePaths=` and
+`InaccessiblePaths=` lines (below). If your `codex` is not in `~/.npm-global/bin`, change that path in the copy's
+`Environment=PATH=` and `ExecStart=` lines too.
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp ops/systemd/codex-host-bridge.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now codex-host-bridge.service
+case "$PWD" in
+  *["&|\%'\""]* | *[[:space:]]*)
+    echo "The checkout's path holds a space, a quote or one of & | \ %, which the unit cannot take." >&2
+    false ;;
+  *)
+    if [ -f ops/systemd/codex-host-bridge.service ]; then
+      mkdir -p ~/.config/systemd/user &&
+        sed "s|/path/to/auto-browser|$PWD|g" ops/systemd/codex-host-bridge.service \
+          > ~/.config/systemd/user/codex-host-bridge.service.new &&
+        mv ~/.config/systemd/user/codex-host-bridge.service.new ~/.config/systemd/user/codex-host-bridge.service &&
+        systemctl --user daemon-reload &&
+        systemctl --user enable codex-host-bridge.service
+    else
+      echo "Run this from the checkout's root, where ops/systemd/codex-host-bridge.service is." >&2
+      false
+    fi ;;
+esac
 ```
+
+Then start it: `systemctl --user start codex-host-bridge.service`. The steps enable the unit without starting it, so
+that an upgrade (the CHANGELOG's Upgrade note) carries its own lines over before the bridge runs.
+
+The steps refuse, before they make or write anything, a checkout path the unit cannot take (`sed` reads a `&`, `|` or
+`\` in it as its own, systemd reads `%` as a specifier, and `InaccessiblePaths=` splits a path at a space, a tab or a
+line break and takes its quotes off), and a run from a directory without `ops/systemd/` (`controller/`, say): install
+from the root of a checkout whose path has none of them. The copy is written beside its place and moved there only once
+`sed` has written it whole, so a copy installed before is never emptied; a `sed` that fails part way leaves what it
+wrote beside the copy, as `codex-host-bridge.service.new`, which the next install writes over.
+
+The unit runs the bridge with `NoNewPrivileges=yes`, the kernel's no_new_privs flag for the bridge and what it
+starts. It also carries `ProtectSystem=strict`, `ProtectHome=read-only` and `ReadWritePaths=` lines, commented
+out, which keep the bridge and its Codex from writing anywhere but the places `ReadWritePaths=` names, and `/dev`,
+`/proc` and `/sys`, which `ProtectSystem=strict` leaves as they were (`/dev/shm` stays writable, say). In a user
+unit they work inside a user namespace, as the option below does, with its caveats; and what Codex writes in its
+home and its temp directory is not measured, so `ReadWritePaths=` names those directories whole. After taking the
+comment marks off, reload and restart the unit, `systemctl --user daemon-reload` then
+`systemctl --user restart codex-host-bridge.service`, and check that a step through the bridge still works; if it
+does not, put them back, then reload and restart again.
 
 Then:
 
@@ -774,6 +962,15 @@ OPENAI_HOST_BRIDGE_SOCKET=/data/host-bridge/codex.sock
 That keeps `codex` on the host, reuses the host login state directly, and lets the container call it over a shared Unix socket, so the controller image does not need the CLIs for OpenAI.
 The controller now health-checks that socket and the bridge kills stuck host `codex` jobs after 55 seconds by default.
 Treat the socket as a host-trust boundary: any local process that can connect to it can trigger host-side `codex exec`.
+The bridge's Codex has no command tool and starts no MCP server of the system, managed, home or project
+configuration, as the controller's own Codex call ("Option B", above; measured with codex-cli 0.114.0, and the bridge
+runs the host's own Codex): the bridge passes the same `-c` flags and runs `codex <those flags> features list` (the
+look) and `codex <those flags> mcp list --json` in each call's temp directory with the environment its exec gets,
+within the call's timeout. It sets `enabled=false` for each server listed, and lists once more where one was on. It
+makes no `codex exec` where a feature the call turns off still reads on in the look (each but `unified_exec`, which
+on its own brings the model no tool), where a server is still listed as on, or where Codex fails either command (it
+exits non-zero or prints no list): a running bridge answers 409, a refusal the controller does not retry, and logs
+why on its side. Where either command does not answer in time it answers 504, as for a `codex exec` that times out.
 The bridge starts Codex with an allowlisted environment, not the whole environment of the shell it was started
 from. Exactly these pass, matched case-insensitively (the bridge's copies of the controller's `CLI_BASE_ENV_NAMES`,
 `CLI_BASE_ENV_PREFIXES` and the OpenAI adapter's `cli_env_names`, which a test keeps equal):
@@ -807,15 +1004,24 @@ The bridge's Codex runs on the host as the bridge's user, outside the CLI sandbo
 prompt-inject it as it can any CLI: what that user can read, it can read. The unit template
 (`ops/systemd/codex-host-bridge.service`) carries an option against that, off as shipped. Its `InaccessiblePaths=`
 lines, commented out, name the checkout's `.env`; the places of the controller's secrets under `data/` (`api-token`,
-`takeover-token`, `auth`, `witness`, `mesh/identity`, `ssh` and `browser-profile` are their settings' defaults, and
-`proxy-personas.json` is the place `.env.example` gives `PROXY_PERSONA_FILE`, which has no default); and
-`data/cli-home`, which holds the sign-ins of the container's CLIs (the bridge's Codex signs in under the bridge's own
-home). Each has a leading `-`, so that one that is not there is passed over. An `ExecStartPre=` line, commented out
-too, refuses to start the bridge while one of those paths can still be read. To turn the option on, take the comment
-marks off the `PrivateUsers=yes`, `InaccessiblePaths=` and `ExecStartPre=` lines, change the paths with
-`WorkingDirectory=` if your checkout is elsewhere, add any other place you keep a secret, then reload and restart the
-unit. The check's list is not made from the `InaccessiblePaths=` lines: add a path to it, or take one out of it, as
-you do there. The data directory itself is not named, and must not be: the bridge's socket is
+`takeover-token`, `auth`, `witness`, `ssh` and `browser-profile` are their settings' defaults, `mesh` holds the
+mesh's identity and the peers it trusts, and `proxy-personas.json` is the place `.env.example` gives
+`PROXY_PERSONA_FILE`, which has no default); `data/cli-home`, which holds the sign-ins of the container's CLIs (the
+bridge's Codex signs in under the bridge's own home); and the places of the controller's stores under `data/`, each
+at its setting's default (`approvals`, which holds the approvals' digest key, `audit`, `sessions`, `jobs`,
+`memory`, `harness`, `artifacts`, `uploads` and `compliance-manifest.json`, and `mcp`, `crons`, `share` and
+`tunnels`, which hold the MCP sessions, the crons, the share links' revocations and the tunnels' records), then
+`browser-sessions`, which no setting names (the isolated sessions' browser profiles and endpoint files), and `db`,
+where the top of this page puts `STATE_DB_PATH`, which has no default; and `data/controller-tmp`, the controller's own
+temp files (an OCR's screenshot, a local browser's profile). Each has
+a leading `-`, so that one that is not there is passed over. An `ExecStartPre=` line, commented out too, refuses to
+start the bridge while one of those paths can still be read, or searched: a directory that cannot be listed but can
+be searched still opens a file in it whose name is known. To turn the option on, take the comment marks off the
+`PrivateUsers=yes`, `InaccessiblePaths=` and `ExecStartPre=` lines in your copy (the install above put your
+checkout's path in `WorkingDirectory=` and in the `InaccessiblePaths=` lines; the check's paths are read from
+`WorkingDirectory=`), add any other place you keep a secret or a store, then reload and restart the unit. The
+check's list is not made from the `InaccessiblePaths=` lines: add a path to it, or take one out of it, as you do
+there. The data directory itself is not named, and must not be: the bridge's socket is
 `data/host-bridge/codex.sock`, and systemd cannot nest a writable path inside an inaccessible one.
 
 In a user unit these settings work inside a user namespace (`PrivateUsers=`). No CI job runs the unit; it was run by
@@ -824,26 +1030,27 @@ it names. With the `PrivateUsers=yes` line left commented, the paths stay readab
 refuses the start. Where the host restricts unprivileged user namespaces (Ubuntu 24.04 and later do by default:
 `kernel.apparmor_restrict_unprivileged_userns=1`), the unit starts with `PrivateUsers=` and `InaccessiblePaths=` on
 and the paths stay readable, with no error: that is what the `ExecStartPre=` check is for. There it refuses the
-start, and the journal (`journalctl --user -u codex-host-bridge`) has "the option is on and .env is still readable:
-this host does not let a user unit hide paths" (the first path it finds readable). A refused start is tried again
-every `RestartSec=`, as any failed start of the unit is, and each try writes the message again.
+start, and the journal (`journalctl --user -u codex-host-bridge`) has "the option is on and .env can still be read
+or searched: this host does not let a user unit hide paths" (the first path it finds so). A refused start is tried
+again every `RestartSec=`, as any failed start of the unit is, and each try writes the message again.
 
 The option hides what is at a named path when the unit starts, and nothing that comes there later. A path made after
 the start (the controller's first start writes `data/api-token`), a file replaced by a rename (the controller writes
-`proxy-personas.json` that way at every change, and most editors save `.env` that way) and a file removed and made
-again are readable to the bridge's Codex until the bridge is restarted. A file rewritten in place, and whatever is
+`proxy-personas.json` that way at every change and `compliance-manifest.json` at each start with a compliance
+template, and most editors save `.env` that way) and a file removed and made again are readable to the bridge's
+Codex until the bridge is restarted. A file rewritten in place, and whatever is
 made inside a directory that was hidden at the start, stay hidden. The check runs at a start only and passes a path
 that is not there, so it sees none of this. Start the controller once before the bridge, and restart the bridge
-(`systemctl --user restart codex-host-bridge`) after the controller's first start and after any change to `.env` or
-to the proxy personas.
+(`systemctl --user restart codex-host-bridge`) after the controller's first start, after any change to `.env` or to
+the proxy personas, and after the controller starts with a compliance template.
 
 After turning the option on, check that a step through the bridge still works, and that a command the bridge's Codex
 runs cannot read `data/api-token`: make that check once the file is there, outside the unit, since a file that is not
 there cannot be read either. The option closes the paths it names and nothing else: the rest of what the bridge's
-user can read stays open to its Codex, under `data/` the session records (`sessions`), the approvals and their
-digest key (`approvals`), the jobs and the audit log among it. And it speaks of reading only: where the checkout is
-the bridge's user's, what it does not hide is the bridge's Codex's to write as well, `data/mesh/peers.json` (the list
-of peers `/mesh/receive` trusts) among it.
+user can read stays open to its Codex, outside the checkout and in it (its code, its `.git`, and whatever else lies
+under `data/`). And it speaks of reading only: where the checkout is the bridge's user's, what it does
+not hide is the bridge's Codex's to write as well, the checkout's code among it, which the bridge runs at its next
+start.
 
 ## Generate an auth-state encryption key
 

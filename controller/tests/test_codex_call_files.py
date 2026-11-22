@@ -22,6 +22,7 @@ from app.config import Settings
 from app.providers import openai_adapter
 from app.providers.base import CLI_STDOUT_LIMIT_BYTES, CLIResult
 from app.providers.openai_adapter import OpenAIAdapter
+from tests._codex_mcp_list import answers_mcp_list
 
 DECISION = '{"action":"done","reason":"from the file","risk_category":"read"}'
 CLOSED = '{"action":"done","reason":"CONTENT OF A CLOSED FILE","risk_category":"read"}'
@@ -40,6 +41,7 @@ def adapter(tmp_path: Path) -> OpenAIAdapter:
 async def _decide(adapter: OpenAIAdapter, leave) -> object:
     """One Codex call whose CLI leaves ``leave(decision_path)`` behind and prints STDOUT."""
 
+    @answers_mcp_list
     async def fake_run_cli(*, command, **kwargs):
         leave(Path(command[command.index("--output-last-message") + 1]))
         return CLIResult(command=command, stdout=STDOUT, stderr="", returncode=0)

@@ -34,7 +34,7 @@ from app.browser.click_target import (
     reading_presses,
     refuse_press_not_asked_about,
 )
-from app.browser.element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from app.browser.element_scripts import ELEMENT_ENABLED_SCRIPT, ELEMENT_HAS_FOCUS_SCRIPT
 from app.browser.services import actions
 from app.browser.services.actions import (
     _PRESS_PLACE_SCRIPT,
@@ -170,9 +170,9 @@ def _locator(
     pointer_takes: float = 0.0,
 ) -> SimpleNamespace:
     """A locator whose steps note what they were given. ``enabled`` is what each look at the target finds (an
-    exception is raised), the last one for good; ``each_step_takes`` is the time a step holds the click for (the
-    clock is the real one); ``under_the_pointer`` is what the page answers when asked whether the pointer finds
-    the target (an exception is raised), after ``pointer_takes`` seconds more."""
+    exception is raised, and _never is no answer at all), the last one for good; ``each_step_takes`` is the time a
+    step holds the click for (the clock is the real one); ``under_the_pointer`` is what the page answers when asked
+    whether the pointer finds the target (an exception is raised), after ``pointer_takes`` seconds more."""
     budgets: dict[str, Any] = {}
     looks = list(enabled)
 
@@ -184,6 +184,8 @@ def _locator(
         given_budget("enabled", given)
         done.append("is it enabled")
         look = looks.pop(0) if len(looks) > 1 else looks[0]
+        if look is _never:
+            return await _never()
         if isinstance(look, BaseException):
             raise look
         return look
@@ -201,6 +203,9 @@ def _locator(
         done.append("trial click" if given.get("trial") else "click")
 
     async def evaluate(script: str, *_args: Any, **given: Any) -> Any:
+        if script == ELEMENT_ENABLED_SCRIPT:
+            # The controller's own read of whether the target is enabled: a look, as is_enabled notes it.
+            return await fake.is_enabled(**given)
         if script == _RECEIVES_POINTER_SCRIPT:
             given_budget("pointer", given)
             time.sleep(pointer_takes)
@@ -218,7 +223,7 @@ def _locator(
         given_budget("box again" if "box" in budgets else "box", given)
         return box
 
-    return SimpleNamespace(
+    fake = SimpleNamespace(
         hover=hover,
         click=click,
         is_enabled=is_enabled,
@@ -226,6 +231,7 @@ def _locator(
         bounding_box=bounding_box,
         budgets=budgets,
     )
+    return fake
 
 
 # Playwright's checks of a click with nothing pressed. Never a trial click: that one presses (the mouse goes down
@@ -1074,6 +1080,42 @@ async def test_a_focus_check_the_page_does_not_answer_refuses_the_type_within_it
     locator.focus.assert_awaited_once()
 
 
+@pytest.mark.parametrize("unanswered", ["the wait before the hover", "the look as the press is about to be made"])
+async def test_an_enabled_question_the_page_does_not_answer_ends_within_its_bound(unanswered: str) -> None:
+    # By selector the enabled question runs in the page's own world, and Locator.evaluate's timeout bounds only the
+    # finding of the element: a page that did not answer it held the click past its budget. The wait before the hover
+    # asks it within the click's budget, and ends as the click's other waits end, with nothing pressed; the look as the
+    # press is about to be made asks it within the pointer check's share, and takes no answer for a no, which hands the
+    # click to Playwright's placing.
+    service, session, done = _service(CLOSE)
+    before_the_hover = unanswered == "the wait before the hover"
+    locator = _locator(done, enabled=(_never,) if before_the_hover else (True, _never))
+    service.move_mouse_human_like = AsyncMock()
+    service.pause_before_press = AsyncMock()
+    service._receives_pointer_at = AsyncMock(return_value=True)
+    service.click_as_playwright_places_it = AsyncMock()
+    clicking = service.click_locator_human_like(
+        session, locator, (40.0, 50.0), budget=_Budget(BOUND_MS if before_the_hover else 20 * BOUND_MS)
+    )
+
+    with patch.object(actions, "POINTER_CHECK_TIMEOUT_MS", BOUND_MS):
+        began = time.monotonic()
+        if before_the_hover:
+            with pytest.raises(PlaywrightTimeoutError):
+                await asyncio.wait_for(clicking, 5)
+        else:
+            await asyncio.wait_for(clicking, 5)
+        took = time.monotonic() - began
+
+    assert took < WITHIN_THREE_BOUNDS_S, took
+    if before_the_hover:
+        assert done == ["is it enabled"]
+        service.click_as_playwright_places_it.assert_not_awaited()
+    else:
+        assert done == [*CHECKS, "is it enabled"]
+        service.click_as_playwright_places_it.assert_awaited_once()
+
+
 @pytest.mark.parametrize("cancelled_during", ["the pause", "the press"])
 async def test_a_press_cancelled_before_its_release_still_lets_the_button_go(cancelled_during: str) -> None:
     # 1b-3: press_mouse sent down(), paused, then up(), and nothing carried the up through a cancel: one in the pause
@@ -1576,10 +1618,11 @@ async def _focus_click_on_a_target_never_enabled(box_takes: float) -> float:
         await asyncio.sleep(box_takes)
         return BOX
 
-    async def never_enabled(**_given: Any) -> bool:
+    async def never_enabled(script: str, **_given: Any) -> bool:
+        assert script == ELEMENT_ENABLED_SCRIPT, script
         return False
 
-    locator = SimpleNamespace(bounding_box=box, is_enabled=never_enabled)
+    locator = SimpleNamespace(bounding_box=box, evaluate=never_enabled)
 
     with (
         patch.object(actions, "FOCUS_CLICK_TIMEOUT_MS", FOCUS_BOUND_MS),
@@ -1636,7 +1679,6 @@ async def test_a_types_focus_click_whose_box_answers_late_still_has_its_whole_cl
 
     locator = SimpleNamespace(
         bounding_box=late_box,
-        is_enabled=lambda **_given: soon(True),
         hover=lambda **_given: soon(None),
         evaluate=lambda *_args, **_given: soon(True),
     )

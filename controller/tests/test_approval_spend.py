@@ -99,9 +99,8 @@ class FakeLocator:
                 "framed": False,
                 "counted": False,
             }
-        return True  # focus checks: the field has focus; the pointer check: the target is under it
-
-    async def is_enabled(self, **_: object) -> bool:
+        # The enabled check: the target is enabled; focus checks: the field has focus; the pointer check: the target
+        # is under it.
         return True
 
     async def hover(self, *, trial: bool = False, **_: object) -> None:

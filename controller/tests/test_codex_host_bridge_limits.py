@@ -8,35 +8,15 @@ local process rather than a remote hole.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import socket
 import socketserver
-import sys
 import threading
 import unittest
-from pathlib import Path
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "codex_host_bridge.py"
+from tests._codex_bridge import BRIDGE_SCRIPT, load_bridge
 
-
-def _load_bridge():
-    """Load the script under a private name; UnixStreamServer is missing on Windows (import only)."""
-    shimmed = not hasattr(socketserver, "UnixStreamServer")
-    if shimmed:
-        socketserver.UnixStreamServer = socketserver.TCPServer
-    try:
-        spec = importlib.util.spec_from_file_location("codex_host_bridge_limits_under_test", _SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        if shimmed:
-            del socketserver.UnixStreamServer
-
-
-bridge = _load_bridge() if _SCRIPT.is_file() else None
+bridge = load_bridge("codex_host_bridge_limits_under_test") if BRIDGE_SCRIPT.is_file() else None
 
 
 class _Service:

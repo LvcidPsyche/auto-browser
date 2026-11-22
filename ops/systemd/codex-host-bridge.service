@@ -4,50 +4,86 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.openclaw/workspace/auto-browser
+# WorkingDirectory= and the commented lines below name your checkout: docs/deployment.md installs the unit with its
+# path in place of the placeholder. Change the codex path in PATH= and ExecStart= if yours is elsewhere.
+WorkingDirectory=/path/to/auto-browser
 Environment=PATH=%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin
 ExecStart=/usr/bin/env python3 scripts/codex_host_bridge.py --socket-path data/host-bridge/codex.sock --codex-path %h/.npm-global/bin/codex
 Restart=on-failure
 RestartSec=2
+# A setuid program the bridge or its Codex starts gains no privilege. This needs no user namespace.
+NoNewPrivileges=yes
 
-# Optional: keep the bridge, and the Codex it starts, from the controller's secrets in this checkout. Uncomment the
-# PrivateUsers=, InaccessiblePaths= and ExecStartPre= lines below, then `systemctl --user daemon-reload` and restart
-# the unit.
-# - The paths repeat WorkingDirectory=: change them with it. A leading "-" passes over a path that is not there.
+# Optional, and not run here: keep the bridge and its Codex from writing anywhere but where they must, and /dev, /proc
+# and /sys, which ProtectSystem=strict leaves as they were (/dev/shm stays writable). In a user unit these work
+# inside a user namespace, as the option below does (its PrivateUsers= line and its caveats).
+# ReadWritePaths= has to name every place they write: the socket's directory, and Codex's home and temp directory
+# at least. What Codex writes there is not measured: a place left out is one it can no longer write.
+#ProtectSystem=strict
+#ProtectHome=read-only
+#ReadWritePaths=-/path/to/auto-browser/data/host-bridge -%h/.codex -/tmp
+
+# Optional: keep the bridge, and the Codex it starts, from the controller's secrets and stores in this checkout.
+# Uncomment the PrivateUsers=, InaccessiblePaths= and ExecStartPre= lines below, then `systemctl --user daemon-reload`
+# and restart the unit.
+# - A leading "-" passes over a path that is not there.
 # - The data directory itself is not named. The bridge's socket is data/host-bridge/codex.sock, and systemd cannot
 #   nest a writable path inside an inaccessible one. data/cli-home is named: it holds the sign-ins of the container's
-#   CLIs, and the bridge's Codex signs in under the bridge's own home.
+#   CLIs, and the bridge's Codex signs in under the bridge's own home. After it come the controller's stores, each
+#   at its setting's default place (the approvals with their digest key, the audit log, the sessions, the jobs and
+#   the rest); data/mesh holds the mesh's identity and the peers it trusts. Then data/browser-sessions, which no
+#   setting names (the isolated sessions' profiles and endpoint files), and data/db, where the docs put STATE_DB_PATH,
+#   which has no default. Last, data/controller-tmp: the controller's own temp files (an OCR's screenshot, a local
+#   browser's profile and downloads).
 # - In a user unit these settings work inside a user namespace (PrivateUsers=). Where the host restricts unprivileged
 #   user namespaces (Ubuntu 24.04 and later do by default: kernel.apparmor_restrict_unprivileged_userns=1) the unit
 #   starts with PrivateUsers= and InaccessiblePaths= on and hides nothing, with no error; without the PrivateUsers=
 #   line it hides nothing anywhere. Measured by hand in user units on GitHub-hosted runners on 2026-11-13; no CI job
 #   runs this unit.
 # - The ExecStartPre= line checks for that: it refuses to start the bridge while a path the option names can still be
-#   read. A refused start is tried again every RestartSec=, and each try writes the line's message to the journal
+#   read, or searched (a directory that cannot be listed still opens a file whose name is known). A refused start
+#   is tried again every RestartSec=, and each try writes the line's message to the journal
 #   (journalctl --user -u codex-host-bridge). The check's list is not made from the InaccessiblePaths= lines: add a
 #   path to it, or take one out of it, as you do there.
 # - The option hides what is at a named path when the unit starts, and nothing that comes there later: a path made
 #   after the start (the controller's first start writes data/api-token), a file replaced by a rename (the controller
-#   writes data/proxy-personas.json that way, and most editors save .env that way) or removed and made again is
-#   readable to the bridge's Codex until the bridge is restarted. The check runs at a start only, and passes a path
-#   that is not there. Start the controller once before the bridge, and restart the bridge
-#   (systemctl --user restart codex-host-bridge) after the controller's first start and after any change to .env or
-#   to the proxy personas.
+#   writes data/proxy-personas.json that way, and data/compliance-manifest.json at each start with a compliance
+#   template, and most editors save .env that way) or removed and made again is readable to the bridge's Codex until
+#   the bridge is restarted. The check runs at a start only, and passes a path that is not there. Start the
+#   controller once before the bridge, and restart the bridge (systemctl --user restart codex-host-bridge) after the
+#   controller's first start, after any change to .env or to the proxy personas, and after the controller starts
+#   with a compliance template.
 # - Afterwards check that the bridge still answers, and that a command its Codex runs cannot read data/api-token, once
 #   that file is there: one that is not there cannot be read either. See "Closing the checkout's secrets to the
 #   bridge" in docs/deployment.md.
 #PrivateUsers=yes
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/.env
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/api-token
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/takeover-token
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/proxy-personas.json
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/auth
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/witness
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/mesh/identity
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/ssh
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/browser-profile
-#InaccessiblePaths=-%h/.openclaw/workspace/auto-browser/data/cli-home
-#ExecStartPre=/bin/sh -c 'for f in .env data/api-token data/takeover-token data/proxy-personas.json data/auth data/witness data/mesh/identity data/ssh data/browser-profile data/cli-home; do [ ! -r "$$f" ] || { echo "the option is on and $$f is still readable: this host does not let a user unit hide paths" >&2; exit 78; }; done'
+#InaccessiblePaths=-/path/to/auto-browser/.env
+#InaccessiblePaths=-/path/to/auto-browser/data/api-token
+#InaccessiblePaths=-/path/to/auto-browser/data/takeover-token
+#InaccessiblePaths=-/path/to/auto-browser/data/proxy-personas.json
+#InaccessiblePaths=-/path/to/auto-browser/data/auth
+#InaccessiblePaths=-/path/to/auto-browser/data/witness
+#InaccessiblePaths=-/path/to/auto-browser/data/mesh
+#InaccessiblePaths=-/path/to/auto-browser/data/ssh
+#InaccessiblePaths=-/path/to/auto-browser/data/browser-profile
+#InaccessiblePaths=-/path/to/auto-browser/data/cli-home
+#InaccessiblePaths=-/path/to/auto-browser/data/approvals
+#InaccessiblePaths=-/path/to/auto-browser/data/audit
+#InaccessiblePaths=-/path/to/auto-browser/data/sessions
+#InaccessiblePaths=-/path/to/auto-browser/data/jobs
+#InaccessiblePaths=-/path/to/auto-browser/data/memory
+#InaccessiblePaths=-/path/to/auto-browser/data/harness
+#InaccessiblePaths=-/path/to/auto-browser/data/mcp
+#InaccessiblePaths=-/path/to/auto-browser/data/crons
+#InaccessiblePaths=-/path/to/auto-browser/data/share
+#InaccessiblePaths=-/path/to/auto-browser/data/tunnels
+#InaccessiblePaths=-/path/to/auto-browser/data/artifacts
+#InaccessiblePaths=-/path/to/auto-browser/data/uploads
+#InaccessiblePaths=-/path/to/auto-browser/data/compliance-manifest.json
+#InaccessiblePaths=-/path/to/auto-browser/data/browser-sessions
+#InaccessiblePaths=-/path/to/auto-browser/data/db
+#InaccessiblePaths=-/path/to/auto-browser/data/controller-tmp
+#ExecStartPre=/bin/sh -c 'for f in .env data/api-token data/takeover-token data/proxy-personas.json data/auth data/witness data/mesh data/ssh data/browser-profile data/cli-home data/approvals data/audit data/sessions data/jobs data/memory data/harness data/mcp data/crons data/share data/tunnels data/artifacts data/uploads data/compliance-manifest.json data/browser-sessions data/db data/controller-tmp; do [ ! -r "$$f" ] && [ ! -x "$$f" ] || { echo "the option is on and $$f can still be read or searched: this host does not let a user unit hide paths" >&2; exit 78; }; done'
 
 [Install]
 WantedBy=default.target

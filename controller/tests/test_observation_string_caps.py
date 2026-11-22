@@ -19,6 +19,7 @@ import pytest
 
 from app import browser_scripts
 from app.browser_scripts import AB_ATTR_MAX, AB_HREF_MAX, AB_TITLE_MAX, AB_TRUNCATED_MARK
+from tests.test_element_naming import FAKE_PROTOTYPES
 
 NODE = shutil.which("node")
 HUGE = 1_000_000
@@ -91,7 +92,7 @@ console.log(JSON.stringify({ interactables, active, summary, posts, profile, fou
 
 
 def _run_scripts(mode: str) -> dict:
-    source = _RUNNER % {
+    source = FAKE_PROTOTYPES + _RUNNER % {
         "huge": HUGE,
         "mode": json.dumps(mode),
         "interactables": browser_scripts.INTERACTABLES_SCRIPT,

@@ -8,8 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from .providers.base import allowlisted_environment
+from .process_hardening import child_environment
 from .utils import error_text_for_log, utc_now
+
+# The prefix of the operator's own autossh tuning (AUTOSSH_POLL, AUTOSSH_GATETIME, ...), which autossh gets beside the
+# base names; the CLI sandbox judges the places these name (AUTOSSH_PATH, AUTOSSH_PIDFILE, AUTOSSH_LOGFILE).
+AUTOSSH_ENV_PREFIXES = ("AUTOSSH_",)
 
 
 def _is_bare_host(value: str) -> bool:
@@ -162,8 +166,9 @@ class IsolatedSessionTunnelBroker:
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=tunnel.stderr_handle,
                         # The base names, not the controller's tokens and keys (W2-27), plus the operator's own
-                        # AUTOSSH_ tuning (AUTOSSH_POLL, AUTOSSH_GATETIME, ...): configuration, not secrets.
-                        env=allowlisted_environment(extra_prefixes=("AUTOSSH_",)),
+                        # AUTOSSH_ tuning (AUTOSSH_POLL, AUTOSSH_GATETIME, ...): configuration, not secrets. Its temp
+                        # directory is the controller's own (process_hardening.child_environment).
+                        env=child_environment(prefixes=AUTOSSH_ENV_PREFIXES),
                     )
                 except BaseException:
                     # BaseException: a create cancelled while autossh is starting

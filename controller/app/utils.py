@@ -69,6 +69,13 @@ def capped_for_log(text: str) -> str:
     return text if len(text) <= MAX_LOGGED_PATH_CHARS else text[:MAX_LOGGED_PATH_CHARS] + "..."
 
 
+def quoted_whole_for_log(path: str) -> str:
+    """``path`` for the log, quoted by str's own repr, a line break in it escaped, and whole: a path a CLI names, or
+    makes, could be padded past quoted_for_log's cut to hide where a link it swapped in leads, or which file of its own
+    it left. quoted_for_log quotes the text it cuts with it."""
+    return str.__repr__(path)
+
+
 def quoted_for_log(value: object) -> str:
     """``value`` as a log line carries it: quoted, a line break in it escaped, and cut to MAX_LOGGED_PATH_CHARS with
     "..." after the closing quote where something was cut ('xyyy'...): inside the quotes, the mark read as the
@@ -79,7 +86,7 @@ def quoted_for_log(value: object) -> str:
     """
     try:
         text = value if type(value) is str else repr(value)
-        quoted = str.__repr__(text[:MAX_LOGGED_PATH_CHARS])
+        quoted = quoted_whole_for_log(text[:MAX_LOGGED_PATH_CHARS])
         return quoted if len(text) <= MAX_LOGGED_PATH_CHARS else quoted + "..."
     except Exception:
         return f"<a {type(value).__name__} that could not be printed>"

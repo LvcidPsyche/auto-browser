@@ -114,3 +114,13 @@ def _keep_the_test_runner_dumpable() -> bool:
 
 REAL_MAKE_NON_DUMPABLE = _process_hardening.make_non_dumpable
 _process_hardening.make_non_dumpable = _keep_the_test_runner_dumpable
+
+
+# The lifespan also moves tempfile's directory into the CLI sandbox's protected root (use_private_temp_directory):
+# the test runner keeps its own, which the CLIs its tests start are given. Its tests call the real one.
+def _keep_the_test_runners_temp_directory() -> None:
+    return None
+
+
+REAL_USE_PRIVATE_TEMP_DIRECTORY = _process_hardening.use_private_temp_directory
+_process_hardening.use_private_temp_directory = _keep_the_test_runners_temp_directory

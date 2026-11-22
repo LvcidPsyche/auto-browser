@@ -76,12 +76,14 @@ under `CODEX_SANDBOX_MODE=read-only` and `workspace-write`, beneath this one; un
 `CODEX_BRIDGE_ALLOW_HOST_EXEC=true` Codex runs the command beneath this sandbox alone. The npm package's codex is the
 musl build, whose own sandbox does not work beneath this one, so a controller run on the host with it cannot run
 such a command under `read-only` or `workspace-write`. "Codex's own sandbox" in docs/deployment.md gives what each
-setting reaches (measured), why a host run loads the MCP servers its Codex home names, and what a pin of 0.115.0 or
-later needs. The decision the controller asks Codex for needs no command. Known
-limit: the bridge's Codex runs as the bridge's uid on the host, outside that sandbox, so it can still read that
-user's files. Page content shown to the model can prompt-inject a CLI into trying. On
-macOS and Windows there is no sandbox and the controller and the bridge do not make themselves non-dumpable, and
-whether a process of the same user can read their environment depends on the system.
+setting reaches (measured) and what a pin of 0.115.0 or later needs; a decision call starts no MCP server of the
+system, managed, home or project configuration and offers the model no command tool, and is not made where Codex's own
+lists, read before it (`codex features list`, `codex mcp list`), show a feature the call turns off (each but
+`unified_exec`) or an MCP server still on ("Option B" there; measured with codex-cli 0.114.0). The decision the
+controller asks Codex for needs no command. Known limit: the bridge's Codex runs as the bridge's uid on the host,
+outside that sandbox, so it can still read that user's files. Page content shown to the model can prompt-inject a CLI
+into trying. On macOS and Windows there is no sandbox and the controller and the bridge do not make themselves
+non-dumpable, and whether a process of the same user can read their environment depends on the system.
 
 ### OpenAI
 Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:
