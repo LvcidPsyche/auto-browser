@@ -4,6 +4,28 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-11-22
+
+A security and correctness release over 1.18.1, from the findings the reviews of 1.18.1 left open and from reviews of
+this release's own changes. A Codex decision call starts no MCP server from the system, managed, home or project
+configuration and turns Codex's command tools off, and a Claude Code call loads no MCP server. In an image built with
+`INSTALL_AGENT_CLIS=true`, Codex's own sandbox now runs beneath the CLI sandbox. A form's named controls and a
+document's named elements no longer answer for the reads that decide where a type's text goes, what its approval shows
+and what a click lands on. Under the CLI sandbox, a provider CLI can no longer signal the controller, or reach an
+abstract Unix socket of a process outside it, on Linux 6.12 or later, and no longer reaches the temp files the
+controller now keeps in `/data`; the sandbox's check takes in the controller's whole import path, the `.env` it reads
+its settings from, where the compliance manifest and the host bridge's socket are kept, and the stores no setting
+names. The root (Glama) image starts again; it had failed at every start since 1.15.0.
+
+Read the upgrade notes first: an image built with `INSTALL_AGENT_CLIS=true` is to be built again; a uvicorn you start
+yourself takes `--lifespan on`; a controller run on a host with the CLI sandbox is started from its own directory; one
+controller runs on a `/data`; the Codex host bridge's unit is installed again; and a Codex decision call asks Codex
+two questions before it runs, and is not made where an answer is not the call's.
+
+The controller image and the root (Glama) image change; the browser-node image changes in its base, now pinned by
+digest, and in what its build is sent; the client, LangChain and MCP bridge packages change only in version.
+Advisories: GHSA-9v9h-gv73-5jjp, GHSA-c2cr-c94c-2v34 and GHSA-vpxx-qj67-35rj, fixed in this release.
+
 ### Upgrade notes
 
 - **Rebuild an image built with `INSTALL_AGENT_CLIS=true`.** Its codex now comes from Codex's GitHub release, not from
