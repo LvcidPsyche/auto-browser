@@ -19,10 +19,11 @@ updates:
         update-types:
           - minor
           - patch
-    # Playwright is upgraded by hand, on both sides at once. Its websocket
-    # protocol requires an exact client/server version match, and the pip pin
-    # here and the npm pin in /browser-node are separate ecosystems to
-    # Dependabot -- so it can only ever propose half the change. That half is
+    # Playwright is upgraded by hand, on both sides at once. The server refuses
+    # a client of another major.minor, and both sides must run the same
+    # browser, and the pip pin here and the npm pin in /browser-node are
+    # separate ecosystems to Dependabot -- so it can only ever propose half the
+    # change. That half is
     # not a smaller upgrade, it is the #60 outage: every docker compose up
     # --build crash-looped on readiness. It has since re-proposed the npm half
     # (#97) and the pip half (#121), both caught by
@@ -45,7 +46,8 @@ updates:
           - minor
           - patch
     # Ignored for the same reason as the pip side above: coordinated manual
-    # bump only, guarded by scripts/check_playwright_pins.py.
+    # bump only, guarded by scripts/check_playwright_pins.py (the pins, and
+    # with --installed the browser each side carries).
     ignore:
       - dependency-name: playwright
 
