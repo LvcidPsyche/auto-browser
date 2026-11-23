@@ -6,21 +6,17 @@ legs' aggregate result (needs.real-browser-tests.result) as its one argument. Gi
 leg that was cancelled before it started, so each leg is judged as well.
 
 Exit 0, printing each leg with its conclusion, only when the aggregate is success, the listing is whole (it holds as
-many jobs as its total_count says), the legs (the jobs named "real-browser-tests (K/N)") share one N and hold each K
-from 1 to N once, and every leg succeeded. A job named like a leg but not of that shape fails the check. A failed
-check exits 1, with one line that says what failed and each leg's conclusion; a call without the one argument is a
-usage error, exit 2.
+many jobs as its total_count says), the legs (the jobs whose names start "real-browser-tests (") are named
+real-browser-tests (1/N) to (N/N) once each, N their number, and every leg succeeded. A failed check exits 1, with
+one line that says what failed and each leg's conclusion; a call without the one argument is a usage error, exit 2.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import sys
 
 PREFIX = "real-browser-tests ("
-# K and N of at most three digits: more legs than this job will run, and int() and range() stay small.
-LEG = re.compile(re.escape(PREFIX) + r"([1-9][0-9]{0,2})/([1-9][0-9]{0,2})\)")
 
 
 def _jobs(listing: object) -> tuple[list[tuple[str, str | None]], int]:
@@ -40,26 +36,19 @@ def _jobs(listing: object) -> tuple[list[tuple[str, str | None]], int]:
     return jobs, listing["total_count"]
 
 
-def _shown(name: str) -> str:
-    """A leg's name as printed: one not of a leg's shape is quoted, so that whatever it holds stays on one line."""
-    return name if LEG.fullmatch(name) else repr(name)
-
-
 def _not_a_whole_set(names: list[str]) -> str | None:
-    """What keeps the legs' names from being real-browser-tests (1/N) to (N/N), once each, or None."""
+    """What keeps the legs' names from being real-browser-tests (1/N) to (N/N) once each, N their number, or None."""
     if not names:
         return "no leg"
-    matches = [LEG.fullmatch(name) for name in names]
-    stray = [name for name, match in zip(names, matches) if match is None]
-    if stray:
-        return f"not named as a leg, real-browser-tests (K/N): {', '.join(map(_shown, stray))}"
-    totals = {int(match[2]) for match in matches}
-    if len(totals) > 1:
-        return "the legs do not share one N"
-    (total,) = totals
-    if sorted(int(match[1]) for match in matches) != list(range(1, total + 1)):
-        return f"the legs are not 1 to {total} once each"
+    if sorted(names) != sorted(f"{PREFIX}{number}/{len(names)})" for number in range(1, len(names) + 1)):
+        return "the legs are not real-browser-tests (1/N) to (N/N) once each"
     return None
+
+
+def _failure(why: str) -> str:
+    """The one line a failed check prints: quoted when it holds a line break or another unprintable character."""
+    line = f"real-browser-tests did not pass: {why}"
+    return line if line.isprintable() else repr(line)
 
 
 def judge(listing: object, aggregate: str) -> tuple[bool, list[str]]:
@@ -67,7 +56,7 @@ def judge(listing: object, aggregate: str) -> tuple[bool, list[str]]:
     try:
         jobs, total_count = _jobs(listing)
     except ValueError as error:
-        return False, [f"real-browser-tests did not pass: not a jobs listing ({error})"]
+        return False, [_failure(f"not a jobs listing ({error})")]
     legs = [(name, conclusion) for name, conclusion in jobs if name.startswith(PREFIX)]
     problems = []
     if aggregate != "success":
@@ -79,10 +68,10 @@ def judge(listing: object, aggregate: str) -> tuple[bool, list[str]]:
         problems.append(shape)
     if any(conclusion != "success" for _, conclusion in legs):
         problems.append("not every leg succeeded")
-    concluded = [f"{_shown(name)}: {'null' if conclusion is None else conclusion}" for name, conclusion in legs]
+    concluded = [f"{name}: {'null' if conclusion is None else conclusion}" for name, conclusion in legs]
     if problems:
         each = ", ".join(concluded) or "none"
-        return False, [f"real-browser-tests did not pass: {'; '.join(problems)}. Legs: {each}."]
+        return False, [_failure(f"{'; '.join(problems)}. Legs: {each}.")]
     return True, concluded
 
 
@@ -93,7 +82,7 @@ def main(argv: list[str]) -> int:
     try:
         listing = json.loads(sys.stdin.read())
     except ValueError as error:
-        print(f"real-browser-tests did not pass: not a jobs listing (not JSON: {error})", file=sys.stderr)
+        print(_failure(f"not a jobs listing (not JSON: {error})"), file=sys.stderr)
         return 1
     passed, lines = judge(listing, argv[0])
     print("\n".join(lines), file=sys.stdout if passed else sys.stderr)

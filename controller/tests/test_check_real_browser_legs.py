@@ -89,18 +89,21 @@ def test_four_good_legs_fail_when_the_aggregate_is_not_success(check, aggregate:
     assert f"the aggregate result is {aggregate}" in _failure(check, _listing(*FOUR), aggregate)
 
 
+NOT_A_WHOLE_SET = "the legs are not real-browser-tests (1/N) to (N/N) once each"
+
+
 @pytest.mark.parametrize(
     "legs, said",
     [
         ([], "no leg"),
-        (FOUR[:3], "the legs are not 1 to 4 once each"),
-        ([FOUR[0], FOUR[1], FOUR[1], FOUR[3]], "the legs are not 1 to 4 once each"),
-        ([*FOUR[:3], ("real-browser-tests (4/5)", "success")], "the legs do not share one N"),
-        ([("real-browser-tests (other)", "success")], "not named as a leg"),
-        ([*FOUR, ("real-browser-tests (other)", "success")], "not named as a leg"),
-        ([*FOUR[:3], ("real-browser-tests (04/4)", "success")], "not named as a leg"),
-        ([("real-browser-tests (1/100000000000000000000)", "success")], "not named as a leg"),
-        ([(f"real-browser-tests ({'1' * 5000}/4)", "success"), *FOUR[1:]], "not named as a leg"),
+        (FOUR[:3], NOT_A_WHOLE_SET),
+        ([FOUR[0], FOUR[1], FOUR[1], FOUR[3]], NOT_A_WHOLE_SET),
+        ([*FOUR[:3], ("real-browser-tests (4/5)", "success")], NOT_A_WHOLE_SET),
+        ([("real-browser-tests (other)", "success")], NOT_A_WHOLE_SET),
+        ([*FOUR, ("real-browser-tests (other)", "success")], NOT_A_WHOLE_SET),
+        ([*FOUR[:3], ("real-browser-tests (04/4)", "success")], NOT_A_WHOLE_SET),
+        ([("real-browser-tests (1/100000000000000000000)", "success")], NOT_A_WHOLE_SET),
+        ([(f"real-browser-tests ({'1' * 5000}/4)", "success"), *FOUR[1:]], NOT_A_WHOLE_SET),
     ],
     ids=[
         "no leg",
@@ -110,7 +113,7 @@ def test_four_good_legs_fail_when_the_aggregate_is_not_success(check, aggregate:
         "a stray name alone",
         "a stray name beside four",
         "04/4",
-        "an N past what a list holds",
+        "an N of 21 digits",
         "a K of 5,000 digits",
     ],
 )
@@ -118,10 +121,18 @@ def test_legs_that_are_not_a_whole_set_fail(check, legs: list[tuple[str, str]], 
     assert said in _failure(check, _listing(*legs))
 
 
-def test_a_name_that_is_not_a_legs_is_quoted_so_the_failure_stays_one_line(check) -> None:
-    line = _failure(check, _listing(*FOUR, ("real-browser-tests (1/4)\nreal-browser-tests (5/4)", "success")))
+@pytest.mark.parametrize(
+    "leg, shown",
+    [
+        (("real-browser-tests (1/4)\nreal-browser-tests (5/4)", "success"), "real-browser-tests (1/4)\\nreal-browser-tests"),
+        (("real-browser-tests (4/4)", "failure\nreal-browser-tests (4/4): success"), "failure\\nreal-browser-tests"),
+    ],
+    ids=["a name", "a conclusion"],
+)
+def test_a_line_break_in_what_the_listing_says_keeps_the_failure_to_one_line(check, leg: tuple, shown: str) -> None:
+    line = _failure(check, _listing(*FOUR[:3], leg))
 
-    assert "\n" not in line and "'real-browser-tests (1/4)\\nreal-browser-tests (5/4)'" in line, line
+    assert "\n" not in line and shown in line, line
 
 
 @pytest.mark.parametrize("total", [150, 2])
@@ -162,7 +173,7 @@ def test_the_command_reads_the_listing_on_stdin_and_the_aggregate_as_its_one_arg
 
     assert (passed.returncode, passed.stdout.splitlines(), passed.stderr) == (0, FOUR_PASSED, "")
     assert (failed.returncode, failed.stdout) == (1, "") and len(failed.stderr.splitlines()) == 1, failed.stderr
-    assert "the aggregate result is failure" in failed.stderr
+    assert failed.stderr.startswith("real-browser-tests did not pass: the aggregate result is failure"), failed.stderr
     assert usage.returncode == 2 and "usage:" in usage.stderr
 
 
