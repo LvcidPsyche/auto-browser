@@ -741,8 +741,8 @@ class AgentJobQueue:
             await self._audit("agent_job_started", "running", record)
         except asyncio.CancelledError:
             # Stopped as it started: recorded as a stop during the run is, or the record stays "running" or
-            # "cancelling" until the next restart. The one end this block writes has its audit above, never twice.
-            await self._record_stop(job_id, audit_a_landed_end=False)
+            # "cancelling" until the next restart. A refusal written as the stop came stands, audited as a run's end is.
+            await self._record_stop(job_id)
             raise
 
         try:
@@ -795,7 +795,7 @@ class AgentJobQueue:
                 error=self._reported_error(result) if failed else None,
             )
         except asyncio.CancelledError:
-            await self._record_stop(job_id, audit_a_landed_end=True)
+            await self._record_stop(job_id)
             raise
         except Exception:
             # Previously a bare `except Exception` that recorded the constant
@@ -817,20 +817,18 @@ class AgentJobQueue:
             return False
         return not self._operator_configured(operator.id)
 
-    async def _record_stop(self, job_id: str, *, audit_a_landed_end: bool) -> None:
+    async def _record_stop(self, job_id: str) -> None:
         """Record a job that was stopped: cancelled by its operator, or interrupted (a shutdown, a withdrawal).
 
-        A job whose end landed as the stop came keeps it, and the end is audited if `audit_a_landed_end` (the run's:
-        its own audit comes after the run, which the stop skips).
+        A job whose end landed as the stop came keeps it, and the end is audited here (`agent_job_finished`): the
+        end's own audit follows its write, and the stop came before that audit had been written.
         """
         user_cancelled = self._cancellation_reasons.get(job_id) == "user"
         record, changed = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
         if changed:
             event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
-        elif audit_a_landed_end:
-            event_type = "agent_job_finished"
         else:
-            return
+            event_type = "agent_job_finished"
         # Quietly: the job has stopped and its record says so; an error raised here would take the place of the
         # CancelledError the caller re-raises.
         await self._audit_quietly(event_type, record.status, record)
