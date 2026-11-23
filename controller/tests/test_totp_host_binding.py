@@ -34,10 +34,8 @@ RFC_6238_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 
 
 def _frozen_code() -> object:
-    """pyotp, as the autofill uses it, answering CODE."""
-    return patch(
-        "app.browser.services.actions.pyotp", SimpleNamespace(TOTP=lambda _secret: SimpleNamespace(now=lambda: CODE))
-    )
+    """pyotp's TOTP, as the autofill uses it, answering CODE."""
+    return patch("app.browser.services.actions._SiteSecretTOTP", lambda _secret: SimpleNamespace(now=lambda: CODE))
 
 
 def _rfc_6238_code(secret: str, at: float) -> str:
