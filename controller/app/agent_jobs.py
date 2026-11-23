@@ -4,7 +4,8 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from contextvars import Context
+from contextvars import Context, copy_context
+from functools import partial
 from pathlib import Path
 from typing import TypeVar
 from uuid import uuid4
@@ -66,24 +67,30 @@ class AgentJobStore:
         A thread cannot be stopped, so a call cancelled meanwhile waits for it, however often it is cancelled, and then
         raises the cancellation: the next call finds what this one wrote (AgentJobQueue._enqueue finds create's record
         under the lock), and a shutdown returns only once the write has landed. A failure of the thread meanwhile is
-        logged, naming `job_id` (None for a listing).
+        logged, naming `job_id` (None for a listing). A call cancelled while it waits for the lock starts no thread:
+        _enqueue's `except KeyError` after a cancelled create relies on it.
         """
         # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns when cancelled).
         async with self._lock:
-            work = asyncio.ensure_future(asyncio.to_thread(function, *args))
-            try:
-                return await asyncio.shield(work)
-            except asyncio.CancelledError:
-                while not work.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.wait([work])
-                if not work.cancelled() and work.exception() is not None:
-                    logger.error(
-                        "agent job %s could not be written or read after its call was cancelled: %s",
-                        "records" if job_id is None else quoted_for_log(job_id),
-                        error_text_for_log(work.exception()),
-                    )
-                raise
+            # The thread's own future, copying the context as asyncio.to_thread does: a task around it would be
+            # cancelled with every other when a loop is torn down, and asyncio.shield logs a late failure's own text.
+            work = asyncio.get_running_loop().run_in_executor(None, partial(copy_context().run, function, *args))
+            cancelled: asyncio.CancelledError | None = None
+            while not work.done():
+                try:
+                    await asyncio.wait([work])
+                except asyncio.CancelledError as exc:
+                    cancelled = cancelled or exc
+            if cancelled is None:
+                return work.result()
+            if (error := work.exception()) is not None:
+                logger.error(
+                    "agent job %s could not be written or read after its call was cancelled: %s: %s",
+                    "records" if job_id is None else quoted_for_log(job_id),
+                    type(error).__name__,
+                    error_text_for_log(error),
+                )
+            raise cancelled
 
     async def list(
         self,
