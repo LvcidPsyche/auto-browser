@@ -12,7 +12,6 @@ child process with the switch and AUTO_BROWSER_TEST_CHROMIUM set as each case ne
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -104,38 +103,27 @@ needs_the_workflow = pytest.mark.skipif(
     not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)"
 )
 
-
-SHARD_OF_THE_LEG = "$(( ${{ strategy.job-index }} + 1 ))/${{ strategy.job-total }}"
-RUN_THE_SHARD = ["cd", "controller", "python", "-m", "pytest", "tests/", "--real-browser-shard", SHARD_OF_THE_LEG, "-v"]
-JUDGE_THE_LEGS = [
-    "gh",
-    "api",
-    "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100",
-    "|",
-    "python3",
-    "scripts/check_real_browser_legs.py",
-    "$LEGS_RESULT",
-]
+# The two steps' run text as it must be, compared whole: a list of words misses quoting, line breaks and a # inside a
+# word, and each changes what sh runs.
+RUN_THE_SHARD = (
+    "cd controller\n"
+    'python -m pytest tests/ --real-browser-shard "$(( ${{ strategy.job-index }} + 1 ))/${{ strategy.job-total }}" -v'
+)
+JUDGE_THE_LEGS = (
+    'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \\\n'
+    '  | python3 scripts/check_real_browser_legs.py "$LEGS_RESULT"'
+)
 
 
 def _jobs() -> dict[str, dict]:
     return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
 
 
-def _step_index(job: dict, runs: str) -> int:
-    """The position of the one step of `job` whose run string holds `runs`."""
-    found = [index for index, step in enumerate(job["steps"]) if runs in step.get("run", "")]
-    assert len(found) == 1, f"{len(found)} steps run {runs!r}"
-    return found[0]
-
-
 def _step(job: dict, runs: str) -> dict:
-    return job["steps"][_step_index(job, runs)]
-
-
-def _words(run: str) -> list[str]:
-    """A run string's words as sh splits them: a backslash at the end of a line continues it, and # starts a comment."""
-    return shlex.split(run.replace("\\\n", " "), comments=True)
+    """The one step of `job` whose run string holds `runs`."""
+    steps = [step for step in job["steps"] if runs in step.get("run", "")]
+    assert len(steps) == 1, f"{len(steps)} steps run {runs!r}"
+    return steps[0]
 
 
 @needs_the_workflow
@@ -165,23 +153,23 @@ def test_each_real_browser_leg_runs_the_shard_of_its_position() -> None:
 
     assert job["name"] == "real-browser-tests (${{ matrix.shard }}/${{ strategy.job-total }})"
     assert list(legs) == ["shard"] and legs["shard"] == list(range(1, len(legs["shard"]) + 1)) != []
-    assert _words(_step(job, "--real-browser-shard")["run"]) == RUN_THE_SHARD
+    assert _step(job, "--real-browser-shard")["run"].strip() == RUN_THE_SHARD
 
 
 @needs_the_workflow
 def test_every_real_browser_leg_installs_chromium_and_requires_it() -> None:
     jobs = _jobs()
     job = jobs["real-browser-tests"]
-    install = _step_index(job, "playwright install")
-    test = _step_index(job, "--real-browser-shard")
+    install = _step(job, "playwright install")
+    test = _step(job, "--real-browser-shard")
 
     for scope in (job, *job["steps"]):
         assert "continue-on-error" not in scope, scope
-    for scope in (job, job["steps"][install], job["steps"][test]):
+    for scope in (job, install, test):
         assert "if" not in scope, scope
-    assert install < test
-    assert job["steps"][install]["run"].strip() == "python -m playwright install --with-deps chromium"
-    switch = {**job.get("env", {}), **job["steps"][test].get("env", {})}.get("AUTO_BROWSER_REQUIRE_CHROMIUM")
+    assert job["steps"].index(install) < job["steps"].index(test)
+    assert install["run"].strip() == "python -m playwright install --with-deps chromium"
+    switch = {**job.get("env", {}), **test.get("env", {})}.get("AUTO_BROWSER_REQUIRE_CHROMIUM")
     assert chromium_required({"AUTO_BROWSER_REQUIRE_CHROMIUM": str(switch)}), switch
     assert _step(job, "uv pip install")["run"] == _step(jobs["host-tests"], "uv pip install")["run"]
 
@@ -193,23 +181,23 @@ def test_one_check_passes_only_when_the_script_passes_every_leg() -> None:
     job = _jobs()["real-browser-tests-done"]
     needs = job["needs"]
     steps = job["steps"]
-    judging = _step_index(job, "check_real_browser_legs.py")
-    checkouts = [index for index, step in enumerate(steps) if step.get("uses", "").startswith("actions/checkout@")]
+    judging = _step(job, "check_real_browser_legs.py")
+    checkout = next((step for step in steps if step.get("uses", "").startswith("actions/checkout@")), None)
 
-    assert job["if"] in ("always()", "${{ always() }}")
+    assert job["if"] == "always()"
     assert "real-browser-tests" in ([needs] if isinstance(needs, str) else needs)
     assert job["permissions"] == {"actions": "read", "contents": "read"}
     assert "continue-on-error" not in job
     for step in steps:
         assert not {"if", "continue-on-error"} & set(step), step
-    assert checkouts and checkouts[0] < judging
-    assert (steps[checkouts[0]].get("with") or {}).get("persist-credentials") is False
-    assert steps[judging]["shell"] == "bash"
-    assert steps[judging]["env"] == {
+    assert checkout is not None and steps.index(checkout) < steps.index(judging)
+    assert (checkout.get("with") or {}).get("persist-credentials") is False
+    assert judging["shell"] == "bash"
+    assert judging["env"] == {
         "GH_TOKEN": "${{ github.token }}",
         "LEGS_RESULT": "${{ needs.real-browser-tests.result }}",
     }
-    assert _words(steps[judging]["run"]) == JUDGE_THE_LEGS
+    assert judging["run"].strip() == JUDGE_THE_LEGS
 
 
 @needs_the_workflow
