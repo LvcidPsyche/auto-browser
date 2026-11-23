@@ -171,7 +171,7 @@ class _HeldStoreThread:
 
 
 class _GatedOrchestrator:
-    """Runs the job whose goal is "ahead" until `gate` is set, so that the jobs queued behind it wait; any other at once.
+    """Runs the job whose goal is "ahead" until `gate` is set, so that the jobs queued behind it wait; others at once.
 
     Records the goal of every run it begins, and sets `behind_started` when one other than "ahead" begins.
     """

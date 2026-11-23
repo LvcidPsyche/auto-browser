@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextvars import Context
 from pathlib import Path
+from typing import TypeVar
 from uuid import uuid4
 
 from .audit import get_current_operator
@@ -27,12 +28,15 @@ from .utils import (
     atomic_write_text,
     error_lines_for_log,
     error_text_for_log,
+    quoted_for_log,
     record_json,
     record_path,
     utc_now,
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class _AlreadyFinished(ValueError):
@@ -56,18 +60,41 @@ class AgentJobStore:
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
+    async def _run_locked(self, job_id: str | None, function: Callable[..., _T], *args: object) -> _T:
+        """Run `function(*args)` in a worker thread under the store's lock, and hold the lock until the thread has ended.
+
+        A thread cannot be stopped, so a call cancelled meanwhile waits for it, however often it is cancelled, and then
+        raises the cancellation: the next call finds what this one wrote (AgentJobQueue._enqueue finds create's record
+        under the lock), and a shutdown returns only once the write has landed. A failure of the thread meanwhile is
+        logged, naming `job_id` (None for a listing).
+        """
+        # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns when cancelled).
+        async with self._lock:
+            work = asyncio.ensure_future(asyncio.to_thread(function, *args))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                while not work.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait([work])
+                if not work.cancelled() and work.exception() is not None:
+                    logger.error(
+                        "agent job %s could not be written or read after its call was cancelled: %s",
+                        "records" if job_id is None else quoted_for_log(job_id),
+                        error_text_for_log(work.exception()),
+                    )
+                raise
+
     async def list(
         self,
         *,
         status: AgentJobStatus | None = None,
         session_id: str | None = None,
     ) -> list[AgentJobRecord]:
-        async with self._lock:
-            return await asyncio.to_thread(self._list_sync, status, session_id)
+        return await self._run_locked(None, self._list_sync, status, session_id)
 
     async def get(self, job_id: str) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._get_sync, job_id)
+        return await self._run_locked(job_id, self._get_sync, job_id)
 
     async def create(
         self,
@@ -79,48 +106,19 @@ class AgentJobStore:
         parent_job_id: str | None = None,
         job_id: str | None = None,
     ) -> AgentJobRecord:
-        async with self._lock:
-            now = utc_now()
-            record = AgentJobRecord(
-                id=job_id or uuid4().hex[:12],
-                session_id=session_id,
-                kind=kind,  # type: ignore[arg-type]
-                status="queued",
-                created_at=now,
-                updated_at=now,
-                request=request,
-                parent_job_id=parent_job_id,
-                operator=operator,
-            )
-            write = asyncio.ensure_future(asyncio.to_thread(self._write_sync, record))
-            try:
-                await asyncio.shield(write)
-            except asyncio.CancelledError:
-                # A thread cannot be stopped, so the record may still land: keep the lock until it has, however
-                # often this call is cancelled meanwhile, so a caller handling the cancellation
-                # (AgentJobQueue._enqueue) finds the record under the lock.
-                while not write.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.wait([write])
-                if not write.cancelled() and write.exception() is not None:
-                    logger.error(
-                        "agent job %s could not be written: %s", record.id, error_text_for_log(write.exception())
-                    )
-                raise
-            return record
+        record_id = job_id or uuid4().hex[:12]
+        return await self._run_locked(
+            record_id, self._create_sync, record_id, session_id, kind, request, operator, parent_job_id
+        )
 
     async def update(self, record: AgentJobRecord) -> None:
-        async with self._lock:
-            record.updated_at = utc_now()
-            await asyncio.to_thread(self._write_sync, record)
+        await self._run_locked(record.id, self._update_sync, record)
 
     async def start_queued(self, job_id: str) -> AgentJobRecord | None:
-        async with self._lock:
-            return await asyncio.to_thread(self._start_queued_sync, job_id)
+        return await self._run_locked(job_id, self._start_queued_sync, job_id)
 
     async def append_checkpoint(self, job_id: str, checkpoint: AgentJobCheckpoint) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._append_checkpoint_sync, job_id, checkpoint)
+        return await self._run_locked(job_id, self._append_checkpoint_sync, job_id, checkpoint)
 
     async def finish(
         self,
@@ -130,24 +128,19 @@ class AgentJobStore:
         result: dict | None,
         error: str | None,
     ) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._finish_sync, job_id, status, result, error)
+        return await self._run_locked(job_id, self._finish_sync, job_id, status, result, error)
 
     async def finish_cancelled(self, job_id: str, *, user_cancelled: bool) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._finish_cancelled_sync, job_id, user_cancelled)
+        return await self._run_locked(job_id, self._finish_cancelled_sync, job_id, user_cancelled)
 
     async def request_cancel(self, job_id: str) -> tuple[AgentJobRecord, bool]:
-        async with self._lock:
-            return await asyncio.to_thread(self._request_cancel_sync, job_id)
+        return await self._run_locked(job_id, self._request_cancel_sync, job_id)
 
     async def interrupt_queued(self, job_id: str) -> tuple[AgentJobRecord, bool]:
-        async with self._lock:
-            return await asyncio.to_thread(self._interrupt_queued_sync, job_id)
+        return await self._run_locked(job_id, self._interrupt_queued_sync, job_id)
 
     async def discard(self, job_id: str) -> tuple[AgentJobRecord, bool]:
-        async with self._lock:
-            return await asyncio.to_thread(self._discard_sync, job_id)
+        return await self._run_locked(job_id, self._discard_sync, job_id)
 
     async def mark_running_interrupted(self) -> None:
         for record in await self.list():
@@ -187,6 +180,34 @@ class AgentJobStore:
         if not path.exists():
             raise KeyError(job_id)
         return AgentJobRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def _create_sync(
+        self,
+        job_id: str,
+        session_id: str,
+        kind: str,
+        request: dict,
+        operator: OperatorIdentity | None,
+        parent_job_id: str | None,
+    ) -> AgentJobRecord:
+        now = utc_now()
+        record = AgentJobRecord(
+            id=job_id,
+            session_id=session_id,
+            kind=kind,  # type: ignore[arg-type]
+            status="queued",
+            created_at=now,
+            updated_at=now,
+            request=request,
+            parent_job_id=parent_job_id,
+            operator=operator,
+        )
+        self._write_sync(record)
+        return record
+
+    def _update_sync(self, record: AgentJobRecord) -> None:
+        record.updated_at = utc_now()
+        self._write_sync(record)
 
     def _start_queued_sync(self, job_id: str) -> AgentJobRecord | None:
         record = self._get_sync(job_id)
