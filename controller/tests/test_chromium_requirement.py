@@ -103,15 +103,14 @@ needs_the_workflow = pytest.mark.skipif(
     not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)"
 )
 
-# The two steps' run text as it must be, compared whole: a list of words misses quoting, line breaks and a # inside a
-# word, and each changes what sh runs.
+# The two steps' run text, compared whole: quoting, line breaks and a # inside a word each change what sh runs.
 RUN_THE_SHARD = (
     "cd controller\n"
-    'python -m pytest tests/ --real-browser-shard "$(( ${{ strategy.job-index }} + 1 ))/${{ strategy.job-total }}" -v'
+    'python -m pytest tests/ --real-browser-shard "$(( ${{ strategy.job-index }} + 1 ))/${{ strategy.job-total }}" -v\n'
 )
 JUDGE_THE_LEGS = (
     'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \\\n'
-    '  | python3 scripts/check_real_browser_legs.py "$LEGS_RESULT"'
+    '  | python3 scripts/check_real_browser_legs.py "$LEGS_RESULT"\n'
 )
 
 
@@ -124,6 +123,12 @@ def _step(job: dict, runs: str) -> dict:
     steps = [step for step in job["steps"] if runs in step.get("run", "")]
     assert len(steps) == 1, f"{len(steps)} steps run {runs!r}"
     return steps[0]
+
+
+def _whole(job: dict) -> dict:
+    """The job with each action named without its version: Dependabot bumps versions, and nothing else may change."""
+    steps = [{**step, "uses": step["uses"].split("@")[0]} if "uses" in step else step for step in job["steps"]]
+    return {**job, "steps": steps}
 
 
 @needs_the_workflow
@@ -145,59 +150,53 @@ def test_ci_keeps_the_required_check_names_of_host_tests() -> None:
 
 
 @needs_the_workflow
-def test_each_real_browser_leg_runs_the_shard_of_its_position() -> None:
-    """The legs' list names them, through the job's name, so it must be 1 to N for the names to be true; the gate reads
-    the legs by that name."""
-    job = _jobs()["real-browser-tests"]
-    legs = job["strategy"]["matrix"]
-
-    assert job["name"] == "real-browser-tests (${{ matrix.shard }}/${{ strategy.job-total }})"
-    assert list(legs) == ["shard"] and legs["shard"] == list(range(1, len(legs["shard"]) + 1)) != []
-    assert _step(job, "--real-browser-shard")["run"].strip() == RUN_THE_SHARD
-
-
-@needs_the_workflow
-def test_every_real_browser_leg_installs_chromium_and_requires_it() -> None:
-    """The job and its test step hold only the keys they have, so no env, defaults, container or continue-on-error
-    (a PYTEST_ADDOPTS of --collect-only, say) changes how the shard runs unseen."""
+def test_each_real_browser_leg_installs_chromium_and_runs_the_shard_of_its_position() -> None:
+    """The job is held whole, an action's version and the number of shards aside, as anything else changes how the
+    shards run; they are 1 to N, so that each leg's name, by which the gate reads it, gives its shard."""
     jobs = _jobs()
     job = jobs["real-browser-tests"]
-    install = _step(job, "playwright install")
-    test = _step(job, "--real-browser-shard")
+    shards = job["strategy"]["matrix"]["shard"]
 
-    assert set(job) == {"name", "timeout-minutes", "needs", "runs-on", "strategy", "steps"}
-    assert set(test) == {"name", "env", "run"} and test["env"] == {"AUTO_BROWSER_REQUIRE_CHROMIUM": "1"}
-    for step in job["steps"]:
-        assert not {"if", "continue-on-error"} & set(step), step
-    assert job["steps"].index(install) < job["steps"].index(test)
-    assert install["run"].strip() == "python -m playwright install --with-deps chromium"
-    assert _step(job, "uv pip install")["run"] == _step(jobs["host-tests"], "uv pip install")["run"]
+    assert shards == list(range(1, len(shards) + 1)) != []
+    assert _whole(job) == {
+        "name": "real-browser-tests (${{ matrix.shard }}/${{ strategy.job-total }})",
+        "timeout-minutes": 30,
+        "needs": "lint",
+        "runs-on": "ubuntu-latest",
+        "strategy": {"fail-fast": False, "matrix": {"shard": shards}},
+        "steps": [
+            {"uses": "actions/checkout"},
+            {"uses": "actions/setup-python", "with": {"python-version": "3.11"}},
+            {"name": "Install host test dependencies", "run": _step(jobs["host-tests"], "uv pip install")["run"]},
+            {"name": "Install Chromium", "run": "python -m playwright install --with-deps chromium"},
+            {
+                "name": "Run this leg's shard of the real-browser tests",
+                "env": {"AUTO_BROWSER_REQUIRE_CHROMIUM": "1"},
+                "run": RUN_THE_SHARD,
+            },
+        ],
+    }
 
 
 @needs_the_workflow
 def test_one_check_passes_only_when_the_script_passes_every_leg() -> None:
-    """The judging step is that one pipeline and nothing else; bash by name adds pipefail, so a failed API call fails
-    it. The job and the step hold only the keys they have. scripts/check_real_browser_legs.py's own tests hold what it
-    passes."""
-    job = _jobs()["real-browser-tests-done"]
-    needs = job["needs"]
-    steps = job["steps"]
-    judging = _step(job, "check_real_browser_legs.py")
-    checkout = next((step for step in steps if step.get("uses", "").startswith("actions/checkout@")), None)
-
-    assert set(job) == {"if", "needs", "runs-on", "permissions", "steps"} and job["if"] == "always()"
-    assert "real-browser-tests" in ([needs] if isinstance(needs, str) else needs)
-    assert job["permissions"] == {"actions": "read", "contents": "read"}
-    for step in steps:
-        assert not {"if", "continue-on-error"} & set(step), step
-    assert checkout is not None and steps.index(checkout) < steps.index(judging)
-    assert (checkout.get("with") or {}).get("persist-credentials") is False
-    assert set(judging) == {"name", "shell", "env", "run"} and judging["shell"] == "bash"
-    assert judging["env"] == {
-        "GH_TOKEN": "${{ github.token }}",
-        "LEGS_RESULT": "${{ needs.real-browser-tests.result }}",
+    """The job is held whole, an action's version aside; bash by name adds pipefail, so a failed API call fails the
+    pipeline. scripts/check_real_browser_legs.py's own tests hold what it passes."""
+    assert _whole(_jobs()["real-browser-tests-done"]) == {
+        "if": "always()",
+        "needs": "real-browser-tests",
+        "runs-on": "ubuntu-latest",
+        "permissions": {"actions": "read", "contents": "read"},
+        "steps": [
+            {"uses": "actions/checkout", "with": {"persist-credentials": False}},
+            {
+                "name": "Every leg of the real-browser tests passed",
+                "shell": "bash",
+                "env": {"GH_TOKEN": "${{ github.token }}", "LEGS_RESULT": "${{ needs.real-browser-tests.result }}"},
+                "run": JUDGE_THE_LEGS,
+            },
+        ],
     }
-    assert judging["run"].strip() == JUDGE_THE_LEGS
 
 
 @needs_the_workflow
