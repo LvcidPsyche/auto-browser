@@ -158,46 +158,55 @@ def test_each_real_browser_leg_runs_the_shard_of_its_position() -> None:
 
 @needs_the_workflow
 def test_every_real_browser_leg_installs_chromium_and_requires_it() -> None:
+    """The job and its test step hold only the keys they have, so no env, defaults, container or continue-on-error
+    (a PYTEST_ADDOPTS of --collect-only, say) changes how the shard runs unseen."""
     jobs = _jobs()
     job = jobs["real-browser-tests"]
     install = _step(job, "playwright install")
     test = _step(job, "--real-browser-shard")
 
-    for scope in (job, *job["steps"]):
-        assert "continue-on-error" not in scope, scope
-    for scope in (job, install, test):
-        assert "if" not in scope, scope
+    assert set(job) == {"name", "timeout-minutes", "needs", "runs-on", "strategy", "steps"}
+    assert set(test) == {"name", "env", "run"} and test["env"] == {"AUTO_BROWSER_REQUIRE_CHROMIUM": "1"}
+    for step in job["steps"]:
+        assert not {"if", "continue-on-error"} & set(step), step
     assert job["steps"].index(install) < job["steps"].index(test)
     assert install["run"].strip() == "python -m playwright install --with-deps chromium"
-    switch = {**job.get("env", {}), **test.get("env", {})}.get("AUTO_BROWSER_REQUIRE_CHROMIUM")
-    assert chromium_required({"AUTO_BROWSER_REQUIRE_CHROMIUM": str(switch)}), switch
     assert _step(job, "uv pip install")["run"] == _step(jobs["host-tests"], "uv pip install")["run"]
 
 
 @needs_the_workflow
 def test_one_check_passes_only_when_the_script_passes_every_leg() -> None:
     """The judging step is that one pipeline and nothing else; bash by name adds pipefail, so a failed API call fails
-    it. scripts/check_real_browser_legs.py's own tests hold what it passes."""
+    it. The job and the step hold only the keys they have. scripts/check_real_browser_legs.py's own tests hold what it
+    passes."""
     job = _jobs()["real-browser-tests-done"]
     needs = job["needs"]
     steps = job["steps"]
     judging = _step(job, "check_real_browser_legs.py")
     checkout = next((step for step in steps if step.get("uses", "").startswith("actions/checkout@")), None)
 
-    assert job["if"] == "always()"
+    assert set(job) == {"if", "needs", "runs-on", "permissions", "steps"} and job["if"] == "always()"
     assert "real-browser-tests" in ([needs] if isinstance(needs, str) else needs)
     assert job["permissions"] == {"actions": "read", "contents": "read"}
-    assert "continue-on-error" not in job
     for step in steps:
         assert not {"if", "continue-on-error"} & set(step), step
     assert checkout is not None and steps.index(checkout) < steps.index(judging)
     assert (checkout.get("with") or {}).get("persist-credentials") is False
-    assert judging["shell"] == "bash"
+    assert set(judging) == {"name", "shell", "env", "run"} and judging["shell"] == "bash"
     assert judging["env"] == {
         "GH_TOKEN": "${{ github.token }}",
         "LEGS_RESULT": "${{ needs.real-browser-tests.result }}",
     }
     assert judging["run"].strip() == JUDGE_THE_LEGS
+
+
+@needs_the_workflow
+def test_the_workflow_sets_only_its_one_env_variable_and_no_defaults() -> None:
+    """A workflow's env and defaults reach every job's steps, the shard and judging steps among them."""
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+
+    assert workflow["env"] == {"FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": True}
+    assert "defaults" not in workflow
 
 
 @needs_the_workflow
