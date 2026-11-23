@@ -33,7 +33,7 @@ SECCOMP_DIR = Path(__file__).resolve().parents[1] / "app" / "browser" / "seccomp
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE = REPO / "docker-compose.yml"
 BROWSER_NODE = REPO / "browser-node"
-MOBY_SHA256 = "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334"
+MOBY_SHA256 = "6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6"
 NNP = "no-new-privileges:true"
 
 
@@ -48,7 +48,7 @@ class SeccompProfileTests(unittest.TestCase):
         self.profile = json.loads((SECCOMP_DIR / "chromium-sandbox.json").read_text(encoding="utf-8"))
 
     def test_the_pinned_moby_default_is_byte_for_byte_upstream(self) -> None:
-        # docker-v29.9.2 vendor/github.com/moby/profiles/seccomp/default.json (module v0.2.4); see README.md.
+        # docker-v29.10.0 vendor/github.com/moby/profiles/seccomp/default.json (module v0.3.0); see README.md.
         self.assertEqual(hashlib.sha256(self.moby_bytes).hexdigest(), MOBY_SHA256)
 
     def test_exactly_one_entry_is_ours_and_it_allows_only_chroot_clone_and_unshare(self) -> None:
@@ -69,7 +69,7 @@ class SeccompProfileTests(unittest.TestCase):
 
     def test_the_readme_records_the_provenance(self) -> None:
         readme = (SECCOMP_DIR / "README.md").read_text(encoding="utf-8")
-        for fact in ("docker-v29.9.2", "vendor/github.com/moby/profiles/seccomp/default.json", "v0.2.4", MOBY_SHA256):
+        for fact in ("docker-v29.10.0", "vendor/github.com/moby/profiles/seccomp/default.json", "v0.3.0", MOBY_SHA256):
             self.assertIn(fact, readme)
 
     def test_the_controller_loads_the_profile_it_ships(self) -> None:
