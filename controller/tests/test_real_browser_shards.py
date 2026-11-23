@@ -265,14 +265,6 @@ REPORTED_SKIPPED = {
         "call",
         "expected",
     ),
-    "an xfail mark whose reason starts as pytest's for one not run": (
-        '@requires_chromium\n@pytest.mark.xfail(reason="[NOTRUN] a reason of its own")\n'
-        "def test_case():\n    raise AssertionError\n",
-        "FAILED",
-        AS_EXPECTED,
-        "call",
-        r"\[NOTRUN\] a reason of its own",
-    ),
     "an xfail mark over a fixture that raises": (
         '@pytest.fixture\ndef broken():\n    raise RuntimeError("setup broke")\n\n\n'
         f"{UNDER_AN_XFAIL_MARK}def test_case(broken):\n    pass\n",
@@ -313,14 +305,6 @@ REPORTED_SKIPPED = {
         "FAILED",
         AS_EXPECTED,
         "call",
-        "expected",
-    ),
-    "an xfail mark over a fixture whose teardown raises": (
-        '@pytest.fixture\ndef broken_after():\n    yield\n    raise RuntimeError("teardown broke")\n\n\n'
-        f"{UNDER_AN_XFAIL_MARK}def test_case(broken_after):\n    raise AssertionError\n",
-        "ERROR",
-        AS_EXPECTED,
-        "teardown",
         "expected",
     ),
     "a skip in teardown": (

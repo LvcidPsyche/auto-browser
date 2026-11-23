@@ -93,14 +93,15 @@ def pytest_make_collect_report(
     return report
 
 
-@pytest.hookimpl(wrapper=True)
+@pytest.hookimpl(wrapper=True, tryfirst=True)  # around pytest's own, which sets skipped and wasxfail after its yield
 def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestReport, pytest.TestReport]:
     """Turn a real-browser test reported skipped, an expected failure included, into a failure where they must run,
     as pytest turns a strict xfail that passed into one."""
     report = yield
     if report.skipped and is_real_browser(item) and _must_run(item.config):
         if hasattr(report, "wasxfail"):
-            # pytest's own text (the traceback of what was raised) says where and why, as a skip's location does.
+            # pytest's own text, kept after the message: the traceback of what was raised, which shows where the test
+            # raised it, or where pytest did (xfail(run=False), unittest's expectedFailure), or only the reason.
             said, detail = "as an expected failure", f"{report.wasxfail}\n{report.longrepr}"
             # A failed report that keeps its wasxfail is printed as a failure or an error and counted in the summary, but
             # pytest leaves it out of the run's exit status.
