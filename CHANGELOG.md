@@ -4,6 +4,14 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The seccomp profile for Chromium's sandbox follows moby's default as Docker Engine 29.10.0 ships it** (it was
+  29.9.2's). One rule differs: the `socket` call is allowed for the address families moby now lists, where it was
+  allowed for every family below 38. For the twelve left out (3 to 6, 11, 12, 19, 20, 23, 25, 34 and 37: AX.25,
+  IPX, AppleTalk and other legacy protocols) the call is refused, and Unix, IPv4, IPv6 and netlink sockets open
+  as before; both measured in a container under the old profile and the new.
+
 ## [1.19.0] — 2026-11-22
 
 A security and correctness release over 1.18.1, from the findings the reviews of 1.18.1 left open and from reviews of
