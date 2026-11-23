@@ -9,15 +9,15 @@
 # flattened Route objects. Never enumerate app.routes expecting .path -- use
 # app.openapi() or a request. The upper bound keeps minor bumps reviewed;
 # Dependabot moves it, so it is deliberately not restated as a number here.
-fastapi>=0.162.4,<0.163
+fastapi>=0.165.0,<0.166
 starlette==1.10.0
 uvicorn[standard]==0.54.0
 playwright==1.64.1
-pydantic-settings==2.16.2
+pydantic-settings==2.16.3
 # pydantic and typing-inspection come in through pydantic-settings and FastAPI, and click through uvicorn. Pinned for
 # the 1.16.0 build, where their newest releases (pydantic 2.14.3, typing-inspection 0.4.5, click 8.5.1) were under 72
 # hours old; pydantic's own exact pin holds pydantic-core. Dependabot's weekly group moves them like any other pin.
-pydantic==2.14.3
+pydantic==2.14.4
 typing-inspection==0.4.5
 click==8.5.1
 httpx==0.28.1
@@ -30,6 +30,6 @@ Pillow==13.0.0
 pytesseract==0.3.13
 docker==7.2.0
 prometheus-client==0.26.0
-pyotp==2.10.0
+pyotp==2.12.1
 apscheduler==3.11.3
 tomli==2.4.1; python_version < "3.11"
