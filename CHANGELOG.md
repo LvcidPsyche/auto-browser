@@ -6,11 +6,12 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
-- **A job's record no longer changes after the controller has recorded its stop.** When the controller stopped while a
-  job's record was being written (a step's checkpoint, or the job's end), that write could land after the stop had
-  been recorded: the job was then listed as running until the next start, or a finished job's record disagreed with
-  its last audit event. Each job-store call now finishes before the next begins, and a stop waits for the one under
-  way.
+- **A job stopped by a shutdown as its record is being written now reads as its audit says.** When the controller
+  stopped while a run's step was being recorded, the job could read after the restart as interrupted on restart
+  (`agent_job_interrupted_on_restart`), though its stop had been recorded; stopped while its end was being recorded,
+  it could be listed completed while its last audit event said it was interrupted. A job stopped while a step is
+  being recorded now reads interrupted (`agent_job_interrupted`) from the stop on, and one stopped as its end is
+  being recorded keeps that end and its result, with an `agent_job_finished` audit event.
 
 ## [1.19.0] — 2026-11-22
 

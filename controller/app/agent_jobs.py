@@ -66,9 +66,9 @@ class AgentJobStore:
 
         A thread cannot be stopped, so a call cancelled meanwhile waits for it, however often it is cancelled, and then
         raises the cancellation: the next call finds what this one wrote (AgentJobQueue._enqueue finds create's record
-        under the lock), and a shutdown returns only once the write has landed. A failure of the thread meanwhile is
-        logged, naming `job_id` (None for a listing). A call cancelled while it waits for the lock starts no thread:
-        _enqueue's `except KeyError` after a cancelled create relies on it.
+        under the lock), and the queue's shutdown, which waits for its own workers, returns only once their writes have
+        landed. A failure of the thread meanwhile is logged, naming `job_id` (None for a listing). A call cancelled
+        while waiting for the lock starts no thread: _enqueue's `except KeyError` after a cancelled create relies on it.
         """
         # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns the result with a flag
         # where the store must raise the cancellation).
