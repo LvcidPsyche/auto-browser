@@ -1,4 +1,4 @@
-"""One shard of the real-browser tests, and a failure for each one that does not run where they must.
+"""One shard of the real-browser tests, and a failure for each one reported skipped where they must run.
 
 CI runs the real-browser tests (the ones `requires_chromium` marks) in a job of their own, split into shards that run
 in parallel; the host-tests legs run the whole suite without a browser, so the real-browser tests skip there.
@@ -7,8 +7,8 @@ its parameters, so every case of one test function lands in the same shard and t
 test exactly once.
 
 A shard that skipped its tests would pass all the same. So where they must run (AUTO_BROWSER_REQUIRE_CHROMIUM is set,
-or a shard is given), a real-browser test that does not run fails, with where and why it was skipped, and so does a
-test module skipped at collection.
+or a shard is given), a real-browser test reported skipped fails, an expected failure whose body ran aside, and so does
+anything skipped at collection.
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--real-browser-shard",
         type=parse_shard,
         metavar="K/N",
-        help="run only the real-browser tests (the ones requires_chromium marks) of shard K of N, and fail any that "
-        "does not run",
+        help="run only the real-browser tests (the ones requires_chromium marks) of shard K of N, and fail any "
+        "reported skipped",
     )
 
 
@@ -79,15 +79,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def pytest_make_collect_report(
     collector: pytest.Collector,
 ) -> Generator[None, pytest.CollectReport, pytest.CollectReport]:
-    """A module skipped at collection has no tests to tell real-browser ones by, so where they must run, any skip at
-    collection fails the run (pytest reports it as a collection error)."""
+    """What is skipped at collection (a module, or any collector) holds no tests to tell real-browser ones by, so where
+    they must run, any skip at collection fails the run (pytest reports it as a collection error)."""
     report = yield
     if report.skipped and _must_run(collector.config):
         path, lineno, reason = report.longrepr
         report.outcome = "failed"
         report.longrepr = (
-            f"{path}:{lineno}: {reason}\na test module skipped at collection, where real-browser tests must run "
-            f"({_MUST_RUN}): nothing tells whether its tests are real-browser ones, so skip its tests one by one "
+            f"{report.nodeid} was skipped at collection ({path}:{lineno}: {reason}), where real-browser tests must "
+            f"run ({_MUST_RUN}): nothing tells whether its tests are real-browser ones, so skip its tests one by one "
             "instead"
         )
     return report
@@ -95,22 +95,28 @@ def pytest_make_collect_report(
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestReport, pytest.TestReport]:
-    """Turn the skip of a real-browser test into a failure where they must run, as pytest turns a strict xfail that
-    passed into one. Only an expected failure reported from the call phase ran its body, so only it stays as it is."""
+    """Turn a real-browser test reported skipped into a failure where they must run, as pytest turns a strict xfail
+    that passed into one. Only an expected failure whose body ran stays as it is."""
     report = yield
-    body_ran = report.when == "call" and hasattr(report, "wasxfail")
-    if report.skipped and not body_ran and is_real_browser(item) and _must_run(item.config):
-        why = _why_it_did_not_run(report)
-        report.longrepr = f"a real-browser test did not run where they must ({_MUST_RUN}): {why}"
-        report.outcome = "failed"
+    if report.skipped and not _body_ran(report) and is_real_browser(item) and _must_run(item.config):
         if hasattr(report, "wasxfail"):
+            said, detail = "as an expected failure", report.wasxfail
             # pytest counts a report that keeps its wasxfail as an expected failure, not as a failure of the run.
             del report.wasxfail
+        else:
+            path, lineno, reason = report.longrepr  # a skip: where it was skipped, and why
+            said, detail = "skipped", f"{path}:{lineno}: {reason}"
+        report.longrepr = (
+            f"a real-browser test was reported {said} in its {report.when} phase, where real-browser tests must run "
+            f"({_MUST_RUN}): {detail}"
+        )
+        report.outcome = "failed"
     return report
 
 
-def _why_it_did_not_run(report: pytest.TestReport) -> str:
-    if hasattr(report, "wasxfail"):  # xfail(run=False), or pytest.xfail() in a fixture
-        return f"an expected failure that never ran: {report.wasxfail}"
-    path, lineno, reason = report.longrepr  # a skip: where it was skipped, and why
-    return f"{path}:{lineno}: {reason}"
+def _body_ran(report: pytest.TestReport) -> bool:
+    """Only an expected failure reported from the call phase ran the test's body, and not one pytest marks [NOTRUN]:
+    an xfail(run=False) applied by a fixture is reported from the call phase, before the body runs."""
+    if report.when != "call" or not hasattr(report, "wasxfail"):
+        return False
+    return not report.wasxfail.startswith("[NOTRUN] ")
