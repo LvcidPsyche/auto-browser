@@ -24,6 +24,9 @@ _WINDOWS = (
     "chromium_headless_shell-*/chrome-headless-shell-win*/chrome-headless-shell.exe",
 )
 
+# The skip reason of `requires_chromium`, by which tests/_real_browser_shards.py tells a real-browser test.
+REQUIRES_CHROMIUM_REASON = "no local Chromium binary"
+
 
 def _browser_roots() -> list[Path]:
     roots = [Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])] if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") else []
@@ -67,16 +70,17 @@ def chromium_required(environ: Mapping[str, str]) -> bool:
 def requires_chromium_mark(executable: str | None, *, required: bool):
     """The skip mark for the real-browser tests.
 
-    A missing Chromium skips them, unless the run says it must have one: a CI leg that
-    installs Chromium sets AUTO_BROWSER_REQUIRE_CHROMIUM, and then a missing browser raises
-    here, at collection, so the run fails instead of going green on skipped tests.
+    A missing Chromium skips them, unless the run says it must have one: the real-browser-tests
+    job sets AUTO_BROWSER_REQUIRE_CHROMIUM, and then a missing browser raises here, as pytest
+    starts (tests/conftest.py imports this module), so every run under the switch fails at once
+    with the fix in its message instead of going green on skipped tests.
     """
     if executable is None and required:
         raise ChromiumRequiredError(
             "AUTO_BROWSER_REQUIRE_CHROMIUM is set but no Chromium was found (the real-browser tests would "
             "skip); install one with `python -m playwright install chromium` or set AUTO_BROWSER_TEST_CHROMIUM"
         )
-    return pytest.mark.skipif(executable is None, reason="no local Chromium binary")
+    return pytest.mark.skipif(executable is None, reason=REQUIRES_CHROMIUM_REASON)
 
 
 requires_chromium = requires_chromium_mark(chromium_executable(), required=chromium_required(os.environ))

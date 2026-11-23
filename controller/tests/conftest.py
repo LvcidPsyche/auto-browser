@@ -7,6 +7,15 @@ import pytest_asyncio
 
 from tests import _background
 
+# pytest registers a conftest's hooks by their names: these run one shard of the real-browser tests
+# (--real-browser-shard), and fail each reported skipped where they must run.
+from tests._real_browser_shards import (  # noqa: F401
+    pytest_addoption,
+    pytest_collection_modifyitems,
+    pytest_make_collect_report,
+    pytest_runtest_makereport,
+)
+
 # PRIVATE pytest-asyncio API: the name of its fixture for the event loop of each loop scope
 # (pytest_asyncio/plugin.py, _create_scoped_runner_fixture). Nothing public gives a fixture the test's
 # loop. requirements-dev.txt caps pytest-asyncio below its next minor release for this; a release that
