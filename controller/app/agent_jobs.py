@@ -70,7 +70,8 @@ class AgentJobStore:
         logged, naming `job_id` (None for a listing). A call cancelled while it waits for the lock starts no thread:
         _enqueue's `except KeyError` after a cancelled create relies on it.
         """
-        # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns when cancelled).
+        # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns the result with a flag
+        # where the store must raise the cancellation).
         async with self._lock:
             # The thread's own future, copying the context as asyncio.to_thread does: a task around it would be
             # cancelled with every other when a loop is torn down, and asyncio.shield logs a late failure's own text.
@@ -113,13 +114,24 @@ class AgentJobStore:
         parent_job_id: str | None = None,
         job_id: str | None = None,
     ) -> AgentJobRecord:
-        record_id = job_id or uuid4().hex[:12]
-        return await self._run_locked(
-            record_id, self._create_sync, record_id, session_id, kind, request, operator, parent_job_id
+        now = utc_now()
+        record = AgentJobRecord(
+            id=job_id or uuid4().hex[:12],
+            session_id=session_id,
+            kind=kind,  # type: ignore[arg-type]
+            status="queued",
+            created_at=now,
+            updated_at=now,
+            request=request,
+            parent_job_id=parent_job_id,
+            operator=operator,
         )
+        await self._run_locked(record.id, self._write_sync, record)
+        return record
 
     async def update(self, record: AgentJobRecord) -> None:
-        await self._run_locked(record.id, self._update_sync, record)
+        record.updated_at = utc_now()
+        await self._run_locked(record.id, self._write_sync, record)
 
     async def start_queued(self, job_id: str) -> AgentJobRecord | None:
         return await self._run_locked(job_id, self._start_queued_sync, job_id)
@@ -187,34 +199,6 @@ class AgentJobStore:
         if not path.exists():
             raise KeyError(job_id)
         return AgentJobRecord.model_validate_json(path.read_text(encoding="utf-8"))
-
-    def _create_sync(
-        self,
-        job_id: str,
-        session_id: str,
-        kind: str,
-        request: dict,
-        operator: OperatorIdentity | None,
-        parent_job_id: str | None,
-    ) -> AgentJobRecord:
-        now = utc_now()
-        record = AgentJobRecord(
-            id=job_id,
-            session_id=session_id,
-            kind=kind,  # type: ignore[arg-type]
-            status="queued",
-            created_at=now,
-            updated_at=now,
-            request=request,
-            parent_job_id=parent_job_id,
-            operator=operator,
-        )
-        self._write_sync(record)
-        return record
-
-    def _update_sync(self, record: AgentJobRecord) -> None:
-        record.updated_at = utc_now()
-        self._write_sync(record)
 
     def _start_queued_sync(self, job_id: str) -> AgentJobRecord | None:
         record = self._get_sync(job_id)

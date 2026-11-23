@@ -143,7 +143,7 @@ _A_MOMENT_SECONDS = 0.5
 class _HeldStoreThread:
     """Holds the first call of one of a store's sync functions (the first that `when` accepts) in its worker thread.
 
-    `entered` is set once that thread waits, and `returned` once it has gone on and written what it writes.
+    `entered` is set once that thread waits, and `returned` once it has gone on and the real function has ended.
     """
 
     def __init__(self, store: AgentJobStore, name: str, *, when: Callable[..., bool] | None = None) -> None:
@@ -1029,23 +1029,36 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         store = self.queue.store
         request = AgentRunRequest(provider="openai", goal="every store call").model_dump()
         checkpoint = AgentJobCheckpoint(step_index=1, created_at=utc_now(), status="acted")
+        # Each store method: the function its thread runs, and a call of it.
         calls = {
-            "_list_sync": lambda record: store.list(),
-            "_get_sync": lambda record: store.get(record.id),
-            "_create_sync": lambda record: store.create(session_id="session-20", kind="agent_run", request=request),
-            "_update_sync": lambda record: store.update(record),
-            "_start_queued_sync": lambda record: store.start_queued(record.id),
-            "_append_checkpoint_sync": lambda record: store.append_checkpoint(record.id, checkpoint),
-            "_finish_sync": lambda record: store.finish(record.id, status="completed", result=None, error=None),
-            "_finish_cancelled_sync": lambda record: store.finish_cancelled(record.id, user_cancelled=False),
-            "_request_cancel_sync": lambda record: store.request_cancel(record.id),
-            "_interrupt_queued_sync": lambda record: store.interrupt_queued(record.id),
-            "_discard_sync": lambda record: store.discard(record.id),
+            "list": ("_list_sync", lambda record: store.list()),
+            "get": ("_get_sync", lambda record: store.get(record.id)),
+            "create": (
+                "_write_sync",
+                lambda record: store.create(session_id="session-20", kind="agent_run", request=request),
+            ),
+            "update": ("_write_sync", lambda record: store.update(record)),
+            "start_queued": ("_start_queued_sync", lambda record: store.start_queued(record.id)),
+            "append_checkpoint": (
+                "_append_checkpoint_sync",
+                lambda record: store.append_checkpoint(record.id, checkpoint),
+            ),
+            "finish": (
+                "_finish_sync",
+                lambda record: store.finish(record.id, status="completed", result=None, error=None),
+            ),
+            "finish_cancelled": (
+                "_finish_cancelled_sync",
+                lambda record: store.finish_cancelled(record.id, user_cancelled=False),
+            ),
+            "request_cancel": ("_request_cancel_sync", lambda record: store.request_cancel(record.id)),
+            "interrupt_queued": ("_interrupt_queued_sync", lambda record: store.interrupt_queued(record.id)),
+            "discard": ("_discard_sync", lambda record: store.discard(record.id)),
         }
-        for name, call in calls.items():
-            with self.subTest(store_call=name):
+        for method, (function, call) in calls.items():
+            with self.subTest(store_call=method):
                 record = await store.create(session_id="session-20", kind="agent_run", request=request)
-                held = _HeldStoreThread(store, name)
+                held = _HeldStoreThread(store, function)
                 task = asyncio.create_task(call(record))
                 try:
                     self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
