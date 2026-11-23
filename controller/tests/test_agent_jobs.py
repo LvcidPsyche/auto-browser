@@ -976,14 +976,70 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(call(record))
                 try:
                     self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
-                    task.cancel()
-                    await asyncio.wait({task}, timeout=_A_MOMENT_SECONDS)
-                    self.assertFalse(task.done(), "the cancelled call ended while its thread was still running")
-                    self.assertTrue(store._lock.locked(), "the cancelled call let go of the store's lock")
+                    for cancel in ("first", "second"):
+                        task.cancel()
+                        await asyncio.wait({task}, timeout=_A_MOMENT_SECONDS)
+                        self.assertFalse(task.done(), f"the {cancel} cancel ended the call while its thread ran")
+                        self.assertTrue(store._lock.locked(), f"the {cancel} cancel let go of the store's lock")
                 finally:
                     await held.let_go()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
+
+    async def test_a_store_call_keeps_the_lock_until_its_thread_has_ended_when_every_task_is_cancelled(self) -> None:
+        # As asyncio.run cancels every task when it tears its loop down. The call waited for its thread through a task
+        # of its own, cancelled with the rest: it let go of the lock and ended while the thread went on to write.
+        await self.queue.shutdown()  # so that the call is the only other task
+        store = AgentJobStore(Path(self.tempdir.name) / "bare")
+        await store.startup()
+        record = await store.create(
+            session_id="session-21",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="stopped with every task").model_dump(),
+        )
+        held = _HeldStoreThread(store, "_write_sync")
+        call = asyncio.create_task(
+            store.append_checkpoint(record.id, AgentJobCheckpoint(step_index=1, created_at=utc_now(), status="acted"))
+        )
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            for task in asyncio.all_tasks() - {asyncio.current_task()}:
+                task.cancel()
+            await asyncio.wait({call}, timeout=_A_MOMENT_SECONDS)
+            ended_while_held, lock_held = call.done(), store._lock.locked()
+        finally:
+            await held.let_go()
+        await asyncio.wait({call}, timeout=_HELD_THREAD_SECONDS)
+
+        self.assertFalse(ended_while_held, "the call ended while its thread was still writing")
+        self.assertTrue(lock_held, "the call let go of the store's lock while its thread was still writing")
+        self.assertTrue(call.cancelled(), "the call swallowed its cancellation")
+        self.assertEqual(len((await store.get(record.id)).checkpoints), 1)
+
+    async def test_a_store_thread_that_fails_after_its_call_was_cancelled_is_logged_once_by_its_class(self) -> None:
+        # On Python 3.14 asyncio.shield, which the call waited through, logged the thread's error a second time with
+        # the error's own text as it is (here an id a caller gave; a record's fields where one does not validate).
+        store = AgentJobStore(Path(self.tempdir.name) / "bare")
+        await store.startup()
+        held = _HeldStoreThread(store, "_get_sync")
+        call = asyncio.create_task(store.get("no-such-job"))
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            with (
+                self.assertNoLogs("asyncio", level="ERROR"),
+                self.assertLogs("app.agent_jobs", level="ERROR") as logged,
+            ):
+                call.cancel()
+                await asyncio.wait({call}, timeout=_A_MOMENT_SECONDS)  # the call has taken its cancellation
+                await held.let_go()  # and the thread fails
+                await asyncio.wait({call}, timeout=_HELD_THREAD_SECONDS)
+        finally:
+            await held.let_go()
+
+        self.assertTrue(call.cancelled(), "the thread's error took the place of the call's cancellation")
+        [line] = logged.output
+        self.assertIn("could not be written", line)
+        self.assertIn("KeyError", line)
 
 
 class _InstantOrchestrator:
