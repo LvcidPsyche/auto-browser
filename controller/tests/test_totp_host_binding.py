@@ -9,6 +9,9 @@ show `<input name="code">` and receive a valid second factor for the account.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import time
 import unittest
 from types import SimpleNamespace
@@ -25,13 +28,21 @@ from app.models import CreateSessionRequest, resolve_totp_hosts, totp_host_allow
 SECRET = "JBSWY3DPEHPK3PXP"
 # The code the success tests freeze, so that the keys typed are compared with it, in order.
 CODE = "492039"
+# RFC 6238's own SHA-1 key (160 bits), in base32.
+RFC_6238_SECRET = base64.b32encode(b"12345678901234567890").decode()
 
 
 def _frozen_code() -> object:
-    """pyotp, as the autofill uses it, answering CODE."""
-    return patch(
-        "app.browser.services.actions.pyotp", SimpleNamespace(TOTP=lambda _secret: SimpleNamespace(now=lambda: CODE))
-    )
+    """pyotp's TOTP, as the autofill uses it, answering CODE."""
+    return patch("app.browser.services.actions._SiteSecretTOTP", lambda _secret: SimpleNamespace(now=lambda: CODE))
+
+
+def _rfc_6238_code(secret: str, at: float) -> str:
+    """The 6-digit code for the base32 ``secret`` at ``at`` (seconds since the epoch): RFC 6238 with SHA-1 and a
+    30-second step, from the standard library, so that the library the autofill uses is checked, not trusted."""
+    digest = hmac.new(base64.b32decode(secret), (int(at) // 30).to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    return f"{(int.from_bytes(digest[offset : offset + 4], 'big') & 0x7FFFFFFF) % 1_000_000:06d}"
 
 
 class TotpHostResolutionTests(unittest.TestCase):
@@ -86,6 +97,7 @@ class TotpAutofillTests(unittest.TestCase):
         focused: bool | list[bool] = True,
         keys_take: float = 0.0,
         queued_at_check: int | None = None,
+        secret: str = SECRET,
     ) -> tuple[object, AsyncMock]:
         """``leaves_during``: the step ("search" for the field, "focus" for its click, "clear" for the field's
         fill(""), "clear by keys" for the Control+A and Delete made where that fill fails, as ``fill_fails`` has it,
@@ -138,7 +150,7 @@ class TotpAutofillTests(unittest.TestCase):
         typed = AsyncMock(wraps=service.type_text_human_like)
         keyboard = SimpleNamespace(press=AsyncMock(side_effect=press_key), type=AsyncMock(side_effect=type_key))
         session = SimpleNamespace(
-            page=SimpleNamespace(url=url, keyboard=keyboard), totp_secret=SECRET, totp_hosts=hosts
+            page=SimpleNamespace(url=url, keyboard=keyboard), totp_secret=secret, totp_hosts=hosts
         )
 
         def leave_during(step: str) -> None:
@@ -175,6 +187,29 @@ class TotpAutofillTests(unittest.TestCase):
         # are the code's, in order (item 29, staged F14).
         typed.assert_awaited_once()
         self.assertEqual("".join(self.typed_keys), CODE)
+
+    def assert_types_the_rfc_6238_code(self, secret: str) -> None:
+        """The autofill, with the library it computes the code with, types ``secret``'s RFC 6238 code."""
+        before = time.time()
+        self.run_autofill("https://login.example.com/2fa", hosts=("login.example.com",), secret=secret)
+        # The code of the 30-second step the autofill started in, or of the one it ended in. Not a frozen clock:
+        # patching the clock pyotp reads would tie the test to how one release of the library reads the time.
+        expected = {_rfc_6238_code(secret, before), _rfc_6238_code(secret, time.time())}
+        self.assertIn("".join(self.typed_keys), expected)
+
+    def test_the_reference_code_is_rfc_6238s(self) -> None:
+        # The RFC's own SHA-1 test vectors (Appendix B), as the last six of their eight digits.
+        self.assertEqual(_rfc_6238_code(RFC_6238_SECRET, 59), "287082")
+        self.assertEqual(_rfc_6238_code(RFC_6238_SECRET, 1111111109), "081804")
+
+    def test_a_secret_of_the_length_a_site_issued_gets_its_code(self) -> None:
+        # pyotp 2.12.1 refuses a secret under 112 bits by default, when the code's object is built, and many sites
+        # still issue 80-bit ones (16 base32 characters, as SECRET is). The autofill sets no minimum, and this holds
+        # it down to 40 bits. The RFC's own key is the control.
+        for secret, bits in (("JBSWY3DP", 40), (SECRET, 80), (RFC_6238_SECRET, 160)):
+            with self.subTest(bits=bits):
+                self.assertEqual(len(base64.b32decode(secret)) * 8, bits)
+                self.assert_types_the_rfc_6238_code(secret)
 
     def test_a_page_on_another_host_gets_nothing(self) -> None:
         for url in (

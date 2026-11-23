@@ -73,6 +73,15 @@ try:  # pragma: no cover - optional until dependency is installed in runtime ima
     import pyotp
 except Exception:  # pragma: no cover - graceful fallback for non-login test runs
     pyotp = None  # type: ignore[assignment]
+else:
+
+    class _SiteSecretTOTP(pyotp.TOTP):
+        """pyotp's TOTP with no minimum secret length (pyotp's default is 112 bits): many sites still issue 80-bit
+        secrets, and the autofill types the code for a valid base32 secret of any length, as before. The class
+        attribute is the one pyotp documents for subclasses to set."""
+
+        min_secret_length_bits = 0
+
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -2339,7 +2348,7 @@ class BrowserActionService:
         # Finding the field awaited the page, which may have navigated since.
         if not self._may_fill_totp(session):
             return None
-        code = pyotp.TOTP(session.totp_secret).now()
+        code = _SiteSecretTOTP(session.totp_secret).now()
         await self.focus_verified(session, locator, action="totp_fill")
         # So did the focus click: the pointer's moves, the pause and the press, whose navigation a click waits for.
         if not self._may_fill_totp(session):
