@@ -205,6 +205,8 @@ _HEADER = "import unittest\n\nimport pytest\n\nfrom tests._chromium import requi
 
 AS_SKIPPED, AS_EXPECTED = "skipped", "as an expected failure"
 
+UNDER_AN_XFAIL_MARK = '@requires_chromium\n@pytest.mark.xfail(reason="expected")\n'
+
 # Real-browser tests reported skipped other than by a plain skip in their setup or body, each run on its own: (source,
 # its outcome as `-v` prints it, and how it was reported, in which phase, and what pytest said, for _reported).
 REPORTED_SKIPPED = {
@@ -248,7 +250,6 @@ REPORTED_SKIPPED = {
         "call",
         "in setUp",
     ),
-    # pytest reports unittest's expectedFailure by calling pytest.xfail() itself.
     "unittest's expectedFailure": (
         "@requires_chromium\nclass Case(unittest.TestCase):\n"
         "    @unittest.expectedFailure\n    def test_case(self):\n        raise AssertionError\n",
@@ -257,13 +258,70 @@ REPORTED_SKIPPED = {
         "call",
         "",
     ),
+    "an xfail mark taking what the body raised": (
+        f"{UNDER_AN_XFAIL_MARK}def test_case():\n    raise AssertionError\n",
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "expected",
+    ),
+    "an xfail mark whose reason starts as pytest's for one not run": (
+        '@requires_chromium\n@pytest.mark.xfail(reason="[NOTRUN] a reason of its own")\n'
+        "def test_case():\n    raise AssertionError\n",
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        r"\[NOTRUN\] a reason of its own",
+    ),
     "an xfail mark over a fixture that raises": (
         '@pytest.fixture\ndef broken():\n    raise RuntimeError("setup broke")\n\n\n'
-        '@requires_chromium\n@pytest.mark.xfail(reason="expected")\ndef test_case(broken):\n    pass\n',
+        f"{UNDER_AN_XFAIL_MARK}def test_case(broken):\n    pass\n",
         "ERROR",
         AS_EXPECTED,
         "setup",
         r"expected\n(?:.*\n)*?E +RuntimeError: setup broke",  # pytest's own text follows: the fixture's traceback
+    ),
+    # pytest runs a TestCase's setUp and tearDown in its call phase, so neither is told from the method by phase.
+    "an xfail mark over a TestCase whose setUp raises": (
+        f"{UNDER_AN_XFAIL_MARK}class Case(unittest.TestCase):\n"
+        '    def setUp(self):\n        raise RuntimeError("setUp broke")\n\n    def test_case(self):\n        pass\n',
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "expected",
+    ),
+    "an xfail mark over a TestCase whose tearDown raises": (
+        f"{UNDER_AN_XFAIL_MARK}class Case(unittest.TestCase):\n"
+        '    def tearDown(self):\n        raise RuntimeError("tearDown broke")\n\n    def test_case(self):\n        pass\n',
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "expected",
+    ),
+    # The fixture's subtest is reported from a call phase of its own, and a test with a failed subtest fails too.
+    "an xfail mark over a fixture whose subtest raises": (
+        '@pytest.fixture\ndef checks(subtests):\n    with subtests.test("in a fixture"):\n'
+        '        raise RuntimeError("subtest broke")\n\n\n'
+        f"{UNDER_AN_XFAIL_MARK}def test_case(checks):\n    pass\n",
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "expected",
+    ),
+    "an xfail mark over an async test nothing runs": (
+        f"{UNDER_AN_XFAIL_MARK}async def test_case():\n    pass\n",
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "expected",
+    ),
+    "an xfail mark over a fixture whose teardown raises": (
+        '@pytest.fixture\ndef broken_after():\n    yield\n    raise RuntimeError("teardown broke")\n\n\n'
+        f"{UNDER_AN_XFAIL_MARK}def test_case(broken_after):\n    raise AssertionError\n",
+        "ERROR",
+        AS_EXPECTED,
+        "teardown",
+        "expected",
     ),
     "a skip in teardown": (
         '@pytest.fixture\ndef skips_after():\n    yield\n    pytest.skip("skipped in teardown")\n\n\n'
@@ -283,8 +341,7 @@ REPORTED_SKIPPED = {
     ),
 }
 
-# An xfail mark takes what the test raises, whatever its reason says.
-XFAIL_THAT_RAISES = "@requires_chromium\n@pytest.mark.xfail(reason={reason!r})\ndef test_case():\n    raise AssertionError\n"
+XPASS = f"{UNDER_AN_XFAIL_MARK}def test_case():\n    pass\n"
 
 SKIPPED_MODULE = """
 import pytest
@@ -313,7 +370,7 @@ def _run(tmp_path: Path, name: str, text: str, *options: str, required: str | No
     (tmp_path / name).write_text(text, encoding="utf-8")
     result = _child(_pytest_on(tmp_path, *PLUGIN, "-v", *options), chromium=sys.executable, required=required)
     # `-v` prints each node id relative to the working directory, the controller, so the tree's path comes before it.
-    outcomes = re.findall(rf"{re.escape(name)}::([\w:]+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL)", result.stdout)
+    outcomes = re.findall(rf"{re.escape(name)}::([\w:]+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)", result.stdout)
     return result.returncode, result.stdout + result.stderr, dict(outcomes)
 
 
@@ -376,15 +433,12 @@ def test_with_the_switch_each_way_of_being_reported_skipped_fails_the_run(tmp_pa
     assert re.search(_reported(said, phase, detail), output), output
 
 
-@pytest.mark.parametrize("reason", ["expected", "[NOTRUN] a reason of its own"])
-def test_with_the_switch_an_xfail_mark_that_takes_what_the_test_raised_stays_as_it_is(
-    tmp_path: Path, reason: str
-) -> None:
-    source = f"{_HEADER}\n\n{XFAIL_THAT_RAISES.format(reason=reason)}"
-    returncode, output, outcomes = _run(tmp_path, "test_case.py", source, required="1")
+def test_with_the_switch_a_real_browser_test_that_passes_under_an_xfail_mark_leaves_the_run_green(tmp_path: Path) -> None:
+    """What is not reported skipped is left as it is: a non-strict xfail that passed is reported passed (XPASS)."""
+    returncode, output, outcomes = _run(tmp_path, "test_case.py", f"{_HEADER}\n\n{XPASS}", required="1")
 
     assert returncode == pytest.ExitCode.OK, output
-    assert outcomes == {"test_case": "XFAIL"}, output
+    assert outcomes == {"test_case": "XPASS"}, output
 
 
 def _beside_a_skipped_module(

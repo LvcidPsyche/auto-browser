@@ -7,9 +7,8 @@ its parameters, so every case of one test function lands in the same shard and t
 test exactly once.
 
 A shard that skipped its tests would pass all the same. So where they must run (AUTO_BROWSER_REQUIRE_CHROMIUM is set,
-or a shard is given), a real-browser test reported skipped fails, and so does anything skipped at collection. The one
-report kept is an expected failure from the call phase whose exception is not pytest.xfail()'s: an xfail mark taking
-what the test raised.
+or a shard is given), a real-browser test reported skipped fails, an expected failure included (no report tells whether
+the test it stands for ran), and so does anything skipped at collection.
 """
 
 from __future__ import annotations
@@ -95,22 +94,16 @@ def pytest_make_collect_report(
 
 
 @pytest.hookimpl(wrapper=True)
-def pytest_runtest_makereport(
-    item: pytest.Item, call: pytest.CallInfo[None]
-) -> Generator[None, pytest.TestReport, pytest.TestReport]:
-    """Turn a real-browser test reported skipped into a failure where they must run, as pytest turns a strict xfail
-    that passed into one. Only an expected failure that an xfail mark took from the call phase stays as it is."""
+def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Turn a real-browser test reported skipped, an expected failure included, into a failure where they must run,
+    as pytest turns a strict xfail that passed into one."""
     report = yield
-    if (
-        report.skipped
-        and not _marked_failure_of_the_call(report, call)
-        and is_real_browser(item)
-        and _must_run(item.config)
-    ):
+    if report.skipped and is_real_browser(item) and _must_run(item.config):
         if hasattr(report, "wasxfail"):
             # pytest's own text (the traceback of what was raised) says where and why, as a skip's location does.
             said, detail = "as an expected failure", f"{report.wasxfail}\n{report.longrepr}"
-            # pytest counts a report that keeps its wasxfail as an expected failure, not as a failure of the run.
+            # A failed report that keeps its wasxfail is printed as a failure or an error and counted in the summary, but
+            # pytest leaves it out of the run's exit status.
             del report.wasxfail
         else:
             path, lineno, reason = report.longrepr  # a skip: where it was skipped, and why
@@ -121,14 +114,3 @@ def pytest_runtest_makereport(
         )
         report.outcome = "failed"
     return report
-
-
-def _marked_failure_of_the_call(report: pytest.TestReport, call: pytest.CallInfo[None]) -> bool:
-    """Whether the report is an expected failure from the call phase whose exception is not pytest.xfail()'s, which is
-    how pytest reports an xfail mark taking what the call raised. pytest.xfail() is not one, wherever it is called: by
-    the test, by pytest for unittest's expectedFailure, or by pytest to stop an xfail(run=False) before the test runs."""
-    return (
-        hasattr(report, "wasxfail")
-        and call.when == "call"
-        and not isinstance(call.excinfo.value, pytest.xfail.Exception)
-    )
