@@ -125,14 +125,14 @@ def test_legs_that_are_not_a_whole_set_fail(check, legs: list[tuple[str, str]], 
     "leg, shown",
     [
         (("real-browser-tests (1/4)\nreal-browser-tests (5/4)", "success"), "real-browser-tests (1/4)\\nreal-browser-tests"),
-        (("real-browser-tests (4/4)", "failure\nreal-browser-tests (4/4): success"), "failure\\nreal-browser-tests"),
+        (("real-browser-tests (4/4)", "failure\rreal-browser-tests (4/4): success"), "failure\\rreal-browser-tests"),
     ],
     ids=["a name", "a conclusion"],
 )
 def test_a_line_break_in_what_the_listing_says_keeps_the_failure_to_one_line(check, leg: tuple, shown: str) -> None:
     line = _failure(check, _listing(*FOUR[:3], leg))
 
-    assert "\n" not in line and shown in line, line
+    assert line.isprintable() and shown in line, line
 
 
 @pytest.mark.parametrize("total", [150, 2])

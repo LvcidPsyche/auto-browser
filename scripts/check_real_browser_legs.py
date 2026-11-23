@@ -8,7 +8,8 @@ leg that was cancelled before it started, so each leg is judged as well.
 Exit 0, printing each leg with its conclusion, only when the aggregate is success, the listing is whole (it holds as
 many jobs as its total_count says), the legs (the jobs whose names start "real-browser-tests (") are named
 real-browser-tests (1/N) to (N/N) once each, N their number, and every leg succeeded. A failed check exits 1, with
-one line that says what failed and each leg's conclusion; a call without the one argument is a usage error, exit 2.
+one line that says what failed and each leg's conclusion, or, when the listing cannot be read, why not; a call
+without the one argument is a usage error, exit 2.
 """
 
 from __future__ import annotations
