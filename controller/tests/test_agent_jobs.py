@@ -892,6 +892,79 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
             (final.status, final.error, len(final.checkpoints)), ("interrupted", "agent_job_interrupted", 1)
         )
 
+    async def _shut_down_as_a_runs_end_is_written(
+        self, result: AgentRunResult, end: str
+    ) -> tuple[AgentJobRecord, AgentJobRecord, list[tuple[str, str]]]:
+        """Shut down while a run that gave `result` has its end (`end`) written: the record at shutdown's return and
+        after, and the job's audit events with their statuses."""
+        audit = AsyncMock()
+        self.orchestrator.run = AsyncMock(return_value=result)
+        await self._restart_with(self.orchestrator, audit)
+        held = _HeldStoreThread(self.queue.store, "_write_sync", when=lambda record: record.status == end)
+        job = await self.queue.enqueue_run("session-22", AgentRunRequest(provider="openai", goal="stopped as it ends"))
+
+        async def shut_down() -> AgentJobRecord:
+            await self.queue.shutdown()
+            return await self.queue.store.get(job["id"])
+
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            stopping = asyncio.create_task(shut_down())
+            await asyncio.wait({stopping}, timeout=_A_MOMENT_SECONDS)  # the shutdown has stopped the job
+        finally:
+            await held.let_go()
+        at_return = await asyncio.wait_for(stopping, _HELD_THREAD_SECONDS)
+        final = await self.queue.store.get(job["id"])
+        events = [
+            (call.kwargs["event_type"], call.kwargs["status"])
+            for call in audit.append.await_args_list
+            if call.kwargs["job_id"] == job["id"]
+        ]
+        return at_return, final, events
+
+    async def test_a_run_stopped_by_shutdown_as_its_completion_is_written_keeps_it_and_its_result(self) -> None:
+        # The end landed, and the stop was then written over it: the record read interrupted, the run's result was
+        # gone, and the job was offered for a resume that would run it again.
+        result = AgentRunResult(
+            provider="openai", model="test-model", goal="stopped as it ends", status="done", steps=[], final_session={}
+        )
+
+        at_return, final, events = await self._shut_down_as_a_runs_end_is_written(result, "completed")
+
+        for record in (at_return, final):
+            self.assertEqual((record.status, record.result, record.error), ("completed", result.model_dump(), None))
+        self.assertFalse(AgentJobQueue._public_record(final)["resumable"])
+        self.assertEqual(events[-1], ("agent_job_finished", "completed"))
+        self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
+
+    async def test_a_run_stopped_by_shutdown_as_its_failure_is_written_keeps_it_and_its_result(self) -> None:
+        step = AgentStepResult(
+            provider="openai",
+            model="test-model",
+            goal="stopped as it ends",
+            status="error",
+            observation={},
+            decision={},
+            error="the page would not load",
+        )
+        result = AgentRunResult(
+            provider="openai",
+            model="test-model",
+            goal="stopped as it ends",
+            status="error",
+            steps=[step],
+            final_session={},
+        )
+
+        at_return, final, events = await self._shut_down_as_a_runs_end_is_written(result, "failed")
+
+        for record in (at_return, final):
+            self.assertEqual(
+                (record.status, record.result, record.error), ("failed", result.model_dump(), "the page would not load")
+            )
+        self.assertEqual(events[-1], ("agent_job_finished", "failed"))
+        self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
+
     async def test_a_queued_job_does_not_run_when_its_cancel_is_cancelled_as_the_cancel_is_written(self) -> None:
         # The cancelled cancel let go of the store's lock while its thread went on: a worker took the job and ran it
         # before the thread wrote it cancelled.
