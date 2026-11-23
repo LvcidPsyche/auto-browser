@@ -7,10 +7,10 @@ All notable changes to auto-browser are documented here.
 ### Fixed
 
 - **A job's record no longer changes after the controller has recorded its stop.** When the controller stopped while a
-  job's record was being written (a step's checkpoint, the job's start or its end), that write could land after the
-  stop had been recorded: the job was then listed as running until the next start, or a finished job's record
-  disagreed with its last audit event. Each job-store call now finishes before the next begins, and a stop waits for
-  the one under way.
+  job's record was being written (a step's checkpoint, or the job's end), that write could land after the stop had
+  been recorded: the job was then listed as running until the next start, or a finished job's record disagreed with
+  its last audit event. Each job-store call now finishes before the next begins, and a stop waits for the one under
+  way.
 
 ## [1.19.0] — 2026-11-22
 
