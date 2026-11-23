@@ -950,6 +950,41 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((behind.status, behind.error), ("interrupted", "agent_job_interrupted"))
         self.assertTrue(enqueue.cancelled(), "the enqueue swallowed its own cancellation")
 
+    async def test_every_store_call_cancelled_in_its_thread_holds_the_lock_until_the_thread_has_ended(self) -> None:
+        # One call that let go of the lock when cancelled would let the next read the record while its thread went on
+        # to write it, as each of these but create did.
+        store = self.queue.store
+        request = AgentRunRequest(provider="openai", goal="every store call").model_dump()
+        checkpoint = AgentJobCheckpoint(step_index=1, created_at=utc_now(), status="acted")
+        calls = {
+            "_list_sync": lambda record: store.list(),
+            "_get_sync": lambda record: store.get(record.id),
+            "_create_sync": lambda record: store.create(session_id="session-20", kind="agent_run", request=request),
+            "_update_sync": lambda record: store.update(record),
+            "_start_queued_sync": lambda record: store.start_queued(record.id),
+            "_append_checkpoint_sync": lambda record: store.append_checkpoint(record.id, checkpoint),
+            "_finish_sync": lambda record: store.finish(record.id, status="completed", result=None, error=None),
+            "_finish_cancelled_sync": lambda record: store.finish_cancelled(record.id, user_cancelled=False),
+            "_request_cancel_sync": lambda record: store.request_cancel(record.id),
+            "_interrupt_queued_sync": lambda record: store.interrupt_queued(record.id),
+            "_discard_sync": lambda record: store.discard(record.id),
+        }
+        for name, call in calls.items():
+            with self.subTest(store_call=name):
+                record = await store.create(session_id="session-20", kind="agent_run", request=request)
+                held = _HeldStoreThread(store, name)
+                task = asyncio.create_task(call(record))
+                try:
+                    self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+                    task.cancel()
+                    await asyncio.wait({task}, timeout=_A_MOMENT_SECONDS)
+                    self.assertFalse(task.done(), "the cancelled call ended while its thread was still running")
+                    self.assertTrue(store._lock.locked(), "the cancelled call let go of the store's lock")
+                finally:
+                    await held.let_go()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
 
 class _InstantOrchestrator:
     """A run that finishes at once and records the goals in the order it ran them."""
