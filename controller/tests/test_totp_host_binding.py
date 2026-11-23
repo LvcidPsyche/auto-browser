@@ -204,8 +204,8 @@ class TotpAutofillTests(unittest.TestCase):
 
     def test_a_secret_of_the_length_a_site_issued_gets_its_code(self) -> None:
         # pyotp 2.12.1 refuses a secret under 112 bits by default, when the code's object is built, and many sites
-        # still issue 80-bit ones (16 base32 characters, as SECRET is). The autofill types the code for whatever
-        # secret the site issued, so it keeps no minimum at all: 40 bits too. The RFC's own key is the control.
+        # still issue 80-bit ones (16 base32 characters, as SECRET is). The autofill sets no minimum, and this holds
+        # it down to 40 bits. The RFC's own key is the control.
         for secret, bits in (("JBSWY3DP", 40), (SECRET, 80), (RFC_6238_SECRET, 160)):
             with self.subTest(bits=bits):
                 self.assertEqual(len(base64.b32decode(secret)) * 8, bits)

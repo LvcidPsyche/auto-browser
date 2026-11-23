@@ -10,9 +10,9 @@ All notable changes to auto-browser are documented here.
   pydantic-settings 2.16.3, pyotp 2.12.1 and annotated-doc 0.0.7. Development and test tools: pytest-asyncio 1.5.0
   (`>=1.5.0,<1.6`), ruff 0.17.5, coverage 7.17.3, cachecontrol 0.15.0, filelock 4.2.12 and platformdirs 4.14.8.
   `controller/constraints.txt` is resolved again under a cutoff of 2026-11-20.
-- One-time codes are typed for a secret of any length, as before. pyotp 2.12.1 refuses a secret under 112 bits by
-  default, and many sites still issue 80-bit ones (16 base32 characters): the autofill sets that minimum to zero
-  through the class attribute pyotp documents for it, and the code it types is pyotp's own.
+- One-time codes are still typed for 80-bit secrets (16 base32 characters), which many sites issue and pyotp 2.12.1
+  refuses by default (its minimum is 112 bits): the autofill sets that minimum to zero through the class attribute
+  pyotp documents for it, and the code it types is pyotp's own.
 
 ## [1.19.0] — 2026-11-22
 
