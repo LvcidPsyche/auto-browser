@@ -109,7 +109,7 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Run this leg's shard of the real-browser tests
         # --real-browser-shard keeps this shard's real-browser tests and deselects the rest of the suite; a
-        # real-browser test that does not run fails, and so does a test module skipped at collection
+        # real-browser test reported skipped fails, and so does anything skipped at collection
         # (controller/tests/_real_browser_shards.py). AUTO_BROWSER_REQUIRE_CHROMIUM makes a missing browser fail as
         # pytest starts, with the fix in its message. No coverage gate: a shard runs a part of the suite.
         env:
@@ -121,26 +121,28 @@ jobs:
   real-browser-tests-done:
     # One check for branch protection to require, whatever the number of legs. It runs always(): a job whose needs
     # failed is skipped, and a required check treats a skipped job as passed; with !cancelled() instead, a run
-    # cancelled after the host legs went green would leave this check skipped too. Besides the aggregate result it
-    # judges each leg's own conclusion, read from this run attempt's jobs, since a leg cancelled because no runner
-    # picked it up has been seen to leave the aggregate at success.
+    # cancelled after the host legs went green would leave this check skipped too. scripts/check_real_browser_legs.py
+    # judges each leg's own conclusion, read from this run attempt's jobs, as well as the aggregate result, since a
+    # leg cancelled because no runner picked it up has been seen to leave the aggregate at success.
     if: always()
     needs: real-browser-tests
     runs-on: ubuntu-latest
     permissions:
       actions: read
+      contents: read
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Every leg of the real-browser tests passed
+        # bash by name, which adds pipefail (the default is bash -e alone), so a failed API call fails the step.
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          LEGS_RESULT: ${{ needs.real-browser-tests.result }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '
-            [.jobs[] | select(.name | startswith("real-browser-tests ("))]
-            | if length == 0 then error("this run attempt has no real-browser-tests leg")
-              elif all(.conclusion == "success") then .[] | "\(.name): \(.conclusion)"
-              else error("not every real-browser-tests leg succeeded: \(map("\(.name): \(.conclusion)") | join(", "))")
-              end'
-          test "${{ needs.real-browser-tests.result }}" = success
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            | python3 scripts/check_real_browser_legs.py "$LEGS_RESULT"
 
   langchain-tests:
     needs: lint
