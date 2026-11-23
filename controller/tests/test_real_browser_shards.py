@@ -201,53 +201,90 @@ def test_marked_that_clears_the_environment_and_skips():
 """
 
 
-_HEADER = "import pytest\n\nfrom tests._chromium import requires_chromium\n"
+_HEADER = "import unittest\n\nimport pytest\n\nfrom tests._chromium import requires_chromium\n"
 
-# Real-browser tests reported skipped other than by a plain skip in their setup or body, each run on its own:
-# (source, its outcome as `-v` prints it, the phase it is reported from, and what the failure must say).
+AS_SKIPPED, AS_EXPECTED = "skipped", "as an expected failure"
+
+# Real-browser tests reported skipped other than by a plain skip in their setup or body, each run on its own: (source,
+# its outcome as `-v` prints it, and how it was reported, in which phase, and what pytest said, for _reported).
 REPORTED_SKIPPED = {
     "an xfail marked not to run": (
         '@requires_chromium\n@pytest.mark.xfail(run=False, reason="never run")\n'
         "def test_case():\n    raise AssertionError\n",
         "ERROR",
+        AS_EXPECTED,
         "setup",
-        r"as an expected failure in its setup phase, [^\n]*: \[NOTRUN\] never run",
+        r"\[NOTRUN\] never run",
     ),
     "an xfail raised by a fixture": (
         '@pytest.fixture\ndef xfails():\n    pytest.xfail("in a fixture")\n\n\n'
         "@requires_chromium\ndef test_case(xfails):\n    raise AssertionError\n",
         "ERROR",
+        AS_EXPECTED,
         "setup",
-        r"as an expected failure in its setup phase, [^\n]*: in a fixture",
+        "in a fixture",
     ),
     "an xfail marked not to run by a fixture": (
         "@pytest.fixture\ndef not_run(request):\n"
         '    request.applymarker(pytest.mark.xfail(run=False, reason="applied by a fixture"))\n\n\n'
         "@requires_chromium\ndef test_case(not_run):\n    raise AssertionError\n",
         "FAILED",
+        AS_EXPECTED,
         "call",
-        r"as an expected failure in its call phase, [^\n]*: \[NOTRUN\] applied by a fixture",
+        r"\[NOTRUN\] applied by a fixture",
+    ),
+    "pytest.xfail() in the body": (
+        '@requires_chromium\ndef test_case():\n    pytest.xfail("in the body")\n',
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "in the body",
+    ),
+    "pytest.xfail() in the setUp of a marked TestCase": (
+        "@requires_chromium\nclass Case(unittest.TestCase):\n"
+        '    def setUp(self):\n        pytest.xfail("in setUp")\n\n    def test_case(self):\n        pass\n',
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "in setUp",
+    ),
+    # pytest reports unittest's expectedFailure by calling pytest.xfail() itself.
+    "unittest's expectedFailure": (
+        "@requires_chromium\nclass Case(unittest.TestCase):\n"
+        "    @unittest.expectedFailure\n    def test_case(self):\n        raise AssertionError\n",
+        "FAILED",
+        AS_EXPECTED,
+        "call",
+        "",
+    ),
+    "an xfail mark over a fixture that raises": (
+        '@pytest.fixture\ndef broken():\n    raise RuntimeError("setup broke")\n\n\n'
+        '@requires_chromium\n@pytest.mark.xfail(reason="expected")\ndef test_case(broken):\n    pass\n',
+        "ERROR",
+        AS_EXPECTED,
+        "setup",
+        r"expected\n(?:.*\n)*?E +RuntimeError: setup broke",  # pytest's own text follows: the fixture's traceback
     ),
     "a skip in teardown": (
         '@pytest.fixture\ndef skips_after():\n    yield\n    pytest.skip("skipped in teardown")\n\n\n'
         "@requires_chromium\ndef test_case(skips_after):\n    pass\n",
         "ERROR",
+        AS_SKIPPED,
         "teardown",
-        r"skipped in its teardown phase, [^\n]*: \S+test_case\.py:\d+: Skipped: skipped in teardown",
+        r"\S+test_case\.py:\d+: Skipped: skipped in teardown",
     ),
     "an xfail in teardown": (
         '@pytest.fixture\ndef xfails_after():\n    yield\n    pytest.xfail("in teardown")\n\n\n'
         "@requires_chromium\ndef test_case(xfails_after):\n    pass\n",
         "ERROR",
+        AS_EXPECTED,
         "teardown",
-        r"as an expected failure in its teardown phase, [^\n]*: in teardown",
+        "in teardown",
     ),
 }
 
-STRICT_XFAIL_THAT_RUNS = (
-    '@requires_chromium\n@pytest.mark.xfail(reason="expected", strict=True)\n'
-    "def test_case():\n    raise AssertionError\n"
-)
+# An xfail mark takes what the test raises, whatever its reason says.
+XFAIL_THAT_RAISES = "@requires_chromium\n@pytest.mark.xfail(reason={reason!r})\ndef test_case():\n    raise AssertionError\n"
 
 SKIPPED_MODULE = """
 import pytest
@@ -264,8 +301,11 @@ def test_never_collected():
 
 RUNS = "from tests._chromium import requires_chromium\n\n\n@requires_chromium\ndef test_runs():\n    pass\n"
 
-# The start of the failure a real-browser test reported skipped is turned into, up to its kind.
-REPORTED = r"a real-browser test was reported "
+
+def _reported(said: str, phase: str, detail: str) -> str:
+    """A regex for the line of the failure a real-browser test reported skipped is turned into: reported as `said`
+    (AS_SKIPPED or AS_EXPECTED) in `phase`, then `detail` (a regex for what pytest said) up to the end of a line."""
+    return rf"a real-browser test was reported {said} in its {phase} phase, [^\n]*: {detail}\n"
 
 
 def _run(tmp_path: Path, name: str, text: str, *options: str, required: str | None) -> tuple[int, str, dict[str, str]]:
@@ -273,7 +313,7 @@ def _run(tmp_path: Path, name: str, text: str, *options: str, required: str | No
     (tmp_path / name).write_text(text, encoding="utf-8")
     result = _child(_pytest_on(tmp_path, *PLUGIN, "-v", *options), chromium=sys.executable, required=required)
     # `-v` prints each node id relative to the working directory, the controller, so the tree's path comes before it.
-    outcomes = re.findall(rf"{re.escape(name)}::(\w+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL)", result.stdout)
+    outcomes = re.findall(rf"{re.escape(name)}::([\w:]+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL)", result.stdout)
     return result.returncode, result.stdout + result.stderr, dict(outcomes)
 
 
@@ -295,8 +335,7 @@ def test_with_the_switch_a_real_browser_test_that_skips_fails_the_run(tmp_path: 
         ("call", "skipped inside"),
         ("call", "skipped with the environment cleared"),
     ):
-        expected = rf"{REPORTED}skipped in its {phase} phase, [^\n]*: \S+test_skips\.py:\d+: Skipped: {reason}\n"
-        assert re.search(expected, output), reason
+        assert re.search(_reported(AS_SKIPPED, phase, rf"\S+test_skips\.py:\d+: Skipped: {reason}"), output), reason
 
 
 def test_without_the_rule_a_real_browser_test_that_skips_leaves_the_run_green(tmp_path: Path) -> None:
@@ -328,17 +367,20 @@ def test_the_shard_option_holds_the_rule_without_the_switch(tmp_path: Path) -> N
 @pytest.mark.parametrize("case", list(REPORTED_SKIPPED))
 def test_with_the_switch_each_way_of_being_reported_skipped_fails_the_run(tmp_path: Path, case: str) -> None:
     """Each in a run of its own, so that its exit code shows the one test counts as a failure; the failure names the
-    phase and says what pytest reported, no more."""
-    source, outcome, phase, said = REPORTED_SKIPPED[case]
+    phase and says what pytest reported."""
+    source, outcome, said, phase, detail = REPORTED_SKIPPED[case]
     returncode, output, outcomes = _run(tmp_path, "test_case.py", f"{_HEADER}\n\n{source}", required="1")
 
     assert returncode == pytest.ExitCode.TESTS_FAILED, output
-    assert outcomes == {"test_case": outcome}, output
-    assert re.search(rf"{REPORTED}{said}\n", output), output
+    assert list(outcomes.values()) == [outcome], output
+    assert re.search(_reported(said, phase, detail), output), output
 
 
-def test_with_the_switch_a_strict_expected_failure_whose_body_ran_stays_as_it_is(tmp_path: Path) -> None:
-    source = f"{_HEADER}\n\n{STRICT_XFAIL_THAT_RUNS}"
+@pytest.mark.parametrize("reason", ["expected", "[NOTRUN] a reason of its own"])
+def test_with_the_switch_an_xfail_mark_that_takes_what_the_test_raised_stays_as_it_is(
+    tmp_path: Path, reason: str
+) -> None:
+    source = f"{_HEADER}\n\n{XFAIL_THAT_RAISES.format(reason=reason)}"
     returncode, output, outcomes = _run(tmp_path, "test_case.py", source, required="1")
 
     assert returncode == pytest.ExitCode.OK, output
