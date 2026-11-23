@@ -76,10 +76,9 @@ except Exception:  # pragma: no cover - graceful fallback for non-login test run
 else:
 
     class _SiteSecretTOTP(pyotp.TOTP):
-        """pyotp's TOTP for the secret as the site issued it. pyotp refuses a secret under 112 bits by default, when
-        the object is built, and many sites still issue 80-bit ones; the autofill types their codes all the same. The
-        floor is lowered through the class attribute pyotp documents for subclasses to override, and nothing else:
-        the code computed is the library's own."""
+        """pyotp's TOTP with no minimum secret length (pyotp's default is 112 bits): many sites still issue 80-bit
+        secrets, and the autofill types the code for whatever secret the site issued. The class attribute is the
+        one pyotp documents for subclasses to set."""
 
         min_secret_length_bits = 0
 
