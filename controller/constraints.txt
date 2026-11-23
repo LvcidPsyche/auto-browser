@@ -37,7 +37,7 @@ colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
     # via
     #   build
     #   pytest
-coverage==7.17.3
+coverage==7.17.4
     # via pytest-cov
 cryptography==50.0.2
     # via -r requirements.txt
@@ -171,7 +171,7 @@ respx==0.23.1
     # via -r requirements-dev.txt
 rich==15.0.0
     # via pip-audit
-ruff==0.17.5
+ruff==0.17.6
     # via -r requirements-dev.txt
 sortedcontainers==2.4.0
     # via cyclonedx-python-lib
