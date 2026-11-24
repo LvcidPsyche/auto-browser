@@ -202,9 +202,11 @@ def test_another_chromium_on_the_npm_side_fails_naming_both(tmp_path: Path, entr
         assert value in named[0], report
 
 
-@pytest.mark.parametrize(
-    ("side", "install"), [("pip", "pip install playwright -c controller/constraints.txt"), ("npm", "npm ci")]
-)
+# What each side's message says to install.
+WHAT_TO_INSTALL = [("pip", "pip install playwright -c controller/constraints.txt"), ("npm", "npm ci")]
+
+
+@pytest.mark.parametrize(("side", "install"), WHAT_TO_INSTALL)
 def test_a_missing_browsers_json_fails_saying_what_to_install(tmp_path: Path, side: str, install: str) -> None:
     code, stdout, report = _installed(tmp_path, plant=tuple({"pip", "npm"} - {side}))
 
@@ -212,15 +214,18 @@ def test_a_missing_browsers_json_fails_saying_what_to_install(tmp_path: Path, si
     assert "browsers.json" in report and install in report, report
 
 
-@pytest.mark.parametrize("side", ["pip", "npm"])
+@pytest.mark.parametrize(("side", "install"), WHAT_TO_INSTALL)
 @pytest.mark.parametrize("entry", [CHROMIUM, SHELL], ids=["chromium", "headless-shell"])
-def test_a_browsers_json_without_the_entry_fails_naming_it(tmp_path: Path, side: str, entry: dict) -> None:
+def test_a_browsers_json_without_the_entry_fails_naming_it_and_what_to_install(
+    tmp_path: Path, side: str, install: str, entry: dict
+) -> None:
     entries = [item for item in (CHROMIUM, SHELL, FIREFOX) if item["name"] != entry["name"]]
 
     code, _, report = _installed(tmp_path, **{side: entries})
 
     assert code == 1
-    assert f"no {entry['name']!r} entry" in report, report
+    named = [line for line in report.splitlines() if f"no {entry['name']!r} entry" in line and install in line]
+    assert len(named) == 1, report
 
 
 @pytest.mark.parametrize("sides", [("pip", "npm"), ("npm",)], ids=["both-sides", "npm-side"])
@@ -311,10 +316,10 @@ def test_without_pip_browsers_the_installed_check_compares_the_installed_driver(
 ) -> None:
     """As CI runs it, with no --pip-browsers: the pip side is the installed driver's file, never npm's own, and no pip
     Playwright fails."""
-    pip_browsers = _pip_browsers(tmp_path)
-    _plant_browsers(pip_browsers, [{**CHROMIUM, "revision": "1251"}, SHELL])
+    installed = _pip_browsers(tmp_path) if driver == "another-chromium" else None
+    if installed:
+        _plant_browsers(installed, [{**CHROMIUM, "revision": "1251"}, SHELL])
     _plant_browsers(_node_modules(tmp_path) / "playwright-core" / "browsers.json", [CHROMIUM, SHELL])
-    installed = pip_browsers if driver == "another-chromium" else None
     monkeypatch.setattr(check_playwright_pins, "pip_driver_browsers", lambda: installed)
 
     code, stdout, report = _main(["--installed", "--node-modules", str(_node_modules(tmp_path))])
@@ -335,8 +340,9 @@ def _step(job: dict, runs: str) -> dict:
     return steps[0]
 
 
-# The installed check's step runs these lines and nothing else: `|| true`, an `echo` or a dropped install would each
-# keep the job green while the check never fails it.
+# The installed check's step runs these lines and nothing else. With `|| true` or an `echo` the check could not fail
+# the job, and an install not held to controller/constraints.txt could bring a pip Playwright of npm's build while the
+# pinned one carries another; without the install the check fails, finding no pip Playwright.
 INSTALLED_CHECK_RUN = [
     "python -m pip install playwright -c controller/constraints.txt",
     "python scripts/check_playwright_pins.py --installed",
@@ -348,9 +354,9 @@ JOB_KEYS_THAT_UNDO_A_STEP = {"if", "continue-on-error", "defaults"}
 
 @needs_the_workflow
 def test_ci_checks_the_installed_chromium_after_browser_nodes_npm_ci() -> None:
-    """The lint job reads the pins only; the job that installs browser-node's packages compares the browsers. The step
-    is its name and its run lines only (no if, continue-on-error or shell of its own), and its job carries nothing that
-    lets it fail unseen."""
+    """The job that runs browser-node's `npm ci` runs the installed check after it, in a step of a name and
+    INSTALLED_CHECK_RUN's lines only, and the job has none of JOB_KEYS_THAT_UNDO_A_STEP. This holds that step and that
+    job as written."""
     jobs = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     installing = [
         job
@@ -369,4 +375,5 @@ def test_ci_checks_the_installed_chromium_after_browser_nodes_npm_ci() -> None:
     assert steps.index(check) > npm_ci
     assert set(check) == {"name", "run"}, check
     assert check["run"].splitlines() == INSTALLED_CHECK_RUN, check["run"]
-    assert not JOB_KEYS_THAT_UNDO_A_STEP & set(job), {key: job[key] for key in JOB_KEYS_THAT_UNDO_A_STEP & set(job)}
+    undo = JOB_KEYS_THAT_UNDO_A_STEP & job.keys()
+    assert not undo, {key: job[key] for key in undo}

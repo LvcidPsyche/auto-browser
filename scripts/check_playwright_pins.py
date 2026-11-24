@@ -201,11 +201,12 @@ def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str, obje
     for name in CHROMIUM_ENTRIES:
         entry = entries.get(name)
         if entry is None:
-            raise _Unreadable(f"{path} has no {name!r} entry")
+            raise _Unreadable(f"{path} has no {name!r} entry; {install}")
         for field in _BUILD_FIELDS:
             if not isinstance(entry.get(field), str) or not entry[field].strip():
                 raise _Unreadable(f"{path} has a {name!r} entry without a readable {field} ({entry!r}); {install}")
-        builds[name] = (entry["revision"], entry["browserVersion"], entry.get(_OVERRIDES) or None)
+        revision, version = (entry[field] for field in _BUILD_FIELDS)
+        builds[name] = (revision, version, entry.get(_OVERRIDES) or None)
     return builds
 
 
