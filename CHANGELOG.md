@@ -15,10 +15,23 @@ All notable changes to auto-browser are documented here.
   pydantic-settings 2.16.3, pyotp 2.12.1, annotated-doc 0.0.7, certifi 2026.11.20 and PyYAML 6.0.4. Development
   and test tools: pytest-asyncio 1.5.0 (`>=1.5.0,<1.6`), ruff 0.17.6, coverage 7.17.4, cachecontrol 0.15.0,
   filelock 4.2.12 and platformdirs 4.14.8. `controller/constraints.txt` is resolved again under a cutoff of
-  2026-11-21.
+  2026-11-21 06:00 UTC, the one its header names.
 - One-time codes are still typed for 80-bit secrets (16 base32 characters), which many sites issue and pyotp 2.12.1
   refuses by default (its minimum is 112 bits): the autofill sets that minimum to zero through the class attribute
   pyotp documents for it, and the code it types is pyotp's own.
+- **The packages are built with the build tools the repository pins.** `controller/constraints.txt` now pins the two
+  build backends the packages name, setuptools 84.2.1 and hatchling 1.33.0, and what hatchling needs (pathspec 1.1.1,
+  tomlkit 0.15.2 and trove-classifiers 2026.9.21.13 are new to it), through a third input,
+  `controller/requirements-build.txt`, which also names pip; it already pinned build 1.6.1 and pip 26.3. The release
+  workflow and CI's `package-build` job install build, and the pip that build installs each backend with, under that
+  file, and they and the release audit hand it to every build with build's `--dependency-constraints-txt`, which holds
+  the backend each build installs to the version the file pins; before, each build took the newest release its
+  `pyproject.toml`'s floor allowed. Measured on the three published packages with a copy of the file that pins each
+  backend one release back: their builds took the older backend with the option and the newest without it. After the
+  last build, `scripts/check_wheel_build_tools.py` fails unless the build and pip installed in the Python that ran the
+  builds are the versions the file pins, and the backend and version each wheel names in its `WHEEL` file are the ones
+  it pins. The release workflow runs it before the artifact upload, so another build or pip, or a wheel built with
+  another backend version, stops the release before anything is uploaded to PyPI.
 
 ### Fixed
 

@@ -150,7 +150,8 @@ def main() -> int:
     # installs pip, wheel and setuptools unpinned. pip-audit reads each line's markers for the host it runs on, so it
     # is given the lines the image installs (IMAGE_MARKER_ENVIRONMENT), without their markers: from any host it audits
     # what CI's dependency-audit job, on Linux and Python 3.11, audits.
-    lock = (ROOT / "controller" / "constraints.txt").read_text(encoding="utf-8")
+    constraints = ROOT / "controller" / "constraints.txt"
+    lock = constraints.read_text(encoding="utf-8")
     image_pins = _image_pins(lock)
     if not image_pins:
         # pip-audit given no requirement audits nothing and passes.
@@ -164,10 +165,14 @@ def main() -> int:
     _run(["npm", "audit", "--omit=dev", "--audit-level=high"], cwd=ROOT / "browser-node")
 
     print("Building and inspecting Python wheels...")
+    # Each package's backend at the version the lock pins, as release.yml and ci.yml hold it, and then a check of the
+    # build and pip installed here and of what built each wheel.
     with tempfile.TemporaryDirectory(prefix="auto-browser-wheelhouse-") as temp_dir:
         wheelhouse = Path(temp_dir)
         for package_dir in WHEEL_PACKAGES:
-            _run([PYTHON, "-m", "build", "--wheel", "--outdir", str(wheelhouse), package_dir])
+            build = [PYTHON, "-m", "build", "--wheel", "--outdir", str(wheelhouse), package_dir]
+            _run([*build, "--dependency-constraints-txt", constraints])
+        _run([PYTHON, "scripts/check_wheel_build_tools.py", constraints, *sorted(wheelhouse.glob("*.whl"))])
         _inspect_controller_wheel(wheelhouse)
         _inspect_mcp_wheel(wheelhouse)
         _inspect_licenses(wheelhouse)

@@ -256,10 +256,25 @@ def test_main_runs_every_step_once_in_order(monkeypatch: pytest.MonkeyPatch, tmp
         "check_open_advisories.py",
         "ruff", "check_version_parity.py", "check_playwright_pins.py", "check_bridge_parity.py",
         "agent_eval.py", "fixture_eval.py", "pip_audit", "npm browser-node",
-        "build", "build", "build", "build", "_inspect_controller_wheel", "_inspect_mcp_wheel", "_inspect_licenses",
+        "build", "build", "build", "build", "check_wheel_build_tools.py",
+        "_inspect_controller_wheel", "_inspect_mcp_wheel", "_inspect_licenses",
         "pytest controller", "venv", "uv", "pytest client", "venv", "uv", "pytest integrations/langchain",
         "compileall",
     ]  # fmt: skip
+
+
+def test_the_audit_builds_under_the_lock_and_checks_what_built_each_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """As release.yml and ci.yml build: each package's backend at the version the lock pins, and then the check."""
+    calls = _audit_commands(monkeypatch, tmp_path)
+    lock = str(release_audit.ROOT / "controller" / "constraints.txt")
+    builds = [command for command, *_ in calls if command[1:3] == ["-m", "build"]]
+    assert [command[-3] for command in builds] == list(release_audit.WHEEL_PACKAGES)
+    for command in builds:
+        assert command[-2:] == ["--dependency-constraints-txt", lock], command
+    (check,) = [command for command, *_ in calls if command[1:2] == ["scripts/check_wheel_build_tools.py"]]
+    assert check[2] == lock, check
 
 
 def _ci_job(name: str) -> str:
