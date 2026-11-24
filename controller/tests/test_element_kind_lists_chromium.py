@@ -1,9 +1,11 @@
 """The in-page scripts' lists of the element kinds that have `labels`, `disabled` and `href` are the browser's.
 
-The scripts read `el.labels`, `el.disabled` and `el.href` only on an element whose kind (its tag name, upper-cased) is
-in LABELABLE_TAGS (app/browser/element_scripts.py, in DOM_JS), HAS_DISABLED or HAS_HREF (app/browser_scripts.py, in
-INTERACTABLES_SCRIPT): on any other element, such as a form whose named controls answer for those names, a read would
-be the page's. Each list is taken from the script text as it ships, and held to the driver's Chromium both ways.
+DOM_JS (app/browser/element_scripts.py) reads `el.labels` only on an element whose kind (its tag name, upper-cased) is
+in LABELABLE_TAGS, and INTERACTABLES_SCRIPT (app/browser_scripts.py, which contains DOM_JS) reads `el.disabled` and
+`el.href` only on one whose kind is in HAS_DISABLED or HAS_HREF: on any other element, such as a form whose named
+controls answer for those names, a read would be the page's. Other scripts in app/browser_scripts.py read `disabled`
+and `href` on any element, and no list holds them. Each list is taken from the script text as it ships, and held to
+the driver's Chromium both ways.
 
 - Each listed kind has the property, as an element of the HTML namespace or of the SVG one (parsed from
   `<svg><KIND></KIND></svg>`, where the HTML parser restores an SVG name's case; a kind the parser moves out of
@@ -16,7 +18,13 @@ The property is first shown to be on no prototype every element has (Element, HT
 would mean nothing. The page is about:blank, and window's properties are read through their descriptors: touching an
 accessor such as localStorage throws on a page without an origin.
 
-The limit: a kind that is not listed but shares its interface with a listed kind is not noticed.
+The scripts tell a kind by its tag name alone, so they read a listed kind's property in either namespace, also where
+only one namespace's element has it (an HTML `<script>` has no `href`, an SVG `<link>` no `disabled`); the test holds
+each kind in either namespace, not in both.
+
+The limits: a kind that is not listed but shares its interface with a listed kind is not noticed; and a list is read
+from its one `const NAME = [...]` literal, which must hold single-quoted upper-case names only, so a change the script
+makes to the array as it runs is not seen.
 """
 
 from __future__ import annotations
@@ -67,13 +75,32 @@ PAGE_JS = """
 """
 
 
+# A list's body: single-quoted upper-case names, comma-separated, a trailing comma allowed. Anything else in it (another
+# quote, a spread, a name, a comment) fails the read instead of being passed over.
+_LIST_BODY = re.compile(r"\s*'[A-Z]+'(?:\s*,\s*'[A-Z]+')*\s*,?\s*")
+
+
 def shipped(script: str, name: str) -> list[str]:
-    """The kinds quoted in the script's one `const NAME = [...];`."""
+    """The kinds of the script's one `const NAME = [...];`, read whole."""
     found = re.findall(rf"\bconst {name} = \[(.*?)\];", script, flags=re.S)
     assert len(found) == 1, f"{len(found)} definitions of {name}"
-    kinds = re.findall(r"'([^']*)'", found[0])
-    assert kinds and all(re.fullmatch(r"[A-Z]+", kind) for kind in kinds), kinds
-    return kinds
+    assert _LIST_BODY.fullmatch(found[0]), f"{name} is not a list of single-quoted upper-case names only: [{found[0]}]"
+    return re.findall(r"'([A-Z]+)'", found[0])
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["'A', \"FORM\"", "'A', ...OTHER", "'A', KIND", "'A', `USE`", "'A', 'use'", "'A', // a note\n  'USE'", ""],
+    ids=["double-quoted", "spread", "a-name", "template", "lower-case", "comment", "empty"],
+)
+def test_a_list_with_anything_but_single_quoted_upper_case_names_fails_the_read(body: str) -> None:
+    """No browser needed. A double-quoted "FORM" in HAS_HREF was once passed over, and the list judged without it."""
+    with pytest.raises(AssertionError, match="HAS_HREF is not a list of single-quoted upper-case names only"):
+        shipped(f"  const HAS_HREF = [{body}];\n", "HAS_HREF")
+
+
+def test_a_list_over_two_lines_with_a_trailing_comma_is_read_whole() -> None:
+    assert shipped("const HAS_HREF = ['A', 'AREA',\n    'USE',\n  ];", "HAS_HREF") == ["A", "AREA", "USE"]
 
 
 def judge(prop: str, kinds: list[str], answer: dict) -> list[str]:
