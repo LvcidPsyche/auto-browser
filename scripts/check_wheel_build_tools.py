@@ -38,19 +38,12 @@ GENERATORS = {
     "setuptools": re.compile(r"setuptools \(([^()\s]+)\)"),
     "hatchling": re.compile(r"hatchling ([^()\s]+)"),
 }
-# A lock line's name and the version it pins with ==, after any extras.
-PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s;]+)")
 WHEEL_FILE = re.compile(r"[^/]+\.dist-info/WHEEL")
 
 
-def lock_pins(text: str) -> dict[str, list[str]]:
-    """Every version the lock pins with == for each package, by its normalized name."""
-    pins: dict[str, list[str]] = {}
-    for raw in text.splitlines():
-        match = PIN.match(raw.split("#", 1)[0].strip())
-        if match:
-            pins.setdefault(re.sub(r"[-_.]+", "-", match.group(1)).lower(), []).append(match.group(2))
-    return pins
+def pins_of(text: str, name: str) -> list[str]:
+    """Every version the lock's ``text`` pins ``name`` to, on a line that starts ``name==``, as uv writes a pin."""
+    return re.findall(rf"(?m)^{re.escape(name)}==([^\s;]+)", text)
 
 
 def generator(wheel: Path) -> str:
@@ -65,13 +58,13 @@ def generator(wheel: Path) -> str:
     return values[0].strip()
 
 
-def check_installed(name: str, pins: dict[str, list[str]], lock: str) -> tuple[bool, str]:
-    """Whether the ``name`` installed in this Python is the version ``pins`` holds, and the line that says so."""
+def check_installed(name: str, text: str, lock: str) -> tuple[bool, str]:
+    """Whether the ``name`` installed in this Python is the version the lock's ``text`` pins, and the line that says so."""
     try:
         installed = importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return False, f"FAIL {name}: not installed in {sys.executable}"
-    pinned = pins.get(name, [])
+    pinned = pins_of(text, name)
     if len(pinned) != 1:
         return False, f"FAIL {name} {installed} in {sys.executable}, but {lock} has {len(pinned)} {name}== pins"
     if installed != pinned[0]:
@@ -79,8 +72,8 @@ def check_installed(name: str, pins: dict[str, list[str]], lock: str) -> tuple[b
     return True, f"ok   {name} {installed} in {sys.executable}, as {lock} pins"
 
 
-def check(wheel: Path, pins: dict[str, list[str]], lock: str) -> tuple[bool, str]:
-    """Whether ``wheel`` was built by the backend version ``pins`` holds, and the line that says so."""
+def check(wheel: Path, text: str, lock: str) -> tuple[bool, str]:
+    """Whether ``wheel`` was built by the backend version the lock's ``text`` pins, and the line that says so."""
     try:
         value = generator(wheel)
     except (OSError, zipfile.BadZipFile, UnicodeDecodeError, ValueError) as exc:
@@ -90,7 +83,7 @@ def check(wheel: Path, pins: dict[str, list[str]], lock: str) -> tuple[bool, str
         if match is None:
             continue
         built = match.group(1)
-        pinned = pins.get(backend, [])
+        pinned = pins_of(text, backend)
         if len(pinned) != 1:
             return (
                 False,
@@ -107,9 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("lock", help="the constraints file that pins the backends")
     parser.add_argument("wheels", nargs="+", type=Path, metavar="wheel", help="a wheel to check")
     args = parser.parse_args(argv)
-    pins = lock_pins(Path(args.lock).read_text(encoding="utf-8"))
-    results = [check_installed(name, pins, args.lock) for name in FRONTEND]
-    results += [check(wheel, pins, args.lock) for wheel in args.wheels]
+    text = Path(args.lock).read_text(encoding="utf-8")
+    results = [check_installed(name, text, args.lock) for name in FRONTEND]
+    results += [check(wheel, text, args.lock) for wheel in args.wheels]
     for _, line in results:
         print(line)
     return 0 if all(ok for ok, _ in results) else 1
