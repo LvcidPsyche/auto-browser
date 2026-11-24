@@ -16,8 +16,9 @@ make release-audit   # launch-prep audit; run before any release PR
   (`python -m pip install -e ./controller[dev] -c controller/constraints.txt`) and point
   `AUTO_BROWSER_PYTHON_BIN` at it if several interpreters exist. The controller's FastAPI floor
   conflicts with other projects' pins, so don't share a global interpreter. The real-browser tests drive the
-  Chromium build the installed pip Playwright names, and skip until `python -m playwright install chromium` has
-  fetched it.
+  Chromium build the installed pip Playwright names (or `AUTO_BROWSER_TEST_CHROMIUM`), and skip until
+  `python -m playwright install chromium` has fetched it, or fail as pytest starts under CI's
+  `AUTO_BROWSER_REQUIRE_CHROMIUM`.
 - `make test-local` runs from `controller/` on purpose: pydantic-settings reads `.env` from the
   working directory, and a developer's root `.env` turns on auth the tests don't send (~138
   false 400s). If you invoke the tests yourself, run them from `controller/` too.

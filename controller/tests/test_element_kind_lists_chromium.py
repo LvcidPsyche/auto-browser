@@ -44,8 +44,6 @@ LISTS = [
     ("disabled", "HAS_DISABLED", browser_scripts.INTERACTABLES_SCRIPT),
     ("href", "HAS_HREF", browser_scripts.INTERACTABLES_SCRIPT),
 ]
-# Asked about beside the listed kinds, for the test of a kind added to a list: a form has none of the three of its own.
-UNLISTED = "FORM"
 
 PAGE_JS = """
 ([prop, kinds]) => {
@@ -123,7 +121,7 @@ def judge(prop: str, kinds: list[str], answer: dict) -> list[str]:
 
 @pytest.fixture(scope="module")
 def answers() -> dict[str, dict]:
-    """What the driver's Chromium answers for each property, about its list's kinds and UNLISTED."""
+    """What the driver's Chromium answers for each property, about its list's kinds."""
     from playwright.async_api import async_playwright
 
     async def ask() -> dict[str, dict]:
@@ -132,8 +130,7 @@ def answers() -> dict[str, dict]:
             try:
                 page = await browser.new_page()
                 return {
-                    prop: await page.evaluate(PAGE_JS, [prop, [*shipped(script, name), UNLISTED]])
-                    for prop, name, script in LISTS
+                    prop: await page.evaluate(PAGE_JS, [prop, shipped(script, name)]) for prop, name, script in LISTS
                 }
             finally:
                 await browser.close()
@@ -158,32 +155,30 @@ def test_each_listed_kind_has_the_property_and_each_interface_with_it_is_listed(
     assert not problems, "\n".join(problems)
 
 
-# A kind taken out of each list, and the interface no other listed kind's element is.
-TAKEN_OUT = [
-    ("labels", "LABELABLE_TAGS", element_scripts.DOM_JS, "METER", "HTMLMeterElement"),
-    ("disabled", "HAS_DISABLED", browser_scripts.INTERACTABLES_SCRIPT, "FIELDSET", "HTMLFieldSetElement"),
-    ("href", "HAS_HREF", browser_scripts.INTERACTABLES_SCRIPT, "USE", "SVGUseElement"),
-]
+# A page's answer about `labels` for three kinds, fixed here: what the judge is told, not what a Chromium says, so a
+# list updated for another Chromium leaves these two tests as they are.
+FIXED_ANSWER = {
+    "generic": [],
+    "carriers": ["HTMLInputElement", "HTMLMeterElement"],
+    "kinds": {
+        "INPUT": {"made": ["html input: HTMLInputElement"], "has": True, "instances": ["HTMLInputElement"]},
+        "METER": {"made": ["html meter: HTMLMeterElement"], "has": True, "instances": ["HTMLMeterElement"]},
+        "FORM": {"made": ["html form: HTMLFormElement"], "has": False, "instances": []},
+    },
+}
 
 
-@requires_chromium
-@pytest.mark.parametrize(("prop", "name", "script", "kind", "interface"), TAKEN_OUT, ids=_ids(TAKEN_OUT))
-def test_a_kind_taken_out_of_a_list_leaves_its_interface_named(
-    answers: dict[str, dict], prop: str, name: str, script: str, kind: str, interface: str
-) -> None:
-    kinds = shipped(script, name)
-    assert kind in kinds
-
-    problems = judge(prop, [listed for listed in kinds if listed != kind], answers[prop])
-
-    assert len(problems) == 1 and problems[0].startswith(f"{interface}:"), problems
+def test_the_judge_passes_a_list_of_the_kinds_with_the_property() -> None:
+    assert judge("labels", ["INPUT", "METER"], FIXED_ANSWER) == []
 
 
-@requires_chromium
-@pytest.mark.parametrize(("prop", "name", "script"), LISTS, ids=_ids(LISTS))
-def test_a_kind_added_to_a_list_without_the_property_is_named(
-    answers: dict[str, dict], prop: str, name: str, script: str
-) -> None:
-    problems = judge(prop, [*shipped(script, name), UNLISTED], answers[prop])
+def test_the_judge_names_the_interface_of_a_kind_taken_out() -> None:
+    problems = judge("labels", ["INPUT"], FIXED_ANSWER)
 
-    assert len(problems) == 1 and problems[0].startswith(f"{UNLISTED}:"), problems
+    assert len(problems) == 1 and problems[0].startswith("HTMLMeterElement:"), problems
+
+
+def test_the_judge_names_a_kind_added_without_the_property() -> None:
+    problems = judge("labels", ["INPUT", "METER", "FORM"], FIXED_ANSWER)
+
+    assert len(problems) == 1 and problems[0].startswith("FORM:"), problems
