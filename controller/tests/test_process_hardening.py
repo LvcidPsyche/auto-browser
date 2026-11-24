@@ -259,6 +259,18 @@ class PlaywrightDriverEnvironmentTests(unittest.TestCase):
                 confine_playwright_driver_environment()
         self.assertIn("Playwright", str(raised.exception))
 
+    def test_a_playwright_without_the_transport_module_fails_closed_naming_it(self) -> None:
+        """An upgrade that moves the module (1.65 renamed every playwright._impl module) raises the same error as one
+        that moves the name, not a bare ModuleNotFoundError."""
+        from app.process_hardening import confine_playwright_driver_environment
+
+        # None in sys.modules makes importing that name raise ModuleNotFoundError, as for a module that is not there.
+        with patch.dict(sys.modules, {"playwright._impl._transport": None}):
+            with self.assertRaises(RuntimeError) as raised:
+                confine_playwright_driver_environment()
+        self.assertIn("playwright._impl._transport.get_driver_env", str(raised.exception))
+        self.assertIn("whole environment", str(raised.exception))
+
 
 def _driver_pids() -> list[int]:
     """This process's children whose command line holds run-driver (Playwright's node driver)."""
