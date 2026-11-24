@@ -7,8 +7,8 @@ models than pip installs and than anything CI tested. Worse, it is a delayed
 failure: nobody notices until the provider retires the old model id and Docker
 users start getting 404s that local runs never reproduce.
 
-This is the same one-thing-two-sources class the repo already guards for
-version strings (check_version_parity.py) and Playwright pins
+This is the same class, two sources that must agree, the repo already guards
+for version strings (check_version_parity.py) and Playwright pins
 (check_playwright_pins.py).
 """
 

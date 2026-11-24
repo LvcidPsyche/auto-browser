@@ -499,8 +499,9 @@ INTERACTABLES_SCRIPT = _with_element_naming(
     '[tabindex]'
   ].join(',');
 
-  // The kinds of element that have a `disabled` and an `href` of their own, as the browser has them (156): each is read
-  // only on such a kind. A form has neither, and its named controls answer for both there.
+  // The kinds of element that have a `disabled` and an `href` of their own, as the browser has them
+  // (tests/test_element_kind_lists_chromium.py holds both lists to the driver's Chromium): each is read only on such
+  // a kind. A form has neither, and its named controls answer for both there.
   const HAS_DISABLED = ['BUTTON', 'FIELDSET', 'INPUT', 'LINK', 'OPTGROUP', 'OPTION', 'SELECT', 'STYLE', 'TEXTAREA'];
   const HAS_HREF = ['A', 'AREA', 'BASE', 'LINK', 'FEIMAGE', 'FILTER', 'IMAGE', 'LINEARGRADIENT', 'MPATH', 'PATTERN',
     'RADIALGRADIENT', 'SCRIPT', 'TEXTPATH', 'USE'];

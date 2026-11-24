@@ -81,7 +81,8 @@ DOM_JS = """const dom = (() => {
   // What holds a document of its own, or is a plugin, whose inside this document cannot see: keys sent to one go
   // there. A portal is listed though the Chromium measured (156) has no such element: one so named is then the page's.
   const FRAME_TAGS = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'FENCEDFRAME', 'PORTAL'];
-  // The kinds of element that have label elements (`labels`), as the browser has them (156). A form has none, and its
+  // The kinds of element that have label elements (`labels`), as the browser has them
+  // (tests/test_element_kind_lists_chromium.py holds the list to the driver's Chromium). A form has none, and its
   // named controls answer for the property there.
   const LABELABLE_TAGS = ['BUTTON', 'INPUT', 'METER', 'OUTPUT', 'PROGRESS', 'SELECT', 'TEXTAREA'];
   const dom = {

@@ -34,7 +34,8 @@ CHROME_UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0",
 ]
 _UA_POOL = CHROME_UA_POOL
-# NOTE: UA strings go stale fast. Refresh this pool every 2-3 months.
+# NOTE: UA strings go stale fast. tests/test_user_agent_pool.py fails when the newest Chrome here is not the major of
+# the Chromium the installed Playwright driver names, or an entry is more than one major behind it.
 # Stale UAs are themselves a bot signal — Chrome 122 in a 2026 session sticks out.
 
 _TIMEZONES = [

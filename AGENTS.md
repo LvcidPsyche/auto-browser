@@ -15,7 +15,10 @@ make release-audit   # launch-prep audit; run before any release PR
 - Use a virtualenv for the host suite
   (`python -m pip install -e ./controller[dev] -c controller/constraints.txt`) and point
   `AUTO_BROWSER_PYTHON_BIN` at it if several interpreters exist. The controller's FastAPI floor
-  conflicts with other projects' pins, so don't share a global interpreter.
+  conflicts with other projects' pins, so don't share a global interpreter. The real-browser tests drive the
+  Chromium build the installed pip Playwright names (or `AUTO_BROWSER_TEST_CHROMIUM`), and skip until
+  `python -m playwright install chromium` has fetched it, or fail as pytest starts under CI's
+  `AUTO_BROWSER_REQUIRE_CHROMIUM`.
 - `make test-local` runs from `controller/` on purpose: pydantic-settings reads `.env` from the
   working directory, and a developer's root `.env` turns on auth the tests don't send (~138
   false 400s). If you invoke the tests yourself, run them from `controller/` too.
@@ -30,8 +33,12 @@ make release-audit   # launch-prep audit; run before any release PR
 
 - **Version parity:** every version string in the repo must match (`scripts/check_version_parity.py`
   lists them). A release bumps all of them together with `python scripts/bump_version.py X.Y.Z`.
-- **Playwright pin parity:** the controller (pip) and `browser-node` (npm) Playwright versions must
-  be identical (`scripts/check_playwright_pins.py`).
+- **Playwright pairing:** the controller (pip) and `browser-node` (npm) Playwright meet two rules
+  (`scripts/check_playwright_pins.py`). One major.minor across the two, because browser-node's server refuses a
+  client of another one, with one exact version inside each ecosystem (read from the pins, in the lint job). And the
+  same browser, which equal versions do not give (pip 1.65.1 and npm 1.65.1 carry different Chromium builds): with
+  `--installed` the script compares the Chromium the installed pip driver and npm's `playwright-core` name (CI's
+  `dependency-audit` job).
 - **Pinned dependency tree:** `controller/constraints.txt` pins every package `controller/requirements.txt`,
   `requirements-dev.txt` and `requirements-build.txt` pull in, at releases at least 72 hours old; the image and the
   host tests install under it. The build tools are in the tree too: `build` and the `pip` it installs the backends

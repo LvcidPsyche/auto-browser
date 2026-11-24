@@ -1,9 +1,12 @@
-"""check_playwright_pins must compare every place the Playwright version is pinned, and refuse a range.
+"""check_playwright_pins must hold the two rules the controller (pip) and browser-node (npm) Playwright meet together.
 
-The controller (pip) and browser-node (npm) speak one protocol, so their Playwright versions must be identical. The
-check read only controller/requirements.txt and browser-node/package.json, and stripped a range operator there, so
-`^1.64.1` passed while npm could install any 1.x, and the lock npm ci installs from, and the constraints file the
-image installs under, could pin another version unnoticed.
+browser-node's Playwright server refuses a client of another major.minor, and both sides must run the same browser,
+which equal version strings do not give. From the pins: every place the Playwright version is pinned inside each
+ecosystem agrees and names an exact version, and the two ecosystems share a major.minor. The check once read only
+controller/requirements.txt and browser-node/package.json, and stripped a range operator there, so `^1.64.1` passed
+while npm could install any 1.x, and the lock npm ci installs from, and the constraints file the image installs under,
+could pin another version unnoticed. From what is installed (--installed): the Chromium builds the pip driver and
+npm's playwright-core name are the same.
 """
 
 from __future__ import annotations
@@ -16,8 +19,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
+import yaml
+
+from tests import _chromium
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+CI_WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
@@ -91,3 +98,286 @@ def test_one_pin_behind_fails_naming_it(
     assert code == 1
     behind = [line for line in report.splitlines() if line.rstrip().endswith("1.64.0")]
     assert len(behind) == 1 and location in behind[0], report
+
+
+def _pins(pip: str, npm: str) -> dict[str, str]:
+    return {"requirements": pip, "constraints": pip, "package": npm, "lock": npm, "lock_core": npm}
+
+
+def test_another_patch_across_the_ecosystems_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The server takes a client of its own major.minor; pip 1.65.2 and npm 1.65.1 carry the same Chromium."""
+    assert _check(monkeypatch, tmp_path, **_pins("1.65.2", "1.65.1")) == (0, "")
+
+
+def test_a_pip_pin_with_a_comment_after_it_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert _check(monkeypatch, tmp_path, **_pins("1.65.1  # pinned with npm", "1.65.1")) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "spec", ["1.65.*", "1.65", "1.65.2,<2", '1.65.1 ; python_version < "3"', '1.65.1;python_version<"3"']
+)
+def test_a_pip_pin_that_is_not_an_exact_version_fails_naming_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spec: str
+) -> None:
+    """Of the right major.minor, so only the pin's form refuses them: the one-string rule refused the first three, as
+    package.json's does, and passed an environment marker, under which pip skips the pin where the marker is false."""
+    code, report = _check(monkeypatch, tmp_path, **_pins(spec, "1.65.1"))
+
+    assert code == 1
+    for location in ("requirements.txt", "constraints.txt"):
+        named = [line for line in report.splitlines() if location in line and repr(spec) in line and "exact" in line]
+        assert len(named) == 1, report
+
+
+@pytest.mark.parametrize(("pip", "line"), [("1.66.0", "1.66"), ("2.65.1", "2.65")])
+def test_another_major_or_minor_across_the_ecosystems_fails_naming_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pip: str, line: str
+) -> None:
+    code, report = _check(monkeypatch, tmp_path, **_pins(pip, "1.65.1"))
+
+    assert code == 1
+    named = [text for text in report.splitlines() if "major.minor" in text and line in text and "1.65" in text]
+    assert len(named) == 1, report
+
+
+CHROMIUM = {"name": "chromium", "revision": "1248", "browserVersion": "156.0.8078.4"}
+SHELL = {"name": "chromium-headless-shell", "revision": "1248", "browserVersion": "156.0.8078.4"}
+FIREFOX = {"name": "firefox", "revision": "1510", "browserVersion": "150.0"}
+
+
+def _pip_browsers(tmp_path: Path) -> Path:
+    return tmp_path / "site-packages" / "playwright" / "driver" / "package" / "browsers.json"
+
+
+def _node_modules(tmp_path: Path) -> Path:
+    return tmp_path / "browser-node" / "node_modules"
+
+
+def _plant_browsers(path: Path, entries: list[dict]) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"comment": "planted", "browsers": entries}), encoding="utf-8")
+
+
+def _main(argv: list[str]) -> tuple[int, str, str]:
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        code = check_playwright_pins.main(argv)
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+def _installed(
+    tmp_path: Path,
+    *,
+    pip: list[dict] | None = None,
+    npm: list[dict] | None = None,
+    plant: tuple[str, ...] = ("pip", "npm"),
+) -> tuple[int, str, str]:
+    """The --installed check on a planted pip driver and a planted browser-node/node_modules: each side's browsers.json
+    lists its entries (the same Chromium on both by default), and a side left out of `plant` has no file."""
+    pip_browsers, node_modules = _pip_browsers(tmp_path), _node_modules(tmp_path)
+    files = {"pip": (pip_browsers, pip), "npm": (node_modules / "playwright-core" / "browsers.json", npm)}
+    for side in plant:
+        path, entries = files[side]
+        _plant_browsers(path, [CHROMIUM, SHELL, FIREFOX] if entries is None else entries)
+    return _main(["--installed", "--pip-browsers", str(pip_browsers), "--node-modules", str(node_modules)])
+
+
+def test_the_same_chromium_on_both_sides_passes(tmp_path: Path) -> None:
+    code, stdout, stderr = _installed(tmp_path)
+
+    assert (code, stderr) == (0, "")
+    assert "1248" in stdout and "156.0.8078.4" in stdout
+
+
+@pytest.mark.parametrize("entry", [CHROMIUM, SHELL], ids=["chromium", "headless-shell"])
+@pytest.mark.parametrize(
+    "change", [{"revision": "1251", "browserVersion": "159.0.8200.1"}, {"browserVersion": "156.0.8078.5"}]
+)
+def test_another_chromium_on_the_npm_side_fails_naming_both(tmp_path: Path, entry: dict, change: dict) -> None:
+    other = {**entry, **change}
+    npm = [other if item["name"] == entry["name"] else item for item in (CHROMIUM, SHELL)]
+
+    code, _, report = _installed(tmp_path, npm=npm)
+
+    assert code == 1
+    named = [line for line in report.splitlines() if f"{entry['name']}:" in line]
+    assert len(named) == 1, report
+    for value in (entry["revision"], entry["browserVersion"], other["revision"], other["browserVersion"]):
+        assert value in named[0], report
+
+
+# What each side's message says to install.
+WHAT_TO_INSTALL = [("pip", "pip install playwright -c controller/constraints.txt"), ("npm", "npm ci")]
+
+
+@pytest.mark.parametrize(("side", "install"), WHAT_TO_INSTALL)
+def test_a_missing_browsers_json_fails_saying_what_to_install(tmp_path: Path, side: str, install: str) -> None:
+    code, stdout, report = _installed(tmp_path, plant=tuple({"pip", "npm"} - {side}))
+
+    assert code == 1 and "OK" not in stdout
+    assert "browsers.json" in report and install in report, report
+
+
+@pytest.mark.parametrize(("side", "install"), WHAT_TO_INSTALL)
+@pytest.mark.parametrize("entry", [CHROMIUM, SHELL], ids=["chromium", "headless-shell"])
+def test_a_browsers_json_without_the_entry_fails_naming_it_and_what_to_install(
+    tmp_path: Path, side: str, install: str, entry: dict
+) -> None:
+    entries = [item for item in (CHROMIUM, SHELL, FIREFOX) if item["name"] != entry["name"]]
+
+    code, _, report = _installed(tmp_path, **{side: entries})
+
+    assert code == 1
+    named = [line for line in report.splitlines() if f"no {entry['name']!r} entry" in line and install in line]
+    assert len(named) == 1, report
+
+
+@pytest.mark.parametrize("sides", [("pip", "npm"), ("npm",)], ids=["both-sides", "npm-side"])
+@pytest.mark.parametrize(
+    "value", ["missing", None, 1248, "", " "], ids=["missing", "null", "a-number", "empty", "blank"]
+)
+@pytest.mark.parametrize("field", ["revision", "browserVersion"])
+def test_an_entry_without_a_readable_build_fails_naming_the_file_and_the_entry(
+    tmp_path: Path, field: str, value: object, sides: tuple[str, ...]
+) -> None:
+    """Missing on both sides, the two once compared equal (as "None") and passed; a number equal to the other side's
+    string did too, and so did a blank string on both sides."""
+    if value == "missing":
+        unreadable = {key: item for key, item in CHROMIUM.items() if key != field}
+    else:
+        unreadable = {**CHROMIUM, field: value}
+    named = _pip_browsers(tmp_path) if "pip" in sides else _node_modules(tmp_path) / "playwright-core" / "browsers.json"
+
+    code, stdout, report = _installed(tmp_path, **{side: [unreadable, SHELL] for side in sides})
+
+    assert code == 1 and "OK" not in stdout
+    lines = [line for line in report.splitlines() if str(named) in line and "'chromium'" in line and field in line]
+    assert len(lines) == 1, report
+
+
+@pytest.mark.parametrize("side", ["pip", "npm"])
+@pytest.mark.parametrize("entry", [CHROMIUM, SHELL, FIREFOX], ids=["chromium", "headless-shell", "firefox"])
+def test_an_entry_named_twice_fails_naming_the_file_and_the_name(tmp_path: Path, side: str, entry: dict) -> None:
+    """Playwright reads the first entry of a name (`descriptors.find`). The check once kept the last, so another build
+    first and the other side's build second passed."""
+    entries = [{**entry, "revision": "1251"}, CHROMIUM, SHELL, FIREFOX]
+    named = _pip_browsers(tmp_path) if side == "pip" else _node_modules(tmp_path) / "playwright-core" / "browsers.json"
+
+    code, stdout, report = _installed(tmp_path, **{side: entries})
+
+    assert code == 1 and "OK" not in stdout
+    lines = [
+        line
+        for line in report.splitlines()
+        if str(named) in line and f"more than one entry named {entry['name']!r}" in line
+    ]
+    assert len(lines) == 1, report
+
+
+REVISION_OVERRIDES = {"mac12": "1240"}
+
+
+@pytest.mark.parametrize("side", ["pip", "npm"])
+def test_revision_overrides_on_one_side_only_fail_naming_them(tmp_path: Path, side: str) -> None:
+    """An entry's revisionOverrides installs another build on the platforms it names."""
+    overridden = {**CHROMIUM, "revisionOverrides": REVISION_OVERRIDES}
+
+    code, _, report = _installed(tmp_path, **{side: [overridden, SHELL]})
+
+    assert code == 1
+    named = [line for line in report.splitlines() if line.lstrip().startswith("chromium:")]
+    assert len(named) == 1 and "revisionOverrides" in named[0] and "1240" in named[0], report
+
+
+def test_the_same_revision_overrides_on_both_sides_pass(tmp_path: Path) -> None:
+    overridden = [{**CHROMIUM, "revisionOverrides": REVISION_OVERRIDES}, SHELL]
+
+    code, stdout, stderr = _installed(tmp_path, pip=overridden, npm=overridden)
+
+    assert (code, stderr) == (0, "")
+    assert "revisionOverrides" in stdout
+
+
+@pytest.mark.parametrize("side", ["pip", "npm"])
+def test_empty_revision_overrides_on_one_side_are_none(tmp_path: Path, side: str) -> None:
+    """As Playwright reads them: `(obj.revisionOverrides || {})[hostPlatform]`."""
+    emptied = [{**CHROMIUM, "revisionOverrides": {}}, SHELL]
+
+    code, stdout, stderr = _installed(tmp_path, **{side: emptied})
+
+    assert (code, stderr) == (0, "")
+    assert "revisionOverrides" not in stdout
+
+
+def test_the_pip_side_is_the_installed_playwrights_driver_by_default() -> None:
+    """The file the real-browser tests read the driver's builds from, found here without importing playwright."""
+    assert check_playwright_pins.pip_driver_browsers() == _chromium.driver_browsers_json()
+
+
+@pytest.mark.parametrize("driver", ["another-chromium", "not-installed"])
+def test_without_pip_browsers_the_installed_check_compares_the_installed_driver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, driver: str
+) -> None:
+    """As CI runs it, with no --pip-browsers: the pip side is the installed driver's file, never npm's own, and no pip
+    Playwright fails."""
+    installed = _pip_browsers(tmp_path) if driver == "another-chromium" else None
+    if installed:
+        _plant_browsers(installed, [{**CHROMIUM, "revision": "1251"}, SHELL])
+    _plant_browsers(_node_modules(tmp_path) / "playwright-core" / "browsers.json", [CHROMIUM, SHELL])
+    monkeypatch.setattr(check_playwright_pins, "pip_driver_browsers", lambda: installed)
+
+    code, stdout, report = _main(["--installed", "--node-modules", str(_node_modules(tmp_path))])
+
+    assert code == 1 and "OK" not in stdout
+    assert ("revision 1251" if installed else "pip install playwright") in report, report
+
+
+needs_the_workflow = pytest.mark.skipif(
+    not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)"
+)
+
+
+def _step(job: dict, runs: str) -> dict:
+    """The one step of `job` whose run string holds `runs`."""
+    steps = [step for step in job["steps"] if runs in step.get("run", "")]
+    assert len(steps) == 1, f"{len(steps)} steps run {runs!r}"
+    return steps[0]
+
+
+# The installed check's step runs these lines and nothing else. With `|| true` or an `echo` the check could not fail
+# the job, and an install not held to controller/constraints.txt could bring a pip Playwright of npm's build while the
+# pinned one carries another; without the install the check fails, finding no pip Playwright.
+INSTALLED_CHECK_RUN = [
+    "python -m pip install playwright -c controller/constraints.txt",
+    "python scripts/check_playwright_pins.py --installed",
+]
+# Keys by which a job runs a failing step and passes (continue-on-error), skips it (if), or gives it another shell
+# (defaults).
+JOB_KEYS_THAT_UNDO_A_STEP = {"if", "continue-on-error", "defaults"}
+
+
+@needs_the_workflow
+def test_ci_checks_the_installed_chromium_after_browser_nodes_npm_ci() -> None:
+    """The job that runs browser-node's `npm ci` runs the installed check after it, in a step of a name and
+    INSTALLED_CHECK_RUN's lines only, and the job has none of JOB_KEYS_THAT_UNDO_A_STEP. This holds that step and that
+    job as written."""
+    jobs = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    installing = [
+        job
+        for job in jobs.values()
+        if any(
+            "npm ci" in step.get("run", "") and step.get("working-directory") == "browser-node" for step in job["steps"]
+        )
+    ]
+    assert len(installing) == 1, installing
+    job = installing[0]
+    steps = job["steps"]
+
+    npm_ci = steps.index(_step(job, "npm ci"))
+    check = _step(job, "scripts/check_playwright_pins.py --installed")
+
+    assert steps.index(check) > npm_ci
+    assert set(check) == {"name", "run"}, check
+    assert check["run"].splitlines() == INSTALLED_CHECK_RUN, check["run"]
+    undo = JOB_KEYS_THAT_UNDO_A_STEP & job.keys()
+    assert not undo, {key: job[key] for key in undo}
