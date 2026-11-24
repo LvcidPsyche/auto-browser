@@ -775,8 +775,10 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(record.id in line for line in logged.output), logged.output)
 
     async def test_two_cancels_at_once_of_a_running_record_no_worker_holds_audit_one_interruption(self) -> None:
-        # The second cancel's stop write finds the record the first one interrupted: it is left as it is, and audited
-        # by the cancel that changed it alone.
+        # Two cancels of a running record no worker holds: the one whose stop write finds the record already
+        # interrupted leaves it as it is, and only the cancel that changed it audits the interruption. The first
+        # cancel's request is held at its audit until the second has settled the record, so the order is the
+        # test's, not the store lock's.
         record = await self.queue.store.create(
             session_id="session-25",
             kind="agent_run",
@@ -784,10 +786,16 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         )
         record.status = "running"
         await self.queue.store.update(record)
-        audit = _WrittenAudit()
+        audit = _WrittenAudit(hold="agent_job_cancel_requested")
         self.queue.audit = audit
 
-        answers = await asyncio.gather(self.queue.cancel_job(record.id), self.queue.cancel_job(record.id))
+        first = asyncio.create_task(self.queue.cancel_job(record.id))
+        try:
+            await asyncio.wait_for(audit.held.wait(), timeout=2)
+            second = await self.queue.cancel_job(record.id)
+        finally:
+            audit.release.set()
+        answers = [await asyncio.wait_for(first, timeout=2), second]
 
         for answer in answers:
             self.assertEqual((answer["status"], answer["error"]), ("interrupted", "agent_job_interrupted"))
@@ -987,6 +995,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((record.status, record.result, record.error), ("completed", result.model_dump(), None))
         self.assertFalse(AgentJobQueue._public_record(final)["resumable"])
         self.assertEqual(events[-1], ("agent_job_finished", "completed"))
+        self.assertEqual([event for event, _status in events].count("agent_job_finished"), 1)
         self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
 
     async def test_a_run_stopped_by_shutdown_as_its_failure_is_written_keeps_it_and_its_result(self) -> None:
@@ -1015,6 +1024,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
                 (record.status, record.result, record.error), ("failed", result.model_dump(), "the page would not load")
             )
         self.assertEqual(events[-1], ("agent_job_finished", "failed"))
+        self.assertEqual([event for event, _status in events].count("agent_job_finished"), 1)
         self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
 
     async def _shut_down_as_a_refusal_is(self, moment: str) -> tuple[AgentJobRecord, list[tuple[str, str]]]:
