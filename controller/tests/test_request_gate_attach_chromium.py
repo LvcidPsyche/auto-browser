@@ -1,9 +1,10 @@
 """The pre-request gate in an attach mode, on a Chrome the controller did not launch.
 
 tests/test_request_gate_chromium.py runs on a Playwright-launched Chromium, which carries Playwright's own
---disable-features list, BlockOriginHeaderModificationOnRedirect among them, so it proves the gate's rules but not
-what Chrome does in a real attach. Here chrome.exe is started as a plain subprocess (no Playwright flags) and the
-controller reaches it the way an operator configures it: CDP_CONNECT_URL, then ensure_browser.
+--disable-features list (BlockOriginHeaderModificationOnRedirect among them up to Playwright 1.64; 1.65 dropped it),
+so it proves the gate's rules but not what Chrome does in a real attach. Here chrome.exe is started as a plain
+subprocess (no Playwright flags) and the controller reaches it the way an operator configures it: CDP_CONNECT_URL,
+then ensure_browser.
 
 Measured on Chromium 151 in step 0 (diag_origin): without the switch, Chrome fails a cross-origin POST redirect
 hop that a Fetch handler continued (net::ERR_INVALID_ARGUMENT), in every tab while the gate is attached.

@@ -56,7 +56,9 @@ make release-audit   # launch-prep audit; run before any release PR
   read at call time (`confine_tesseract_environment`); `get_languages` passes no `env=`, so the controller must not
   call it (a test in `test_process_hardening.py` fails if `controller/app` names it). At every Playwright bump,
   re-check that `PipeTransport.connect` still starts the driver with `get_driver_env()` from
-  `playwright._impl._transport` (`confine_playwright_driver_environment`).
+  `playwright._impl.transport` (`confine_playwright_driver_environment`), and that
+  `Connection.send_message_to_server` still writes a call's message before its first wait (`_sent_while` in
+  `controller/app/browser/services/actions.py` relies on it).
 - **Codex pin:** with `INSTALL_AGENT_CLIS=true` the controller image installs codex-cli from Codex's GitHub release,
   checked against four sha256 ARGs (each architecture's tarball and the binary in it). A Codex bump changes
   `CODEX_CLI_VERSION` and all four sums in one commit, each binary first verified against the release's `.sigstore`

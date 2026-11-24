@@ -27,9 +27,10 @@ Attach modes only (a Chrome the controller did not launch): without
 redirect hop that any Fetch handler continued, with a bare net::ERR_INVALID_ARGUMENT. Unless the operator
 declares the switch (CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED), the gate fails such a hop of an owned page
 itself, with an explanation that names the fix. The Origin header is never rewritten: a missing Origin
-where Chrome sends ``null`` is a CSRF downgrade. Chrome 155 and later also abort a credentialed cross-origin
+where Chrome sends ``null`` is a CSRF downgrade. Some Chrome builds also abort a credentialed cross-origin
 redirect that needed a CORS preflight while a Fetch handler is enabled, in every tab, unless
-AvoidCorsURLLoaderRestartOnRedirect is disabled too, so the documented switch (REDIRECT_ORIGIN_SWITCH) names both.
+AvoidCorsURLLoaderRestartOnRedirect is disabled too (docs/deployment.md lists the builds measured). So the
+documented switch (REDIRECT_ORIGIN_SWITCH) names both: the Chrome an operator starts may be a build that aborts.
 """
 
 from __future__ import annotations
@@ -54,9 +55,10 @@ FETCH_PATTERNS = [{"urlPattern": "*", "resourceType": "Document", "requestStage"
 BLOCKED_ERROR_REASON = "BlockedByClient"
 # Chromium's error text for a targetId that names no target: an in-process iframe's frameId.
 NO_TARGET_TEXT = "No target with given id"
-# What an attach mode's Chrome is started with. AvoidCorsURLLoaderRestartOnRedirect is there for Chrome 155+, which
-# aborts a credentialed cross-origin redirect that needed a CORS preflight while any Fetch handler is enabled, in
-# every tab (Playwright #43242; Playwright disables it in the browsers it launches).
+# What an attach mode's Chrome is started with. AvoidCorsURLLoaderRestartOnRedirect is there for the Chrome builds
+# that abort a credentialed cross-origin redirect that needed a CORS preflight while any Fetch handler is enabled, in
+# every tab (Playwright #43242; Playwright disables it in the browsers it launches; docs/deployment.md lists the
+# builds measured).
 REDIRECT_ORIGIN_SWITCH = (
     "--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect"
 )
@@ -291,8 +293,8 @@ class RequestGate:
         if self._attach_mode and not self._origin_switch_declared:
             logger.warning(
                 "pre-request gate attached to a Chrome the controller did not launch, without %s=true: it stops "
-                "cross-origin 307/308 POST redirects of the controller's sessions itself, and the same redirects "
-                "in the operator's own tabs fail in Chrome (net::ERR_INVALID_ARGUMENT) while the gate is attached. "
+                "cross-origin 307/308 POST redirects of the controller's sessions itself; older Chrome (Chromium 151) "
+                "also fails them in the operator's own tabs (net::ERR_INVALID_ARGUMENT) while the gate is attached. "
                 "Start that Chrome with %s and set %s=true.",
                 REDIRECT_ORIGIN_SETTING,
                 REDIRECT_ORIGIN_SWITCH,

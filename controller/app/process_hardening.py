@@ -43,6 +43,8 @@ PLAYWRIGHT_DRIVER_ENV_NAMES = frozenset(
     {"DEBUG", "DEBUG_FILE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"}
 )
 PLAYWRIGHT_DRIVER_ENV_PREFIXES = ("PW_", "PLAYWRIGHT_")
+# The private Playwright module whose get_driver_env PipeTransport.connect calls (confine_playwright_driver_environment).
+PLAYWRIGHT_TRANSPORT_MODULE = "playwright._impl.transport"
 # What Tesseract keeps besides the base names: its data path and OpenMP's threads (PATH, a base name, is what
 # subprocess finds the tesseract binary by).
 TESSERACT_ENV_NAMES = frozenset({"TESSDATA_PREFIX"})
@@ -224,15 +226,19 @@ def confine_playwright_driver_environment() -> None:
 
     Playwright has no way to set its driver's environment: PipeTransport.connect starts the driver with
     env=get_driver_env(), which copies the whole of os.environ, and looks that name up in
-    playwright._impl._transport each time it runs. So this replaces that private name with a wrapper that keeps
+    PLAYWRIGHT_TRANSPORT_MODULE each time it runs. So this replaces that private name with a wrapper that keeps
     only the base names and PLAYWRIGHT_DRIVER_ENV_NAMES / _PREFIXES of what the original returns, its temp directory
     the controller's own where there is one (use_private_temp_directory). If an upgrade moves
-    it, this raises rather than let the driver start with the controller's secrets (the pins are exact, and CI runs
-    the lifespan, so that goes red there first).
+    the name or its module, this raises rather than let the driver start with the controller's secrets (the pins are
+    exact, and CI runs the lifespan, so that goes red there first).
     """
     from .providers.base import CLI_BASE_ENV_NAMES, CLI_BASE_ENV_PREFIXES
 
-    transport = importlib.import_module("playwright._impl._transport")
+    import_error: ModuleNotFoundError | None = None
+    try:
+        transport = importlib.import_module(PLAYWRIGHT_TRANSPORT_MODULE)
+    except ModuleNotFoundError as error:  # the module moved: the same error as for a moved name, below, caused by it
+        transport, import_error = None, error
     original = getattr(transport, "get_driver_env", None)
     if not callable(original):
         try:
@@ -240,9 +246,9 @@ def confine_playwright_driver_environment() -> None:
         except importlib.metadata.PackageNotFoundError:
             version = "unknown"
         raise RuntimeError(
-            f"Playwright {version} has no playwright._impl._transport.get_driver_env to confine; its driver would "
+            f"Playwright {version} has no {PLAYWRIGHT_TRANSPORT_MODULE}.get_driver_env to confine; its driver would "
             "start with the controller's whole environment"
-        )
+        ) from import_error
     if getattr(original, _CONFINED, False):
         return
     kept_names = CLI_BASE_ENV_NAMES | PLAYWRIGHT_DRIVER_ENV_NAMES
