@@ -13,7 +13,7 @@ All notable changes to auto-browser are documented here.
   as before; both measured in a container under the old profile and the new.
 - Controller dependencies: FastAPI 0.165.0 (`>=0.165.0,<0.166`), pydantic 2.14.4, pydantic-core 2.50.5,
   pydantic-settings 2.16.3, pyotp 2.12.1 and annotated-doc 0.0.7. Development and test tools: pytest-asyncio 1.5.0
-  (`>=1.5.0,<1.6`), ruff 0.17.5, coverage 7.17.3, cachecontrol 0.15.0, filelock 4.2.12 and platformdirs 4.14.8.
+  (`>=1.5.0,<1.6`), ruff 0.17.6, coverage 7.17.4, cachecontrol 0.15.0, filelock 4.2.12 and platformdirs 4.14.8.
   `controller/constraints.txt` is resolved again under a cutoff of 2026-11-20.
 - One-time codes are still typed for 80-bit secrets (16 base32 characters), which many sites issue and pyotp 2.12.1
   refuses by default (its minimum is 112 bits): the autofill sets that minimum to zero through the class attribute
