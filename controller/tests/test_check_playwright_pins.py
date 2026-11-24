@@ -125,6 +125,26 @@ SHELL = {"name": "chromium-headless-shell", "revision": "1248", "browserVersion"
 FIREFOX = {"name": "firefox", "revision": "1510", "browserVersion": "150.0"}
 
 
+def _pip_browsers(tmp_path: Path) -> Path:
+    return tmp_path / "site-packages" / "playwright" / "driver" / "package" / "browsers.json"
+
+
+def _node_modules(tmp_path: Path) -> Path:
+    return tmp_path / "browser-node" / "node_modules"
+
+
+def _plant_browsers(path: Path, entries: list[dict]) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"comment": "planted", "browsers": entries}), encoding="utf-8")
+
+
+def _main(argv: list[str]) -> tuple[int, str, str]:
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        code = check_playwright_pins.main(argv)
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
 def _installed(
     tmp_path: Path,
     *,
@@ -134,20 +154,12 @@ def _installed(
 ) -> tuple[int, str, str]:
     """The --installed check on a planted pip driver and a planted browser-node/node_modules: each side's browsers.json
     lists its entries (the same Chromium on both by default), and a side left out of `plant` has no file."""
-    pip_browsers = tmp_path / "site-packages" / "playwright" / "driver" / "package" / "browsers.json"
-    node_modules = tmp_path / "browser-node" / "node_modules"
+    pip_browsers, node_modules = _pip_browsers(tmp_path), _node_modules(tmp_path)
     files = {"pip": (pip_browsers, pip), "npm": (node_modules / "playwright-core" / "browsers.json", npm)}
     for side in plant:
         path, entries = files[side]
-        path.parent.mkdir(parents=True)
-        browsers = [CHROMIUM, SHELL, FIREFOX] if entries is None else entries
-        path.write_text(json.dumps({"comment": "planted", "browsers": browsers}), encoding="utf-8")
-    stdout, stderr = io.StringIO(), io.StringIO()
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        code = check_playwright_pins.main(
-            ["--installed", "--pip-browsers", str(pip_browsers), "--node-modules", str(node_modules)]
-        )
-    return code, stdout.getvalue(), stderr.getvalue()
+        _plant_browsers(path, [CHROMIUM, SHELL, FIREFOX] if entries is None else entries)
+    return _main(["--installed", "--pip-browsers", str(pip_browsers), "--node-modules", str(node_modules)])
 
 
 def test_the_same_chromium_on_both_sides_passes(tmp_path: Path) -> None:
@@ -202,6 +214,24 @@ def test_the_pip_side_is_the_installed_playwrights_driver_by_default() -> None:
     assert check_playwright_pins.pip_driver_browsers() == driver
 
 
+@pytest.mark.parametrize("driver", ["another-chromium", "not-installed"])
+def test_without_pip_browsers_the_installed_check_compares_the_installed_driver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, driver: str
+) -> None:
+    """As CI runs it, with no --pip-browsers: the pip side is the installed driver's file, never npm's own, and no pip
+    Playwright fails."""
+    pip_browsers = _pip_browsers(tmp_path)
+    _plant_browsers(pip_browsers, [{**CHROMIUM, "revision": "1251"}, SHELL])
+    _plant_browsers(_node_modules(tmp_path) / "playwright-core" / "browsers.json", [CHROMIUM, SHELL])
+    installed = pip_browsers if driver == "another-chromium" else None
+    monkeypatch.setattr(check_playwright_pins, "pip_driver_browsers", lambda: installed)
+
+    code, stdout, report = _main(["--installed", "--node-modules", str(_node_modules(tmp_path))])
+
+    assert code == 1 and "OK" not in stdout
+    assert ("revision 1251" if installed else "pip install playwright") in report, report
+
+
 needs_the_workflow = pytest.mark.skipif(
     not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)"
 )
@@ -214,9 +244,22 @@ def _step(job: dict, runs: str) -> dict:
     return steps[0]
 
 
+# The installed check's step runs these lines and nothing else: `|| true`, an `echo` or a dropped install would each
+# keep the job green while the check never fails it.
+INSTALLED_CHECK_RUN = [
+    "python -m pip install playwright -c controller/constraints.txt",
+    "python scripts/check_playwright_pins.py --installed",
+]
+# Keys by which a job runs a failing step and passes (continue-on-error), skips it (if), or gives it another shell
+# (defaults).
+JOB_KEYS_THAT_UNDO_A_STEP = {"if", "continue-on-error", "defaults"}
+
+
 @needs_the_workflow
 def test_ci_checks_the_installed_chromium_after_browser_nodes_npm_ci() -> None:
-    """The lint job reads the pins only; the job that installs browser-node's packages compares the browsers."""
+    """The lint job reads the pins only; the job that installs browser-node's packages compares the browsers. The step
+    is its name and its run lines only (no if, continue-on-error or shell of its own), and its job carries nothing that
+    lets it fail unseen."""
     jobs = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     installing = [
         job
@@ -226,9 +269,13 @@ def test_ci_checks_the_installed_chromium_after_browser_nodes_npm_ci() -> None:
         )
     ]
     assert len(installing) == 1, installing
-    steps = installing[0]["steps"]
+    job = installing[0]
+    steps = job["steps"]
 
-    npm_ci = steps.index(_step(installing[0], "npm ci"))
-    check = steps.index(_step(installing[0], "scripts/check_playwright_pins.py --installed"))
+    npm_ci = steps.index(_step(job, "npm ci"))
+    check = _step(job, "scripts/check_playwright_pins.py --installed")
 
-    assert check > npm_ci
+    assert steps.index(check) > npm_ci
+    assert set(check) == {"name", "run"}, check
+    assert check["run"].splitlines() == INSTALLED_CHECK_RUN, check["run"]
+    assert not JOB_KEYS_THAT_UNDO_A_STEP & set(job), {key: job[key] for key in JOB_KEYS_THAT_UNDO_A_STEP & set(job)}
