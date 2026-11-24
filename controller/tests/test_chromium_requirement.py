@@ -164,6 +164,21 @@ def test_the_search_takes_the_drivers_build_over_a_newer_one(monkeypatch: pytest
     assert _search(monkeypatch, root) == drivers
 
 
+def test_the_search_takes_the_first_entry_of_a_name_as_playwright_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "root"
+    first = _plant(root, f"chromium-{DRIVER_BUILD}")
+    _plant(root, f"chromium-{NEWER_BUILD}")
+    entries = [
+        {"name": "chromium", "revision": DRIVER_BUILD, "browserVersion": "150.0.1.2"},
+        {"name": "chromium", "revision": NEWER_BUILD, "browserVersion": "150.0.1.3"},
+    ]
+    _driver_file(monkeypatch, tmp_path, json.dumps({"browsers": entries}))
+
+    assert _search(monkeypatch, root) == first
+
+
 def test_the_search_takes_no_other_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root = tmp_path / "root"
     _plant(root, f"chromium-{NEWER_BUILD}")

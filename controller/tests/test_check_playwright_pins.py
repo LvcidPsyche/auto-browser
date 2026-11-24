@@ -109,6 +109,10 @@ def test_another_patch_across_the_ecosystems_passes(monkeypatch: pytest.MonkeyPa
     assert _check(monkeypatch, tmp_path, **_pins("1.65.2", "1.65.1")) == (0, "")
 
 
+def test_a_pip_pin_with_a_comment_after_it_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert _check(monkeypatch, tmp_path, **_pins("1.65.1  # pinned with npm", "1.65.1")) == (0, "")
+
+
 @pytest.mark.parametrize(
     "spec", ["1.65.*", "1.65", "1.65.2,<2", '1.65.1 ; python_version < "3"', '1.65.1;python_version<"3"']
 )
@@ -252,11 +256,11 @@ def test_an_entry_without_a_readable_build_fails_naming_the_file_and_the_entry(
 
 
 @pytest.mark.parametrize("side", ["pip", "npm"])
-@pytest.mark.parametrize("entry", [CHROMIUM, SHELL], ids=["chromium", "headless-shell"])
+@pytest.mark.parametrize("entry", [CHROMIUM, SHELL, FIREFOX], ids=["chromium", "headless-shell", "firefox"])
 def test_an_entry_named_twice_fails_naming_the_file_and_the_name(tmp_path: Path, side: str, entry: dict) -> None:
     """Playwright reads the first entry of a name (`descriptors.find`). The check once kept the last, so another build
     first and the other side's build second passed."""
-    entries = [{**entry, "revision": "1251"}, CHROMIUM, SHELL]
+    entries = [{**entry, "revision": "1251"}, CHROMIUM, SHELL, FIREFOX]
     named = _pip_browsers(tmp_path) if side == "pip" else _node_modules(tmp_path) / "playwright-core" / "browsers.json"
 
     code, stdout, report = _installed(tmp_path, **{side: entries})
