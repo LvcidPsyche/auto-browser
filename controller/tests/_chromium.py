@@ -63,8 +63,9 @@ def driver_browsers_json() -> Path:
 
 def driver_chromium() -> dict[str, dict]:
     """That file's `chromium` and `chromium-headless-shell` entries, by name, the first of a name as Playwright
-    reads it (`descriptors.find`): none from a file that is missing, unreadable or not of Playwright's shape. Then no Chromium is found, and a host test fails
-    (test_chromium_requirement.py), so that a Playwright that moves the file turns the host suite red."""
+    reads it (`descriptors.find`): none from a file that is missing, unreadable or not of Playwright's shape. Then no
+    Chromium is found, and a host test fails (test_chromium_requirement.py), so that a Playwright that moves the file
+    turns the host suite red."""
     try:
         entries = json.loads(driver_browsers_json().read_text(encoding="utf-8"))["browsers"]
         return {entry["name"]: entry for entry in reversed(entries) if entry.get("name") in CHROMIUM_ENTRIES}
