@@ -165,8 +165,8 @@ def main() -> int:
     _run(["npm", "audit", "--omit=dev", "--audit-level=high"], cwd=ROOT / "browser-node")
 
     print("Building and inspecting Python wheels...")
-    # As release.yml and ci.yml build them: each package's backend at the version the lock pins, and then a check of
-    # the build and pip installed here and of what built each wheel.
+    # Each package's backend at the version the lock pins, as release.yml and ci.yml hold it, and then a check of the
+    # build and pip installed here and of what built each wheel.
     with tempfile.TemporaryDirectory(prefix="auto-browser-wheelhouse-") as temp_dir:
         wheelhouse = Path(temp_dir)
         for package_dir in WHEEL_PACKAGES:
