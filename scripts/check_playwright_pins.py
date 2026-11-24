@@ -22,10 +22,11 @@ Across the two, the major.minor is the same.
 
 Rule 2, both sides run the same browser, which equal version strings do not give: pip 1.65.1 and npm 1.65.1 carry
 different Chromium builds, while pip 1.65.2 and npm 1.65.1 carry the same one. With --installed this compares the
-`chromium` and `chromium-headless-shell` entries (their revision and browserVersion) of the browsers.json the
-installed pip driver names (playwright/driver/package/browsers.json) with those of npm's playwright-core
-(browser-node/node_modules/playwright-core/browsers.json). A missing file fails, saying what to install; it never
-passes or skips. What it does not see: the two bundles may still differ in the switches they launch Chromium with
+`chromium` and `chromium-headless-shell` entries (their revision, browserVersion and revisionOverrides) of the
+browsers.json the installed pip driver names (playwright/driver/package/browsers.json) with those of npm's
+playwright-core (browser-node/node_modules/playwright-core/browsers.json). A missing file, or an entry whose revision
+or browserVersion is missing or not a string, fails, saying what to install; it never passes or skips. What it does
+not see: the two bundles may still differ in the switches they launch Chromium with
 by default. The product's two copies of Playwright's --disable-features list are held to the pip bundle's by their
 own tests (controller/tests/test_playwright_disabled_features.py).
 
@@ -154,8 +155,15 @@ class _Unreadable(Exception):
     """A browsers.json that is missing, unreadable or lacks an entry: the message says which, and what to install."""
 
 
-def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str]]:
-    """(revision, browserVersion) of each of CHROMIUM_ENTRIES in the browsers.json at `path`."""
+# What names an entry's build. A revision or browserVersion that is missing or not a string is unreadable (two missing
+# ones would compare equal), and revisionOverrides installs another build on the platforms it names.
+_BUILD_FIELDS = ("revision", "browserVersion")
+_OVERRIDES = "revisionOverrides"
+
+
+def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str, object]]:
+    """(revision, browserVersion, revisionOverrides or None) of each of CHROMIUM_ENTRIES in the browsers.json at
+    `path`."""
     if not path.is_file():
         raise _Unreadable(f"there is no {path}; {install}")
     try:
@@ -167,8 +175,17 @@ def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str]]:
         entry = entries.get(name)
         if entry is None:
             raise _Unreadable(f"{path} has no {name!r} entry")
-        builds[name] = (str(entry.get("revision")), str(entry.get("browserVersion")))
+        for field in _BUILD_FIELDS:
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise _Unreadable(f"{path} has a {name!r} entry without a readable {field} ({entry!r}); {install}")
+        builds[name] = (entry["revision"], entry["browserVersion"], entry.get(_OVERRIDES))
     return builds
+
+
+def _build_text(build: tuple[str, str, object]) -> str:
+    revision, version, overrides = build
+    text = f"revision {revision} ({version})"
+    return text if overrides is None else f"{text} {_OVERRIDES} {json.dumps(overrides, sort_keys=True)}"
 
 
 def _version_beside(browsers: Path) -> str:
@@ -196,7 +213,7 @@ def check_installed(pip_browsers: Path | None, node_modules: Path) -> int:
     sides = [("pip driver", pip_browsers, pip), ("npm playwright-core", npm_browsers, npm)]
     described = [
         f"  {side} {_version_beside(path)} ({path}): "
-        + ", ".join(f"{name} revision {revision} ({version})" for name, (revision, version) in builds.items())
+        + ", ".join(f"{name} {_build_text(build)}" for name, build in builds.items())
         for side, path, builds in sides
     ]
     differ = [name for name in CHROMIUM_ENTRIES if pip[name] != npm[name]]
@@ -207,8 +224,7 @@ def check_installed(pip_browsers: Path | None, node_modules: Path) -> int:
     print("ERROR: the pip and the npm Playwright carry different Chromium builds.", file=sys.stderr)
     for name in differ:
         print(
-            f"  {name}: pip driver revision {pip[name][0]} ({pip[name][1]}), "
-            f"npm playwright-core revision {npm[name][0]} ({npm[name][1]})",
+            f"  {name}: pip driver {_build_text(pip[name])}, npm playwright-core {_build_text(npm[name])}",
             file=sys.stderr,
         )
     print(*described, sep="\n", file=sys.stderr)

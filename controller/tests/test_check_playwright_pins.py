@@ -207,6 +207,51 @@ def test_a_browsers_json_without_the_entry_fails_naming_it(tmp_path: Path, side:
     assert f"no {entry['name']!r} entry" in report, report
 
 
+@pytest.mark.parametrize("sides", [("pip", "npm"), ("npm",)], ids=["both-sides", "npm-side"])
+@pytest.mark.parametrize("value", ["missing", None, 1248], ids=["missing", "null", "a-number"])
+@pytest.mark.parametrize("field", ["revision", "browserVersion"])
+def test_an_entry_without_a_readable_build_fails_naming_the_file_and_the_entry(
+    tmp_path: Path, field: str, value: object, sides: tuple[str, ...]
+) -> None:
+    """Missing on both sides, the two once compared equal (as "None") and passed; a number equal to the other side's
+    string did too."""
+    if value == "missing":
+        unreadable = {key: item for key, item in CHROMIUM.items() if key != field}
+    else:
+        unreadable = {**CHROMIUM, field: value}
+    named = _pip_browsers(tmp_path) if "pip" in sides else _node_modules(tmp_path) / "playwright-core" / "browsers.json"
+
+    code, stdout, report = _installed(tmp_path, **{side: [unreadable, SHELL] for side in sides})
+
+    assert code == 1 and "OK" not in stdout
+    lines = [line for line in report.splitlines() if str(named) in line and "'chromium'" in line and field in line]
+    assert len(lines) == 1, report
+
+
+REVISION_OVERRIDES = {"mac12": "1240"}
+
+
+@pytest.mark.parametrize("side", ["pip", "npm"])
+def test_revision_overrides_on_one_side_only_fail_naming_them(tmp_path: Path, side: str) -> None:
+    """An entry's revisionOverrides installs another build on the platforms it names."""
+    overridden = {**CHROMIUM, "revisionOverrides": REVISION_OVERRIDES}
+
+    code, _, report = _installed(tmp_path, **{side: [overridden, SHELL]})
+
+    assert code == 1
+    named = [line for line in report.splitlines() if line.lstrip().startswith("chromium:")]
+    assert len(named) == 1 and "revisionOverrides" in named[0] and "1240" in named[0], report
+
+
+def test_the_same_revision_overrides_on_both_sides_pass(tmp_path: Path) -> None:
+    overridden = [{**CHROMIUM, "revisionOverrides": REVISION_OVERRIDES}, SHELL]
+
+    code, stdout, stderr = _installed(tmp_path, pip=overridden, npm=overridden)
+
+    assert (code, stderr) == (0, "")
+    assert "revisionOverrides" in stdout
+
+
 def test_the_pip_side_is_the_installed_playwrights_driver_by_default() -> None:
     """Where Playwright finds its own driver (`playwright._impl._driver.compute_driver_executable`)."""
     driver = Path(inspect.getfile(playwright)).parent / "driver" / "package" / "browsers.json"
