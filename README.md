@@ -296,8 +296,8 @@ operator's own tabs included, waits on its reply: about 13 ms each, the median m
 that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`
 and set `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`. Without it, cross-origin 307/308 POST redirects can fail, and
 on some Chrome builds credentialed cross-origin requests that need a CORS preflight fail after a redirect, in the
-operator's own tabs too, while the controller is attached: of the builds measured, 156.0.8078.4 does, and the later
-155 and 156 builds and the 157 to 159 ones follow such a redirect. Details:
+operator's own tabs too, while the controller is attached: of the builds measured, 156.0.8078.4 aborts them, and
+155.0.8059.84, 156.0.8078.47, 156.0.8078.80 and 157 to 159 follow such a redirect. Details:
 [`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
 
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:

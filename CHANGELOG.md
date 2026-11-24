@@ -49,9 +49,9 @@ All notable changes to auto-browser are documented here.
   Chrome for Testing builds measured, 156.0.8078.4 aborts it, and 155.0.8059.84, 156.0.8078.47, 156.0.8078.80,
   157.0.8103.38, 158.0.8127.88 and 159.0.8154.6 follow it. The documented switch,
   `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`, is unchanged,
-  for an operator's Chrome that aborts. The controller's log warning no longer says that cross-origin 307/308 POST
-  redirects fail in the operator's own tabs while the gate is attached: Chromium 151 failed such a redirect there,
-  and the builds above let 307 and 308 through.
+  for an operator's Chrome that aborts. The controller's log warning now says that it is older Chrome (Chromium 151)
+  that fails cross-origin 307/308 POST redirects in the operator's own tabs while the gate is attached; the builds
+  above let 307 and 308 through.
 - The stealth user-agent pool claims Chrome 159 and 158, and Edge 159, to match the Chromium 159 browser-node ships.
   It claimed Chrome 156 and 155, and Edge 156.
 

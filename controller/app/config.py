@@ -484,8 +484,8 @@ class Settings(BaseSettings):
     # started with --disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect
     # (request_gate.REDIRECT_ORIGIN_SWITCH). Without the first, older Chrome fails a cross-origin POST redirect the
     # pre-request gate let through, so the gate stops it itself and says why; without the second, some Chrome builds
-    # abort credentialed, preflighted cross-origin redirects in every tab while the gate is attached (of the builds
-    # measured, 156.0.8078.4 does, and the later 155 and 156 builds and the 157 to 159 ones follow them).
+    # abort credentialed, preflighted cross-origin redirects in every tab while the gate is attached
+    # (docs/deployment.md lists the builds measured).
     cdp_block_origin_on_redirect_disabled: bool = Field(False, alias="CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED")
 
     # Shadow browsing — enable headed mode for debugging
