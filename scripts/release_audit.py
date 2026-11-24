@@ -164,10 +164,15 @@ def main() -> int:
     _run(["npm", "audit", "--omit=dev", "--audit-level=high"], cwd=ROOT / "browser-node")
 
     print("Building and inspecting Python wheels...")
+    # As release.yml and ci.yml build them: each package's backend at the version the lock pins, and then a check of
+    # what built each wheel.
+    constraints = ROOT / "controller" / "constraints.txt"
     with tempfile.TemporaryDirectory(prefix="auto-browser-wheelhouse-") as temp_dir:
         wheelhouse = Path(temp_dir)
         for package_dir in WHEEL_PACKAGES:
-            _run([PYTHON, "-m", "build", "--wheel", "--outdir", str(wheelhouse), package_dir])
+            build = [PYTHON, "-m", "build", "--wheel", "--outdir", str(wheelhouse), package_dir]
+            _run([*build, "--dependency-constraints-txt", constraints])
+        _run([PYTHON, "scripts/check_wheel_build_tools.py", constraints, *sorted(wheelhouse.glob("*.whl"))])
         _inspect_controller_wheel(wheelhouse)
         _inspect_mcp_wheel(wheelhouse)
         _inspect_licenses(wheelhouse)

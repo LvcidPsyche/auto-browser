@@ -239,13 +239,16 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install build tool
-        run: python -m pip install build
+        run: python -m pip install build -c controller/constraints.txt
       - name: Build Python wheels
+        # Each package's build backend at the version controller/constraints.txt pins, as release.yml builds them.
         run: |
-          python -m build --wheel --outdir /tmp/wheelhouse controller
-          python -m build --wheel --outdir /tmp/wheelhouse client
-          python -m build --wheel --outdir /tmp/wheelhouse integrations/langchain
-          python -m build --wheel --outdir /tmp/wheelhouse packaging/auto-browser-mcp
+          python -m build --wheel --outdir /tmp/wheelhouse controller --dependency-constraints-txt controller/constraints.txt
+          python -m build --wheel --outdir /tmp/wheelhouse client --dependency-constraints-txt controller/constraints.txt
+          python -m build --wheel --outdir /tmp/wheelhouse integrations/langchain --dependency-constraints-txt controller/constraints.txt
+          python -m build --wheel --outdir /tmp/wheelhouse packaging/auto-browser-mcp --dependency-constraints-txt controller/constraints.txt
+      - name: Each wheel was built by the backend version the lock pins
+        run: python scripts/check_wheel_build_tools.py controller/constraints.txt /tmp/wheelhouse/*.whl
       - name: The controller wheel ships the seccomp profile
         # app/browser_sandbox.py loads it from the package; setuptools ships only .py files unless told.
         run: |
