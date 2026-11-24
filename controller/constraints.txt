@@ -113,7 +113,7 @@ pip-requirements-parser==32.0.1
     # via pip-audit
 platformdirs==4.14.8
     # via pip-audit
-playwright==1.64.1
+playwright==1.65.2
     # via -r requirements.txt
 pluggy==1.7.0
     # via
@@ -135,10 +135,6 @@ pydantic-core==2.50.5
     # via pydantic
 pydantic-settings==2.16.3
     # via -r requirements.txt
-pyee==13.0.1 ; python_full_version < '3.12'
-    # via playwright
-pyee==14.0.0 ; python_full_version >= '3.12'
-    # via playwright
 pygments==2.21.0
     # via
     #   pytest
@@ -208,7 +204,6 @@ typing-extensions==4.16.0
     #   pydantic
     #   pydantic-core
     #   pydantic-settings
-    #   pyee
     #   pytest-asyncio
     #   starlette
     #   typing-inspection

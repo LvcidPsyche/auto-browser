@@ -14,24 +14,22 @@ driver's list minus ThirdPartyStoragePartitioning, so a Playwright upgrade canno
 
 from __future__ import annotations
 
-# Playwright 1.64's disabledFeatures (driver/package/lib/coreBundle.js), in its order, without
+# Playwright 1.65's disabledFeatures (driver/package/lib/coreBundle.js), in its order, without
 # ThirdPartyStoragePartitioning.
 PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING = (
     "AvoidUnnecessaryBeforeUnloadCheckSync",
     "DestroyProfileOnBrowserClose",
-    "DialMediaRouteProvider",
-    "GlobalMediaControls",
     "HttpsUpgrades",
+    "HttpsFirstBalancedModeAutoEnable",
     "LensOverlay",
     "MediaRouter",
     "PaintHolding",
-    "BlockOriginHeaderModificationOnRedirect",
     "AvoidCorsURLLoaderRestartOnRedirect",
-    "Translate",
-    "AutoDeElevate",
+    "TcpPortRandomizationWin",
     "OptimizationHints",
     "NetworkTimeServiceQuerying",
     "AimEnabled",
+    "PreconnectToSearch",
     "msForceBrowserSignIn",
     "msEdgeUpdateLaunchServicesPreferredVersion",
 )

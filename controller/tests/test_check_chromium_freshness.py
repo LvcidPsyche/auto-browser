@@ -1,7 +1,7 @@
 """scripts/check_chromium_freshness.py, offline: every fetch is a fixture.
 
 Fixtures (tests/fixtures/chromium_freshness/) are real responses, trimmed: Google's versionhistory for Chrome stable
-on Linux, and the browsers.json of playwright-core 1.64.1 (packed into a tarball here, as npm serves it).
+on Linux, and the browsers.json of playwright-core 1.65.1 (packed into a tarball here, as npm serves it).
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def _tarball(browsers: dict) -> bytes:
 
 
 def _browsers(chromium: str) -> dict:
-    browsers = json.loads((_FIXTURES / "playwright-core-1.64.1-browsers.json").read_text(encoding="utf-8"))
+    browsers = json.loads((_FIXTURES / "playwright-core-1.65.1-browsers.json").read_text(encoding="utf-8"))
     for browser in browsers["browsers"]:
         if browser["name"] == "chromium":
             browser["browserVersion"] = chromium
@@ -61,16 +61,21 @@ def _stable(*versions: str) -> bytes:
     return json.dumps({"versions": [{"version": version} for version in versions]}).encode()
 
 
+# Chrome stable on the bundled Chromium's build, 75 patch numbers ahead of it, for the patch-gap tests: the real
+# fixture's newest stable (158.0.8127.88) is a major behind the bundled 159.0.8154.6, so it shows no gap.
+_STABLE_75_AHEAD = _stable("159.0.8154.81", "159.0.8154.75", "159.0.8154.47")
+
+
 class FakeSources:
     """The npm registry, versionhistory and GitHub/moby, as one fetch function."""
 
-    def __init__(self, *, latest="1.64.1", latest_chromium="156.0.8078.4", stable=b"", moby=None, tag="docker-v29.9.2"):
+    def __init__(self, *, latest="1.65.1", latest_chromium="159.0.8154.6", stable=b"", moby=None, tag="docker-v29.9.2"):
         self.responses = {
-            "https://registry.npmjs.org/playwright-core/1.64.1": json.dumps(
-                {"dist": {"tarball": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz"}}
+            "https://registry.npmjs.org/playwright-core/1.65.1": json.dumps(
+                {"dist": {"tarball": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.65.1.tgz"}}
             ).encode(),
-            "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz": _tarball(
-                _browsers("156.0.8078.4")
+            "https://registry.npmjs.org/playwright-core/-/playwright-core-1.65.1.tgz": _tarball(
+                _browsers("159.0.8154.6")
             ),
             "https://registry.npmjs.org/playwright-core/latest": json.dumps({"version": latest}).encode(),
             f"https://registry.npmjs.org/playwright-core/{latest}": json.dumps(
@@ -83,7 +88,7 @@ class FakeSources:
                 json.dumps(moby).encode() if moby is not None else (_SECCOMP / "moby-default.json").read_bytes()
             ),
         }
-        if latest != "1.64.1":
+        if latest != "1.65.1":
             self.responses[f"https://registry.npmjs.org/playwright-core/-/playwright-core-{latest}.tgz"] = _tarball(
                 _browsers(latest_chromium)
             )
@@ -107,39 +112,39 @@ class ChromiumFreshnessTests(unittest.TestCase):
         return code, out.getvalue()
 
     def test_reads_the_pinned_version_from_the_lockfile_and_its_bundled_chromium(self) -> None:
-        self.assertEqual(self.check.pinned_playwright_core(), "1.64.1")
+        self.assertEqual(self.check.pinned_playwright_core(), "1.65.1")
         sources = FakeSources()
-        self.assertEqual(self.check.bundled_chromium("1.64.1", sources), "156.0.8078.4")
-        self.assertEqual(self.check.chrome_stable(sources), "156.0.8078.79")
+        self.assertEqual(self.check.bundled_chromium("1.65.1", sources), "159.0.8154.6")
+        self.assertEqual(self.check.chrome_stable(sources), "158.0.8127.88")
 
     def test_current_passes_and_prints_the_patch_gap(self) -> None:
-        code, out = self._run(FakeSources())
+        code, out = self._run(FakeSources(stable=_STABLE_75_AHEAD))
         self.assertEqual(code, 0, out)
-        self.assertIn("pinned playwright-core 1.64.1 bundles Chromium 156.0.8078.4", out)
-        self.assertIn("Chrome stable for Linux: 156.0.8078.79", out)
+        self.assertIn("pinned playwright-core 1.65.1 bundles Chromium 159.0.8154.6", out)
+        self.assertIn("Chrome stable for Linux: 159.0.8154.81", out)
         self.assertIn(
-            "OK: same build 156.0.8078; stable is 75 patch number(s) ahead (156.0.8078.79 vs 156.0.8078.4)", out
+            "OK: same build 159.0.8154; stable is 75 patch number(s) ahead (159.0.8154.81 vs 159.0.8154.6)", out
         )
         self.assertIn(
             "OK: the seccomp profile minus its auto-browser entry matches moby's default as docker-v29.9.2", out
         )
 
     def test_stable_a_major_ahead_fails_naming_both(self) -> None:
-        code, out = self._run(FakeSources(stable=_stable("157.0.8100.12", "156.0.8078.79")))
+        code, out = self._run(FakeSources(stable=_stable("160.0.8200.12", "159.0.8154.81")))
         self.assertEqual(code, 1)
-        self.assertIn("STALE: Chrome stable 157.0.8100.12 is a major ahead of the bundled Chromium 156.0.8078.4", out)
+        self.assertIn("STALE: Chrome stable 160.0.8200.12 is a major ahead of the bundled Chromium 159.0.8154.6", out)
 
     def test_a_newer_playwright_with_a_newer_chromium_fails_naming_both(self) -> None:
-        code, out = self._run(FakeSources(latest="1.65.0", latest_chromium="157.0.8100.3"))
+        code, out = self._run(FakeSources(latest="1.66.0", latest_chromium="160.0.8200.3"))
         self.assertEqual(code, 1)
         self.assertIn(
-            "STALE: playwright-core 1.65.0 bundles Chromium 157.0.8100.3, newer than the Chromium 156.0.8078.4 of the "
-            "pinned 1.64.1",
+            "STALE: playwright-core 1.66.0 bundles Chromium 160.0.8200.3, newer than the Chromium 159.0.8154.6 of the "
+            "pinned 1.65.1",
             out,
         )
 
     def test_a_newer_playwright_with_the_same_chromium_passes(self) -> None:
-        code, out = self._run(FakeSources(latest="1.64.2", latest_chromium="156.0.8078.4"))
+        code, out = self._run(FakeSources(latest="1.65.2", latest_chromium="159.0.8154.6"))
         self.assertEqual(code, 0, out)
 
     def test_a_bundled_chromium_newer_than_stable_passes(self) -> None:
@@ -204,13 +209,13 @@ class RobustnessTests(unittest.TestCase):
 
     def test_npm_metadata_that_is_a_list(self) -> None:
         sources = FakeSources()
-        sources.responses["https://registry.npmjs.org/playwright-core/1.64.1"] = b"[1, 2]"
+        sources.responses["https://registry.npmjs.org/playwright-core/1.65.1"] = b"[1, 2]"
         out = self._assert_error(sources)
         self.assertIn("returned a JSON list, not a dict", out)  # named, not the catch-all's "unexpected"
 
     def test_a_tarball_that_is_not_gzip(self) -> None:
         sources = FakeSources()
-        sources.responses["https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz"] = b"not a tarball"
+        sources.responses["https://registry.npmjs.org/playwright-core/-/playwright-core-1.65.1.tgz"] = b"not a tarball"
         self._assert_error(sources)
 
     def test_versionhistory_with_versions_null(self) -> None:
@@ -224,7 +229,7 @@ class RobustnessTests(unittest.TestCase):
             lock.write_text(json.dumps({"packages": {"node_modules/playwright-core": {"version": "1.65.0-alpha"}}}))
             sources = FakeSources()
             sources.responses["https://registry.npmjs.org/playwright-core/1.65.0-alpha"] = sources.responses[
-                "https://registry.npmjs.org/playwright-core/1.64.1"
+                "https://registry.npmjs.org/playwright-core/1.65.1"
             ]
             self._assert_error(sources, lock_path=lock)
 
@@ -258,7 +263,7 @@ class PatchGapWarningTests(unittest.TestCase):
             summary = Path(tempdir) / "summary.md"
             out = io.StringIO()
             with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), contextlib.redirect_stdout(out):
-                code = self.check.run(fetcher=FakeSources())
+                code = self.check.run(fetcher=FakeSources(stable=_STABLE_75_AHEAD))
             self.assertEqual(code, 0)
             self.assertIn("::warning::", out.getvalue())
             self.assertIn("75 patch", out.getvalue())
@@ -267,7 +272,7 @@ class PatchGapWarningTests(unittest.TestCase):
     def test_a_small_gap_is_no_warning(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = self.check.run(fetcher=FakeSources(stable=_stable("156.0.8078.20")))
+            code = self.check.run(fetcher=FakeSources(stable=_stable("159.0.8154.20")))
         self.assertEqual(code, 0)
         self.assertNotIn("::warning::", out.getvalue())
 
@@ -382,7 +387,7 @@ class Round3FreshnessTests(unittest.TestCase):
             out = io.StringIO()
             # A directory where the summary file should be: opening it for append fails.
             with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": tempdir}), contextlib.redirect_stdout(out):
-                code = self.check.run(fetcher=FakeSources())
+                code = self.check.run(fetcher=FakeSources(stable=_STABLE_75_AHEAD))
         self.assertEqual(code, 0, out.getvalue())
         self.assertIn("WARNING: could not write the job summary", out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
@@ -406,7 +411,7 @@ class Round3FreshnessTests(unittest.TestCase):
     def test_the_warning_says_patch_numbers(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.check.run(fetcher=FakeSources())
+            self.check.run(fetcher=FakeSources(stable=_STABLE_75_AHEAD))
         self.assertIn("75 patch numbers behind", out.getvalue())
 
 

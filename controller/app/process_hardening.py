@@ -44,7 +44,7 @@ PLAYWRIGHT_DRIVER_ENV_NAMES = frozenset(
 )
 PLAYWRIGHT_DRIVER_ENV_PREFIXES = ("PW_", "PLAYWRIGHT_")
 # The private Playwright module whose get_driver_env PipeTransport.connect calls (confine_playwright_driver_environment).
-PLAYWRIGHT_TRANSPORT_MODULE = "playwright._impl._transport"
+PLAYWRIGHT_TRANSPORT_MODULE = "playwright._impl.transport"
 # What Tesseract keeps besides the base names: its data path and OpenMP's threads (PATH, a base name, is what
 # subprocess finds the tesseract binary by).
 TESSERACT_ENV_NAMES = frozenset({"TESSDATA_PREFIX"})
