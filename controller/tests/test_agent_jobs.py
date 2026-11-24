@@ -773,6 +773,26 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((interrupted["status"], interrupted["error"]), ("interrupted", "agent_job_interrupted"))
         self.assertTrue(any(record.id in line for line in logged.output), logged.output)
 
+    async def test_two_cancels_at_once_of_a_running_record_no_worker_holds_audit_one_interruption(self) -> None:
+        # The second cancel's stop write finds the record the first one interrupted: it is left as it is, and audited
+        # by the cancel that changed it alone.
+        record = await self.queue.store.create(
+            session_id="session-25",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="no worker holds it").model_dump(),
+        )
+        record.status = "running"
+        await self.queue.store.update(record)
+        audit = _WrittenAudit()
+        self.queue.audit = audit
+
+        answers = await asyncio.gather(self.queue.cancel_job(record.id), self.queue.cancel_job(record.id))
+
+        for answer in answers:
+            self.assertEqual((answer["status"], answer["error"]), ("interrupted", "agent_job_interrupted"))
+        events = [event for job_id, event, _status in audit.written if job_id == record.id]
+        self.assertEqual(events.count("agent_job_interrupted"), 1, events)
+
     async def test_cancelling_a_job_whose_end_could_not_be_written_leaves_its_finish_callback_to_run(self) -> None:
         # A run whose end could not be written (a full disk) still reads running while its task closes its session.
         # A cancel then cancelled that task inside the close, and nothing else closes the session.
