@@ -264,7 +264,8 @@ class PlaywrightDriverEnvironmentTests(unittest.TestCase):
 
     def test_a_playwright_without_the_transport_module_fails_closed_naming_it(self) -> None:
         """An upgrade that moves the module (1.65 renamed most playwright._impl modules, _transport among them) raises
-        the same error as one that moves the name, not a bare ModuleNotFoundError."""
+        the same error as one that moves the name, not a bare ModuleNotFoundError, with the import error as its cause:
+        one the module's own imports raised says which module is missing."""
         from app.process_hardening import PLAYWRIGHT_TRANSPORT_MODULE, confine_playwright_driver_environment
 
         # None in sys.modules makes importing that name raise ModuleNotFoundError, as for a module that is not there.
@@ -273,6 +274,8 @@ class PlaywrightDriverEnvironmentTests(unittest.TestCase):
                 confine_playwright_driver_environment()
         self.assertIn(f"{PLAYWRIGHT_TRANSPORT_MODULE}.get_driver_env", str(raised.exception))
         self.assertIn("whole environment", str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, ModuleNotFoundError)
+        self.assertEqual(raised.exception.__cause__.name, PLAYWRIGHT_TRANSPORT_MODULE)
 
 
 def _driver_pids() -> list[int]:

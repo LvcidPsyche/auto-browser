@@ -234,10 +234,11 @@ def confine_playwright_driver_environment() -> None:
     """
     from .providers.base import CLI_BASE_ENV_NAMES, CLI_BASE_ENV_PREFIXES
 
+    import_error: ModuleNotFoundError | None = None
     try:
         transport = importlib.import_module(PLAYWRIGHT_TRANSPORT_MODULE)
-    except ModuleNotFoundError:  # the module moved: the same error as for a moved name, below
-        transport = None
+    except ModuleNotFoundError as error:  # the module moved: the same error as for a moved name, below, caused by it
+        transport, import_error = None, error
     original = getattr(transport, "get_driver_env", None)
     if not callable(original):
         try:
@@ -247,7 +248,7 @@ def confine_playwright_driver_environment() -> None:
         raise RuntimeError(
             f"Playwright {version} has no {PLAYWRIGHT_TRANSPORT_MODULE}.get_driver_env to confine; its driver would "
             "start with the controller's whole environment"
-        )
+        ) from import_error
     if getattr(original, _CONFINED, False):
         return
     kept_names = CLI_BASE_ENV_NAMES | PLAYWRIGHT_DRIVER_ENV_NAMES
