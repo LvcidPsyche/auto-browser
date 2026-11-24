@@ -4,8 +4,10 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from contextvars import Context
+from contextvars import Context, copy_context
+from functools import partial
 from pathlib import Path
+from typing import TypeVar
 from uuid import uuid4
 
 from .audit import get_current_operator
@@ -27,12 +29,18 @@ from .utils import (
     atomic_write_text,
     error_lines_for_log,
     error_text_for_log,
+    quoted_for_log,
     record_json,
     record_path,
     utc_now,
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+# What a running job's record reads until its end is written ("cancelling": an operator has asked it to stop).
+_RUNNING_STATUSES = frozenset({"running", "cancelling"})
 
 
 class _AlreadyFinished(ValueError):
@@ -56,18 +64,49 @@ class AgentJobStore:
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
+    async def _run_locked(self, job_id: str | None, function: Callable[..., _T], *args: object) -> _T:
+        """Run `function(*args)` in a worker thread under the store's lock, and hold the lock until the thread has ended.
+
+        A thread cannot be stopped, so a call cancelled meanwhile waits for it, however often it is cancelled, and then
+        raises the cancellation: the next call finds what this one wrote (AgentJobQueue._enqueue finds create's record
+        under the lock), and the queue's shutdown, which waits for its own workers, returns only once their record
+        writes have landed. A failure of the thread meanwhile is logged, naming `job_id` (None for a listing). A call
+        cancelled while waiting for the lock starts no thread: _enqueue's `except KeyError` after a cancelled create
+        relies on it.
+        """
+        # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns the result with a flag
+        # where the store must raise the cancellation).
+        async with self._lock:
+            # The thread's own future, copying the context as asyncio.to_thread does: a task around it would be
+            # cancelled with every other when a loop is torn down, and asyncio.shield logs a late failure's own text.
+            work = asyncio.get_running_loop().run_in_executor(None, partial(copy_context().run, function, *args))
+            cancelled: asyncio.CancelledError | None = None
+            while not work.done():
+                try:
+                    await asyncio.wait([work])
+                except asyncio.CancelledError as exc:
+                    cancelled = cancelled or exc
+            if cancelled is None:
+                return work.result()
+            if (error := work.exception()) is not None:
+                logger.error(
+                    "agent job %s could not be written or read after its call was cancelled: %s: %s",
+                    "records" if job_id is None else quoted_for_log(job_id),
+                    type(error).__name__,
+                    error_text_for_log(error),
+                )
+            raise cancelled
+
     async def list(
         self,
         *,
         status: AgentJobStatus | None = None,
         session_id: str | None = None,
     ) -> list[AgentJobRecord]:
-        async with self._lock:
-            return await asyncio.to_thread(self._list_sync, status, session_id)
+        return await self._run_locked(None, self._list_sync, status, session_id)
 
     async def get(self, job_id: str) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._get_sync, job_id)
+        return await self._run_locked(job_id, self._get_sync, job_id)
 
     async def create(
         self,
@@ -79,48 +118,30 @@ class AgentJobStore:
         parent_job_id: str | None = None,
         job_id: str | None = None,
     ) -> AgentJobRecord:
-        async with self._lock:
-            now = utc_now()
-            record = AgentJobRecord(
-                id=job_id or uuid4().hex[:12],
-                session_id=session_id,
-                kind=kind,  # type: ignore[arg-type]
-                status="queued",
-                created_at=now,
-                updated_at=now,
-                request=request,
-                parent_job_id=parent_job_id,
-                operator=operator,
-            )
-            write = asyncio.ensure_future(asyncio.to_thread(self._write_sync, record))
-            try:
-                await asyncio.shield(write)
-            except asyncio.CancelledError:
-                # A thread cannot be stopped, so the record may still land: keep the lock until it has, however
-                # often this call is cancelled meanwhile, so a caller handling the cancellation
-                # (AgentJobQueue._enqueue) finds the record under the lock.
-                while not write.done():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.wait([write])
-                if not write.cancelled() and write.exception() is not None:
-                    logger.error(
-                        "agent job %s could not be written: %s", record.id, error_text_for_log(write.exception())
-                    )
-                raise
-            return record
+        now = utc_now()
+        record = AgentJobRecord(
+            id=job_id or uuid4().hex[:12],
+            session_id=session_id,
+            kind=kind,  # type: ignore[arg-type]
+            status="queued",
+            created_at=now,
+            updated_at=now,
+            request=request,
+            parent_job_id=parent_job_id,
+            operator=operator,
+        )
+        await self._run_locked(record.id, self._write_sync, record)
+        return record
 
     async def update(self, record: AgentJobRecord) -> None:
-        async with self._lock:
-            record.updated_at = utc_now()
-            await asyncio.to_thread(self._write_sync, record)
+        record.updated_at = utc_now()
+        await self._run_locked(record.id, self._write_sync, record)
 
     async def start_queued(self, job_id: str) -> AgentJobRecord | None:
-        async with self._lock:
-            return await asyncio.to_thread(self._start_queued_sync, job_id)
+        return await self._run_locked(job_id, self._start_queued_sync, job_id)
 
     async def append_checkpoint(self, job_id: str, checkpoint: AgentJobCheckpoint) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._append_checkpoint_sync, job_id, checkpoint)
+        return await self._run_locked(job_id, self._append_checkpoint_sync, job_id, checkpoint)
 
     async def finish(
         self,
@@ -130,24 +151,19 @@ class AgentJobStore:
         result: dict | None,
         error: str | None,
     ) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._finish_sync, job_id, status, result, error)
+        return await self._run_locked(job_id, self._finish_sync, job_id, status, result, error)
 
-    async def finish_cancelled(self, job_id: str, *, user_cancelled: bool) -> AgentJobRecord:
-        async with self._lock:
-            return await asyncio.to_thread(self._finish_cancelled_sync, job_id, user_cancelled)
+    async def finish_cancelled(self, job_id: str, *, user_cancelled: bool) -> tuple[AgentJobRecord, bool]:
+        return await self._run_locked(job_id, self._finish_cancelled_sync, job_id, user_cancelled)
 
     async def request_cancel(self, job_id: str) -> tuple[AgentJobRecord, bool]:
-        async with self._lock:
-            return await asyncio.to_thread(self._request_cancel_sync, job_id)
+        return await self._run_locked(job_id, self._request_cancel_sync, job_id)
 
     async def interrupt_queued(self, job_id: str) -> tuple[AgentJobRecord, bool]:
-        async with self._lock:
-            return await asyncio.to_thread(self._interrupt_queued_sync, job_id)
+        return await self._run_locked(job_id, self._interrupt_queued_sync, job_id)
 
     async def discard(self, job_id: str) -> tuple[AgentJobRecord, bool]:
-        async with self._lock:
-            return await asyncio.to_thread(self._discard_sync, job_id)
+        return await self._run_locked(job_id, self._discard_sync, job_id)
 
     async def mark_running_interrupted(self) -> None:
         for record in await self.list():
@@ -224,8 +240,10 @@ class AgentJobStore:
         self._write_sync(record)
         return record
 
-    def _finish_cancelled_sync(self, job_id: str, user_cancelled: bool) -> AgentJobRecord:
+    def _finish_cancelled_sync(self, job_id: str, user_cancelled: bool) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
+        if record.status not in _RUNNING_STATUSES:
+            return record, False  # it ended first (its end, or another stop, landed): it stands
         if user_cancelled:
             record.status = "cancelled"
             record.error = "agent_job_cancelled"
@@ -235,7 +253,7 @@ class AgentJobStore:
         record.result = None
         record.updated_at = utc_now()
         self._write_sync(record)
-        return record
+        return record, True
 
     def _request_cancel_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
@@ -267,7 +285,7 @@ class AgentJobStore:
 
     def _discard_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
-        if record.status in {"running", "cancelling"}:
+        if record.status in _RUNNING_STATUSES:
             raise ValueError("Running jobs must be cancelled before they can be discarded")
         if record.status != "discarded":
             record.status = "discarded"
@@ -534,8 +552,9 @@ class AgentJobQueue:
             return self._public_record(record)
 
         if task is None:
-            record = await self.store.finish_cancelled(job_id, user_cancelled=False)
-            await self._audit_quietly("agent_job_interrupted", "interrupted", record)
+            record, interrupted = await self.store.finish_cancelled(job_id, user_cancelled=False)
+            if interrupted:  # otherwise whoever settled the record audits it
+                await self._audit_quietly("agent_job_interrupted", "interrupted", record)
             return self._public_record(record)
 
         # The worker records how the job ended. Neither its cancellation nor an error of its own is raised over this
@@ -558,7 +577,7 @@ class AgentJobQueue:
         # The task of a finished job may still be running its finish callback (closing its session): cancelled, the
         # close never happened, and nothing else would close the session. Its record can still say running when the
         # write of its end failed, so the in-memory mark counts as much as the record.
-        if task is None or job_id in self._finishing or record.status not in {"running", "cancelling"}:
+        if task is None or job_id in self._finishing or record.status not in _RUNNING_STATUSES:
             raise _AlreadyFinished(f"agent job {job_id} has already finished")
         # Any reason but "user" makes the worker record an interruption; an operator's cancel under way keeps its own.
         self._cancellation_reasons.setdefault(job_id, "withdrawn")
@@ -715,20 +734,26 @@ class AgentJobQueue:
             # still needs releasing. _process_job's finally does that.
             return
 
+        refused = self._queued_by_a_removed_operator(record)
         try:
-            if self._queued_by_a_removed_operator(record):
+            if refused:
                 # Never started: it ends as any failed job does, and _process_job's finally releases its session.
                 record = await self.store.finish(
                     record.id, status="failed", result=None, error=QUEUED_OPERATOR_CREDENTIAL_REMOVED
                 )
-                await self._audit_quietly("agent_job_finished", record.status, record)
-                return
-            await self._audit("agent_job_started", "running", record)
+            else:
+                await self._audit("agent_job_started", "running", record)
         except asyncio.CancelledError:
             # Stopped as it started: recorded as a stop during the run is, or the record stays "running" or
-            # "cancelling" until the next restart.
+            # "cancelling" until the next restart. A refusal written as the stop came stands, audited as a run's end is.
             await self._record_stop(job_id)
             raise
+        if refused:
+            # After the try, as a run's end audit is: inside it, a stop during this audit would have the handler
+            # audit the end again, and the audit it cancelled can still land (the audit store writes in a thread,
+            # which goes on).
+            await self._audit_quietly("agent_job_finished", record.status, record)
+            return
 
         try:
             if record.kind == "agent_step":
@@ -803,10 +828,17 @@ class AgentJobQueue:
         return not self._operator_configured(operator.id)
 
     async def _record_stop(self, job_id: str) -> None:
-        """Record a job that was stopped: cancelled by its operator, or interrupted (a shutdown, a withdrawal)."""
+        """Record a job that was stopped: cancelled by its operator, or interrupted (a shutdown, a withdrawal).
+
+        A job whose end landed as the stop came keeps it, and the end is audited here (`agent_job_finished`): the
+        end's own audit comes after the block this stop ended, and is never begun.
+        """
         user_cancelled = self._cancellation_reasons.get(job_id) == "user"
-        record = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
-        event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
+        record, changed = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
+        if changed:
+            event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
+        else:
+            event_type = "agent_job_finished"
         # Quietly: the job has stopped and its record says so; an error raised here would take the place of the
         # CancelledError the caller re-raises.
         await self._audit_quietly(event_type, record.status, record)

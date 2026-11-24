@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import tempfile
+import threading
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from app.agent_jobs import AgentJobQueue
-from app.models import AgentJobCheckpoint, AgentRunRequest, AgentRunResult, AgentStepRequest, AgentStepResult
+from app.agent_jobs import QUEUED_OPERATOR_CREDENTIAL_REMOVED, AgentJobQueue, AgentJobStore
+from app.models import (
+    AgentJobCheckpoint,
+    AgentJobRecord,
+    AgentRunRequest,
+    AgentRunResult,
+    AgentStepRequest,
+    AgentStepResult,
+    OperatorIdentity,
+)
+from app.session_ownership import acting_as
 from app.utils import utc_now
 
 
@@ -121,6 +133,101 @@ class _HeldAudit:
         if kwargs["event_type"] == self.event_type:
             self.held.set()
             await self.release.wait()
+
+
+# The longest a test holds a store's thread, or waits for one: a regression fails an assertion, never hangs the run.
+_HELD_THREAD_SECONDS = 10.0
+# How long a test gives what must not happen while a store's thread is held (a second call, a shutdown's return, a
+# job's run) to happen: where the store lets go of its lock too early, it happens at once.
+_A_MOMENT_SECONDS = 0.5
+
+
+class _HeldStoreThread:
+    """Holds the first call of one of a store's sync functions (the first that `when` accepts) in its worker thread.
+
+    `entered` is set once that thread waits, and `returned` once it has gone on and the real function has ended.
+    """
+
+    def __init__(self, store: AgentJobStore, name: str, *, when: Callable[..., bool] | None = None) -> None:
+        self.entered, self.release, self.returned = threading.Event(), threading.Event(), threading.Event()
+        first = threading.Lock()
+        real = getattr(store, name)
+
+        def held(*args):
+            if (when is not None and not when(*args)) or not first.acquire(blocking=False):
+                return real(*args)
+            self.entered.set()
+            self.release.wait(_HELD_THREAD_SECONDS)
+            try:
+                return real(*args)
+            finally:
+                self.returned.set()
+
+        setattr(store, name, held)
+
+    async def let_go(self) -> None:
+        """Release the thread and wait until it has returned, so that nothing it writes lands after the test."""
+        self.release.set()
+        if self.entered.is_set():
+            await asyncio.to_thread(self.returned.wait, _HELD_THREAD_SECONDS)
+
+
+class _GatedOrchestrator:
+    """Runs the job whose goal is "ahead" until `gate` is set, so that the jobs queued behind it wait; others at once.
+
+    Records the goal of every run it begins, and sets `behind_started` when one other than "ahead" begins.
+    """
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.ahead_started = asyncio.Event()
+        self.behind_started = asyncio.Event()
+        self.goals: list[str] = []
+
+    async def run(self, **kwargs):
+        self.goals.append(kwargs["goal"])
+        if kwargs["goal"] == "ahead":
+            self.ahead_started.set()
+            await self.gate.wait()
+        else:
+            self.behind_started.set()
+        return AgentRunResult(
+            provider=kwargs["provider_name"],
+            model="test-model",
+            goal=kwargs["goal"],
+            status="done",
+            steps=[],
+            final_session={"id": kwargs["session_id"], "status": "active"},
+        )
+
+
+class _WrittenAudit:
+    """Records each audit event once it has been written, as (job id, event type, status).
+
+    Given `hold`, the first append of that event type is handed to a worker thread (`held` is set then) that waits
+    until `release` is set, and sets `landed` once it has written. An append cancelled meanwhile still lands then:
+    the real writer (app.audit.AuditStore) writes through asyncio.to_thread, whose thread goes on when its call is
+    cancelled.
+    """
+
+    def __init__(self, hold: str | None = None) -> None:
+        self.hold = hold
+        self.held = asyncio.Event()
+        self.release, self.landed = threading.Event(), threading.Event()
+        self.written: list[tuple[str, str, str]] = []
+
+    async def append(self, **kwargs) -> None:
+        event = (kwargs["job_id"], kwargs["event_type"], kwargs["status"])
+        if kwargs["event_type"] != self.hold or self.held.is_set():
+            self.written.append(event)
+            return
+        self.held.set()
+        await asyncio.to_thread(self._write_once_released, event)
+
+    def _write_once_released(self, event: tuple[str, str, str]) -> None:
+        self.release.wait(_HELD_THREAD_SECONDS)
+        self.written.append(event)
+        self.landed.set()
 
 
 class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
@@ -510,7 +617,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled["error"], "agent_job_cancelled")
         self.assertTrue(slow_orchestrator.cancelled.is_set())
 
-    async def _restart_with(self, orchestrator, audit) -> None:
+    async def _restart_with(self, orchestrator, audit, *, operator_configured=None) -> None:
         """Replace the queue with one that runs jobs on *orchestrator* and audits them to *audit*."""
         await self.queue.shutdown()
         self.queue = AgentJobQueue(
@@ -519,6 +626,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
             session_accessible=every_session_usable,
             worker_count=1,
             audit_store=audit,
+            operator_configured=operator_configured,
         )
         await self.queue.startup()
 
@@ -666,6 +774,34 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((interrupted["status"], interrupted["error"]), ("interrupted", "agent_job_interrupted"))
         self.assertTrue(any(record.id in line for line in logged.output), logged.output)
 
+    async def test_two_cancels_at_once_of_a_running_record_no_worker_holds_audit_one_interruption(self) -> None:
+        # Two cancels of a running record no worker holds: the one whose stop write finds the record already
+        # interrupted leaves it as it is, and only the cancel that changed it audits the interruption. The first
+        # cancel's request is held at its audit until the second has settled the record, so the order is the
+        # test's, not the store lock's.
+        record = await self.queue.store.create(
+            session_id="session-25",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="no worker holds it").model_dump(),
+        )
+        record.status = "running"
+        await self.queue.store.update(record)
+        audit = _WrittenAudit(hold="agent_job_cancel_requested")
+        self.queue.audit = audit
+
+        first = asyncio.create_task(self.queue.cancel_job(record.id))
+        try:
+            await asyncio.wait_for(audit.held.wait(), timeout=2)
+            second = await self.queue.cancel_job(record.id)
+        finally:
+            audit.release.set()
+        answers = [await asyncio.wait_for(first, timeout=2), second]
+
+        for answer in answers:
+            self.assertEqual((answer["status"], answer["error"]), ("interrupted", "agent_job_interrupted"))
+        events = [event for job_id, event, _status in audit.written if job_id == record.id]
+        self.assertEqual(events.count("agent_job_interrupted"), 1, events)
+
     async def test_cancelling_a_job_whose_end_could_not_be_written_leaves_its_finish_callback_to_run(self) -> None:
         # A run whose end could not be written (a full disk) still reads running while its task closes its session.
         # A cancel then cancelled that task inside the close, and nothing else closes the session.
@@ -751,6 +887,357 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         updated = await self.queue.get_job(record.id)
         self.assertEqual(updated["status"], "interrupted")
         self.assertTrue(updated["resumable"])
+
+    async def test_a_store_call_cancelled_mid_write_keeps_the_lock_until_the_write_has_landed(self) -> None:
+        # The lock went with the cancelled call while its thread went on: a second call read and wrote the record
+        # meanwhile, and the first thread's write then put back what it had read (a stopped job read running again).
+        store = self.queue.store
+        record = await store.create(
+            session_id="session-16",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="stopped as it writes").model_dump(),
+        )
+        record.status = "running"
+        await store.update(record)
+        held = _HeldStoreThread(store, "_write_sync")
+        append = asyncio.create_task(
+            store.append_checkpoint(record.id, AgentJobCheckpoint(step_index=1, created_at=utc_now(), status="acted"))
+        )
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            append.cancel()
+            stop = asyncio.create_task(store.finish_cancelled(record.id, user_cancelled=True))
+            await asyncio.wait({append, stop}, timeout=_A_MOMENT_SECONDS)
+            lock_held, stop_waited = store._lock.locked(), not stop.done()
+        finally:
+            await held.let_go()
+        with self.assertRaises(asyncio.CancelledError):
+            await append
+        await asyncio.wait_for(stop, _HELD_THREAD_SECONDS)
+        final = await store.get(record.id)
+
+        self.assertTrue(lock_held, "the cancelled call let go of the store's lock while its thread was still writing")
+        self.assertTrue(stop_waited, "a second call ran while the first one's thread was still writing")
+        self.assertEqual((final.status, len(final.checkpoints)), ("cancelled", 1))
+
+    async def test_shutdown_returns_only_once_a_store_write_under_way_has_landed(self) -> None:
+        # A shutdown that stopped a job while its thread wrote a checkpoint returned before the write landed: the job
+        # was recorded interrupted, then the late write put it back to running until the next start (and, landing
+        # as the folder was removed, failed this class's teardown with "Directory not empty").
+        held = _HeldStoreThread(self.queue.store, "_write_sync", when=lambda record: bool(record.checkpoints))
+        job = await self.queue.enqueue_run(
+            "session-17", AgentRunRequest(provider="openai", goal="stopped as it writes", max_steps=1)
+        )
+
+        async def shut_down() -> AgentJobRecord:
+            await self.queue.shutdown()
+            return await self.queue.store.get(job["id"])
+
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            stopping = asyncio.create_task(shut_down())
+            returned_while_held, _ = await asyncio.wait({stopping}, timeout=_A_MOMENT_SECONDS)
+        finally:
+            await held.let_go()
+        at_return = await asyncio.wait_for(stopping, _HELD_THREAD_SECONDS)
+        final = await self.queue.store.get(job["id"])
+
+        self.assertEqual(
+            (final.status, len(final.checkpoints)),
+            (at_return.status, len(at_return.checkpoints)),
+            "the record changed after shutdown returned",
+        )
+        self.assertFalse(returned_while_held, "shutdown returned while a store write was still under way")
+        self.assertEqual(
+            (final.status, final.error, len(final.checkpoints)), ("interrupted", "agent_job_interrupted", 1)
+        )
+
+    async def _shut_down_as_a_runs_end_is_written(
+        self, result: AgentRunResult, end: str
+    ) -> tuple[AgentJobRecord, AgentJobRecord, list[tuple[str, str]]]:
+        """Shut down while a run that gave `result` has its end (`end`) written: the record at shutdown's return and
+        after, and the job's audit events with their statuses."""
+        audit = AsyncMock()
+        self.orchestrator.run = AsyncMock(return_value=result)
+        await self._restart_with(self.orchestrator, audit)
+        held = _HeldStoreThread(self.queue.store, "_write_sync", when=lambda record: record.status == end)
+        job = await self.queue.enqueue_run("session-22", AgentRunRequest(provider="openai", goal="stopped as it ends"))
+
+        async def shut_down() -> AgentJobRecord:
+            await self.queue.shutdown()
+            return await self.queue.store.get(job["id"])
+
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            stopping = asyncio.create_task(shut_down())
+            await asyncio.wait({stopping}, timeout=_A_MOMENT_SECONDS)  # the shutdown has stopped the job
+        finally:
+            await held.let_go()
+        at_return = await asyncio.wait_for(stopping, _HELD_THREAD_SECONDS)
+        final = await self.queue.store.get(job["id"])
+        events = [
+            (call.kwargs["event_type"], call.kwargs["status"])
+            for call in audit.append.await_args_list
+            if call.kwargs["job_id"] == job["id"]
+        ]
+        return at_return, final, events
+
+    async def test_a_run_stopped_by_shutdown_as_its_completion_is_written_keeps_it_and_its_result(self) -> None:
+        # The end landed, and the stop was then written over it: the record read interrupted, the run's result was
+        # gone, and the job was offered for a resume that would run it again.
+        result = AgentRunResult(
+            provider="openai", model="test-model", goal="stopped as it ends", status="done", steps=[], final_session={}
+        )
+
+        at_return, final, events = await self._shut_down_as_a_runs_end_is_written(result, "completed")
+
+        for record in (at_return, final):
+            self.assertEqual((record.status, record.result, record.error), ("completed", result.model_dump(), None))
+        self.assertFalse(AgentJobQueue._public_record(final)["resumable"])
+        self.assertEqual(events[-1], ("agent_job_finished", "completed"))
+        self.assertEqual([event for event, _status in events].count("agent_job_finished"), 1)
+        self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
+
+    async def test_a_run_stopped_by_shutdown_as_its_failure_is_written_keeps_it_and_its_result(self) -> None:
+        step = AgentStepResult(
+            provider="openai",
+            model="test-model",
+            goal="stopped as it ends",
+            status="error",
+            observation={},
+            decision={},
+            error="the page would not load",
+        )
+        result = AgentRunResult(
+            provider="openai",
+            model="test-model",
+            goal="stopped as it ends",
+            status="error",
+            steps=[step],
+            final_session={},
+        )
+
+        at_return, final, events = await self._shut_down_as_a_runs_end_is_written(result, "failed")
+
+        for record in (at_return, final):
+            self.assertEqual(
+                (record.status, record.result, record.error), ("failed", result.model_dump(), "the page would not load")
+            )
+        self.assertEqual(events[-1], ("agent_job_finished", "failed"))
+        self.assertEqual([event for event, _status in events].count("agent_job_finished"), 1)
+        self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
+
+    async def _shut_down_as_a_refusal_is(self, moment: str) -> tuple[AgentJobRecord, list[tuple[str, str]]]:
+        """Shut down while a job refused because its operator's credential is gone has its failure written (`moment`
+        "written") or that failure's agent_job_finished audited ("audited"): the record at shutdown's return, and the
+        job's audit events as written, with their statuses."""
+        audit = _WrittenAudit(hold="agent_job_finished" if moment == "audited" else None)
+        await self._restart_with(self.orchestrator, audit, operator_configured=lambda _operator_id: False)
+        held = _HeldStoreThread(
+            self.queue.store, "_write_sync", when=lambda record: moment == "written" and record.status == "failed"
+        )
+        with acting_as(OperatorIdentity(id="removed", source="token")):
+            job = await self.queue.enqueue_run("session-23", AgentRunRequest(provider="openai", goal="refused"))
+
+        async def shut_down() -> AgentJobRecord:
+            await self.queue.shutdown()
+            return await self.queue.store.get(job["id"])
+
+        try:
+            if moment == "written":
+                self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            else:
+                await asyncio.wait_for(audit.held.wait(), _HELD_THREAD_SECONDS)
+            stopping = asyncio.create_task(shut_down())
+            await asyncio.wait({stopping}, timeout=_A_MOMENT_SECONDS)  # the shutdown has stopped the job
+        finally:
+            await held.let_go()
+            audit.release.set()
+        at_return = await asyncio.wait_for(stopping, _HELD_THREAD_SECONDS)
+        if moment == "audited":
+            self.assertTrue(await asyncio.to_thread(audit.landed.wait, _HELD_THREAD_SECONDS))
+        return at_return, [(event, status) for job_id, event, status in audit.written if job_id == job["id"]]
+
+    async def test_a_refused_job_stopped_by_shutdown_as_its_failure_is_written_keeps_it_and_audits_it(self) -> None:
+        # Stopped as its failure was written, the record read failed while its audit said interrupted. The failure now
+        # stands, and the stop's handler audits it as the job's end: the failure's own audit, after the block the stop
+        # ended, is never begun.
+        record, events = await self._shut_down_as_a_refusal_is("written")
+
+        self.assertEqual((record.status, record.error), ("failed", QUEUED_OPERATOR_CREDENTIAL_REMOVED))
+        self.assertEqual(events[-1], ("agent_job_finished", "failed"))
+        self.assertEqual([event for event, _status in events].count("agent_job_finished"), 1)
+        self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
+
+    async def test_a_refused_job_stopped_by_shutdown_as_its_failure_is_audited_is_audited_once(self) -> None:
+        # The audit the stop cancels lands all the same, as the real writer's does, so it is the one event: the stop's
+        # handler, which audits an end that stands, does not cover that audit.
+        record, events = await self._shut_down_as_a_refusal_is("audited")
+
+        self.assertEqual((record.status, record.error), ("failed", QUEUED_OPERATOR_CREDENTIAL_REMOVED))
+        self.assertEqual([event for event, _status in events].count("agent_job_finished"), 1)
+
+    async def test_a_queued_job_does_not_run_when_its_cancel_is_cancelled_as_the_cancel_is_written(self) -> None:
+        # The cancelled cancel let go of the store's lock while its thread went on: a worker took the job and ran it
+        # before the thread wrote it cancelled.
+        orchestrator = _GatedOrchestrator()
+        await self._restart_with(orchestrator, None)
+        await self.queue.enqueue_run("session-18", AgentRunRequest(provider="openai", goal="ahead"))
+        await asyncio.wait_for(orchestrator.ahead_started.wait(), timeout=2)
+        behind = await self.queue.enqueue_run("session-18", AgentRunRequest(provider="openai", goal="behind"))
+        held = _HeldStoreThread(self.queue.store, "_request_cancel_sync")
+        caller = asyncio.create_task(self.queue.cancel_job(behind["id"]))
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            caller.cancel()
+            orchestrator.gate.set()  # the job ahead ends, and the worker takes the one behind it
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(orchestrator.behind_started.wait(), _A_MOMENT_SECONDS)
+        finally:
+            await held.let_go()
+        await asyncio.wait_for(self.queue.queue.join(), _HELD_THREAD_SECONDS)
+
+        self.assertNotIn("behind", orchestrator.goals, "the job ran after it was cancelled")
+        self.assertEqual((await self.queue.store.get(behind["id"])).status, "cancelled")
+        self.assertTrue(caller.cancelled(), "the cancel call swallowed its own cancellation")
+
+    async def test_a_job_does_not_run_when_its_enqueue_is_cancelled_again_as_it_is_withdrawn(self) -> None:
+        # Cancelled while its admission was audited, the enqueue withdraws the job; cancelled again during the
+        # withdrawal, it let go of the store's lock while the thread went on, and a worker ran the job meanwhile.
+        orchestrator, audit = _GatedOrchestrator(), _HeldAudit("agent_job_enqueued")
+        await self._restart_with(orchestrator, audit)
+        # The job ahead is put on the queue as a restart puts one, so that only the second job's admission is held.
+        ahead = await self.queue.store.create(
+            session_id="session-19",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="ahead").model_dump(),
+        )
+        await self.queue.queue.put(ahead.id)
+        await asyncio.wait_for(orchestrator.ahead_started.wait(), timeout=2)
+        held = _HeldStoreThread(self.queue.store, "_interrupt_queued_sync")
+        enqueue = asyncio.create_task(
+            self.queue.enqueue_run("session-19", AgentRunRequest(provider="openai", goal="behind"))
+        )
+        try:
+            await asyncio.wait_for(audit.held.wait(), timeout=2)
+            enqueue.cancel()  # given up on while its admission is audited: the job is withdrawn
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            enqueue.cancel()  # and again while it is withdrawn
+            orchestrator.gate.set()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(orchestrator.behind_started.wait(), _A_MOMENT_SECONDS)
+        finally:
+            await held.let_go()
+        await asyncio.wait_for(self.queue.queue.join(), _HELD_THREAD_SECONDS)
+        [behind] = [record for record in await self.queue.store.list() if record.request["goal"] == "behind"]
+
+        self.assertNotIn("behind", orchestrator.goals, "the job ran after its caller withdrew it")
+        self.assertEqual((behind.status, behind.error), ("interrupted", "agent_job_interrupted"))
+        self.assertTrue(enqueue.cancelled(), "the enqueue swallowed its own cancellation")
+
+    async def test_every_store_call_cancelled_in_its_thread_holds_the_lock_until_the_thread_has_ended(self) -> None:
+        # One call that let go of the lock when cancelled would let the next read the record while its thread went on
+        # to write it, as each of these but create did.
+        store = self.queue.store
+        request = AgentRunRequest(provider="openai", goal="every store call").model_dump()
+        checkpoint = AgentJobCheckpoint(step_index=1, created_at=utc_now(), status="acted")
+        # Each store method: the function its thread runs, and a call of it.
+        calls = {
+            "list": ("_list_sync", lambda record: store.list()),
+            "get": ("_get_sync", lambda record: store.get(record.id)),
+            "create": (
+                "_write_sync",
+                lambda record: store.create(session_id="session-20", kind="agent_run", request=request),
+            ),
+            "update": ("_write_sync", lambda record: store.update(record)),
+            "start_queued": ("_start_queued_sync", lambda record: store.start_queued(record.id)),
+            "append_checkpoint": (
+                "_append_checkpoint_sync",
+                lambda record: store.append_checkpoint(record.id, checkpoint),
+            ),
+            "finish": (
+                "_finish_sync",
+                lambda record: store.finish(record.id, status="completed", result=None, error=None),
+            ),
+            "finish_cancelled": (
+                "_finish_cancelled_sync",
+                lambda record: store.finish_cancelled(record.id, user_cancelled=False),
+            ),
+            "request_cancel": ("_request_cancel_sync", lambda record: store.request_cancel(record.id)),
+            "interrupt_queued": ("_interrupt_queued_sync", lambda record: store.interrupt_queued(record.id)),
+            "discard": ("_discard_sync", lambda record: store.discard(record.id)),
+        }
+        for method, (function, call) in calls.items():
+            with self.subTest(store_call=method):
+                record = await store.create(session_id="session-20", kind="agent_run", request=request)
+                held = _HeldStoreThread(store, function)
+                task = asyncio.create_task(call(record))
+                try:
+                    self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+                    for cancel in ("first", "second"):
+                        task.cancel()
+                        await asyncio.wait({task}, timeout=_A_MOMENT_SECONDS)
+                        self.assertFalse(task.done(), f"the {cancel} cancel ended the call while its thread ran")
+                        self.assertTrue(store._lock.locked(), f"the {cancel} cancel let go of the store's lock")
+                finally:
+                    await held.let_go()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+    async def test_a_store_call_keeps_the_lock_until_its_thread_has_ended_when_every_task_is_cancelled(self) -> None:
+        # As asyncio.run cancels every task when it tears its loop down. The call waited for its thread through a task
+        # of its own, cancelled with the rest: it let go of the lock and ended while the thread went on to write.
+        await self.queue.shutdown()  # so that the call is the only other task
+        store = AgentJobStore(Path(self.tempdir.name) / "bare")
+        await store.startup()
+        record = await store.create(
+            session_id="session-21",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="stopped with every task").model_dump(),
+        )
+        held = _HeldStoreThread(store, "_write_sync")
+        call = asyncio.create_task(
+            store.append_checkpoint(record.id, AgentJobCheckpoint(step_index=1, created_at=utc_now(), status="acted"))
+        )
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            for task in asyncio.all_tasks() - {asyncio.current_task()}:
+                task.cancel()
+            await asyncio.wait({call}, timeout=_A_MOMENT_SECONDS)
+            ended_while_held, lock_held = call.done(), store._lock.locked()
+        finally:
+            await held.let_go()
+        await asyncio.wait({call}, timeout=_HELD_THREAD_SECONDS)
+
+        self.assertFalse(ended_while_held, "the call ended while its thread was still writing")
+        self.assertTrue(lock_held, "the call let go of the store's lock while its thread was still writing")
+        self.assertTrue(call.cancelled(), "the call swallowed its cancellation")
+        self.assertEqual(len((await store.get(record.id)).checkpoints), 1)
+
+    async def test_a_store_thread_that_fails_after_its_call_was_cancelled_is_logged_once_by_its_class(self) -> None:
+        # On Python 3.14 asyncio.shield, which the call waited through, logged the thread's error a second time with
+        # the error's own text as it is (here an id a caller gave; a record's fields where one does not validate).
+        store = AgentJobStore(Path(self.tempdir.name) / "bare")
+        await store.startup()
+        held = _HeldStoreThread(store, "_get_sync")
+        call = asyncio.create_task(store.get("no-such-job"))
+        try:
+            self.assertTrue(await asyncio.to_thread(held.entered.wait, _HELD_THREAD_SECONDS))
+            with (
+                self.assertNoLogs("asyncio", level="ERROR"),
+                self.assertLogs("app.agent_jobs", level="ERROR") as logged,
+            ):
+                call.cancel()
+                await asyncio.wait({call}, timeout=_A_MOMENT_SECONDS)  # the call has taken its cancellation
+                await held.let_go()  # and the thread fails
+                await asyncio.wait({call}, timeout=_HELD_THREAD_SECONDS)
+        finally:
+            await held.let_go()
+
+        self.assertTrue(call.cancelled(), "the thread's error took the place of the call's cancellation")
+        [line] = logged.output
+        self.assertIn("could not be written", line)
+        self.assertIn("KeyError", line)
 
 
 class _InstantOrchestrator:
