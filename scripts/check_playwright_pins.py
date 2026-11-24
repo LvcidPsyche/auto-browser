@@ -26,9 +26,9 @@ different Chromium builds, while pip 1.65.2 and npm 1.65.1 carry the same one. W
 `chromium` and `chromium-headless-shell` entries (their revision, browserVersion and revisionOverrides) of the
 installed pip driver's own browsers.json (playwright/driver/package/browsers.json) with those of npm's playwright-core
 (browser-node/node_modules/playwright-core/browsers.json). A missing file, or an entry whose revision or
-browserVersion is missing or not a string, fails, saying what to install; it never passes or skips. What it does not
-see: the two bundles may still differ in the switches they launch Chromium with by default. The product's two copies
-of Playwright's --disable-features list are held to the pip bundle's by their own tests
+browserVersion is missing, blank or not a string, fails, saying what to install; it never passes or skips. What it
+does not see: the two bundles may still differ in the switches they launch Chromium with by default. The product's two
+copies of Playwright's --disable-features list are held to the pip bundle's by their own tests
 (controller/tests/test_playwright_disabled_features.py).
 
 Neither mode installs anything. Standard library only, and playwright is never imported: the lint job does not
@@ -171,8 +171,9 @@ class _Unreadable(Exception):
     install."""
 
 
-# What names an entry's build. A revision or browserVersion that is missing or not a string is unreadable (two missing
-# ones would compare equal), and revisionOverrides installs another build on the platforms it names.
+# What names an entry's build. A revision or browserVersion that is missing, not a string, empty or blank is unreadable
+# (two missing or two blank ones would compare equal), and revisionOverrides installs another build on the platforms it
+# names.
 _BUILD_FIELDS = ("revision", "browserVersion")
 _OVERRIDES = "revisionOverrides"
 
@@ -192,7 +193,7 @@ def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str, obje
         if entry is None:
             raise _Unreadable(f"{path} has no {name!r} entry")
         for field in _BUILD_FIELDS:
-            if not isinstance(entry.get(field), str) or not entry[field]:
+            if not isinstance(entry.get(field), str) or not entry[field].strip():
                 raise _Unreadable(f"{path} has a {name!r} entry without a readable {field} ({entry!r}); {install}")
         builds[name] = (entry["revision"], entry["browserVersion"], entry.get(_OVERRIDES))
     return builds

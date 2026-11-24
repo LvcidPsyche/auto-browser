@@ -221,13 +221,15 @@ def test_a_browsers_json_without_the_entry_fails_naming_it(tmp_path: Path, side:
 
 
 @pytest.mark.parametrize("sides", [("pip", "npm"), ("npm",)], ids=["both-sides", "npm-side"])
-@pytest.mark.parametrize("value", ["missing", None, 1248], ids=["missing", "null", "a-number"])
+@pytest.mark.parametrize(
+    "value", ["missing", None, 1248, "", " "], ids=["missing", "null", "a-number", "empty", "blank"]
+)
 @pytest.mark.parametrize("field", ["revision", "browserVersion"])
 def test_an_entry_without_a_readable_build_fails_naming_the_file_and_the_entry(
     tmp_path: Path, field: str, value: object, sides: tuple[str, ...]
 ) -> None:
     """Missing on both sides, the two once compared equal (as "None") and passed; a number equal to the other side's
-    string did too."""
+    string did too, and so did a blank string on both sides."""
     if value == "missing":
         unreadable = {key: item for key, item in CHROMIUM.items() if key != field}
     else:
