@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+# What a running job's record reads until its end is written ("cancelling": an operator has asked it to stop).
+_RUNNING_STATUSES = frozenset({"running", "cancelling"})
+
 
 class _AlreadyFinished(ValueError):
     """AgentJobQueue._withdraw found nothing to take back: the job has already finished."""
@@ -239,7 +242,7 @@ class AgentJobStore:
 
     def _finish_cancelled_sync(self, job_id: str, user_cancelled: bool) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
-        if record.status not in {"running", "cancelling"}:
+        if record.status not in _RUNNING_STATUSES:
             return record, False  # it ended first (its end, or another stop, landed): it stands
         if user_cancelled:
             record.status = "cancelled"
@@ -282,7 +285,7 @@ class AgentJobStore:
 
     def _discard_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
-        if record.status in {"running", "cancelling"}:
+        if record.status in _RUNNING_STATUSES:
             raise ValueError("Running jobs must be cancelled before they can be discarded")
         if record.status != "discarded":
             record.status = "discarded"
@@ -549,8 +552,8 @@ class AgentJobQueue:
             return self._public_record(record)
 
         if task is None:
-            record, changed = await self.store.finish_cancelled(job_id, user_cancelled=False)
-            if changed:  # otherwise whoever settled the record has audited it
+            record, interrupted = await self.store.finish_cancelled(job_id, user_cancelled=False)
+            if interrupted:  # otherwise whoever settled the record has audited it
                 await self._audit_quietly("agent_job_interrupted", "interrupted", record)
             return self._public_record(record)
 
@@ -574,7 +577,7 @@ class AgentJobQueue:
         # The task of a finished job may still be running its finish callback (closing its session): cancelled, the
         # close never happened, and nothing else would close the session. Its record can still say running when the
         # write of its end failed, so the in-memory mark counts as much as the record.
-        if task is None or job_id in self._finishing or record.status not in {"running", "cancelling"}:
+        if task is None or job_id in self._finishing or record.status not in _RUNNING_STATUSES:
             raise _AlreadyFinished(f"agent job {job_id} has already finished")
         # Any reason but "user" makes the worker record an interruption; an operator's cancel under way keeps its own.
         self._cancellation_reasons.setdefault(job_id, "withdrawn")
