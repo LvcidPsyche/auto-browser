@@ -20,7 +20,7 @@ build==1.6.1
     # via -r requirements-dev.txt
 cachecontrol==0.15.0
     # via pip-audit
-certifi==2026.10.23
+certifi==2026.11.20
     # via
     #   httpcore
     #   httpx
@@ -158,7 +158,7 @@ python-dotenv==1.2.4
     #   uvicorn
 pywin32==312 ; sys_platform == 'win32'
     # via docker
-pyyaml==6.0.3
+pyyaml==6.0.4
     # via uvicorn
 redis==8.1.0
     # via -r requirements.txt
