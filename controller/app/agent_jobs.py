@@ -66,9 +66,10 @@ class AgentJobStore:
 
         A thread cannot be stopped, so a call cancelled meanwhile waits for it, however often it is cancelled, and then
         raises the cancellation: the next call finds what this one wrote (AgentJobQueue._enqueue finds create's record
-        under the lock), and the queue's shutdown, which waits for its own workers, returns only once their writes have
-        landed. A failure of the thread meanwhile is logged, naming `job_id` (None for a listing). A call cancelled
-        while waiting for the lock starts no thread: _enqueue's `except KeyError` after a cancelled create relies on it.
+        under the lock), and the queue's shutdown, which waits for its own workers, returns only once their record
+        writes have landed. A failure of the thread meanwhile is logged, naming `job_id` (None for a listing). A call
+        cancelled while waiting for the lock starts no thread: _enqueue's `except KeyError` after a cancelled create
+        relies on it.
         """
         # Not run_to_completion (the failure wins over the cancel) nor _run_through (it returns the result with a flag
         # where the store must raise the cancellation).
@@ -826,7 +827,7 @@ class AgentJobQueue:
         """Record a job that was stopped: cancelled by its operator, or interrupted (a shutdown, a withdrawal).
 
         A job whose end landed as the stop came keeps it, and the end is audited here (`agent_job_finished`): the
-        end's own audit follows its write, and the stop came before that audit had been written.
+        end's own audit comes after the block this stop ended, and is never begun.
         """
         user_cancelled = self._cancellation_reasons.get(job_id) == "user"
         record, changed = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)

@@ -1048,8 +1048,9 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         return at_return, [(event, status) for job_id, event, status in audit.written if job_id == job["id"]]
 
     async def test_a_refused_job_stopped_by_shutdown_as_its_failure_is_written_keeps_it_and_audits_it(self) -> None:
-        # The failure landed and the stop came after it: the stop skipped the audit that follows the failure's write,
-        # and the stop's handler wrote no event for a record that stood, so nothing said how the job had ended.
+        # Stopped as its failure was written, the record read failed while its audit said interrupted. The failure now
+        # stands, and the stop's handler audits it as the job's end: the failure's own audit, after the block the stop
+        # ended, is never begun.
         record, events = await self._shut_down_as_a_refusal_is("written")
 
         self.assertEqual((record.status, record.error), ("failed", QUEUED_OPERATOR_CREDENTIAL_REMOVED))
