@@ -7,6 +7,7 @@ The wheels here are tiny zip files written by the test, with the WHEEL file each
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import subprocess
 import sys
@@ -21,18 +22,24 @@ pytestmark = pytest.mark.skipif(not _SCRIPT.parent.is_dir(), reason="scripts/ is
 
 # As uv writes the lock: each pin on a line of its own, with what pulled it in below.
 LOCK = """\
+build==1.6.1
+    # via -r requirements-dev.txt
 hatchling==1.33.0
     # via -r requirements-build.txt
 packaging==26.0
     # via
     #   build
     #   hatchling
+pip==26.3
+    # via pip-api
 setuptools==84.2.1
     # via -r requirements-build.txt
 """
 # Each backend's Generator line as it writes it, read from a real wheel of each.
 SETUPTOOLS = "setuptools (84.2.1)"
 HATCHLING = "hatchling 1.33.0"
+# The build and pip the stubbed importlib.metadata.version reports as installed: the versions LOCK pins.
+INSTALLED = {"build": "1.6.1", "pip": "26.3"}
 
 
 @pytest.fixture(scope="module")
@@ -41,6 +48,23 @@ def check():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def installed(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """What importlib.metadata.version reports for build and pip, as LOCK pins them; a test may change it."""
+    versions = dict(INSTALLED)
+    real = importlib.metadata.version
+
+    def version(name: str) -> str:
+        if name not in INSTALLED:
+            return real(name)
+        if name not in versions:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return versions[name]
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    return versions
 
 
 def _wheel(directory: Path, name: str, generator: str | None) -> Path:
@@ -55,12 +79,12 @@ def _wheel(directory: Path, name: str, generator: str | None) -> Path:
 
 
 def _run(check, capsys: pytest.CaptureFixture[str], tmp_path: Path, wheels: list[Path], lock: str = LOCK):
-    """The check's exit status and the lines it printed, given ``lock`` and ``wheels``."""
+    """The check's exit status, its lines for build and pip, and its lines for the wheels, given ``lock`` and ``wheels``."""
     lock_path = tmp_path / "constraints.txt"
     lock_path.write_text(lock, encoding="utf-8")
     status = check.main([str(lock_path), *map(str, wheels)])
-    out = capsys.readouterr().out
-    return status, out.splitlines()
+    lines = capsys.readouterr().out.splitlines()
+    return status, lines[:2], lines[2:]
 
 
 def _one_of_each(directory: Path) -> list[Path]:
@@ -72,8 +96,9 @@ def _one_of_each(directory: Path) -> list[Path]:
 
 
 def test_wheels_built_by_the_pinned_backends_pass(check, capsys, tmp_path: Path) -> None:
-    status, lines = _run(check, capsys, tmp_path, _one_of_each(tmp_path))
-    assert status == 0, lines
+    status, frontend, lines = _run(check, capsys, tmp_path, _one_of_each(tmp_path))
+    assert status == 0, frontend + lines
+    assert [line.split()[:3] for line in frontend] == [["ok", "build", "1.6.1"], ["ok", "pip", "26.3"]], frontend
     assert len(lines) == 2 and all(line.startswith("ok ") for line in lines), lines
     assert "auto_browser_client-1.0.0-py3-none-any.whl" in lines[0] and "setuptools 84.2.1" in lines[0]
     assert "auto_browser_langchain-1.0.0-py3-none-any.whl" in lines[1] and "hatchling 1.33.0" in lines[1]
@@ -86,7 +111,7 @@ def test_wheels_built_by_the_pinned_backends_pass(check, capsys, tmp_path: Path)
 def test_another_version_fails_and_names_both(
     check, capsys, tmp_path: Path, generator: str, built: str, pinned: str
 ) -> None:
-    status, lines = _run(check, capsys, tmp_path, [_wheel(tmp_path, "pkg", generator)])
+    status, _, lines = _run(check, capsys, tmp_path, [_wheel(tmp_path, "pkg", generator)])
     assert status == 1
     assert len(lines) == 1 and lines[0].startswith("FAIL "), lines
     assert built in lines[0] and pinned in lines[0], lines
@@ -104,7 +129,7 @@ def test_another_version_fails_and_names_both(
     ],
 )
 def test_an_unrecognised_generator_fails(check, capsys, tmp_path: Path, generator: str | None) -> None:
-    status, lines = _run(check, capsys, tmp_path, [_wheel(tmp_path, "pkg", generator)])
+    status, _, lines = _run(check, capsys, tmp_path, [_wheel(tmp_path, "pkg", generator)])
     assert status == 1
     assert len(lines) == 1 and lines[0].startswith("FAIL "), lines
 
@@ -119,15 +144,56 @@ def test_an_unrecognised_generator_fails(check, capsys, tmp_path: Path, generato
     ids=["no-pin", "a-range", "two-pins"],
 )
 def test_a_lock_without_one_pin_of_the_backend_fails(check, capsys, tmp_path: Path, lock: str) -> None:
-    status, lines = _run(check, capsys, tmp_path, _one_of_each(tmp_path), lock)
+    status, _, lines = _run(check, capsys, tmp_path, _one_of_each(tmp_path), lock)
     assert status == 1
     assert lines[0].startswith("ok "), lines
     assert lines[1].startswith("FAIL ") and "hatchling" in lines[1], lines
 
 
+@pytest.mark.parametrize("tool", ["build", "pip"])
+def test_a_build_or_pip_other_than_the_lock_pins_fails_and_names_both(
+    check, capsys, tmp_path: Path, installed: dict[str, str], tool: str
+) -> None:
+    installed[tool] = "1.0"
+    status, frontend, lines = _run(check, capsys, tmp_path, _one_of_each(tmp_path))
+    assert status == 1
+    failed, passed = (frontend[0], frontend[1]) if tool == "build" else (frontend[1], frontend[0])
+    assert failed.startswith(f"FAIL {tool} 1.0 ") and f"{tool}=={INSTALLED[tool]}" in failed, frontend
+    assert passed.startswith("ok "), frontend
+    assert all(line.startswith("ok ") for line in lines), lines
+
+
+@pytest.mark.parametrize("tool", ["build", "pip"])
+def test_a_build_or_pip_that_is_not_installed_fails(
+    check, capsys, tmp_path: Path, installed: dict[str, str], tool: str
+) -> None:
+    del installed[tool]
+    status, frontend, _ = _run(check, capsys, tmp_path, _one_of_each(tmp_path))
+    assert status == 1
+    assert [line for line in frontend if line.startswith("FAIL ")] == [
+        f"FAIL {tool}: not installed in {sys.executable}"
+    ], frontend
+
+
+@pytest.mark.parametrize(
+    ("tool", "lock"),
+    [
+        ("pip", LOCK.replace("pip==26.3\n", "")),
+        ("pip", LOCK.replace("pip==26.3", "pip>=26")),
+        ("build", LOCK + "build==1.5.0 ; python_version < '3.12'\n"),
+    ],
+    ids=["no-pin", "a-range", "two-pins"],
+)
+def test_a_lock_without_one_pin_of_build_or_pip_fails(check, capsys, tmp_path: Path, tool: str, lock: str) -> None:
+    status, frontend, _ = _run(check, capsys, tmp_path, _one_of_each(tmp_path), lock)
+    assert status == 1
+    failed = [line for line in frontend if line.startswith("FAIL ")]
+    assert len(failed) == 1 and f"has {lock.count(f'{tool}==')} {tool}== pins" in failed[0], frontend
+
+
 def test_a_file_that_is_no_wheel_fails(check, capsys, tmp_path: Path) -> None:
     # As a shell passes a glob that matched nothing: the pattern itself.
-    status, lines = _run(check, capsys, tmp_path, [tmp_path / "wheelhouse" / "*.whl"])
+    status, _, lines = _run(check, capsys, tmp_path, [tmp_path / "wheelhouse" / "*.whl"])
     assert status == 1
     assert len(lines) == 1 and lines[0].startswith("FAIL "), lines
 
@@ -141,14 +207,24 @@ def test_no_wheel_given_fails(check, capsys, tmp_path: Path) -> None:
 
 
 def test_the_command_runs_as_the_workflows_run_it(tmp_path: Path) -> None:
+    # Unstubbed, in a process of its own: the lock pins the build and pip this interpreter has.
+    real = {tool: importlib.metadata.distribution(tool).version for tool in INSTALLED}
+    lock = LOCK.replace("build==1.6.1", f"build=={real['build']}").replace("pip==26.3", f"pip=={real['pip']}")
     lock_path = tmp_path / "constraints.txt"
-    lock_path.write_text(LOCK, encoding="utf-8")
+    lock_path.write_text(lock, encoding="utf-8")
+    other_pip = tmp_path / "other-pip.txt"
+    other_pip.write_text(lock.replace(f"pip=={real['pip']}", "pip==1.0"), encoding="utf-8")
     good = _wheel(tmp_path, "auto_browser_client", SETUPTOOLS)
     bad = _wheel(tmp_path, "auto_browser_mcp", "setuptools (80.0.0)")
-    passed = subprocess.run([sys.executable, str(_SCRIPT), str(lock_path), str(good)], capture_output=True, text=True)
-    failed = subprocess.run(
-        [sys.executable, str(_SCRIPT), str(lock_path), str(good), str(bad)], capture_output=True, text=True
-    )
+
+    def run(lock: Path, *wheels: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPT), str(lock), *map(str, wheels)], capture_output=True, text=True
+        )
+
+    passed, failed, pip_failed = run(lock_path, good), run(lock_path, good, bad), run(other_pip, good)
     assert passed.returncode == 0, passed.stdout + passed.stderr
     assert failed.returncode == 1, failed.stdout + failed.stderr
-    assert len(failed.stdout.splitlines()) == 2 and "80.0.0" in failed.stdout
+    assert len(failed.stdout.splitlines()) == 4 and "80.0.0" in failed.stdout
+    assert pip_failed.returncode == 1, pip_failed.stdout + pip_failed.stderr
+    assert f"FAIL pip {real['pip']} " in pip_failed.stdout and "pip==1.0" in pip_failed.stdout

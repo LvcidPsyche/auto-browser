@@ -21,15 +21,16 @@ All notable changes to auto-browser are documented here.
 - **The packages are built with the build tools the repository pins.** `controller/constraints.txt` now pins the two
   build backends the packages name, setuptools 84.2.1 and hatchling 1.33.0, and what hatchling needs (pathspec
   1.1.1, tomlkit 0.15.2 and trove-classifiers 2026.9.21.13 are new to it), through a third input,
-  `controller/requirements-build.txt`; it already pinned build 1.6.1. The release workflow and CI's `package-build`
-  job install build under that file, and they and the release audit hand it to every build with build's
-  `--dependency-constraints-txt`, which holds the backend each build installs to the version the file pins; before,
-  each build took the newest release its `pyproject.toml`'s floor allowed. Measured on the three published packages
-  with a copy of the file that pins each backend one release back: their builds took the older backend with the
-  option and the newest without it. After the last build, `scripts/check_wheel_build_tools.py` reads the backend and
-  version each wheel names in its `WHEEL` file and fails unless they are the ones the file pins. The release workflow
-  runs it before the artifact upload, so a wheel built with another backend version stops the release before
-  anything is uploaded to PyPI.
+  `controller/requirements-build.txt`; it already pinned build 1.6.1 and pip 26.3. The release workflow and CI's
+  `package-build` job install build, and the pip that build installs each backend with, under that file, and they
+  and the release audit hand it to every build with build's `--dependency-constraints-txt`, which holds the backend
+  each build installs to the version the file pins; before, each build took the newest release its
+  `pyproject.toml`'s floor allowed. Measured on the three published packages with a copy of the file that pins each
+  backend one release back: their builds took the older backend with the option and the newest without it. After
+  the last build, `scripts/check_wheel_build_tools.py` fails unless the build and pip installed in the Python that
+  ran the builds are the versions the file pins, and the backend and version each wheel names in its `WHEEL` file
+  are the ones it pins. The release workflow runs it before the artifact upload, so another build or pip, or a wheel
+  built with another backend version, stops the release before anything is uploaded to PyPI.
 
 ### Fixed
 

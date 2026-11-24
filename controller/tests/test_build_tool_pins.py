@@ -78,8 +78,9 @@ def test_each_backend_pin_meets_every_floor_that_names_it() -> None:
         )
 
 
-def test_the_lock_pins_the_build_frontend() -> None:
-    assert len(_lock_pins().get("build", [])) == 1
+@pytest.mark.parametrize("tool", ["build", "pip"])
+def test_the_lock_pins_the_build_frontend_and_the_pip_it_installs_backends_with(tool: str) -> None:
+    assert len(_lock_pins().get(tool, [])) == 1, f"controller/constraints.txt pins no single {tool}== version"
 
 
 def _commands(run: str) -> list[list[str]]:

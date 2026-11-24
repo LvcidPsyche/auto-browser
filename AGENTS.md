@@ -34,12 +34,13 @@ make release-audit   # launch-prep audit; run before any release PR
   be identical (`scripts/check_playwright_pins.py`).
 - **Pinned dependency tree:** `controller/constraints.txt` pins every package `controller/requirements.txt`,
   `requirements-dev.txt` and `requirements-build.txt` pull in, at releases at least 72 hours old; the image and the
-  host tests install under it. The build tools are in the tree too: `build`, from `requirements-dev.txt`, and the two
-  build backends `requirements-build.txt` names (setuptools and hatchling; their floors stay in the four
-  `pyproject.toml` files). When any of the three files changes (a Dependabot bump, a Playwright bump, a new package),
-  generate it again from `controller/` with the command in its header and a cutoff 72 hours before then: a bump it
-  contradicts fails CI's install, and a new package it lacks goes in unpinned. Dependabot bumps the file's own lines
-  as it would a requirements file's, without resolving them together: generate it again in such a PR too.
+  host tests install under it. The build tools are in the tree too: `build` and the `pip` it installs the backends
+  with, from `requirements-dev.txt` (pip through pip-audit), and the two build backends `requirements-build.txt`
+  names (setuptools and hatchling; their floors stay in the four `pyproject.toml` files). When any of the three files
+  changes (a Dependabot bump, a Playwright bump, a new package), generate it again from `controller/` with the
+  command in its header and a cutoff 72 hours before then: a bump it contradicts fails CI's install, and a new
+  package it lacks goes in unpinned. Dependabot bumps the file's own lines as it would a requirements file's, without
+  resolving them together: generate it again in such a PR too.
 - **Child-environment wraps:** `controller/app/process_hardening.py` confines two children by replacing a private
   name in a dependency. At every pytesseract bump, re-check that `pytesseract.pytesseract` still passes its
   module-level `environ` as `env=` in the two launches that read it, `subprocess_args` and `get_tesseract_version`,

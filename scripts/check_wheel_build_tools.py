@@ -1,28 +1,37 @@
 #!/usr/bin/env python
-"""Fail unless each wheel was built by the version of its build backend the lock pins.
+"""Fail unless build, pip and the backend that built each wheel are the versions the lock pins.
 
     python scripts/check_wheel_build_tools.py controller/constraints.txt dist/*.whl
+
+The frontend is read where it runs: the ``build`` and ``pip`` distributions installed in the Python that runs this
+check must be the versions the lock pins with ``==``, each pinned exactly once. build installs each backend with the pip
+of the Python it runs in (``python -m pip --python <its environment>``, for a pip of 22.3 or later), and the workflows
+and the release audit run this check with the interpreter that ran their builds; run by another Python, these two lines
+speak of that Python.
 
 A wheel's ``*.dist-info/WHEEL`` file names what built it on its ``Generator:`` line, which the backend writes from its own
 version: setuptools writes ``Generator: setuptools (84.2.1)``, hatchling ``Generator: hatchling 1.33.0``. Each wheel's
 line must name one of those two backends and the version the lock pins for it with ``==``. A generator this check does
 not recognise fails, and so does a lock that does not pin that backend exactly once.
 
-What the line witnesses is the backend's own version. It says nothing of the versions of what the backend imported
-(packaging, pathspec and the rest), nor of the frontend (build) that installed and ran it. An sdist records no
-generator, so only wheels are checked.
+What the Generator line witnesses is the backend's own version. It says nothing of the versions of what the backend
+imported (packaging, pathspec and the rest). An sdist records no generator, so only wheels are checked.
 
-It prints one line per wheel, and exits with status 1 if any wheel fails.
+It prints one line for build, one for pip and one per wheel, and exits with status 1 if any of them fails.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import re
 import sys
 import zipfile
 from email.parser import HeaderParser
 from pathlib import Path
+
+# The frontend, and the pip it installs each backend with.
+FRONTEND = ("build", "pip")
 
 # Each backend's Generator value, with its version as the one group.
 GENERATORS = {
@@ -56,6 +65,20 @@ def generator(wheel: Path) -> str:
     return values[0].strip()
 
 
+def check_installed(name: str, pins: dict[str, list[str]], lock: str) -> tuple[bool, str]:
+    """Whether the ``name`` installed in this Python is the version ``pins`` holds, and the line that says so."""
+    try:
+        installed = importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return False, f"FAIL {name}: not installed in {sys.executable}"
+    pinned = pins.get(name, [])
+    if len(pinned) != 1:
+        return False, f"FAIL {name} {installed} in {sys.executable}, but {lock} has {len(pinned)} {name}== pins"
+    if installed != pinned[0]:
+        return False, f"FAIL {name} {installed} in {sys.executable}, but {lock} pins {name}=={pinned[0]}"
+    return True, f"ok   {name} {installed} in {sys.executable}, as {lock} pins"
+
+
 def check(wheel: Path, pins: dict[str, list[str]], lock: str) -> tuple[bool, str]:
     """Whether ``wheel`` was built by the backend version ``pins`` holds, and the line that says so."""
     try:
@@ -85,12 +108,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("wheels", nargs="+", type=Path, metavar="wheel", help="a wheel to check")
     args = parser.parse_args(argv)
     pins = lock_pins(Path(args.lock).read_text(encoding="utf-8"))
-    passed = True
-    for wheel in args.wheels:
-        ok, line = check(wheel, pins, args.lock)
+    results = [check_installed(name, pins, args.lock) for name in FRONTEND]
+    results += [check(wheel, pins, args.lock) for wheel in args.wheels]
+    for _, line in results:
         print(line)
-        passed = passed and ok
-    return 0 if passed else 1
+    return 0 if all(ok for ok, _ in results) else 1
 
 
 if __name__ == "__main__":
