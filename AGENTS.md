@@ -40,7 +40,9 @@ make release-audit   # launch-prep audit; run before any release PR
   changes (a Dependabot bump, a Playwright bump, a new package), generate it again from `controller/` with the
   command in its header and a cutoff 72 hours before then: a bump it contradicts fails CI's install, and a new
   package it lacks goes in unpinned. Dependabot bumps the file's own lines as it would a requirements file's, without
-  resolving them together: generate it again in such a PR too.
+  resolving them together: generate it again in such a PR too. A `[build-system]` floor raised past the lock's pin of
+  that backend also needs `-P <backend>` on the header's command: none of the three files changes, so without it uv
+  keeps the pin it has, and `controller/tests/test_build_tool_pins.py` fails.
 - **Child-environment wraps:** `controller/app/process_hardening.py` confines two children by replacing a private
   name in a dependency. At every pytesseract bump, re-check that `pytesseract.pytesseract` still passes its
   module-level `environ` as `env=` in the two launches that read it, `subprocess_args` and `get_tesseract_version`,

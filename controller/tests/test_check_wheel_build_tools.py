@@ -1,8 +1,10 @@
-"""scripts/check_wheel_build_tools.py, which reads what built each wheel and holds it to the version the lock pins.
+"""scripts/check_wheel_build_tools.py, which holds build, pip and what built each wheel to the versions the lock pins.
 
 The release workflow, CI's package-build job and the release audit build the packages with the backends their
-pyproject.toml files name; the lock pins those backends, and this check reads each wheel's own record of what built it.
-The wheels here are tiny zip files written by the test, with the WHEEL file each backend writes.
+pyproject.toml files name; the lock pins those backends, build and pip, and this check reads the build and pip installed
+in the Python that runs it and each wheel's own record of what built it. The wheels here are tiny zip files written by
+the test, with the WHEEL file each backend writes, and the installed build and pip are a stub of
+importlib.metadata.version, except in the one test that runs the script as a command.
 """
 
 from __future__ import annotations
@@ -242,7 +244,7 @@ def test_no_wheel_given_fails(check, capsys, tmp_path: Path) -> None:
     assert caught.value.code != 0
 
 
-def test_the_command_runs_as_the_workflows_run_it(tmp_path: Path) -> None:
+def test_the_script_run_as_a_command_exits_1_when_any_line_fails(tmp_path: Path) -> None:
     # Unstubbed, in a process of its own: the lock pins the build and pip this interpreter has.
     real = {tool: importlib.metadata.distribution(tool).version for tool in INSTALLED}
     lock = LOCK.replace("build==1.6.1", f"build=={real['build']}").replace("pip==26.3", f"pip=={real['pip']}")

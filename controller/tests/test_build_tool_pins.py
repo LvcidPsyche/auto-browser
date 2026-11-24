@@ -1,12 +1,16 @@
 """The tools that build the published packages are pinned in controller/constraints.txt, the repository's one lock.
 
 `python -m build` installs each package's build backend fresh, from its pyproject.toml's `[build-system] requires`,
-which hold only floors: the release built the packages it uploads with whatever backend was newest that day. The lock
-pins the backends and the frontend, and every pin meets the floors the four pyproject.toml files set.
+which hold only floors: the release built the packages it uploads with whatever backend was newest that day. These
+tests check that the lock pins each backend once, at a version every floor the four pyproject.toml files set for it
+allows, and pins build and pip once each.
 
-Every workflow installs the frontend under the lock and hands it to each build, and each job that builds runs
-scripts/check_wheel_build_tools.py on the wheels after its last build, before anything is uploaded. The workflow tests
-find the commands by what they run, not by step names, so a build added later without the lock fails them.
+In every workflow: each pip install of build names the lock with -c, each `python -m build` or `pyproject-build` is
+given it with --dependency-constraints-txt, and each job that builds runs scripts/check_wheel_build_tools.py alone, in
+the step right after its last build and before any artifact upload. The tests find commands by what they run, not by
+step names, and judge each command a line chains with `&&`, `||` or `;` on its own, so a build added later in those
+forms without the lock fails them. They are an early warning for the forms they name: no test that reads YAML can
+know every way a build may be spelled. The gate is the check script, which reads what built each wheel.
 """
 
 from __future__ import annotations
