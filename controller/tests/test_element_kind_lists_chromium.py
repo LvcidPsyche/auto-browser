@@ -154,7 +154,8 @@ def test_each_listed_kind_has_the_property_and_each_interface_with_it_is_listed(
 
     assert answer["generic"] == [], f"every element has `{prop}`: {answer['generic']}"
     assert answer["carriers"], f"no interface on window has `{prop}`: the enumeration is wrong"
-    assert judge(prop, shipped(script, name), answer) == []
+    problems = judge(prop, shipped(script, name), answer)
+    assert not problems, "\n".join(problems)
 
 
 # A kind taken out of each list, and the interface no other listed kind's element is.

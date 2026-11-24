@@ -71,4 +71,4 @@ def test_the_default_pool_follows_the_chromium_the_installed_driver_names() -> N
         if edge and int(edge.group(1)) != major:
             problems.append(f"Edge {edge.group(1)} on Chrome {major}: {agent}")
 
-    assert problems == []
+    assert not problems, "\n".join(problems)
