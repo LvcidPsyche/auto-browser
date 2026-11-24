@@ -294,7 +294,8 @@ def test_the_override_wins_and_needs_no_home_folder(monkeypatch: pytest.MonkeyPa
 def test_the_installed_driver_names_the_chromium_builds_the_search_looks_for() -> None:
     """No browser needed. Were the installed Playwright to move its browsers.json, or to name a build otherwise, the
     search would find nothing and every real-browser test would skip here; this fails instead. An entry with
-    revisionOverrides installs under another folder name, which the search does not follow."""
+    revisionOverrides (an empty one names none, as Playwright reads it) installs under another folder name, which
+    the search does not follow."""
     path = _chromium.driver_browsers_json()
     entries = _chromium.driver_chromium()
 
@@ -302,7 +303,7 @@ def test_the_installed_driver_names_the_chromium_builds_the_search_looks_for() -
     for name in ("chromium", "chromium-headless-shell"):
         entry = entries.get(name, {})
         assert isinstance(entry.get("revision"), str) and entry["revision"], f"{path} names no {name!r} revision"
-        assert "revisionOverrides" not in entry, f"{path}'s {name!r} entry has revisionOverrides: {entry}"
+        assert not entry.get("revisionOverrides"), f"{path}'s {name!r} entry has revisionOverrides: {entry}"
 
 
 needs_the_workflow = pytest.mark.skipif(
