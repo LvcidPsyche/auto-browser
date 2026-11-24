@@ -29,8 +29,7 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect` and set
   `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`; without it, cross-origin 307/308 POST redirects can fail, and on
   some Chrome builds credentialed, preflighted cross-origin requests fail after a redirect, in the operator's own
-  tabs too, while the gate is attached (of the builds measured, 156.0.8078.4 aborts them, and 155.0.8059.84,
-  156.0.8078.47, 156.0.8078.80 and 157 to 159 follow such a redirect). What is stopped and what is not:
+  tabs too, while the gate is attached (156.0.8078.4 among the builds measured). What is stopped and what is not:
   [`docs/deployment.md`](./deployment.md#stopped-before-the-request-is-sent). On Docker Desktop, browser
   containers can reach that Chrome's remote-debugging port: keep it off a host whose browser containers load
   pages you don't trust ([`docs/deployment.md`](./deployment.md#per-session-networks-docker_ephemeral)).

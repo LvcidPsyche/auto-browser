@@ -625,9 +625,9 @@ _TEXT_CONTENT_MARKERS = ("json", "text", "html", "xml", "javascript")
 # application/x-ndjson, a long poll) is given up on after RESPONSE_BODY_READ_SECONDS.
 _STREAMING_MEDIA_TYPES = ("text/event-stream", "multipart/x-mixed-replace")
 
-# How long a response body's read is waited for. Past it the read is cancelled, which in Playwright asks the driver to
-# abort the call and waits for its answer: probed with Playwright 1.65.2 on an endless chunked application/x-ndjson,
-# a read given 1 s ended in 1.00 s and left no call waiting on the connection.
+# How long a response body's read is waited for. Past it the read is cancelled, which in Playwright sends the driver
+# an abort for the call: probed with Playwright 1.65.2 on an endless chunked application/x-ndjson, a read given 1 s
+# ended in 1.00 s, and 1 s later no call was waiting on the connection.
 RESPONSE_BODY_READ_SECONDS = 10.0
 # Why a text response's body is not in its entry, as its "response_body_not_captured".
 BODY_TOO_LARGE = "too_large"

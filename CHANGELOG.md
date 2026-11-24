@@ -38,20 +38,23 @@ All notable changes to auto-browser are documented here.
   controller from a checkout: after installing the new requirements, run `python -m playwright install chromium`.
   Chrome stable for Linux was 158.0.8127.88 on 2026-11-24; 159.0.8154.6 is the first Chrome 159 beta build.
   `controller/constraints.txt` no longer pins pyee, which Playwright 1.65 does not use.
+- `browser.get_cookies` with `urls` returns what Playwright 1.65 matches, which follows the cookie rules more
+  closely: a cookie whose path is `/api` is no longer returned for `/apiv2` (it still is for `/api/x`), and a
+  host-only cookie of `h.example` is no longer returned for `sub.h.example`. Measured with both Playwright versions.
 - Playwright 1.65's default `--disable-features` list adds `HttpsFirstBalancedModeAutoEnable`,
   `TcpPortRandomizationWin` and `PreconnectToSearch`, and drops `DialMediaRouteProvider`, `GlobalMediaControls`,
   `BlockOriginHeaderModificationOnRedirect`, `Translate` and `AutoDeElevate`. The copy browser-node and the
   controller pass, which keeps storage partitioning on, follows it.
 - **Attach modes: some Chrome builds, not every Chrome from 155 on, abort a credentialed, preflighted cross-origin
-  redirect without the switch.** The README, `docs/deployment.md`, `docs/production-hardening.md`, `.env.example`
-  and the readiness warning said that while the gate is attached, Chrome 155 and later abort a credentialed
-  cross-origin request that needed a CORS preflight once it is redirected. They now say that some builds do: of the
-  Chrome for Testing builds measured, 156.0.8078.4 aborts it, and 155.0.8059.84, 156.0.8078.47, 156.0.8078.80,
+  redirect without the switch.** The README, `docs/deployment.md`, `docs/production-hardening.md`, `.env.example` and
+  the readiness warning said that while the gate is attached, Chrome 155 and later abort a credentialed cross-origin
+  request that needed a CORS preflight once it is redirected. They now say that some builds do: of the Chrome for
+  Testing builds measured on Windows, 156.0.8078.4 aborts it, and 155.0.8059.84, 156.0.8078.47, 156.0.8078.80,
   157.0.8103.38, 158.0.8127.88 and 159.0.8154.6 follow it. The documented switch,
-  `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`, is unchanged,
-  for an operator's Chrome that aborts. The controller's log warning now says that it is older Chrome (Chromium 151)
-  that fails cross-origin 307/308 POST redirects in the operator's own tabs while the gate is attached; the builds
-  above let 307 and 308 through.
+  `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`, is unchanged, for an
+  operator's Chrome that aborts. The controller's log warning now says that it is older Chrome (Chromium 151) that fails
+  cross-origin 307/308 POST redirects in the operator's own tabs while the gate is attached; the builds above let 307
+  and 308 through.
 - The stealth user-agent pool claims Chrome 159 and 158, and Edge 159, to match the Chromium 159 browser-node ships.
   It claimed Chrome 156 and 155, and Edge 156.
 
