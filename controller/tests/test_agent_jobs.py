@@ -202,22 +202,31 @@ class _GatedOrchestrator:
 
 
 class _WrittenAudit:
-    """Records each audit event once its append has returned, as (job id, event type, status).
+    """Records each audit event once it has been written, as (job id, event type, status).
 
-    Given `hold`, the first append of that event type waits (`held` is set) until it is cancelled, and is then never
-    written; one that is not cancelled goes on after _HELD_THREAD_SECONDS.
+    Given `hold`, the first append of that event type is written by a worker thread that waits (`held` is set) until
+    `release` is set, and sets `landed` once it has written. An append cancelled meanwhile still lands then: the real
+    writer (app.audit.AuditStore) writes through asyncio.to_thread, whose thread goes on when its call is cancelled.
     """
 
     def __init__(self, hold: str | None = None) -> None:
         self.hold = hold
         self.held = asyncio.Event()
+        self.release, self.landed = threading.Event(), threading.Event()
         self.written: list[tuple[str, str, str]] = []
 
     async def append(self, **kwargs) -> None:
-        if kwargs["event_type"] == self.hold and not self.held.is_set():
-            self.held.set()
-            await asyncio.sleep(_HELD_THREAD_SECONDS)
-        self.written.append((kwargs["job_id"], kwargs["event_type"], kwargs["status"]))
+        event = (kwargs["job_id"], kwargs["event_type"], kwargs["status"])
+        if kwargs["event_type"] != self.hold or self.held.is_set():
+            self.written.append(event)
+            return
+        self.held.set()
+        await asyncio.to_thread(self._write_once_released, event)
+
+    def _write_once_released(self, event: tuple[str, str, str]) -> None:
+        self.release.wait(_HELD_THREAD_SECONDS)
+        self.written.append(event)
+        self.landed.set()
 
 
 class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
@@ -1012,7 +1021,10 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait({stopping}, timeout=_A_MOMENT_SECONDS)  # the shutdown has stopped the job
         finally:
             await held.let_go()
+            audit.release.set()
         at_return = await asyncio.wait_for(stopping, _HELD_THREAD_SECONDS)
+        if moment == "audited":
+            self.assertTrue(await asyncio.to_thread(audit.landed.wait, _HELD_THREAD_SECONDS))
         return at_return, [(event, status) for job_id, event, status in audit.written if job_id == job["id"]]
 
     async def test_a_refused_job_stopped_by_shutdown_as_its_failure_is_written_keeps_it_and_audits_it(self) -> None:
@@ -1026,7 +1038,8 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("agent_job_interrupted", [event for event, _status in events])
 
     async def test_a_refused_job_stopped_by_shutdown_as_its_failure_is_audited_is_audited_once(self) -> None:
-        # The double never writes the audit the stop cancelled: the one event is the stop handler's.
+        # The audit the stop cancels lands all the same, as the real writer's does, so it is the one event: the stop's
+        # handler, which audits an end that stands, does not cover that audit.
         record, events = await self._shut_down_as_a_refusal_is("audited")
 
         self.assertEqual((record.status, record.error), ("failed", QUEUED_OPERATOR_CREDENTIAL_REMOVED))
