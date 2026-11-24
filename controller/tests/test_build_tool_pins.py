@@ -83,9 +83,11 @@ def test_the_lock_pins_the_build_frontend() -> None:
 
 
 def _commands(run: str) -> list[list[str]]:
-    """The commands of a step's run text, one per line once each `\\` continuation is joined, each as its words."""
+    """The commands of a step's run text, each as its words: one per line once each `\\` continuation is joined, and
+    one per command a line chains with `&&`, `||` or `;`, so that each is judged on its own."""
     joined = re.sub(r"\\\r?\n", " ", run)
-    return [[word.strip("'\"") for word in line.split()] for line in joined.splitlines() if line.strip()]
+    parts = [part for line in joined.splitlines() for part in re.split(r"&&|\|\||;", line)]
+    return [[word.strip("'\"") for word in part.split()] for part in parts if part.strip()]
 
 
 def _pairs(words: list[str]) -> set[tuple[str, str]]:
@@ -134,7 +136,7 @@ def _all_commands() -> list[tuple[str, str, list[str]]]:
         ("docker compose build controller\n", [False]),
         ("INSTALL_DEV_DEPS=true docker compose build controller\n", [False]),
         ("python -m build --outdir dist client\n", [True]),
-        ("cd client && python3 -m build \\\n  --wheel .\n", [True]),
+        ("cd client && python3 -m build \\\n  --wheel .\n", [False, True]),
         ("pyproject-build --outdir dist client\n", [True]),
         ("python -m pip install build\npython -m buildx\n", [False, False]),
     ],
@@ -156,6 +158,14 @@ def test_a_package_build_is_found_by_what_it_runs(run: str, builds: list[bool]) 
 )
 def test_an_install_of_build_is_found_by_what_it_runs(run: str, installs: bool) -> None:
     assert [_installs_build(words) for words in _commands(run)] == [installs]
+
+
+@pytest.mark.parametrize("chain", [" && ", " || ", "; "])
+def test_a_build_chained_after_another_is_judged_on_its_own(chain: str) -> None:
+    first = f"python -m build --outdir dist client --dependency-constraints-txt {LOCK_ARG}"
+    commands = _commands(f"{first}{chain}python -m build --outdir dist integrations/langchain\n")
+    assert [_is_package_build(words) for words in commands] == [True, True], commands
+    assert [_under_the_lock(words, "--dependency-constraints-txt") for words in commands] == [True, False], commands
 
 
 def test_a_continued_line_is_read_as_one_command() -> None:
