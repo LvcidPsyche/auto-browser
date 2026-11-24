@@ -34,10 +34,10 @@ make release-audit   # launch-prep audit; run before any release PR
   lists them). A release bumps all of them together with `python scripts/bump_version.py X.Y.Z`.
 - **Playwright pairing:** the controller (pip) and `browser-node` (npm) Playwright meet two rules
   (`scripts/check_playwright_pins.py`). One major.minor across the two, because browser-node's server refuses a
-  client of another one, with one version inside each ecosystem and an exact one in `package.json` (read from the
-  pins, in the lint job). And the same browser, which equal versions do not give (pip 1.65.1 and npm 1.65.1 carry
-  different Chromium builds): with `--installed` the script compares the Chromium the installed pip driver and npm's
-  `playwright-core` name (CI's `dependency-audit` job).
+  client of another one, with one exact version inside each ecosystem (read from the pins, in the lint job). And the
+  same browser, which equal versions do not give (pip 1.65.1 and npm 1.65.1 carry different Chromium builds): with
+  `--installed` the script compares the Chromium the installed pip driver and npm's `playwright-core` name (CI's
+  `dependency-audit` job).
 - **Pinned dependency tree:** `controller/constraints.txt` pins every package `controller/requirements.txt` and
   `requirements-dev.txt` pull in, at releases at least 72 hours old; the image and the host tests install under it.
   When either file changes (a Dependabot bump, a Playwright bump, a new package), generate it again from

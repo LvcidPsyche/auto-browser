@@ -15,9 +15,11 @@ Rule 1, the server accepts the client. playwright-core's server refuses a client
 
 and in `getPlaywrightVersion`, `return majorMinorOnly ? version3.split(".").slice(0, 2).join(".") : version3;`.
 That refusal was the #60 outage. With no argument (the lint job) this reads the pins and installs nothing. Inside
-each ecosystem the pins agree: controller/requirements.txt and controller/constraints.txt, which the image and the
-host tests install under; and browser-node/package.json, which must name an exact version (a range lets npm take
-another one), with the playwright and playwright-core of browser-node/package-lock.json, which `npm ci` installs.
+each ecosystem the pins agree and are exact: controller/requirements.txt and controller/constraints.txt, which the
+image and the host tests install under, each name the same exact version, as `==X.Y.Z` (a wildcard lets pip take
+another one, and a shortened release or a second specifier is not a version this can compare); and
+browser-node/package.json, which must name an exact version (a range lets npm take another one), with the playwright
+and playwright-core of browser-node/package-lock.json, which `npm ci` installs.
 Across the two, the major.minor is the same.
 
 Rule 2, both sides run the same browser, which equal version strings do not give: pip 1.65.1 and npm 1.65.1 carry
@@ -54,6 +56,8 @@ NODE_MODULES = REPO_ROOT / "browser-node" / "node_modules"
 
 # An exact npm version (a pre-release suffix allowed): no range operator, wildcard or space.
 _EXACT_NPM_VERSION = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+# An exact pip version after `==`, X.Y.Z: no wildcard (1.65.*), shortened release (1.65) or second specifier (,<2).
+_EXACT_PIP_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 # The browsers.json entries both sides must name alike.
 CHROMIUM_ENTRIES = ("chromium", "chromium-headless-shell")
 INSTALL_PIP = "install the pinned pip Playwright: `python -m pip install playwright -c controller/constraints.txt`"
@@ -111,6 +115,11 @@ def check_pins() -> int:
     ]
     npm = [("browser-node/package.json", browser_node), *_lock_pins()]
     problems = [
+        f"{location} pins playwright as {version!r}, not an exact version"
+        for location, version in pip
+        if not _EXACT_PIP_VERSION.match(version)
+    ]
+    problems += [
         f"the {side} pins are not all the same (inside one ecosystem they must be)"
         for side, pins in (("pip", pip), ("npm", npm))
         if len({version for _, version in pins}) > 1
@@ -134,7 +143,7 @@ def check_pins() -> int:
     for location, version in (*pip, *npm):
         print(f"  {location:44} {version}", file=sys.stderr)
     print(
-        "\nMove both sides together: one version in each ecosystem, the same major.minor across them, and a pair\n"
+        "\nMove both sides together: one exact version in each ecosystem, the same major.minor across them, and a pair\n"
         "that carries the same Chromium (`python scripts/check_playwright_pins.py --installed`). Then regenerate\n"
         "controller/constraints.txt and run npm install in browser-node. See scripts/check_playwright_pins.py for why.",
         file=sys.stderr,

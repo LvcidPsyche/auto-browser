@@ -109,6 +109,19 @@ def test_another_patch_across_the_ecosystems_passes(monkeypatch: pytest.MonkeyPa
     assert _check(monkeypatch, tmp_path, **_pins("1.65.2", "1.65.1")) == (0, "")
 
 
+@pytest.mark.parametrize("spec", ["1.65.*", "1.65", "1.65.2,<2"])
+def test_a_pip_pin_that_is_not_an_exact_version_fails_naming_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spec: str
+) -> None:
+    """Of the right major.minor, so only exactness refuses them (the one-string rule did, as package.json's does)."""
+    code, report = _check(monkeypatch, tmp_path, **_pins(spec, "1.65.1"))
+
+    assert code == 1
+    for location in ("requirements.txt", "constraints.txt"):
+        named = [line for line in report.splitlines() if location in line and repr(spec) in line and "exact" in line]
+        assert len(named) == 1, report
+
+
 @pytest.mark.parametrize(("pip", "line"), [("1.66.0", "1.66"), ("2.65.1", "2.65")])
 def test_another_major_or_minor_across_the_ecosystems_fails_naming_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pip: str, line: str
