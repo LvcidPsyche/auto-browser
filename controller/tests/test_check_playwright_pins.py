@@ -109,11 +109,14 @@ def test_another_patch_across_the_ecosystems_passes(monkeypatch: pytest.MonkeyPa
     assert _check(monkeypatch, tmp_path, **_pins("1.65.2", "1.65.1")) == (0, "")
 
 
-@pytest.mark.parametrize("spec", ["1.65.*", "1.65", "1.65.2,<2"])
+@pytest.mark.parametrize(
+    "spec", ["1.65.*", "1.65", "1.65.2,<2", '1.65.1 ; python_version < "3"', '1.65.1;python_version<"3"']
+)
 def test_a_pip_pin_that_is_not_an_exact_version_fails_naming_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spec: str
 ) -> None:
-    """Of the right major.minor, so only exactness refuses them (the one-string rule did, as package.json's does)."""
+    """Of the right major.minor, so only the pin's form refuses them: the one-string rule refused the first three, as
+    package.json's does, and passed an environment marker, under which pip skips the pin where the marker is false."""
     code, report = _check(monkeypatch, tmp_path, **_pins(spec, "1.65.1"))
 
     assert code == 1
