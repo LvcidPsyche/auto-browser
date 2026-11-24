@@ -295,8 +295,8 @@ sessions only (apart from a frame it cannot classify, above), but every navigati
 operator's own tabs included, waits on its reply: about 13 ms each, the median measured on Chromium 151. Start
 that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`
 and set `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`. Without it, cross-origin 307/308 POST redirects can fail, and
-on Chrome 155 and later credentialed cross-origin requests that need a CORS preflight fail after a redirect, in
-the operator's own tabs too, while the controller is attached. Details:
+on Chrome 155 and 156 credentialed cross-origin requests that need a CORS preflight fail after a redirect, in
+the operator's own tabs too, while the controller is attached (Chrome 157 to 159 follow such a redirect). Details:
 [`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
 
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:

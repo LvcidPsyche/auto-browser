@@ -1,10 +1,11 @@
 """A gated page's credentialed, preflighted fetch still follows a cross-origin redirect (Playwright #43242).
 
-Chromium 155 and later abort a preflighted cross-origin redirect with net::ERR_ABORTED while Fetch interception is
+Chromium 155 and 156 abort a preflighted cross-origin redirect with net::ERR_ABORTED while Fetch interception is
 enabled, and the pre-request gate enables it (Fetch.enable on Document requests, app/browser/request_gate.py).
-Playwright 1.64 disables AvoidCorsURLLoaderRestartOnRedirect for that, and launched browsers keep Playwright's
-list (app/browser/launch_flags.py, browser-node/server.mjs), so the redirect goes through. The control launches
-with Playwright 1.62's list, which lacks the feature, and Chromium aborts the same fetch.
+Playwright 1.64 and 1.65 disable AvoidCorsURLLoaderRestartOnRedirect for that, and launched browsers keep
+Playwright's list (app/browser/launch_flags.py, browser-node/server.mjs), so the redirect goes through. Chromium 157,
+158 and 159 follow it with the feature enabled too. The controls launch without the feature, or attach to a Chrome
+started with only the old switch, and say what the driver's Chromium does: on 156 they fail.
 
 The browser is launched as the shadow launch launches one. Loopback hosts only.
 """
@@ -31,8 +32,10 @@ API_HOST = "api.localhost"
 FILES_HOST = "files.localhost"
 BODY = b"\x07" * 4096
 AVOID_CORS_RESTART = "AvoidCorsURLLoaderRestartOnRedirect"
-# Playwright 1.62's list, without partitioning, as launch_flags carried it before the 1.64 bump.
-LIST_1_62 = [feature for feature in PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING if feature != AVOID_CORS_RESTART]
+# launch_flags' list without the feature, as Playwright's list was before 1.64 added it.
+LIST_WITHOUT_THE_FEATURE = [
+    feature for feature in PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING if feature != AVOID_CORS_RESTART
+]
 
 FETCH_JS = """async (url) => {
   try {
@@ -123,14 +126,17 @@ async def test_a_gated_pages_preflighted_fetch_follows_a_cross_origin_redirect(
     assert (FILES_HOST, "GET") in cors_server.hits  # type: ignore[attr-defined]
 
 
-async def test_control_without_the_feature_disabled_chromium_aborts_that_redirect_under_the_gate(
+async def test_control_without_the_feature_disabled_the_drivers_chromium_follows_that_redirect_under_the_gate(
     tmp_path: Path, cors_server: ThreadingHTTPServer
 ) -> None:
-    """If this starts passing through, Chromium fixed #43242 and the feature can leave Playwright's list."""
-    result = await _fetch_through_a_gated_page(tmp_path, cors_server, "--disable-features=" + ",".join(LIST_1_62))
+    """Chromium 155 and 156 abort it (#43242); 157, 158 and 159 follow it. If this fails, the driver's Chromium
+    aborts it again, and only the feature in Playwright's list keeps the launched browsers' redirects going."""
+    result = await _fetch_through_a_gated_page(
+        tmp_path, cors_server, "--disable-features=" + ",".join(LIST_WITHOUT_THE_FEATURE)
+    )
 
-    assert result.startswith("ERR "), result
-    assert (FILES_HOST, "GET") not in cors_server.hits  # type: ignore[attr-defined]
+    assert result == f"200 {len(BODY)}", result
+    assert (FILES_HOST, "GET") in cors_server.hits  # type: ignore[attr-defined]
 
 
 # ── attach modes: the operator starts Chrome, so the operator passes the switch ──
@@ -161,12 +167,13 @@ async def test_an_attached_chrome_started_with_the_documented_switch_follows_the
     assert results == (f"200 {len(BODY)}", f"200 {len(BODY)}")
 
 
-async def test_control_the_old_switch_alone_leaves_every_tab_aborting_the_redirect(
+async def test_control_the_old_switch_alone_lets_the_drivers_chromium_follow_the_redirect_in_every_tab(
     tmp_path: Path, cors_server: ThreadingHTTPServer
 ) -> None:
-    """The switch 1.12.4 documented: Chrome 155+ still aborts the redirect, in the operator's own tab too."""
+    """The switch 1.12.4 documented: Chrome 155 and 156 still abort the redirect with it, in the operator's own tab
+    too; 157, 158 and 159 follow it. An operator's Chrome may be older, so the documented switch keeps the feature."""
     session, operator_tab = await _fetch_through_an_attached_chrome(
         tmp_path, cors_server, "--disable-features=BlockOriginHeaderModificationOnRedirect"
     )
 
-    assert session.startswith("ERR ") and operator_tab.startswith("ERR "), (session, operator_tab)
+    assert (session, operator_tab) == (f"200 {len(BODY)}", f"200 {len(BODY)}")
