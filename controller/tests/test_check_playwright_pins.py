@@ -289,6 +289,17 @@ def test_the_same_revision_overrides_on_both_sides_pass(tmp_path: Path) -> None:
     assert "revisionOverrides" in stdout
 
 
+@pytest.mark.parametrize("side", ["pip", "npm"])
+def test_empty_revision_overrides_on_one_side_are_none(tmp_path: Path, side: str) -> None:
+    """As Playwright reads them: `(obj.revisionOverrides || {})[hostPlatform]`."""
+    emptied = [{**CHROMIUM, "revisionOverrides": {}}, SHELL]
+
+    code, stdout, stderr = _installed(tmp_path, **{side: emptied})
+
+    assert (code, stderr) == (0, "")
+    assert "revisionOverrides" not in stdout
+
+
 def test_the_pip_side_is_the_installed_playwrights_driver_by_default() -> None:
     """The file the real-browser tests read the driver's builds from, found here without importing playwright."""
     assert check_playwright_pins.pip_driver_browsers() == _chromium.driver_browsers_json()

@@ -177,7 +177,8 @@ class _Unreadable(Exception):
 
 # What names an entry's build. A revision or browserVersion that is missing, not a string, empty or blank is unreadable
 # (two missing or two blank ones would compare equal), and revisionOverrides installs another build on the platforms it
-# names.
+# names. An empty one names none, as Playwright reads it (`readDescriptors` in coreBundle.js):
+#     const revisionOverride = (obj.revisionOverrides || {})[hostPlatform];
 _BUILD_FIELDS = ("revision", "browserVersion")
 _OVERRIDES = "revisionOverrides"
 
@@ -204,7 +205,7 @@ def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str, obje
         for field in _BUILD_FIELDS:
             if not isinstance(entry.get(field), str) or not entry[field].strip():
                 raise _Unreadable(f"{path} has a {name!r} entry without a readable {field} ({entry!r}); {install}")
-        builds[name] = (entry["revision"], entry["browserVersion"], entry.get(_OVERRIDES))
+        builds[name] = (entry["revision"], entry["browserVersion"], entry.get(_OVERRIDES) or None)
     return builds
 
 
