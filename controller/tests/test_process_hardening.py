@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib
 import importlib.metadata
 import json
 import os
@@ -209,9 +210,11 @@ class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _transport_module():
-    import playwright._impl._transport as transport
+    """The module the wrap replaces get_driver_env in, by the name the product imports, so that no test here stands in
+    for a module the product no longer imports."""
+    from app.process_hardening import PLAYWRIGHT_TRANSPORT_MODULE
 
-    return transport
+    return importlib.import_module(PLAYWRIGHT_TRANSPORT_MODULE)
 
 
 class _UnwrappedDriverEnv:
@@ -251,10 +254,10 @@ class PlaywrightDriverEnvironmentTests(unittest.TestCase):
             self.assertIn(name, driver_env)
 
     def test_a_playwright_without_get_driver_env_fails_closed(self) -> None:
-        from app.process_hardening import confine_playwright_driver_environment
+        from app.process_hardening import PLAYWRIGHT_TRANSPORT_MODULE, confine_playwright_driver_environment
 
-        stub = type(sys)("playwright._impl._transport")
-        with patch.dict(sys.modules, {"playwright._impl._transport": stub}):
+        stub = type(sys)(PLAYWRIGHT_TRANSPORT_MODULE)
+        with patch.dict(sys.modules, {PLAYWRIGHT_TRANSPORT_MODULE: stub}):
             with self.assertRaises(RuntimeError) as raised:
                 confine_playwright_driver_environment()
         self.assertIn("Playwright", str(raised.exception))
@@ -262,13 +265,13 @@ class PlaywrightDriverEnvironmentTests(unittest.TestCase):
     def test_a_playwright_without_the_transport_module_fails_closed_naming_it(self) -> None:
         """An upgrade that moves the module (1.65 renamed every playwright._impl module) raises the same error as one
         that moves the name, not a bare ModuleNotFoundError."""
-        from app.process_hardening import confine_playwright_driver_environment
+        from app.process_hardening import PLAYWRIGHT_TRANSPORT_MODULE, confine_playwright_driver_environment
 
         # None in sys.modules makes importing that name raise ModuleNotFoundError, as for a module that is not there.
-        with patch.dict(sys.modules, {"playwright._impl._transport": None}):
+        with patch.dict(sys.modules, {PLAYWRIGHT_TRANSPORT_MODULE: None}):
             with self.assertRaises(RuntimeError) as raised:
                 confine_playwright_driver_environment()
-        self.assertIn("playwright._impl._transport.get_driver_env", str(raised.exception))
+        self.assertIn(f"{PLAYWRIGHT_TRANSPORT_MODULE}.get_driver_env", str(raised.exception))
         self.assertIn("whole environment", str(raised.exception))
 
 
