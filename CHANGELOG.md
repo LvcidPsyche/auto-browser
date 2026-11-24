@@ -32,6 +32,25 @@ All notable changes to auto-browser are documented here.
   builds are the versions the file pins, and the backend and version each wheel names in its `WHEEL` file are the ones
   it pins. The release workflow runs it before the artifact upload, so another build or pip, or a wheel built with
   another backend version, stops the release before anything is uploaded to PyPI.
+- **Chromium 159.0.8154.6, up from 156.0.8078.4: Playwright 1.65.2 in the controller (pip) and 1.65.1 in
+  browser-node (npm), up from 1.64.1 on both.** The two name the same Chromium build, and Playwright's server takes
+  only a client of its own major.minor, so update the controller and browser-node images together. Running the
+  controller from a checkout: after installing the new requirements, run `python -m playwright install chromium`.
+  Chrome stable for Linux was 158.0.8127.88 on 2026-11-24; 159.0.8154.6 is the first Chrome 159 beta build.
+  `controller/constraints.txt` no longer pins pyee, which Playwright 1.65 does not use.
+- Playwright 1.65's default `--disable-features` list adds `HttpsFirstBalancedModeAutoEnable`,
+  `TcpPortRandomizationWin` and `PreconnectToSearch`, and drops `DialMediaRouteProvider`, `GlobalMediaControls`,
+  `BlockOriginHeaderModificationOnRedirect`, `Translate` and `AutoDeElevate`. The copy browser-node and the
+  controller pass, which keeps storage partitioning on, follows it.
+- **Attach modes: Chrome 157 and later follow a credentialed, preflighted cross-origin redirect without the switch.**
+  The README, `docs/deployment.md`, `docs/production-hardening.md`, `.env.example` and the readiness warning said
+  that while the gate is attached, Chrome 155 and later abort a credentialed cross-origin request that needed a CORS
+  preflight once it is redirected. They now name Chrome 155 and 156, and the documents add that Chrome 157 to 159
+  follow such a redirect (measured on Chromium 156, 157, 158 and 159). The documented switch,
+  `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`, is unchanged,
+  for an operator's older Chrome.
+- The stealth user-agent pool claims Chrome 159 and 158, and Edge 159, to match the Chromium 159 browser-node ships.
+  It claimed Chrome 156 and 155, and Edge 156.
 
 ### Fixed
 
