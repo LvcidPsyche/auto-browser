@@ -745,8 +745,12 @@ async def test_a_tab_a_refused_page_navigates_and_then_closes_on_is_refused(tmp_
         closed = asyncio.Event()
         session.context.on("page", lambda page: page.on("close", lambda _page: closed.set()))
 
-        await opener.evaluate("(url) => window.open(url)", f"{env.evil}/")
-        await asyncio.wait_for(closed.wait(), timeout=SCRIPT_TIMEOUT_SECONDS)
+        # Under the session lock until the popup has closed, as refused_popup opens one: the guard's return of a
+        # refused popup to about:blank takes that lock, and would otherwise race the popup's script, which then
+        # never runs.
+        async with session.lock:
+            await opener.evaluate("(url) => window.open(url)", f"{env.evil}/")
+            await asyncio.wait_for(closed.wait(), timeout=SCRIPT_TIMEOUT_SECONDS)
         assert await settle(lambda: any(CHOSEN_MARKER in url for url in committed), timeout=10.0), committed
 
         tabs = await env.manager.list_tabs(session_id)

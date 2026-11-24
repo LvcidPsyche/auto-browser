@@ -16,13 +16,14 @@ user-namespace code. `controller/tests/test_browser_sandbox.py` (SeccompProfileT
 
 | | |
 |---|---|
-| Source | https://raw.githubusercontent.com/moby/moby/docker-v29.9.2/vendor/github.com/moby/profiles/seccomp/default.json |
-| moby tag | `docker-v29.9.2` (Docker Engine 29.9.2) |
-| Module | `github.com/moby/profiles/seccomp v0.2.4` (per that tag's `vendor/modules.txt`) |
-| sha256 | `785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334` |
+| Source | https://raw.githubusercontent.com/moby/moby/docker-v29.10.0/vendor/github.com/moby/profiles/seccomp/default.json |
+| moby tag | `docker-v29.10.0` (Docker Engine 29.10.0) |
+| Module | `github.com/moby/profiles/seccomp v0.3.0` (per that tag's `vendor/modules.txt`) |
+| sha256 | `6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6` |
 
-The profile replaces the engine's own default, so a stale copy can deny a syscall a newer runtime needs.
+The profile replaces the engine's own default, so a stale copy can deny a syscall a newer runtime needs, or go on
+allowing one a newer default refuses.
 `scripts/check_chromium_freshness.py` (weekly) fails when moby's current default no longer matches
 `chromium-sandbox.json` minus the auto-browser entry. To refresh: replace `moby-default.json` with the new upstream
-file, update this table and the sha256 in the test, and regenerate `chromium-sandbox.json` by appending the same
-entry to it.
+file, update this table and the test's sha256, tag and module version, and regenerate `chromium-sandbox.json` by
+appending the same entry to it.
