@@ -243,6 +243,25 @@ def test_an_entry_without_a_readable_build_fails_naming_the_file_and_the_entry(
     assert len(lines) == 1, report
 
 
+@pytest.mark.parametrize("side", ["pip", "npm"])
+@pytest.mark.parametrize("entry", [CHROMIUM, SHELL], ids=["chromium", "headless-shell"])
+def test_an_entry_named_twice_fails_naming_the_file_and_the_name(tmp_path: Path, side: str, entry: dict) -> None:
+    """Playwright reads the first entry of a name (`descriptors.find`). The check once kept the last, so another build
+    first and the other side's build second passed."""
+    entries = [{**entry, "revision": "1251"}, CHROMIUM, SHELL]
+    named = _pip_browsers(tmp_path) if side == "pip" else _node_modules(tmp_path) / "playwright-core" / "browsers.json"
+
+    code, stdout, report = _installed(tmp_path, **{side: entries})
+
+    assert code == 1 and "OK" not in stdout
+    lines = [
+        line
+        for line in report.splitlines()
+        if str(named) in line and f"more than one entry named {entry['name']!r}" in line
+    ]
+    assert len(lines) == 1, report
+
+
 REVISION_OVERRIDES = {"mac12": "1240"}
 
 

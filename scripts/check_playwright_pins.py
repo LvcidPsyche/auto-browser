@@ -25,11 +25,11 @@ Rule 2, both sides run the same browser, which equal version strings do not give
 different Chromium builds, while pip 1.65.2 and npm 1.65.1 carry the same one. With --installed this compares the
 `chromium` and `chromium-headless-shell` entries (their revision, browserVersion and revisionOverrides) of the
 installed pip driver's own browsers.json (playwright/driver/package/browsers.json) with those of npm's playwright-core
-(browser-node/node_modules/playwright-core/browsers.json). A missing file, or an entry whose revision or
-browserVersion is missing, blank or not a string, fails, saying what to install; it never passes or skips. What it
-does not see: the two bundles may still differ in the switches they launch Chromium with by default. The product's two
-copies of Playwright's --disable-features list are held to the pip bundle's by their own tests
-(controller/tests/test_playwright_disabled_features.py).
+(browser-node/node_modules/playwright-core/browsers.json). A missing file, a name given to more than one entry
+(Playwright reads the first), or an entry whose revision or browserVersion is missing, blank or not a string, fails,
+saying what to install; it never passes or skips. What it does not see: the two bundles may still differ in the
+switches they launch Chromium with by default. The product's two copies of Playwright's --disable-features list are
+held to the pip bundle's by their own tests (controller/tests/test_playwright_disabled_features.py).
 
 Neither mode installs anything. Standard library only, and playwright is never imported: the lint job does not
 install it.
@@ -38,8 +38,8 @@ Exit 0 when the rule holds. Exit 1 when it does not, or cannot be read:
 - package.json names a range (the error names it, reading no other pin);
 - a pip pin is not exact, or the pins break rule 1 (every pin is listed);
 - a pin is not found in its file;
-- with --installed: no pip Playwright is installed; a browsers.json is missing or unreadable, or lacks a readable
-  `chromium` or `chromium-headless-shell` entry; or the two sides' builds differ (both are listed).
+- with --installed: no pip Playwright is installed; a browsers.json is missing or unreadable, names an entry twice, or
+  lacks a readable `chromium` or `chromium-headless-shell` entry; or the two sides' builds differ (both are listed).
 Exit 2 for a usage error, as argparse reports it (--pip-browsers or --node-modules without --installed, an unknown
 argument).
 """
@@ -167,8 +167,8 @@ def pip_driver_browsers() -> Path | None:
 
 
 class _Unreadable(Exception):
-    """A browsers.json that is missing, unreadable or lacks a readable entry: the message says which, and what to
-    install."""
+    """A browsers.json that is missing, unreadable, names an entry twice or lacks a readable entry: the message says
+    which, and what to install."""
 
 
 # What names an entry's build. A revision or browserVersion that is missing, not a string, empty or blank is unreadable
@@ -184,9 +184,14 @@ def _chromium_builds(path: Path, install: str) -> dict[str, tuple[str, str, obje
     if not path.is_file():
         raise _Unreadable(f"there is no {path}; {install}")
     try:
-        entries = {entry["name"]: entry for entry in json.loads(path.read_text(encoding="utf-8"))["browsers"]}
+        browsers = json.loads(path.read_text(encoding="utf-8"))["browsers"]
+        names = [entry["name"] for entry in browsers]
+        entries = dict(zip(names, browsers))
     except (OSError, ValueError, LookupError, TypeError) as exc:
         raise _Unreadable(f"{path} is not a browsers.json Playwright writes ({exc!r}); {install}") from exc
+    twice = [name for index, name in enumerate(names) if name in names[:index]]
+    if twice:
+        raise _Unreadable(f"{path} has more than one entry named {twice[0]!r} (Playwright reads the first); {install}")
     builds = {}
     for name in CHROMIUM_ENTRIES:
         entry = entries.get(name)
