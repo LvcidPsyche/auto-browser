@@ -6,13 +6,14 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
-- **A job stopped by a shutdown as a step or its end is being recorded now reads as its audit says.** When the
-  controller stopped while a run's step was being recorded, the job could read after the restart as interrupted on
-  restart (`agent_job_interrupted_on_restart`), though its stop had been recorded; stopped while its end was being
-  recorded, it could be listed completed or failed while its last audit event said it was interrupted. A job stopped
-  while a step is being recorded now reads interrupted (`agent_job_interrupted`) from the stop on. A run that has
-  returned, and a job refused because the operator who queued it no longer has a named credential, now keep the end
-  being recorded as they are stopped (a run's with its result), with an `agent_job_finished` audit event.
+- **A job stopped by a shutdown while a step or its end is being written no longer reads one way while its audit
+  says another.** When the controller stopped while a run's step was being recorded, the job could read after the
+  restart as interrupted on restart (`agent_job_interrupted_on_restart`), though its stop had been recorded; stopped
+  while its end was being recorded, it could be listed completed or failed while its last audit event said it was
+  interrupted. A job stopped while a step is being recorded now reads interrupted (`agent_job_interrupted`) from the
+  stop on. A run that has returned, and a job refused because the operator who queued it no longer has a named
+  credential, now keep an end whose write has begun when they are stopped (a run's with its result), and their audit
+  does not say they were interrupted.
 
 ## [1.19.0] — 2026-11-22
 

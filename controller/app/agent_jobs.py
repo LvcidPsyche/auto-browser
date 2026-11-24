@@ -553,7 +553,7 @@ class AgentJobQueue:
 
         if task is None:
             record, interrupted = await self.store.finish_cancelled(job_id, user_cancelled=False)
-            if interrupted:  # otherwise whoever settled the record has audited it
+            if interrupted:  # otherwise whoever settled the record audits it
                 await self._audit_quietly("agent_job_interrupted", "interrupted", record)
             return self._public_record(record)
 
@@ -749,8 +749,9 @@ class AgentJobQueue:
             await self._record_stop(job_id)
             raise
         if refused:
-            # After the try, as a run's end audit is: a stop during it would have the handler audit the end again, and
-            # the audit it cancelled can still land (the audit store writes in a thread, which goes on).
+            # After the try, as a run's end audit is: inside it, a stop during this audit would have the handler
+            # audit the end again, and the audit it cancelled can still land (the audit store writes in a thread,
+            # which goes on).
             await self._audit_quietly("agent_job_finished", record.status, record)
             return
 

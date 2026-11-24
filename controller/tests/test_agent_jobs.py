@@ -204,9 +204,10 @@ class _GatedOrchestrator:
 class _WrittenAudit:
     """Records each audit event once it has been written, as (job id, event type, status).
 
-    Given `hold`, the first append of that event type is written by a worker thread that waits (`held` is set) until
-    `release` is set, and sets `landed` once it has written. An append cancelled meanwhile still lands then: the real
-    writer (app.audit.AuditStore) writes through asyncio.to_thread, whose thread goes on when its call is cancelled.
+    Given `hold`, the first append of that event type is handed to a worker thread (`held` is set then) that waits
+    until `release` is set, and sets `landed` once it has written. An append cancelled meanwhile still lands then:
+    the real writer (app.audit.AuditStore) writes through asyncio.to_thread, whose thread goes on when its call is
+    cancelled.
     """
 
     def __init__(self, hold: str | None = None) -> None:
