@@ -32,7 +32,7 @@ _BINARIES = {
         "chrome-win*/chrome.exe",
     ),
     "chromium-headless-shell": (
-        "chrome-*/chrome-headless-shell",
+        "chrome-headless-shell-linux*/chrome-headless-shell",
         "chrome-headless-shell-mac*/chrome-headless-shell",
         "chrome-headless-shell-win*/chrome-headless-shell.exe",
     ),

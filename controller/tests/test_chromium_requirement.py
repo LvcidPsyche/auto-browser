@@ -209,21 +209,28 @@ def test_the_search_takes_chromium_in_a_later_root_over_the_headless_shell_in_an
     assert _search(monkeypatch, first, second) == chromium
 
 
-# The driver's own macOS layouts (EXECUTABLE_PATHS in its coreBundle.js): Chrome for Testing, for each architecture.
+# The driver's own layouts (EXECUTABLE_PATHS in its coreBundle.js), each platform's binary of Chromium and of its
+# headless shell: macOS's Chromium is Chrome for Testing.
 MAC_CHROME = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+LAYOUTS = {
+    "linux-x64": (CHROME, HEADLESS_SHELL),
+    "linux-arm64": ("chrome-linux-arm64/chrome", "chrome-headless-shell-linux-arm64/chrome-headless-shell"),
+    "mac-x64": (f"chrome-mac-x64/{MAC_CHROME}", "chrome-headless-shell-mac-x64/chrome-headless-shell"),
+    "mac-arm64": (f"chrome-mac-arm64/{MAC_CHROME}", "chrome-headless-shell-mac-arm64/chrome-headless-shell"),
+    "win-x64": ("chrome-win64/chrome.exe", "chrome-headless-shell-win64/chrome-headless-shell.exe"),
+}
 
 
 @pytest.mark.parametrize(
     ("folder", "binary"),
     [
-        (f"chromium-{DRIVER_BUILD}", f"chrome-mac-x64/{MAC_CHROME}"),
-        (f"chromium-{DRIVER_BUILD}", f"chrome-mac-arm64/{MAC_CHROME}"),
-        (f"chromium_headless_shell-{DRIVER_BUILD}", "chrome-headless-shell-mac-x64/chrome-headless-shell"),
-        (f"chromium_headless_shell-{DRIVER_BUILD}", "chrome-headless-shell-mac-arm64/chrome-headless-shell"),
+        layout
+        for chromium, shell in LAYOUTS.values()
+        for layout in ((f"chromium-{DRIVER_BUILD}", chromium), (f"chromium_headless_shell-{DRIVER_BUILD}", shell))
     ],
-    ids=["mac-x64", "mac-arm64", "mac-x64-headless-shell", "mac-arm64-headless-shell"],
+    ids=[f"{platform}{entry}" for platform in LAYOUTS for entry in ("", "-headless-shell")],
 )
-def test_the_search_finds_the_drivers_macos_layouts(
+def test_the_search_finds_each_of_the_drivers_layouts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, folder: str, binary: str
 ) -> None:
     root = tmp_path / "root"
