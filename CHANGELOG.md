@@ -42,13 +42,16 @@ All notable changes to auto-browser are documented here.
   `TcpPortRandomizationWin` and `PreconnectToSearch`, and drops `DialMediaRouteProvider`, `GlobalMediaControls`,
   `BlockOriginHeaderModificationOnRedirect`, `Translate` and `AutoDeElevate`. The copy browser-node and the
   controller pass, which keeps storage partitioning on, follows it.
-- **Attach modes: Chrome 157 and later follow a credentialed, preflighted cross-origin redirect without the switch.**
-  The README, `docs/deployment.md`, `docs/production-hardening.md`, `.env.example` and the readiness warning said
-  that while the gate is attached, Chrome 155 and later abort a credentialed cross-origin request that needed a CORS
-  preflight once it is redirected. They now name Chrome 155 and 156, and the documents add that Chrome 157 to 159
-  follow such a redirect (measured on Chromium 156, 157, 158 and 159). The documented switch,
+- **Attach modes: some Chrome builds, not every Chrome from 155 on, abort a credentialed, preflighted cross-origin
+  redirect without the switch.** The README, `docs/deployment.md`, `docs/production-hardening.md`, `.env.example`
+  and the readiness warning said that while the gate is attached, Chrome 155 and later abort a credentialed
+  cross-origin request that needed a CORS preflight once it is redirected. They now say that some builds do: of the
+  Chrome for Testing builds measured, 156.0.8078.4 aborts it, and 155.0.8059.84, 156.0.8078.47, 156.0.8078.80,
+  157.0.8103.38, 158.0.8127.88 and 159.0.8154.6 follow it. The documented switch,
   `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`, is unchanged,
-  for an operator's older Chrome.
+  for an operator's Chrome that aborts. The controller's log warning no longer says that cross-origin 307/308 POST
+  redirects fail in the operator's own tabs while the gate is attached: Chromium 151 failed such a redirect there,
+  and the builds above let 307 and 308 through.
 - The stealth user-agent pool claims Chrome 159 and 158, and Edge 159, to match the Chromium 159 browser-node ships.
   It claimed Chrome 156 and 155, and Edge 156.
 

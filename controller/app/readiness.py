@@ -116,8 +116,9 @@ def pre_request_gate_check(gates: dict[str, Any]) -> ReadinessCheck:
             message=(
                 "The pre-request gate is attached to a Chrome the controller did not launch, without "
                 "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true: cross-origin 307/308 POST redirects are stopped in the "
-                "controller's sessions and can fail in the operator's own tabs too, and on Chrome 155 and 156 "
-                "credentialed cross-origin requests that need a CORS preflight fail after a redirect, in every tab."
+                "controller's sessions and can fail in the operator's own tabs too, and on some Chrome builds "
+                "(156.0.8078.4 for one) credentialed cross-origin requests that need a CORS preflight fail after a "
+                "redirect, in every tab."
             ),
             fix=(
                 f"Start that Chrome with {REDIRECT_ORIGIN_SWITCH} and set CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true."

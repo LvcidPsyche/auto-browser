@@ -27,10 +27,11 @@ Attach modes only (a Chrome the controller did not launch): without
 redirect hop that any Fetch handler continued, with a bare net::ERR_INVALID_ARGUMENT. Unless the operator
 declares the switch (CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED), the gate fails such a hop of an owned page
 itself, with an explanation that names the fix. The Origin header is never rewritten: a missing Origin
-where Chrome sends ``null`` is a CSRF downgrade. Chrome 155 and 156 also abort a credentialed cross-origin
+where Chrome sends ``null`` is a CSRF downgrade. Some Chrome builds also abort a credentialed cross-origin
 redirect that needed a CORS preflight while a Fetch handler is enabled, in every tab, unless
-AvoidCorsURLLoaderRestartOnRedirect is disabled too (Chrome 157 to 159 follow it), so the documented switch
-(REDIRECT_ORIGIN_SWITCH) names both: the Chrome an operator starts may be older.
+AvoidCorsURLLoaderRestartOnRedirect is disabled too: of the builds measured, 156.0.8078.4 does, and the later 155
+and 156 builds and the 157 to 159 ones follow it. So the documented switch (REDIRECT_ORIGIN_SWITCH) names both: the
+Chrome an operator starts may be a build that aborts.
 """
 
 from __future__ import annotations
@@ -55,9 +56,10 @@ FETCH_PATTERNS = [{"urlPattern": "*", "resourceType": "Document", "requestStage"
 BLOCKED_ERROR_REASON = "BlockedByClient"
 # Chromium's error text for a targetId that names no target: an in-process iframe's frameId.
 NO_TARGET_TEXT = "No target with given id"
-# What an attach mode's Chrome is started with. AvoidCorsURLLoaderRestartOnRedirect is there for Chrome 155 and 156,
-# which abort a credentialed cross-origin redirect that needed a CORS preflight while any Fetch handler is enabled, in
-# every tab (Playwright #43242; Playwright disables it in the browsers it launches); Chrome 157 to 159 follow it.
+# What an attach mode's Chrome is started with. AvoidCorsURLLoaderRestartOnRedirect is there for the Chrome builds
+# that abort a credentialed cross-origin redirect that needed a CORS preflight while any Fetch handler is enabled, in
+# every tab (Playwright #43242; Playwright disables it in the browsers it launches): of the builds measured,
+# 156.0.8078.4 does, and the later 155 and 156 builds and the 157 to 159 ones follow it.
 REDIRECT_ORIGIN_SWITCH = (
     "--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect"
 )
@@ -292,9 +294,9 @@ class RequestGate:
         if self._attach_mode and not self._origin_switch_declared:
             logger.warning(
                 "pre-request gate attached to a Chrome the controller did not launch, without %s=true: it stops "
-                "cross-origin 307/308 POST redirects of the controller's sessions itself, and the same redirects "
-                "in the operator's own tabs fail in Chrome (net::ERR_INVALID_ARGUMENT) while the gate is attached. "
-                "Start that Chrome with %s and set %s=true.",
+                "cross-origin 307/308 POST redirects of the controller's sessions itself. In the operator's own tabs "
+                "Chromium 151 failed such a redirect (net::ERR_INVALID_ARGUMENT) while the gate was attached; the "
+                "155 to 159 builds measured let them through. Start that Chrome with %s and set %s=true.",
                 REDIRECT_ORIGIN_SETTING,
                 REDIRECT_ORIGIN_SWITCH,
                 REDIRECT_ORIGIN_SETTING,
