@@ -1,0 +1,184 @@
+"""The in-page scripts' lists of the element kinds that have `labels`, `disabled` and `href` are the browser's.
+
+DOM_JS (app/browser/element_scripts.py) reads `el.labels` only on an element whose kind (its tag name, upper-cased) is
+in LABELABLE_TAGS, and INTERACTABLES_SCRIPT (app/browser_scripts.py, which contains DOM_JS) reads `el.disabled` and
+`el.href` only on one whose kind is in HAS_DISABLED or HAS_HREF: on any other element, such as a form whose named
+controls answer for those names, a read would be the page's. Other scripts in app/browser_scripts.py read `disabled`
+and `href` on any element, and no list holds them. Each list is taken from the script text as it ships, and held to
+the driver's Chromium both ways.
+
+- Each listed kind has the property, as an element of the HTML namespace or of the SVG one (parsed from
+  `<svg><KIND></KIND></svg>`, where the HTML parser restores an SVG name's case; a kind the parser moves out of
+  `<svg>` is judged by its HTML element alone).
+- Each carrier interface, an interface on `window` whose prototype has the property and is an element's, is the
+  interface of some listed kind's element in either namespace. An abstract one (SVGGradientElement) is covered by the
+  kinds that inherit from it, and a named constructor (Option) by its element's kind.
+
+The property is first shown to be on no prototype every element has (Element, HTMLElement, SVGElement): there the list
+would mean nothing. The page is about:blank, and window's properties are read through their descriptors: touching an
+accessor such as localStorage throws on a page without an origin.
+
+The scripts tell a kind by its tag name alone, so they read a listed kind's property in either namespace, also where
+only one namespace's element has it (an HTML `<script>` has no `href`, an SVG `<link>` no `disabled`); the test holds
+each kind in either namespace, not in both.
+
+The limits: a kind that is not listed but shares its interface with a listed kind is not noticed; and a list is read
+from its one `const NAME = [...]` literal, which must hold single-quoted upper-case names only, so a change the script
+makes to the array as it runs is not seen.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+
+import pytest
+
+from app import browser_scripts
+from app.browser import element_scripts
+from tests._chromium import chromium_executable, requires_chromium
+
+# (the property, the list's name, the script it ships in)
+LISTS = [
+    ("labels", "LABELABLE_TAGS", element_scripts.DOM_JS),
+    ("disabled", "HAS_DISABLED", browser_scripts.INTERACTABLES_SCRIPT),
+    ("href", "HAS_HREF", browser_scripts.INTERACTABLES_SCRIPT),
+]
+
+PAGE_JS = """
+([prop, kinds]) => {
+  const SVG = 'http://www.w3.org/2000/svg';
+  const generic = ['Element', 'HTMLElement', 'SVGElement'].filter((name) => prop in window[name].prototype);
+  const interfaces = new Map();
+  for (const name of Object.getOwnPropertyNames(window)) {
+    const value = Object.getOwnPropertyDescriptor(window, name).value;
+    if (typeof value === 'function' && Element.prototype.isPrototypeOf(value.prototype)) interfaces.set(name, value);
+  }
+  const carriers = [...interfaces].filter(([, I]) => prop in I.prototype).map(([name]) => name).sort();
+  const answers = {};
+  for (const kind of kinds) {
+    const made = [document.createElement(kind.toLowerCase())];
+    const box = document.createElement('div');
+    box.innerHTML = '<svg><' + kind + '></' + kind + '></svg>';
+    const child = box.firstElementChild && box.firstElementChild.firstElementChild;
+    if (child && child.namespaceURI === SVG) made.push(child);
+    answers[kind] = {
+      made: made.map((el) => el.namespaceURI + ' ' + el.localName + ': ' + el.constructor.name),
+      has: made.some((el) => prop in el),
+      instances: carriers.filter((name) => made.some((el) => el instanceof interfaces.get(name))),
+    };
+  }
+  return { generic, carriers, kinds: answers };
+}
+"""
+
+
+# A list's body: single-quoted upper-case names, comma-separated, a trailing comma allowed. Anything else in it (another
+# quote, a spread, a name, a comment) fails the read instead of being passed over.
+_LIST_BODY = re.compile(r"\s*'[A-Z]+'(?:\s*,\s*'[A-Z]+')*\s*,?\s*")
+
+
+def shipped(script: str, name: str) -> list[str]:
+    """The kinds of the script's one `const NAME = [...];`, read whole."""
+    found = re.findall(rf"\bconst {name} = \[(.*?)\];", script, flags=re.S)
+    assert len(found) == 1, f"{len(found)} definitions of {name}"
+    assert _LIST_BODY.fullmatch(found[0]), f"{name} is not a list of single-quoted upper-case names only: [{found[0]}]"
+    return re.findall(r"'([A-Z]+)'", found[0])
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["'A', \"FORM\"", "'A', ...OTHER", "'A', KIND", "'A', `USE`", "'A', 'use'", "'A', // a note\n  'USE'", ""],
+    ids=["double-quoted", "spread", "a-name", "template", "lower-case", "comment", "empty"],
+)
+def test_a_list_with_anything_but_single_quoted_upper_case_names_fails_the_read(body: str) -> None:
+    """No browser needed. A double-quoted "FORM" in HAS_HREF was once passed over, and the list judged without it."""
+    with pytest.raises(AssertionError, match="HAS_HREF is not a list of single-quoted upper-case names only"):
+        shipped(f"  const HAS_HREF = [{body}];\n", "HAS_HREF")
+
+
+def test_a_list_over_two_lines_with_a_trailing_comma_is_read_whole() -> None:
+    assert shipped("const HAS_HREF = ['A', 'AREA',\n    'USE',\n  ];", "HAS_HREF") == ["A", "AREA", "USE"]
+
+
+def judge(prop: str, kinds: list[str], answer: dict) -> list[str]:
+    """What is wrong with `kinds` as the kinds of element that have `prop`, by what the page answered."""
+    problems = []
+    for kind in kinds:
+        if not answer["kinds"][kind]["has"]:
+            made = answer["kinds"][kind]["made"]
+            problems.append(
+                f"{kind}: no element of this kind has `{prop}`, in the HTML namespace or the SVG one ({made})"
+            )
+    covered = {name for kind in kinds for name in answer["kinds"][kind]["instances"]}
+    problems += [
+        f"{name}: has `{prop}`, and no listed kind's element is one"
+        for name in answer["carriers"]
+        if name not in covered
+    ]
+    return problems
+
+
+@pytest.fixture(scope="module")
+def answers() -> dict[str, dict]:
+    """What the driver's Chromium answers for each property, about its list's kinds."""
+    from playwright.async_api import async_playwright
+
+    async def ask() -> dict[str, dict]:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(executable_path=chromium_executable(), headless=True)
+            try:
+                page = await browser.new_page()
+                return {
+                    prop: await page.evaluate(PAGE_JS, [prop, shipped(script, name)]) for prop, name, script in LISTS
+                }
+            finally:
+                await browser.close()
+
+    return asyncio.run(ask())
+
+
+def _ids(cases: list[tuple]) -> list[str]:
+    return [case[1] for case in cases]
+
+
+@requires_chromium
+@pytest.mark.parametrize(("prop", "name", "script"), LISTS, ids=_ids(LISTS))
+def test_each_listed_kind_has_the_property_and_each_interface_with_it_is_listed(
+    answers: dict[str, dict], prop: str, name: str, script: str
+) -> None:
+    answer = answers[prop]
+
+    assert answer["generic"] == [], f"every element has `{prop}`: {answer['generic']}"
+    assert answer["carriers"], f"no interface on window has `{prop}`: the enumeration is wrong"
+    problems = judge(prop, shipped(script, name), answer)
+    assert not problems, "\n".join(problems)
+
+
+# A page's answer about `labels` for three kinds, fixed here: what the judge is told, not what a Chromium says, so a
+# list updated for another Chromium leaves these two tests as they are.
+FIXED_ANSWER = {
+    "generic": [],
+    "carriers": ["HTMLInputElement", "HTMLMeterElement"],
+    "kinds": {
+        "INPUT": {"made": ["html input: HTMLInputElement"], "has": True, "instances": ["HTMLInputElement"]},
+        "METER": {"made": ["html meter: HTMLMeterElement"], "has": True, "instances": ["HTMLMeterElement"]},
+        "FORM": {"made": ["html form: HTMLFormElement"], "has": False, "instances": []},
+    },
+}
+
+
+def test_the_judge_passes_a_list_of_the_kinds_with_the_property() -> None:
+    assert judge("labels", ["INPUT", "METER"], FIXED_ANSWER) == []
+
+
+def test_the_judge_names_the_interface_of_a_kind_taken_out() -> None:
+    problems = judge("labels", ["INPUT"], FIXED_ANSWER)
+
+    assert len(problems) == 1 and problems[0].startswith("HTMLMeterElement:"), problems
+
+
+def test_the_judge_names_a_kind_added_without_the_property() -> None:
+    problems = judge("labels", ["INPUT", "METER", "FORM"], FIXED_ANSWER)
+
+    assert len(problems) == 1 and problems[0].startswith("FORM:"), problems
