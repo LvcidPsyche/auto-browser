@@ -147,7 +147,43 @@ def test_a_lock_without_one_pin_of_the_backend_fails(check, capsys, tmp_path: Pa
     status, _, lines = _run(check, capsys, tmp_path, _one_of_each(tmp_path), lock)
     assert status == 1
     assert lines[0].startswith("ok "), lines
-    assert lines[1].startswith("FAIL ") and "hatchling" in lines[1], lines
+    # The count, not only the name: a check that kept one of two pins would fail here on the version instead.
+    assert lines[1].startswith("FAIL ") and f"has {lock.count('hatchling==')} hatchling== pins" in lines[1], lines
+
+
+def _unreadable(directory: Path, kind: str) -> Path:
+    """A .whl the check cannot read one Generator line from, as ``kind`` says; any line it holds names the pinned one."""
+    path = directory / "pkg-1.0.0-py3-none-any.whl"
+    if kind == "not-a-zip":
+        path.write_bytes(b"not a zip file\n")
+        return path
+    wheel = f"Wheel-Version: 1.0\nGenerator: {SETUPTOOLS}\n".encode()
+    contents = {
+        "two-generator-lines": wheel + f"Generator: {SETUPTOOLS}\n".encode(),
+        "not-utf-8": wheel + b"Tag: \xff\n",
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("pkg-1.0.0.dist-info/WHEEL", contents.get(kind, wheel))
+        if kind == "two-wheel-files":
+            archive.writestr("other-1.0.0.dist-info/WHEEL", wheel)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("not-a-zip", "File is not a zip file"),
+        ("two-wheel-files", "holds 2 *.dist-info/WHEEL files"),
+        ("two-generator-lines", "holds 2 Generator lines"),
+        ("not-utf-8", "codec can't decode"),
+    ],
+)
+def test_a_wheel_without_one_readable_generator_line_fails(
+    check, capsys, tmp_path: Path, kind: str, reason: str
+) -> None:
+    status, _, lines = _run(check, capsys, tmp_path, [_unreadable(tmp_path, kind)])
+    assert status == 1
+    assert len(lines) == 1 and lines[0].startswith("FAIL ") and reason in lines[0], lines
 
 
 @pytest.mark.parametrize("tool", ["build", "pip"])
@@ -191,7 +227,7 @@ def test_a_lock_without_one_pin_of_build_or_pip_fails(check, capsys, tmp_path: P
     assert len(failed) == 1 and f"has {lock.count(f'{tool}==')} {tool}== pins" in failed[0], frontend
 
 
-def test_a_file_that_is_no_wheel_fails(check, capsys, tmp_path: Path) -> None:
+def test_a_wheel_path_that_names_no_file_fails(check, capsys, tmp_path: Path) -> None:
     # As a shell passes a glob that matched nothing: the pattern itself.
     status, _, lines = _run(check, capsys, tmp_path, [tmp_path / "wheelhouse" / "*.whl"])
     assert status == 1
