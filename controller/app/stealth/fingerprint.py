@@ -22,7 +22,8 @@ import random
 # Chromium-engine UAs only: the browser node runs Chromium, and a Firefox/Safari
 # UA on a Chromium engine is an engine/UA mismatch — itself a detection signal.
 CHROME_UA_POOL = [
-    # Chrome 159 on Windows (November 2026 beta, a major ahead of stable; the engine browser-node ships)
+    # Chrome 159 on Windows (November 2026: beta on Linux, and rolling out to stable on Windows and macOS, to 0.5%
+    # since 2026-11-18; the engine browser-node ships)
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",
     # Chrome 159 on macOS (UA reduction freezes the reported mac version)
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36",

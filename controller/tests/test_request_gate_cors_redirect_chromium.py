@@ -33,7 +33,7 @@ API_HOST = "api.localhost"
 FILES_HOST = "files.localhost"
 BODY = b"\x07" * 4096
 AVOID_CORS_RESTART = "AvoidCorsURLLoaderRestartOnRedirect"
-# launch_flags' list without the feature, as Playwright's list was before 1.64 added it.
+# launch_flags' list (Playwright 1.65's, without partitioning) without the feature, which Playwright added in 1.64.
 LIST_WITHOUT_THE_FEATURE = [
     feature for feature in PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING if feature != AVOID_CORS_RESTART
 ]
