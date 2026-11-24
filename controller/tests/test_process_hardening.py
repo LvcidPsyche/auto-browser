@@ -318,6 +318,45 @@ class PlaywrightDriverEnvironmentProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after, {SENTINEL_NAME: "missing", "PW_LANG_NAME": "found"})
 
 
+class PlaywrightDriverStartEnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    """On every OS, the env= the real async_playwright() starts its driver with. The probe above reads /proc, so it
+    runs on Linux only; elsewhere a wrap that confines another module than the one PipeTransport.connect reads, or a
+    Playwright that binds get_driver_env when it is imported, would start the driver with the controller's whole
+    environment while every other test here passes."""
+
+    async def _driver_env(self) -> dict[str, str]:
+        """Start and stop the real Playwright; whether the env= its driver's create_subprocess_exec was given (the
+        call goes through to the real one) holds the sentinel and the names the driver needs, as name -> 'found' or
+        'missing': a failure prints no value of the environment."""
+        from playwright.async_api import async_playwright
+
+        started: list = []
+        real = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            started.append(kwargs.get("env"))
+            return await real(*args, **kwargs)
+
+        with patch.object(asyncio, "create_subprocess_exec", spy):
+            playwright = await async_playwright().start()
+            await playwright.stop()
+        self.assertEqual(len(started), 1, "expected Playwright to start one driver")
+        self.assertIsInstance(started[0], dict, "the driver must be started with an env= of its own")
+        return {
+            name: ("found" if name in started[0] else "missing") for name in (SENTINEL_NAME, "PATH", "PW_LANG_NAME")
+        }
+
+    async def test_the_driver_is_started_with_the_confined_environment(self) -> None:
+        from app.process_hardening import confine_playwright_driver_environment
+
+        with _UnwrappedDriverEnv(), patch.dict(os.environ, {SENTINEL_NAME: SENTINEL}):
+            before = await self._driver_env()
+            self.assertEqual(before[SENTINEL_NAME], "found", "the spy must see the sentinel unconfined")
+            confine_playwright_driver_environment()  # as BrowserManager.startup does, before it starts Playwright
+            after = await self._driver_env()
+        self.assertEqual(after, {SENTINEL_NAME: "missing", "PATH": "found", "PW_LANG_NAME": "found"})
+
+
 class BrowserManagerConfinesTheDriverTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_confines_the_driver_environment_before_starting_playwright(self) -> None:
         from app import browser_manager
