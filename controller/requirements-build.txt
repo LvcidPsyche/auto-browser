@@ -1,0 +1,5 @@
+# The build backends the four pyproject.toml files name in [build-system] requires, brought into constraints.txt
+# so that the builds of the packages (python -m build, given that file) install the versions it pins. The floors
+# live in those pyproject.toml files, not here.
+setuptools
+hatchling
