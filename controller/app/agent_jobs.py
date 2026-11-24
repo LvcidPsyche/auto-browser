@@ -730,20 +730,25 @@ class AgentJobQueue:
             # still needs releasing. _process_job's finally does that.
             return
 
+        refused = self._queued_by_a_removed_operator(record)
         try:
-            if self._queued_by_a_removed_operator(record):
+            if refused:
                 # Never started: it ends as any failed job does, and _process_job's finally releases its session.
                 record = await self.store.finish(
                     record.id, status="failed", result=None, error=QUEUED_OPERATOR_CREDENTIAL_REMOVED
                 )
-                await self._audit_quietly("agent_job_finished", record.status, record)
-                return
-            await self._audit("agent_job_started", "running", record)
+            else:
+                await self._audit("agent_job_started", "running", record)
         except asyncio.CancelledError:
             # Stopped as it started: recorded as a stop during the run is, or the record stays "running" or
             # "cancelling" until the next restart. A refusal written as the stop came stands, audited as a run's end is.
             await self._record_stop(job_id)
             raise
+        if refused:
+            # After the try, as a run's end audit is: a stop during it would have the handler audit the end again, and
+            # the audit it cancelled can still land (the audit store writes in a thread, which goes on).
+            await self._audit_quietly("agent_job_finished", record.status, record)
+            return
 
         try:
             if record.kind == "agent_step":
