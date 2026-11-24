@@ -97,7 +97,7 @@ def check(wheel: Path, text: str, lock: str) -> tuple[bool, str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("lock", help="the constraints file that pins the backends")
+    parser.add_argument("lock", help="the constraints file that pins build, pip and the backends")
     parser.add_argument("wheels", nargs="+", type=Path, metavar="wheel", help="a wheel to check")
     args = parser.parse_args(argv)
     text = Path(args.lock).read_text(encoding="utf-8")

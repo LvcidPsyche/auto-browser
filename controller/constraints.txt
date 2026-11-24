@@ -102,7 +102,9 @@ pillow==13.0.0
     #   -r requirements.txt
     #   pytesseract
 pip==26.3
-    # via pip-api
+    # via
+    #   -r requirements-build.txt
+    #   pip-api
 pip-api==0.0.35
     # via pip-audit
 pip-audit==2.10.1

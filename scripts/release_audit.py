@@ -166,7 +166,7 @@ def main() -> int:
 
     print("Building and inspecting Python wheels...")
     # As release.yml and ci.yml build them: each package's backend at the version the lock pins, and then a check of
-    # what built each wheel.
+    # the build and pip installed here and of what built each wheel.
     with tempfile.TemporaryDirectory(prefix="auto-browser-wheelhouse-") as temp_dir:
         wheelhouse = Path(temp_dir)
         for package_dir in WHEEL_PACKAGES:

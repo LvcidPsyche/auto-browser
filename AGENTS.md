@@ -41,9 +41,9 @@ make release-audit   # launch-prep audit; run before any release PR
   `dependency-audit` job).
 - **Pinned dependency tree:** `controller/constraints.txt` pins every package `controller/requirements.txt`,
   `requirements-dev.txt` and `requirements-build.txt` pull in, at releases at least 72 hours old; the image and the
-  host tests install under it. The build tools are in the tree too: `build` and the `pip` it installs the backends
-  with, from `requirements-dev.txt` (pip through pip-audit), and the two build backends `requirements-build.txt`
-  names (setuptools and hatchling; their floors stay in the four `pyproject.toml` files). When any of the three files
+  host tests install under it. The build tools are in the tree too: `build`, from `requirements-dev.txt`, and the
+  `pip` it installs the backends with and the two build backends (setuptools and hatchling; their floors stay in
+  the four `pyproject.toml` files), which `requirements-build.txt` names. When any of the three files
   changes (a Dependabot bump, a Playwright bump, a new package), generate it again from `controller/` with the
   command in its header and a cutoff 72 hours before then: a bump it contradicts fails CI's install, and a new
   package it lacks goes in unpinned. Dependabot bumps the file's own lines as it would a requirements file's, without
