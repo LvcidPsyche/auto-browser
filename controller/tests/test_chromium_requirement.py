@@ -197,6 +197,42 @@ def test_the_search_takes_the_headless_shell_at_the_headless_shells_own_build(
     assert _search(monkeypatch, root) == shell
 
 
+def test_the_search_takes_chromium_in_a_later_root_over_the_headless_shell_in_an_earlier_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Chromium's own binary is looked for in every root before the headless shell's."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    _plant(first, f"chromium_headless_shell-{DRIVER_BUILD}", HEADLESS_SHELL)
+    chromium = _plant(second, f"chromium-{DRIVER_BUILD}")
+    _driver(monkeypatch, tmp_path)
+
+    assert _search(monkeypatch, first, second) == chromium
+
+
+# The driver's own macOS layouts (EXECUTABLE_PATHS in its coreBundle.js): Chrome for Testing, for each architecture.
+MAC_CHROME = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+
+
+@pytest.mark.parametrize(
+    ("folder", "binary"),
+    [
+        (f"chromium-{DRIVER_BUILD}", f"chrome-mac-x64/{MAC_CHROME}"),
+        (f"chromium-{DRIVER_BUILD}", f"chrome-mac-arm64/{MAC_CHROME}"),
+        (f"chromium_headless_shell-{DRIVER_BUILD}", "chrome-headless-shell-mac-x64/chrome-headless-shell"),
+        (f"chromium_headless_shell-{DRIVER_BUILD}", "chrome-headless-shell-mac-arm64/chrome-headless-shell"),
+    ],
+    ids=["mac-x64", "mac-arm64", "mac-x64-headless-shell", "mac-arm64-headless-shell"],
+)
+def test_the_search_finds_the_drivers_macos_layouts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, folder: str, binary: str
+) -> None:
+    root = tmp_path / "root"
+    planted = _plant(root, folder, binary)
+    _driver(monkeypatch, tmp_path)
+
+    assert _search(monkeypatch, root) == planted
+
+
 @pytest.mark.parametrize(
     "browsers_json",
     [

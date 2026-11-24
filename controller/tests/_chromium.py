@@ -22,15 +22,22 @@ from pathlib import Path
 import playwright
 import pytest
 
-# Each binary as (the browsers.json entry whose build it is, its path in that build's folder), per platform. Chromium's
-# come before the headless shell's: two files tell which they got by "headless-shell" in the path.
-_LINUX = (("chromium", "chrome-linux*/chrome"), ("chromium-headless-shell", "chrome-*/chrome-headless-shell"))
-_MAC = (("chromium", "chrome-mac*/Chromium.app/Contents/MacOS/Chromium"),)
-_WINDOWS = (
-    ("chromium", "chrome-win*/chrome.exe"),
-    ("chromium-headless-shell", "chrome-headless-shell-win*/chrome-headless-shell.exe"),
-)
-CHROMIUM_ENTRIES = ("chromium", "chromium-headless-shell")
+# Each browsers.json entry's binary, as its path in that build's folder on Linux, macOS and Windows (the driver's
+# `EXECUTABLE_PATHS` in coreBundle.js, each architecture by a wildcard). Chromium's are looked for in every root before
+# the headless shell's: two files tell which they got by "headless-shell" in the path.
+_BINARIES = {
+    "chromium": (
+        "chrome-linux*/chrome",
+        "chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chrome-win*/chrome.exe",
+    ),
+    "chromium-headless-shell": (
+        "chrome-*/chrome-headless-shell",
+        "chrome-headless-shell-mac*/chrome-headless-shell",
+        "chrome-headless-shell-win*/chrome-headless-shell.exe",
+    ),
+}
+CHROMIUM_ENTRIES = tuple(_BINARIES)
 
 # The skip reason of `requires_chromium`, by which tests/_real_browser_shards.py tells a real-browser test.
 REQUIRES_CHROMIUM_REASON = "no local Chromium binary"
@@ -69,25 +76,27 @@ def driver_chromium() -> dict[str, dict]:
 def chromium_executable() -> str | None:
     """A Chromium binary for `chromium.launch(executable_path=...)`, or None.
 
-    AUTO_BROWSER_TEST_CHROMIUM names one explicitly. Otherwise the build the installed driver names, under the first
-    Playwright browser root that has it, in the folder Playwright installs it in (`chromium-<revision>`,
-    `chromium_headless_shell-<revision>`). Another build is not taken: none is found until
-    `python -m playwright install chromium` has fetched this one.
+    AUTO_BROWSER_TEST_CHROMIUM names one explicitly. Otherwise the build the installed driver names, in the folder
+    Playwright installs it in (`chromium-<revision>`, `chromium_headless_shell-<revision>`): Chromium's own under the
+    first Playwright browser root that has it, else the headless shell's. Another build is not taken: none is found
+    until `python -m playwright install chromium` has fetched this one.
     """
     override = os.environ.get("AUTO_BROWSER_TEST_CHROMIUM")
     if override:
         return override if Path(override).is_file() else None
     revisions = {name: entry.get("revision") for name, entry in driver_chromium().items()}
-    for root in _browser_roots():
-        for entry, binary in (*_LINUX, *_MAC, *_WINDOWS):
-            revision = revisions.get(entry)
-            if not isinstance(revision, str) or not revision:
-                continue
-            # Playwright's folder for a build: the entry's name with "_" for "-", then the revision.
-            build = glob.escape(str(root / f"{entry.replace('-', '_')}-{revision}"))
-            matches = sorted(glob.glob(os.path.join(build, binary)))
-            if matches:
-                return matches[-1]
+    roots = _browser_roots()
+    for entry, binaries in _BINARIES.items():
+        revision = revisions.get(entry)
+        if not isinstance(revision, str) or not revision:
+            continue
+        # Playwright's folder for a build: the entry's name with "_" for "-", then the revision.
+        folder = f"{entry.replace('-', '_')}-{revision}"
+        for root in roots:
+            for binary in binaries:
+                matches = sorted(glob.glob(os.path.join(glob.escape(str(root / folder)), binary)))
+                if matches:
+                    return matches[-1]
     return None
 
 
