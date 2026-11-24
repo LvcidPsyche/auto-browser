@@ -181,24 +181,29 @@ def test_every_package_build_is_given_the_lock() -> None:
         assert _under_the_lock(words, "--dependency-constraints-txt"), f"{workflow} {name}: {' '.join(words)}"
 
 
-def test_each_job_that_builds_checks_every_wheel_after_its_last_build_and_before_any_upload() -> None:
+def test_each_job_that_builds_runs_the_check_alone_in_the_step_right_after_its_last_build() -> None:
     building = []
     for workflow, name, job in _jobs():
         commands = _job_commands(job)
-        builds = [position for position, (_, words) in enumerate(commands) if _is_package_build(words)]
+        builds = [(step, words) for step, words in commands if _is_package_build(words)]
         if not builds:
             continue
         building.append((workflow, name))
-        checks = [position for position, (_, words) in enumerate(commands) if CHECK in words]
+        checks = [step for step, words in commands if CHECK in words]
         assert len(checks) == 1, f"{workflow} {name} runs {CHECK} {len(checks)} times"
-        assert checks[0] > builds[-1], f"{workflow} {name} runs {CHECK} before its last build"
-        check_step, check = commands[checks[0]]
-        assert check[check.index(CHECK) + 1] == LOCK_ARG, " ".join(check)
-        for position in builds:
-            words = commands[position][1]
+        check_step = checks[0]
+        # A step between them, a publish among them, would run before the check.
+        assert check_step == builds[-1][0] + 1, f"{workflow} {name}: {CHECK} is not the step right after its last build"
+        # Nothing on the step that could let it be skipped or pass on a failure (`if`, `continue-on-error`).
+        step = job["steps"][check_step]
+        extra = sorted(step.keys() - {"name", "run"})
+        assert not extra, f"{workflow} {name}: the check's step also sets {extra}"
+        wheels = []
+        for _, words in builds:
             assert "--outdir" in words, " ".join(words)
-            wheels = f"{words[words.index('--outdir') + 1]}/*.whl"
-            assert wheels in check, f"{workflow} {name}: {CHECK} does not read {wheels}"
+            wheels.append(f"{words[words.index('--outdir') + 1]}/*.whl")
+        expected = ["python", CHECK, LOCK_ARG, *dict.fromkeys(wheels)]
+        assert _commands(step["run"]) == [expected], f"{workflow} {name}: the check's step runs {step['run']!r}"
         uploads = [
             i for i, step in enumerate(job["steps"]) if step.get("uses", "").startswith("actions/upload-artifact")
         ]
