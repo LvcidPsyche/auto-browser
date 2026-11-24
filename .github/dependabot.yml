@@ -20,14 +20,15 @@ updates:
           - minor
           - patch
     # Playwright is upgraded by hand, on both sides at once. The server refuses
-    # a client of another major.minor, and both sides must run the same
-    # browser, and the pip pin here and the npm pin in /browser-node are
-    # separate ecosystems to Dependabot -- so it can only ever propose half the
-    # change. That half is
-    # not a smaller upgrade, it is the #60 outage: every docker compose up
-    # --build crash-looped on readiness. It has since re-proposed the npm half
-    # (#97) and the pip half (#121), both caught by
-    # scripts/check_playwright_pins.py. The guard stays; this stops feeding it.
+    # a client of another major.minor, both sides must run the same browser,
+    # and the pip pin here and the npm pin in /browser-node are separate
+    # ecosystems to Dependabot -- so it can only ever propose half the change.
+    # A half of another minor is not a smaller upgrade, it is the #60 outage:
+    # every docker compose up --build crash-looped on readiness. It has since
+    # re-proposed the npm half (#97) and the pip half (#121), both of another
+    # minor and caught by scripts/check_playwright_pins.py; a half that moves
+    # only the patch fails its --installed check if it changes the browser.
+    # The guard stays; this stops feeding it.
     ignore:
       - dependency-name: playwright
 

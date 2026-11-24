@@ -52,7 +52,7 @@ def test_an_empty_pool_gives_no_user_agent() -> None:
 def test_the_default_pool_follows_the_chromium_the_installed_driver_names() -> None:
     """The newest Chrome in the pool is the engine's major (the Chromium the installed Playwright driver names, as
     browser-node runs the same build: scripts/check_playwright_pins.py --installed), none is more than one major
-    behind it, and an Edge entry's version is its Chrome's. No browser needed."""
+    behind it, and an Edge entry's major is its Chrome's. No browser needed."""
     engine = int(driver_chromium()["chromium"]["browserVersion"].split(".")[0])
     chrome = {agent: _CHROME_MAJOR.search(agent) for agent in CHROME_UA_POOL}
     assert all(chrome.values()), [agent for agent, found in chrome.items() if not found]

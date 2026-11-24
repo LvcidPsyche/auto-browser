@@ -259,7 +259,6 @@ def test_a_driver_that_names_no_chromium_build_finds_none(
 def test_the_override_wins_and_needs_no_home_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A test child here runs with only PATH and SYSTEMROOT, where Path.home() raises."""
     override = _plant(tmp_path / "elsewhere", "any")
-    _driver(monkeypatch, tmp_path)
 
     def no_home() -> Path:
         raise RuntimeError("Could not determine home directory.")

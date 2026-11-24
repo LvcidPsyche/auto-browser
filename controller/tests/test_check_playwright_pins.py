@@ -2,7 +2,7 @@
 
 browser-node's Playwright server refuses a client of another major.minor, and both sides must run the same browser,
 which equal version strings do not give. From the pins: every place the Playwright version is pinned inside each
-ecosystem agrees, package.json names no range, and the two ecosystems share a major.minor. The check once read only
+ecosystem agrees and names an exact version, and the two ecosystems share a major.minor. The check once read only
 controller/requirements.txt and browser-node/package.json, and stripped a range operator there, so `^1.64.1` passed
 while npm could install any 1.x, and the lock npm ci installs from, and the constraints file the image installs under,
 could pin another version unnoticed. From what is installed (--installed): the Chromium builds the pip driver and
@@ -11,7 +11,6 @@ npm's playwright-core name are the same.
 
 from __future__ import annotations
 
-import inspect
 import io
 import json
 import sys
@@ -19,9 +18,10 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-import playwright
 import pytest
 import yaml
+
+from tests import _chromium
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 CI_WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
@@ -266,10 +266,8 @@ def test_the_same_revision_overrides_on_both_sides_pass(tmp_path: Path) -> None:
 
 
 def test_the_pip_side_is_the_installed_playwrights_driver_by_default() -> None:
-    """Where Playwright finds its own driver (`playwright._impl._driver.compute_driver_executable`)."""
-    driver = Path(inspect.getfile(playwright)).parent / "driver" / "package" / "browsers.json"
-
-    assert check_playwright_pins.pip_driver_browsers() == driver
+    """The file the real-browser tests read the driver's builds from, found here without importing playwright."""
+    assert check_playwright_pins.pip_driver_browsers() == _chromium.driver_browsers_json()
 
 
 @pytest.mark.parametrize("driver", ["another-chromium", "not-installed"])

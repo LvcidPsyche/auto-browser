@@ -14,28 +14,34 @@ Rule 1, the server accepts the client. playwright-core's server refuses a client
         `Playwright version mismatch:`,
 
 and in `getPlaywrightVersion`, `return majorMinorOnly ? version3.split(".").slice(0, 2).join(".") : version3;`.
-That refusal was the #60 outage. With no argument (the lint job) this reads the pins and installs nothing. Inside
-each ecosystem the pins agree and are exact: controller/requirements.txt and controller/constraints.txt, which the
-image and the host tests install under, each name the same exact version, as `==X.Y.Z` (a wildcard lets pip take
-another one, and a shortened release or a second specifier is not a version this can compare); and
-browser-node/package.json, which must name an exact version (a range lets npm take another one), with the playwright
-and playwright-core of browser-node/package-lock.json, which `npm ci` installs.
-Across the two, the major.minor is the same.
+That refusal was the #60 outage. With no argument (the lint job) this reads the pins. Inside each ecosystem the pins
+agree and are exact: controller/requirements.txt and controller/constraints.txt, which the image and the host tests
+install under, each name the same version as `==X.Y.Z` (a wildcard lets pip take another one, and a shortened release
+or a second specifier is not a version this can compare); and browser-node/package.json, which must name an exact
+version (a range lets npm take another one), with the playwright and playwright-core of
+browser-node/package-lock.json, which `npm ci` installs. Across the two, the major.minor is the same.
 
 Rule 2, both sides run the same browser, which equal version strings do not give: pip 1.65.1 and npm 1.65.1 carry
 different Chromium builds, while pip 1.65.2 and npm 1.65.1 carry the same one. With --installed this compares the
 `chromium` and `chromium-headless-shell` entries (their revision, browserVersion and revisionOverrides) of the
-browsers.json the installed pip driver names (playwright/driver/package/browsers.json) with those of npm's
-playwright-core (browser-node/node_modules/playwright-core/browsers.json). A missing file, or an entry whose revision
-or browserVersion is missing or not a string, fails, saying what to install; it never passes or skips. What it does
-not see: the two bundles may still differ in the switches they launch Chromium with
-by default. The product's two copies of Playwright's --disable-features list are held to the pip bundle's by their
-own tests (controller/tests/test_playwright_disabled_features.py).
+installed pip driver's own browsers.json (playwright/driver/package/browsers.json) with those of npm's playwright-core
+(browser-node/node_modules/playwright-core/browsers.json). A missing file, or an entry whose revision or
+browserVersion is missing or not a string, fails, saying what to install; it never passes or skips. What it does not
+see: the two bundles may still differ in the switches they launch Chromium with by default. The product's two copies
+of Playwright's --disable-features list are held to the pip bundle's by their own tests
+(controller/tests/test_playwright_disabled_features.py).
 
-Standard library only, and playwright is never imported: the lint job does not install it.
+Neither mode installs anything. Standard library only, and playwright is never imported: the lint job does not
+install it.
 
-Exit 0 when the rule holds. Exit 1 when package.json names a range, which the error names, reading no other pin;
-when a rule is broken, listing every pin or both sides' builds; and when a browsers.json is missing or lacks an entry.
+Exit 0 when the rule holds. Exit 1 when it does not, or cannot be read:
+- package.json names a range (the error names it, reading no other pin);
+- a pip pin is not exact, or the pins break rule 1 (every pin is listed);
+- a pin is not found in its file;
+- with --installed: no pip Playwright is installed; a browsers.json is missing or unreadable, or lacks a readable
+  `chromium` or `chromium-headless-shell` entry; or the two sides' builds differ (both are listed).
+Exit 2 for a usage error, as argparse reports it (--pip-browsers or --node-modules without --installed, an unknown
+argument).
 """
 
 from __future__ import annotations
@@ -143,8 +149,8 @@ def check_pins() -> int:
     for location, version in (*pip, *npm):
         print(f"  {location:44} {version}", file=sys.stderr)
     print(
-        "\nMove both sides together: one exact version in each ecosystem, the same major.minor across them, and a pair\n"
-        "that carries the same Chromium (`python scripts/check_playwright_pins.py --installed`). Then regenerate\n"
+        "\nMove both sides together: one exact version in each ecosystem, the same major.minor across them, and a\n"
+        "pair that carries the same Chromium (`python scripts/check_playwright_pins.py --installed`). Then regenerate\n"
         "controller/constraints.txt and run npm install in browser-node. See scripts/check_playwright_pins.py for why.",
         file=sys.stderr,
     )
@@ -161,7 +167,8 @@ def pip_driver_browsers() -> Path | None:
 
 
 class _Unreadable(Exception):
-    """A browsers.json that is missing, unreadable or lacks an entry: the message says which, and what to install."""
+    """A browsers.json that is missing, unreadable or lacks a readable entry: the message says which, and what to
+    install."""
 
 
 # What names an entry's build. A revision or browserVersion that is missing or not a string is unreadable (two missing
@@ -245,14 +252,12 @@ def check_installed(pip_browsers: Path | None, node_modules: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Rule 1 with no arguments (and with argv None, which parses none); rule 2 with --installed."""
-    if argv is None:
-        return check_pins()
+    """Rule 1 with no arguments (argv None parses none, not sys.argv); rule 2 with --installed."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--installed", action="store_true", help="compare the installed packages' Chromium builds")
     parser.add_argument("--pip-browsers", type=Path, help="the pip driver's browsers.json (default: the installed one)")
     parser.add_argument("--node-modules", type=Path, help="browser-node's node_modules (default: the repository's)")
-    arguments = parser.parse_args(argv)
+    arguments = parser.parse_args(argv or [])
     if not arguments.installed:
         if arguments.pip_browsers or arguments.node_modules:
             parser.error("--pip-browsers and --node-modules go with --installed")
