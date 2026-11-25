@@ -208,10 +208,14 @@ class BrowserDiagnosticsService:
             spawn_background_task(self.manager.request_gates.bypass_service_workers(page))
 
     def watch_context(self, context: Any, session: "BrowserSession") -> None:
-        """Listen to a session's browser context: the pages it reports, and the first navigation of a
-        popup it has not reported yet, which reaches only the context. Each session keeps its own hops
+        """Listen to a session's browser context: the pages it reports, their console messages, and the first
+        navigation of a popup it has not reported yet, which reaches only the context. Each session keeps its own hops
         (session.unframed_hops), so one context's pages never decide about another's."""
         context.on("page", lambda popup: self.manager._attach_popup(popup, session))
+        # On the context, before any of its pages has loaded anything: Playwright's server sends a console message only
+        # to a context or page subscribed to console by then, and a popup can log as it loads, before a listener added
+        # once it is reported has been subscribed.
+        context.on("console", lambda message: self._on_console(session, message))
         context.on("request", lambda request: self.on_context_request(session, request))
         context.on("requestfailed", lambda request: self.on_context_request_failed(session, request))
         context.on("response", lambda response: self.on_context_response(session, response))
@@ -380,7 +384,6 @@ class BrowserDiagnosticsService:
             return
         session.attached_pages.add(page)
 
-        page.on("console", lambda message: self._keep_output(page, session.console_messages, console_entry(message)))
         page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, error_text(error)))
         page.on("request", lambda request: self._on_request_started(session, page, request))
         page.on("requestfailed", lambda request: self._record_request_failure(session, page, request))
@@ -393,6 +396,14 @@ class BrowserDiagnosticsService:
         # listener above never saw where it opened: hold the page to the list where it is now.
         if hasattr(page, "main_frame"):
             self._on_frame_navigated(session, page, page.main_frame, reported=True)
+
+    def _on_console(self, session: "BrowserSession", message: Any) -> None:
+        """A console message from the session's context (watch_context), kept as its page's output when the session
+        has attached that page; one with no page (a service worker's) is not kept."""
+        page = message.page
+        if page is None or page not in session.attached_pages:
+            return
+        self._keep_output(page, session.console_messages, console_entry(message))
 
     def _keep_output(self, page: "Page", items: list[Any], value: Any) -> None:
         """Keep a console message or page error, unless ALLOWED_HOSTS refuses its page (_page_refused).
