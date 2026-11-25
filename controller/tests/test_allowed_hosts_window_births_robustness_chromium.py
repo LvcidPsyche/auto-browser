@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import threading
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -86,6 +88,53 @@ def failing_read(monkeypatch, env: nav.Env, *, spare) -> None:
 
 def lose_watcher_without_replacement(monkeypatch, env: nav.Env) -> None:
     monkeypatch.setattr(env.manager.window_births, "_lost", lambda watcher: None)
+
+
+# A page given to signalling() fetches this path right after its console.log: the test server, on a thread of its own,
+# sees that request while the event loop is blocked (late_listeners).
+LOGGED = "/logged"
+# How long the loop stays blocked once the page has fetched LOGGED: Chromium reported the console message before the
+# fetch began, and this is for that report to reach Playwright's server well before anything the controller sends it.
+LATE_MARGIN_SECONDS = 0.2
+
+
+class _Signalling(dict):
+    """A test server's pages that set ``logged`` when LOGGED is fetched (its handler reads them with get)."""
+
+    def __init__(self, pages: dict, logged: threading.Event) -> None:
+        super().__init__(pages)
+        self.logged = logged
+
+    def get(self, path, default=None):
+        if path == LOGGED:
+            self.logged.set()
+        return super().get(path, default)
+
+
+def signalling(pages: dict, path: str, call: str) -> _Signalling:
+    """``pages``, with ``path``'s page fetching LOGGED right after its ``call`` (a console.log)."""
+    assert call in pages[path], f"{call!r} is not in {path}"
+    return _Signalling({**pages, path: pages[path].replace(call, f"{call}fetch('{LOGGED}');", 1)}, threading.Event())
+
+
+def late_listeners(monkeypatch, env: nav.Env) -> list[bool]:
+    """The next page the context reports gets its listeners only once it has logged, as on a runner busy enough that
+    the event loop handles the report late: attach_popup blocks the loop until the page has fetched LOGGED (env.pages
+    from signalling), so everything Playwright sends meanwhile is handled after it, in order. Playwright's server sends
+    a console message only to a context or page subscribed to console by then. Returns whether the page had logged
+    when its listeners were attached, once they have been, for the test to assert."""
+    diagnostics = env.manager.diagnostics
+    real = diagnostics.attach_popup
+    waited: list[bool] = []
+
+    def late(page, session) -> None:
+        if not waited:
+            waited.append(env.pages.logged.wait(TIMEOUT))
+            time.sleep(LATE_MARGIN_SECONDS)
+        real(page, session)
+
+    monkeypatch.setattr(diagnostics, "attach_popup", late)
+    return waited
 
 
 # ── 1. activate_tab and a verdict that comes out refused ───────────────────────
@@ -456,12 +505,17 @@ async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decide
     the targetId read on an event. While held, what the popup logs and throws is not in the session's output,
     it is not read, and its title is not listed. A clean verdict frees the page and appends what it emitted
     meanwhile (round-4 R5: a legitimate popup's load-time output reached the agent before the hold existed);
-    a refused verdict blanks it and drops that output for good."""
+    a refused verdict blanks it and drops that output for good.
+
+    The popup logs before the controller attaches its listeners (late_listeners), and the test keeps no spy of its own
+    on the context's console: one subscribes the context, and Playwright's server then sends the popup's console line
+    however late the controller's listener comes, which hid that the line was lost when it came that late."""
     noisy = (
         f"<title>noisy-title</title><p>noisy-body</p><script>console.log('{SECRET}');"
         f"setTimeout(() => {{ throw new Error('{SECRET}') }}, 0)</script>"
     )
-    async with browser_env(tmp_path, {**PAGES, "/noisy": noisy}) as env:
+    pages = signalling({**PAGES, "/noisy": noisy}, "/noisy", f"console.log('{SECRET}');")
+    async with browser_env(tmp_path, pages) as env:
         session_id = await env.create("/start")
         session = env.manager.sessions[session_id]
         births = env.manager.window_births
@@ -481,14 +535,20 @@ async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decide
             return BirthVerdict.REFUSED if outcome == "refused" and page is not session.page else result
 
         monkeypatch.setattr(births, "verdict", verdict)
-        emitted: list = []
-        session.context.on("console", lambda message: emitted.append(message.text))
+        listened_late = late_listeners(monkeypatch, env)
 
         popup = await open_popup(session, f"{env.allowed}/noisy")
-        await nav.wait_for(lambda: SECRET in emitted, timeout=TIMEOUT)
+        assert listened_late == [True], "the popup had not logged when its listeners were attached"
         await popup.wait_for_load_state()
         await asyncio.sleep(0.3)
 
+        held_console = [
+            value
+            for items, value in env.manager.diagnostics._held_output.get(popup, [])
+            if items is session.console_messages
+        ]
+        # Kept aside, so the absence of its line below means something.
+        assert SECRET in json.dumps(held_console), "the popup's console line never reached the controller"
         assert env.manager._page_refused(popup), "the reported popup is not held until its verdict"
         assert SECRET not in json.dumps(session.console_messages)
         assert SECRET not in json.dumps(session.page_errors)
@@ -861,11 +921,13 @@ CLOSE_ON_CUE = {
     "/callback": "<title>cb</title><p>cb</p><script>console.log('callback-loaded');"
     "window.opener && window.opener.postMessage('code-123', '*')</script>",
 }
+CALLBACK_LOG = "console.log('callback-loaded');"
 
 
+@pytest.mark.parametrize("listeners", ["on-time", "late"])
 @pytest.mark.parametrize("variant", ["clean", "other-refused"])
 async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_once_it_is_judged(
-    tmp_path: Path, variant: str
+    tmp_path: Path, monkeypatch, variant: str, listeners: str
 ) -> None:
     """Reviewer's R5 (L1): an OAuth callback popup logs at load, posts its code to the opener and closes itself.
     Its load-time console line was emitted while the popup was held for its birth verdict and dropped; base kept
@@ -874,14 +936,21 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
     The popup closes itself only once its verdict has landed. On a timer of its own (1.5 s) it closed first when a
     busy runner was slow to read its targetId, and a popup that closes before its targetId can be read is refused as
     unjudged and keeps nothing (test_a_popup_closed_mid_hold_before_its_id_was_read_shows_nothing_it_emitted), so
-    its line never came (CI, a9db183f)."""
-    async with browser_env(tmp_path, {**PAGES, **CLOSE_ON_CUE}) as env:
+    its line never came (CI, a9db183f).
+
+    Late: the popup logs before the controller attaches its listeners (late_listeners), as it did once on CI
+    ([other-refused], 2026-11-24), when the controller still subscribed each page to console as it attached it and
+    Playwright's server, which sends a console message only to a context or page subscribed by then, dropped the
+    line."""
+    async with browser_env(tmp_path, signalling({**PAGES, **CLOSE_ON_CUE}, "/callback", CALLBACK_LOG)) as env:
         session_id = await env.create("/start")
         session = env.manager.sessions[session_id]
         if variant == "other-refused":
             refused = await open_popup(session, f"{env.evil}/")
             await settle(lambda: env.manager._page_refused(refused), timeout=TIMEOUT)
+        listened_late = late_listeners(monkeypatch, env) if listeners == "late" else [True]
         popup = await open_popup(session, f"{env.allowed}/authorize")
+        assert listened_late == [True], "the popup had not logged when its listeners were attached"
 
         await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
         assert await settle(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT), (
@@ -970,16 +1039,18 @@ async def test_a_popup_closed_mid_hold_before_its_id_was_read_shows_nothing_it_e
         assert SECRET not in json.dumps(await env.manager.observe(session_id, preset="text"), default=str)
 
 
+@pytest.mark.parametrize("listeners", ["on-time", "late"])
 @pytest.mark.parametrize("outcome", ["clean", "refused", "refused-meanwhile"])
 async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only_on_a_clean_verdict(
-    tmp_path: Path, monkeypatch, outcome: str
+    tmp_path: Path, monkeypatch, outcome: str, listeners: str
 ) -> None:
     """Round-4 robustness RB1: a popup held for its birth verdict that closed before the verdict landed lost what
     it logged meanwhile, though the verdict was clean (_judge_birth returned at is_closed before it took the held
     list). The OAuth callback's read lands while it is open; it closes itself; then the verdict lands. Clean: its
     console line reaches the agent, as on base. A refused verdict, or a page refused for something else before it
-    closed, drops it."""
-    async with browser_env(tmp_path, {**PAGES, **CLOSE_ON_CUE}) as env:
+    closed, drops it. Late: the popup logs before the controller attaches its listeners (late_listeners), and the
+    outcome is the same."""
+    async with browser_env(tmp_path, signalling({**PAGES, **CLOSE_ON_CUE}, "/callback", CALLBACK_LOG)) as env:
         session_id = await env.create("/start")
         session = env.manager.sessions[session_id]
         births = env.manager.window_births
@@ -997,7 +1068,9 @@ async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only
             return BirthVerdict.REFUSED if outcome == "refused" else result
 
         monkeypatch.setattr(births, "verdict", verdict_after_close)
+        listened_late = late_listeners(monkeypatch, env) if listeners == "late" else [True]
         popup = await open_popup(session, f"{env.allowed}/authorize")
+        assert listened_late == [True], "the popup had not logged when its listeners were attached"
         await asyncio.wait_for(read_landed.wait(), timeout=TIMEOUT)
         await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
         assert verdicts == [BirthVerdict.CLEAN], verdicts
