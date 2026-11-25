@@ -50,14 +50,14 @@ class ShadowBrowseOwnershipTests(unittest.IsolatedAsyncioTestCase):
         return session_id, shadow["shadow_session_id"]
 
     async def test_the_shadow_context_is_listened_to_as_a_sessions_is(self) -> None:
-        """F9: its popups, and the first navigation of a popup it has not reported yet."""
+        """F9: its popups, their console messages, and the first navigation of a popup it has not reported yet."""
         _, shadow_id = await self._shadow_of(ALICE)
 
         context = self.manager.sessions[shadow_id].context
         # The pre-request gate's "close" first: it owns the context until the context has closed.
         self.assertEqual(
             [call.args[0] for call in context.on.call_args_list],
-            ["close", "page", "request", "requestfailed", "response"],
+            ["close", "page", "console", "request", "requestfailed", "response"],
         )
 
     async def test_the_shadow_session_belongs_to_the_source_owner(self) -> None:
