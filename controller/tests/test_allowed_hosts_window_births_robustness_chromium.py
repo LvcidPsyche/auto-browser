@@ -25,7 +25,7 @@ import pytest
 from app.action_errors import SessionNotFoundError
 from app.browser import request_gates as rg
 from app.browser import window_births as wb_module
-from app.browser.services.tabs import TabUnjudgedError
+from app.browser.services.tabs import REFUSED_TAB_MESSAGE, TabUnjudgedError
 from app.browser.window_births import BirthVerdict, WindowBirthWatcher
 from app.readiness import window_birth_watcher_check
 from tests import test_allowed_hosts_navigation as nav
@@ -578,8 +578,10 @@ async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decide
             # Also when an assertion above fails, so that the held read ends before the test's teardown.
             release.set()
         if outcome == "refused":
-            with pytest.raises(PermissionError):
+            with pytest.raises(PermissionError) as refused:
                 await env.manager.activate_tab(session_id, session.context.pages.index(popup))
+            # The refusal its verdict gives, not an unjudged tab's (TabUnjudgedError is a PermissionError too).
+            assert str(refused.value) == REFUSED_TAB_MESSAGE, refused.value
             await settle(lambda: popup.url == "about:blank", timeout=TIMEOUT)
             assert env.manager._page_refused(popup) and session.page is not popup
             assert SECRET not in json.dumps(session.console_messages)
