@@ -137,6 +137,25 @@ def late_listeners(monkeypatch, env: nav.Env) -> list[bool]:
     return waited
 
 
+def console_count(messages: list, text: str) -> int:
+    """How many of ``messages`` (console entries) are ``text``'s line: a line is kept once, not once per listener."""
+    return sum(1 for message in messages if message.get("text") == text)
+
+
+async def kept_aside(env: nav.Env, session, popup, text: str) -> int:
+    """How many times ``text``'s console line is kept aside for ``popup`` while it is held for its birth verdict, once
+    it is there or TIMEOUT has passed. Polled here, not with settle, which also waits for the held judgement."""
+
+    def count() -> int:
+        held = env.manager.diagnostics._held_output.get(popup, [])
+        return console_count([value for items, value in held if items is session.console_messages], text)
+
+    deadline = time.monotonic() + TIMEOUT
+    while not count() and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    return count()
+
+
 # ── 1. activate_tab and a verdict that comes out refused ───────────────────────
 
 
@@ -537,29 +556,27 @@ async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decide
         monkeypatch.setattr(births, "verdict", verdict)
         listened_late = late_listeners(monkeypatch, env)
 
-        popup = await open_popup(session, f"{env.allowed}/noisy")
-        assert listened_late == [True], "the popup had not logged when its listeners were attached"
-        await popup.wait_for_load_state()
-        await asyncio.sleep(0.3)
+        try:
+            popup = await open_popup(session, f"{env.allowed}/noisy")
+            assert listened_late == [True], "the popup had not logged when its listeners were attached"
+            await popup.wait_for_load_state()
+            await asyncio.sleep(0.3)
 
-        held_console = [
-            value
-            for items, value in env.manager.diagnostics._held_output.get(popup, [])
-            if items is session.console_messages
-        ]
-        # Kept aside, so the absence of its line below means something.
-        assert SECRET in json.dumps(held_console), "the popup's console line never reached the controller"
-        assert env.manager._page_refused(popup), "the reported popup is not held until its verdict"
-        assert SECRET not in json.dumps(session.console_messages)
-        assert SECRET not in json.dumps(session.page_errors)
-        tabs = await env.manager.list_tabs(session_id)
-        assert "noisy-title" not in json.dumps(tabs)
-        session.page = popup
-        with pytest.raises(PermissionError):
-            await env.manager.observe(session_id, preset="text")
-        session.page = session.context.pages[0]
-
-        release.set()
+            # Kept aside, so the absence of its line below means something.
+            held = await kept_aside(env, session, popup, SECRET)
+            assert held == 1, f"the popup's console line was kept aside {held} times"
+            assert env.manager._page_refused(popup), "the reported popup is not held until its verdict"
+            assert SECRET not in json.dumps(session.console_messages)
+            assert SECRET not in json.dumps(session.page_errors)
+            tabs = await env.manager.list_tabs(session_id)
+            assert "noisy-title" not in json.dumps(tabs)
+            session.page = popup
+            with pytest.raises(PermissionError):
+                await env.manager.observe(session_id, preset="text")
+            session.page = session.context.pages[0]
+        finally:
+            # Also when an assertion above fails, so that the held read ends before the test's teardown.
+            release.set()
         if outcome == "refused":
             with pytest.raises(PermissionError):
                 await env.manager.activate_tab(session_id, session.context.pages.index(popup))
@@ -571,7 +588,8 @@ async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decide
         await env.manager.activate_tab(session_id, session.context.pages.index(popup))
         assert session.page is popup and not env.manager._page_refused(popup)
         assert "noisy-body" in json.dumps(await env.manager.observe(session_id, preset="text"))
-        assert SECRET in json.dumps(session.console_messages), "the clean popup's held console line was dropped"
+        kept = console_count(session.console_messages, SECRET)
+        assert kept == 1, f"the clean popup's held console line was kept {kept} times"
         assert SECRET in json.dumps(session.page_errors), "the clean popup's held page error was dropped"
 
 
@@ -922,6 +940,7 @@ CLOSE_ON_CUE = {
     "window.opener && window.opener.postMessage('code-123', '*')</script>",
 }
 CALLBACK_LOG = "console.log('callback-loaded');"
+CALLBACK_LINE = "callback-loaded"
 
 
 @pytest.mark.parametrize("listeners", ["on-time", "late"])
@@ -959,11 +978,36 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
         await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")  # it closes itself
         assert await settle(lambda: popup.is_closed(), timeout=TIMEOUT), "the popup did not close itself"
 
-        assert await settle(
-            lambda: any("callback-loaded" in json.dumps(message) for message in session.console_messages),
-            timeout=TIMEOUT,
-        ), "the callback's console line did not reach the agent"
+        await settle(lambda: console_count(session.console_messages, CALLBACK_LINE) >= 1, timeout=TIMEOUT)
+        kept = console_count(session.console_messages, CALLBACK_LINE)
+        assert kept == 1, f"the callback's console line reached the agent {kept} times"
         assert SECRET not in json.dumps(session.console_messages)
+
+
+PRE_REPORT_LINE = "logged-before-the-window-was-reported"
+
+
+async def test_a_line_logged_into_a_window_before_it_is_reported_reaches_the_agent_once(tmp_path: Path) -> None:
+    """The opener logs on the console of a window it has just opened onto a page, before Playwright has reported the
+    window. Playwright's server keeps such a line and passes it on right after it reports the window, before a listener
+    added once the window is reported can have been subscribed: when the controller subscribed each page to console as
+    it attached it, the line was lost every time. It reaches the agent once the window's verdict is clean, and once
+    only (a listener on the page as well as on the context kept it twice)."""
+    async with browser_env(tmp_path, PAGES) as env:
+        session = env.manager.sessions[await env.create("/start")]
+        async with session.context.expect_page() as opened:
+            await session.page.evaluate(
+                "([u, line]) => { window.open(u).console.log(line) }", [f"{env.allowed}/ok", PRE_REPORT_LINE]
+            )
+        popup = await opened.value
+        assert await settle(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT), (
+            "the window's birth verdict never landed"
+        )
+        assert not env.manager._page_refused(popup), "the window's verdict is not clean"
+
+        await settle(lambda: console_count(session.console_messages, PRE_REPORT_LINE) >= 1, timeout=TIMEOUT)
+        kept = console_count(session.console_messages, PRE_REPORT_LINE)
+        assert kept == 1, f"the line logged before the window was reported reached the agent {kept} times"
 
 
 # ── round 5: held output when the popup closes first, or is refused meanwhile ──
@@ -1064,7 +1108,8 @@ async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only
                 return result
             verdicts.append(result)
             read_landed.set()
-            await nav.wait_for(lambda: page.is_closed(), timeout=TIMEOUT)
+            # Longer than the test waits before it cues the close (kept_aside, up to TIMEOUT).
+            await nav.wait_for(lambda: page.is_closed(), timeout=2 * TIMEOUT)
             return BirthVerdict.REFUSED if outcome == "refused" else result
 
         monkeypatch.setattr(births, "verdict", verdict_after_close)
@@ -1074,16 +1119,21 @@ async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only
         await asyncio.wait_for(read_landed.wait(), timeout=TIMEOUT)
         await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
         assert verdicts == [BirthVerdict.CLEAN], verdicts
-        assert not any("callback-loaded" in json.dumps(message) for message in session.console_messages)
-        if outcome == "refused-meanwhile":
-            env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
-
-        await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")  # it closes itself
+        try:
+            # Kept aside while the popup is held, so the line's absence from the agent's output means something.
+            held = await kept_aside(env, session, popup, CALLBACK_LINE)
+            assert held == 1, f"{outcome}: the callback's console line was kept aside {held} times"
+            assert not any("callback-loaded" in json.dumps(message) for message in session.console_messages)
+            if outcome == "refused-meanwhile":
+                env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
+        finally:
+            # It closes itself, also when an assertion above fails, so that the verdict waiting for that ends.
+            await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")
         await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
         await settle(lambda: not pending(), timeout=TIMEOUT)
 
-        kept = any("callback-loaded" in json.dumps(message) for message in session.console_messages)
-        assert kept is (outcome == "clean"), f"{outcome}: callback line kept={kept}"
+        kept = console_count(session.console_messages, CALLBACK_LINE)
+        assert kept == (1 if outcome == "clean" else 0), f"{outcome}: callback line kept {kept} times"
         assert env.manager.diagnostics._held_output.get(popup) is None
 
 
