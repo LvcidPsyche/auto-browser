@@ -1108,7 +1108,9 @@ async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only
                 return result
             verdicts.append(result)
             read_landed.set()
-            # Longer than the test waits before it cues the close (kept_aside, up to TIMEOUT).
+            # Longer than the test takes to cue the close: it first finds the opener's code and the line kept aside,
+            # each within TIMEOUT. When one of those fails, this wait is still running as the test ends, and the
+            # teardown's close of the context ends it; a wait of TIMEOUT could run out first and fail this task too.
             await nav.wait_for(lambda: page.is_closed(), timeout=2 * TIMEOUT)
             return BirthVerdict.REFUSED if outcome == "refused" else result
 
@@ -1119,16 +1121,14 @@ async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only
         await asyncio.wait_for(read_landed.wait(), timeout=TIMEOUT)
         await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
         assert verdicts == [BirthVerdict.CLEAN], verdicts
-        try:
-            # Kept aside while the popup is held, so the line's absence from the agent's output means something.
-            held = await kept_aside(env, session, popup, CALLBACK_LINE)
-            assert held == 1, f"{outcome}: the callback's console line was kept aside {held} times"
-            assert not any("callback-loaded" in json.dumps(message) for message in session.console_messages)
-            if outcome == "refused-meanwhile":
-                env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
-        finally:
-            # It closes itself, also when an assertion above fails, so that the verdict waiting for that ends.
-            await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")
+        # Kept aside while the popup is held, so the line's absence from the agent's output means something.
+        held = await kept_aside(env, session, popup, CALLBACK_LINE)
+        assert held == 1, f"{outcome}: the callback's console line was kept aside {held} times"
+        assert not any("callback-loaded" in json.dumps(message) for message in session.console_messages)
+        if outcome == "refused-meanwhile":
+            env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
+
+        await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")  # it closes itself
         await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
         await settle(lambda: not pending(), timeout=TIMEOUT)
 
