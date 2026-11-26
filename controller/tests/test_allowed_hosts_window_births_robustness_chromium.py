@@ -121,8 +121,8 @@ def late_listeners(monkeypatch, env: nav.Env) -> list[bool]:
     """The next page the context reports gets its listeners only once it has logged, as on a runner busy enough that
     the event loop handles the report late: attach_popup blocks the loop until the page has fetched LOGGED (env.pages
     from signalling), so everything Playwright sends meanwhile is handled after it, in order. Playwright's server sends
-    a console message only to a context or page subscribed to console by then. Returns whether the page had logged
-    when its listeners were attached, once they have been, for the test to assert."""
+    a page's console message only to a context or page subscribed to console by then. Returns whether the page had
+    logged when its listeners were attached, once they have been, for the test to assert."""
     diagnostics = env.manager.diagnostics
     real = diagnostics.attach_popup
     waited: list[bool] = []
@@ -961,8 +961,8 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
 
     Late: the popup logs before the controller attaches its listeners (late_listeners), as it did once on CI
     ([other-refused], 2026-11-24), when the controller still subscribed each page to console as it attached it and
-    Playwright's server, which sends a console message only to a context or page subscribed by then, dropped the
-    line."""
+    Playwright's server, which sends a page's console message only to a context or page subscribed by then, dropped
+    the line."""
     async with browser_env(tmp_path, signalling({**PAGES, **CLOSE_ON_CUE}, "/callback", CALLBACK_LOG)) as env:
         session_id = await env.create("/start")
         session = env.manager.sessions[session_id]
