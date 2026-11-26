@@ -202,6 +202,10 @@ class Settings(BaseSettings):
         "/vnc.html?autoconnect=true&resize=scale",
         alias="ISOLATED_TAKEOVER_PATH",
     )
+    # The port put in an isolated session's takeover URL. auto: the host port Docker published for the
+    # container's noVNC (the old behaviour). none: no port at all, for a reverse proxy that serves the takeover
+    # host on 443 and forwards to the container itself. A number: that fixed external port instead.
+    isolated_takeover_port: str = Field("auto", alias="ISOLATED_TAKEOVER_PORT")
     # per_session gives each docker_ephemeral browser its own bridge network,
     # joined by the controller, so one session's browser cannot reach another's
     # Playwright server (9223), noVNC (6080) or the shared browser-node. shared
@@ -553,6 +557,20 @@ class Settings(BaseSettings):
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
         return value
+
+    @field_validator("isolated_takeover_port")
+    @classmethod
+    def _validate_takeover_port(cls, value: str) -> str:
+        text = (value or "").strip().lower()
+        if text in {"", "auto"}:
+            return "auto"
+        if text in {"none", "omit"}:
+            return "none"
+        if text.isdigit() and 1 <= int(text) <= 65535:
+            return str(int(text))
+        raise ValueError(
+            "ISOLATED_TAKEOVER_PORT must be 'auto', 'none', or a port number between 1 and 65535"
+        )
 
     @field_validator("cron_timezone", mode="before")
     @classmethod

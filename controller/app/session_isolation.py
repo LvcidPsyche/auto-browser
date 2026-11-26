@@ -1297,9 +1297,13 @@ class DockerBrowserNodeProvisioner:
     def _build_takeover_url(self, novnc_port: int | None) -> str:
         if novnc_port is None:
             raise RuntimeError("Isolated browser container did not publish a noVNC port")
+        # The published port is right when the person reaches the container directly, and wrong behind a proxy
+        # that serves the takeover host on 443: the URL then carries a port nothing listens on.
+        configured_port = self.settings.isolated_takeover_port
+        port_suffix = "" if configured_port == "none" else f":{novnc_port if configured_port == 'auto' else configured_port}"
         return (
             f"{self.settings.isolated_takeover_scheme}://"
-            f"{self.settings.isolated_takeover_host}:{novnc_port}"
+            f"{self.settings.isolated_takeover_host}{port_suffix}"
             f"{self.settings.isolated_takeover_path}"
         )
 
