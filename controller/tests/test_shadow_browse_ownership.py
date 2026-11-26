@@ -50,7 +50,8 @@ class ShadowBrowseOwnershipTests(unittest.IsolatedAsyncioTestCase):
         return session_id, shadow["shadow_session_id"]
 
     async def test_the_shadow_context_is_listened_to_as_a_sessions_is(self) -> None:
-        """F9: its popups, their console messages, and the first navigation of a popup it has not reported yet."""
+        """F9: its popups, every page's console messages, and the first navigation of a popup it has not reported
+        yet."""
         _, shadow_id = await self._shadow_of(ALICE)
 
         context = self.manager.sessions[shadow_id].context

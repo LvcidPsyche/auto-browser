@@ -208,13 +208,13 @@ class BrowserDiagnosticsService:
             spawn_background_task(self.manager.request_gates.bypass_service_workers(page))
 
     def watch_context(self, context: Any, session: "BrowserSession") -> None:
-        """Listen to a session's browser context: the pages it reports, their console messages, and the first
+        """Listen to a session's browser context: the pages it reports, every page's console messages, and the first
         navigation of a popup it has not reported yet, which reaches only the context. Each session keeps its own hops
         (session.unframed_hops), so one context's pages never decide about another's."""
         context.on("page", lambda popup: self.manager._attach_popup(popup, session))
-        # On the context, before any of its pages has loaded anything: Playwright's server sends a console message only
-        # to a context or page subscribed to console by then, and a popup can log as it loads, before a listener added
-        # once it is reported has been subscribed.
+        # On the context, before the session's first navigation: Playwright's server sends a console message only to a
+        # context or page subscribed to console by then, and a popup can log as it loads, before a listener added once
+        # it is reported has been subscribed.
         context.on("console", lambda message: self._on_console(session, message))
         context.on("request", lambda request: self.on_context_request(session, request))
         context.on("requestfailed", lambda request: self.on_context_request_failed(session, request))

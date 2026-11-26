@@ -70,12 +70,13 @@ All notable changes to auto-browser are documented here.
   failed status and its result, and a job refused because the operator who queued it no longer has a named
   credential keeps its failed status and reason; their audit ends with `agent_job_finished`, not an interruption.
 - **A popup's console output from while it loaded is no longer missing.** What a popup logged as it loaded (an OAuth
-  callback's line, say) could be missing from `get_console_messages` and from the console messages in the agent's
-  observations when the controller handled the popup's report late, as on a busy machine: the controller subscribed
-  to a page's console output only once Playwright had reported the page, and Playwright passes a console message on
-  only to a subscriber it already has. The controller now subscribes to the console output of each session's browser
-  context as it sets the session up, before the session's first page loads, and judges each message by its page as
-  before.
+  callback's line, say) was missing from `get_console_messages` and from the console messages in the agent's
+  observations: every time for a line that reached Playwright before it reported the popup, such as an opener's line
+  on the console of a window it had just opened onto a page, and on a busy machine when the controller handled the
+  popup's report late. The controller subscribed to a page's console output only once Playwright had reported the
+  page, and Playwright passes a console message on only to a subscriber it already has. It now subscribes to the
+  console output of each session's browser context as it sets the session up, before the session's first
+  navigation, and judges each message by its page as before.
 
 ## [1.19.0] — 2026-11-22
 
