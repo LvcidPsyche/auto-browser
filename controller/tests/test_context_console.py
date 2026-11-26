@@ -7,8 +7,6 @@ from __future__ import annotations
 import weakref
 from types import SimpleNamespace
 
-import pytest
-
 from app.browser.services.diagnostics import BrowserDiagnosticsService
 from tests.test_active_tab_close import FakePage, fake_manager
 
@@ -28,8 +26,7 @@ class FakeContext:
             handler(message)
 
 
-@pytest.mark.parametrize("source", ["unattached", "no-page"])
-def test_a_console_message_is_kept_only_as_the_output_of_a_page_the_session_has_attached(source: str) -> None:
+def test_a_console_message_is_kept_only_as_the_output_of_a_page_the_session_has_attached() -> None:
     """A message of a page the session has not attached is not the session's to keep, and one with no page (a service
     worker's) has no page to be judged by: neither is kept. A message of an attached page is."""
     service = BrowserDiagnosticsService(fake_manager(), None, None)  # type: ignore[arg-type]
@@ -40,6 +37,7 @@ def test_a_console_message_is_kept_only_as_the_output_of_a_page_the_session_has_
     service.attach_page_listeners(attached, session)
 
     context.log("LINE-OF-AN-ATTACHED-PAGE", attached)
-    context.log("LINE-OF-NO-ATTACHED-PAGE", FakePage() if source == "unattached" else None)
+    context.log("LINE-OF-AN-UNATTACHED-PAGE", FakePage())
+    context.log("LINE-OF-NO-PAGE", None)
 
     assert [message["text"] for message in session.console_messages] == ["LINE-OF-AN-ATTACHED-PAGE"]

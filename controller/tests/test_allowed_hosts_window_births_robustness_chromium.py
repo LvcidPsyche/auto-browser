@@ -941,8 +941,8 @@ CLOSE_ON_CUE = {
     "/callback": "<title>cb</title><p>cb</p><script>console.log('callback-loaded');"
     "window.opener && window.opener.postMessage('code-123', '*')</script>",
 }
-CALLBACK_LOG = "console.log('callback-loaded');"
 CALLBACK_LINE = "callback-loaded"
+CALLBACK_LOG = f"console.log('{CALLBACK_LINE}');"
 
 
 @pytest.mark.parametrize("listeners", ["on-time", "late"])
@@ -1126,7 +1126,7 @@ async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only
         # Kept aside while the popup is held, so the line's absence from the agent's output means something.
         held = await kept_aside(env, session, popup, CALLBACK_LINE)
         assert held == 1, f"{outcome}: the callback's console line was kept aside {held} times"
-        assert not any("callback-loaded" in json.dumps(message) for message in session.console_messages)
+        assert not any(CALLBACK_LINE in json.dumps(message) for message in session.console_messages)
         if outcome == "refused-meanwhile":
             env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
 
