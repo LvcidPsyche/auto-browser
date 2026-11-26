@@ -578,7 +578,7 @@ async def _sent_while(still: Callable[[], bool] | None, send: Callable[[], Await
     """Send a key (``send`` makes the call) where ``still`` says it may go, the check and the send in one step of one
     task: checked first and then sent from a task of its own (_within), the key went out a turn of the loop later,
     after a navigation the controller had already queued, to a page it knew had left the host checked. Playwright
-    writes a call's message before its first wait (Connection._send_message_to_server), so nothing of the
+    writes a call's message before its first wait (Connection.send_message_to_server), so nothing of the
     controller's runs between the two. False, and no call made, where the check says no."""
     if still is not None and not still():
         return False

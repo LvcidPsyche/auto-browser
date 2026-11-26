@@ -555,6 +555,15 @@ async def test_an_attach_mode_gate_without_the_switch_warns_once(caplog) -> None
     assert "operator's own tabs" in text
 
 
+async def test_the_documented_switch_names_both_features() -> None:
+    """The real-browser tests run the driver's Chromium, which follows a credentialed, preflighted cross-origin
+    redirect without the second feature, so none of them notices the switch losing it; the Chrome an operator starts
+    may abort that redirect without it (156.0.8078.4 does)."""
+    assert REDIRECT_ORIGIN_SWITCH == (
+        "--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect"
+    )
+
+
 @pytest.mark.parametrize(("attach_mode", "declared"), [(False, False), (True, True)])
 async def test_no_switch_warning_when_it_does_not_apply(caplog, attach_mode: bool, declared: bool) -> None:
     h = Harness(attach_mode=attach_mode, origin_switch_declared=declared)

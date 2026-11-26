@@ -2,7 +2,7 @@
 
 A browser-level session (Browser.new_browser_cdp_session) and a page-level one
 (BrowserContext.new_cdp_session), as far as the gate uses them: send() records each command and
-answers from `replies`, on() keeps handlers the way Playwright's CDPSession (a pyee emitter) does,
+answers from `replies`, on() keeps handlers the way Playwright's CDPSession (an event emitter) does,
 and emit() delivers an event to them inline, as Playwright does.
 """
 

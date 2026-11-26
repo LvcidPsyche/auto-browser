@@ -1230,10 +1230,13 @@ each (the median measured on Chromium 151). Start that Chrome with
 - Without the first feature, older Chrome fails a cross-origin 307/308 POST redirect hop that a DevTools `Fetch`
   handler lets through (Chromium 151 did, in the operator's own tabs too). So the controller stops such a hop in
   its sessions itself, with an error naming the switch.
-- Without the second, Chrome 155 and later abort a credentialed cross-origin request that needed a CORS preflight
+- Without the second, some Chrome builds abort a credentialed cross-origin request that needed a CORS preflight
   once it is redirected, in every tab, while the gate is attached (Playwright #43242; Playwright disables the
-  feature in the browsers it launches, so `browser-node` is not affected). The controller logs a warning,
-and `/readiness` warns, while the switch is not declared.
+  feature in the browsers it launches, so `browser-node` is not affected). Of the Chrome for Testing builds
+  measured on Windows, 156.0.8078.4 (the version Playwright 1.64 bundled) aborts it, and 155.0.8059.84,
+  156.0.8078.47, 156.0.8078.80, 157.0.8103.38, 158.0.8127.88 and 159.0.8154.6 follow it without the switch. The
+  switch stays documented, as the Chrome an operator starts may be a build that aborts. The controller logs a
+  warning, and `/readiness` warns, while the switch is not declared.
 
 `PRE_REQUEST_BLOCKING=false` turns the gate off; NAV-07 then refuses such pages only after their request has
 gone out, as before.

@@ -20,7 +20,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from playwright._impl._locator import Locator
+from playwright._impl.locator import Locator
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError

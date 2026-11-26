@@ -137,11 +137,11 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.metadata["memory_profile"], "checkout")
         self.assertEqual(session.metadata["memory_context"], "remember this")
         self.assertEqual(page.url, "https://example.com")
-        # Popups, and the first navigation of a popup the context has not reported yet.
-        # The pre-request gate's "close" (it owns the context until then), popups, and the first navigation of a
-        # popup the context has not reported yet.
+        # The pre-request gate's "close" (it owns the context until then), popups, every page's console messages, and
+        # the first navigation of a popup the context has not reported yet.
         self.assertEqual(
-            [c.args[0] for c in context.on.call_args_list], ["close", "page", "request", "requestfailed", "response"]
+            [c.args[0] for c in context.on.call_args_list],
+            ["close", "page", "console", "request", "requestfailed", "response"],
         )
         page.on.assert_called()
         browser.new_context.assert_awaited_once()

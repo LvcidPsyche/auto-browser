@@ -32,6 +32,31 @@ All notable changes to auto-browser are documented here.
   builds are the versions the file pins, and the backend and version each wheel names in its `WHEEL` file are the ones
   it pins. The release workflow runs it before the artifact upload, so another build or pip, or a wheel built with
   another backend version, stops the release before anything is uploaded to PyPI.
+- **Chromium 159.0.8154.6, up from 156.0.8078.4: Playwright 1.65.2 in the controller (pip) and 1.65.1 in
+  browser-node (npm), up from 1.64.1 on both.** The two name the same Chromium build, and Playwright's server takes
+  only a client of its own major.minor, so update the controller and browser-node images together. Running the
+  controller from a checkout: after installing the new requirements, run `python -m playwright install chromium`.
+  Chrome stable for Linux was 158.0.8127.88 on 2026-11-24; 159.0.8154.6 is the first Chrome 159 beta build.
+  `controller/constraints.txt` no longer pins pyee, which Playwright 1.65 does not use.
+- `browser.get_cookies` with `urls` returns what Playwright 1.65 matches, which follows the cookie rules more
+  closely: a cookie whose path is `/api` is no longer returned for `/apiv2` (it still is for `/api/x`), and a
+  host-only cookie of `h.example` is no longer returned for `sub.h.example`. Measured with both Playwright versions.
+- Playwright 1.65's default `--disable-features` list adds `HttpsFirstBalancedModeAutoEnable`,
+  `TcpPortRandomizationWin` and `PreconnectToSearch`, and drops `DialMediaRouteProvider`, `GlobalMediaControls`,
+  `BlockOriginHeaderModificationOnRedirect`, `Translate` and `AutoDeElevate`. The copy browser-node and the
+  controller pass, which keeps storage partitioning on, follows it.
+- **Attach modes: some Chrome builds, not every Chrome from 155 on, abort a credentialed, preflighted cross-origin
+  redirect without the switch.** The README, `docs/deployment.md`, `docs/production-hardening.md`, `.env.example` and
+  the readiness warning said that while the gate is attached, Chrome 155 and later abort a credentialed cross-origin
+  request that needed a CORS preflight once it is redirected. They now say that some builds do: of the Chrome for
+  Testing builds measured on Windows, 156.0.8078.4 aborts it, and 155.0.8059.84, 156.0.8078.47, 156.0.8078.80,
+  157.0.8103.38, 158.0.8127.88 and 159.0.8154.6 follow it. The documented switch,
+  `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`, is unchanged, for an
+  operator's Chrome that aborts. The controller's log warning now says that it is older Chrome (Chromium 151) that fails
+  cross-origin 307/308 POST redirects in the operator's own tabs while the gate is attached; the builds above let 307
+  and 308 through.
+- The stealth user-agent pool claims Chrome 159 and 158, and Edge 159, to match the Chromium 159 browser-node ships.
+  It claimed Chrome 156 and 155, and Edge 156.
 
 ### Fixed
 
@@ -44,6 +69,15 @@ All notable changes to auto-browser are documented here.
   restart. Stopped while its end is being written to its record, a run that has returned keeps its completed or
   failed status and its result, and a job refused because the operator who queued it no longer has a named
   credential keeps its failed status and reason; their audit ends with `agent_job_finished`, not an interruption.
+- **A popup's console output from while it loaded is no longer missing.** A popup's early console lines (an OAuth
+  callback's, say) were missing from `get_console_messages` and from the console messages in the agent's
+  observations: on every run for a line that reached Playwright before Playwright reported the popup, such as one an
+  opener wrote to the console of a window it had just opened onto a page, and on a busy machine for a line the popup
+  logged as it loaded, when the controller handled the popup's report late. The controller subscribed to a page's
+  console output only once Playwright had reported the page, and Playwright passes a console message on only to a
+  subscriber it already has. It now subscribes to the console output of each session's browser context as it sets
+  the session up, before the session's first navigation, and keeps a message only as the output of a page the
+  session has attached, judged by its page as before.
 
 ## [1.19.0] — 2026-11-22
 
