@@ -401,7 +401,7 @@ class BrowserDiagnosticsService:
         """A console message from the session's context (watch_context), kept as its page's output when the session
         has attached that page; one with no page (a service worker's) is not kept."""
         page = message.page
-        if page is None or page not in session.attached_pages:
+        if page not in session.attached_pages:
             return
         self._keep_output(page, session.console_messages, console_entry(message))
 
